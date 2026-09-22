@@ -31,3 +31,21 @@ mkdir -p tmp
 ```
 
 No provider network service or release-safe funding workflow exists yet.
+
+The separate `payment_journal` records immutable BTC-to-LN outgoing payment
+requests and append-only backend-reported observations. Its database is bound
+to an exact network and backend, must be created explicitly, and never
+authorizes payment submission or retry. Missing results, reported failure,
+contradictory statuses, and missing rows after a database restore remain
+ambiguous until the real backend is reconciled. Opaque route bytes are stored
+with a serialization identifier but are not validated by this journal; a
+future pinned LND adapter must validate the route and limits before sending.
+Route bytes are sensitive payment metadata and must not contain credentials or
+signing secrets. Observations store only a caller-supplied SHA-256 digest of
+backend response evidence, not raw responses, credentials, or preimages; the
+journal does not verify the digest's provenance. Keep any secret-bearing
+backend data in a separately specified encrypted store.
+Separate journals cannot coordinate submissions to one shared backend; no
+multi-instance fencing or backend attempt correlation has been implemented.
+There is no RPC or automated reconciliation in this increment, so crash and
+restart storage tests do not complete the D01, D02, or D09 release gates.
