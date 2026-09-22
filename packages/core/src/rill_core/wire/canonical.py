@@ -6,6 +6,7 @@ import json
 from typing import Never, cast
 
 import rfc8785
+from pydantic import BaseModel
 
 from rill_core.errors import CanonicalizationError
 
@@ -100,3 +101,9 @@ def parse_and_canonicalize(document: bytes) -> tuple[JsonValue, bytes]:
     """Parse a document once and return its value and canonical bytes."""
     value = parse_json_strict(document)
     return value, canonicalize(value)
+
+
+def parse_model_json[ModelT: BaseModel](model: type[ModelT], document: bytes) -> ModelT:
+    """Strictly parse JSON once and validate it as a closed wire model."""
+    parsed = parse_json_strict(document)
+    return model.model_validate_json(canonicalize(parsed), strict=True)
