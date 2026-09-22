@@ -1,0 +1,266 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spec.rillswap.invalid/schemas/recovery/recovery-v1.schema.json",
+  "title": "RillSwap recovery plaintext v1 pre-release",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "format_version",
+    "specification_version",
+    "created_at",
+    "updated_at",
+    "network_identity",
+    "profile_id",
+    "contract_hash",
+    "contract_terms",
+    "verification_context",
+    "taproot_contract",
+    "user_secret",
+    "funding_history",
+    "chain_scan_birthday_height",
+    "fee_policy",
+    "recovery_authorization_xonly_key",
+    "monotonic_knowledge",
+    "extensions"
+  ],
+  "properties": {
+    "format": {
+      "const": "rillswap-recovery"
+    },
+    "format_version": {
+      "const": "1-pre.1"
+    },
+    "specification_version": {
+      "const": "0.1.0-pre.1"
+    },
+    "created_at": {
+      "$ref": "../wire/common-v1.schema.json#/$defs/exactInteger"
+    },
+    "updated_at": {
+      "$ref": "../wire/common-v1.schema.json#/$defs/exactInteger"
+    },
+    "network_identity": {
+      "$ref": "../wire/common-v1.schema.json#/$defs/networkIdentity"
+    },
+    "profile_id": {
+      "enum": ["btc-to-ln/v1", "ln-to-btc/v1"]
+    },
+    "contract_hash": {
+      "$ref": "../wire/common-v1.schema.json#/$defs/hex32"
+    },
+    "contract_terms": {
+      "$ref": "../wire/contract-terms-v1.schema.json"
+    },
+    "verification_context": {
+      "$ref": "#/$defs/verificationContext"
+    },
+    "taproot_contract": {
+      "$ref": "#/$defs/taprootContract"
+    },
+    "user_secret": {
+      "$ref": "#/$defs/userSecret"
+    },
+    "funding_history": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["binding", "funder_session_signature"],
+        "properties": {
+          "binding": {
+            "$ref": "../wire/funding-binding-v1.schema.json"
+          },
+          "funder_session_signature": {
+            "$ref": "../wire/common-v1.schema.json#/$defs/signature64"
+          }
+        }
+      }
+    },
+    "chain_scan_birthday_height": {
+      "$ref": "../wire/common-v1.schema.json#/$defs/exactInteger"
+    },
+    "fee_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_claim_fee_sat", "max_refund_fee_sat"],
+      "properties": {
+        "max_claim_fee_sat": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/decimalSats"
+        },
+        "max_refund_fee_sat": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/decimalSats"
+        }
+      }
+    },
+    "recovery_authorization_xonly_key": {
+      "$ref": "../wire/common-v1.schema.json#/$defs/hex32"
+    },
+    "monotonic_knowledge": {
+      "$ref": "#/$defs/monotonicKnowledge"
+    },
+    "extensions": {
+      "$ref": "../wire/common-v1.schema.json#/$defs/extensions"
+    }
+  },
+  "$defs": {
+    "verificationContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "handshake_init",
+        "handshake_accept",
+        "provider_identity_signature",
+        "handshake_hash",
+        "client_session_xonly_key",
+        "provider_session_xonly_key",
+        "expected_provider_identity_source",
+        "provider_terms_signature",
+        "client_acceptance_signature"
+      ],
+      "properties": {
+        "handshake_init": {
+          "$ref": "../wire/handshake-v1.schema.json#/$defs/init"
+        },
+        "handshake_accept": {
+          "$ref": "../wire/handshake-v1.schema.json#/$defs/accept"
+        },
+        "provider_identity_signature": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/signature64"
+        },
+        "handshake_hash": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/hex32"
+        },
+        "client_session_xonly_key": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/hex32"
+        },
+        "provider_session_xonly_key": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/hex32"
+        },
+        "expected_provider_identity_source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "advertisement_digest"],
+          "properties": {
+            "kind": {
+              "enum": ["manual", "advertisement"]
+            },
+            "advertisement_digest": {
+              "oneOf": [
+                {
+                  "$ref": "../wire/common-v1.schema.json#/$defs/hex32"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "provider_terms_signature": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/signature64"
+        },
+        "client_acceptance_signature": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/signature64"
+        }
+      }
+    },
+    "taprootContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "internal_xonly_key",
+        "internal_key_parity",
+        "claim_script",
+        "refund_script",
+        "claim_leaf_hash",
+        "refund_leaf_hash",
+        "merkle_root",
+        "tap_tweak",
+        "output_xonly_key",
+        "output_key_parity",
+        "script_pubkey",
+        "claim_control_block",
+        "refund_control_block"
+      ],
+      "properties": {
+        "internal_xonly_key": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/hex32"
+        },
+        "internal_key_parity": {
+          "enum": [0, 1]
+        },
+        "claim_script": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/scriptHex"
+        },
+        "refund_script": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/scriptHex"
+        },
+        "claim_leaf_hash": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/hex32"
+        },
+        "refund_leaf_hash": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/hex32"
+        },
+        "merkle_root": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/hex32"
+        },
+        "tap_tweak": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/hex32"
+        },
+        "output_xonly_key": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/hex32"
+        },
+        "output_key_parity": {
+          "enum": [0, 1]
+        },
+        "script_pubkey": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/scriptHex"
+        },
+        "claim_control_block": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/scriptHex"
+        },
+        "refund_control_block": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/scriptHex"
+        }
+      }
+    },
+    "userSecret": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "contract_secret_key"],
+      "properties": {
+        "kind": {
+          "const": "raw-secp256k1-v1"
+        },
+        "contract_secret_key": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/hex32"
+        }
+      }
+    },
+    "monotonicKnowledge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preimage_known", "preimage", "dangerous_signature_issued"],
+      "properties": {
+        "preimage_known": {
+          "type": "boolean"
+        },
+        "preimage": {
+          "oneOf": [
+            {
+              "$ref": "../wire/common-v1.schema.json#/$defs/hex32"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dangerous_signature_issued": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}
