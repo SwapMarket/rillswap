@@ -1,0 +1,5 @@
+-e ./packages/core
+hypothesis==6.138.15
+mypy==1.18.1
+pytest==8.4.2
+ruff==0.13.1
