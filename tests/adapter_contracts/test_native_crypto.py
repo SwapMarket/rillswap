@@ -29,6 +29,12 @@ from rill_core.wire.types import NetworkIdentity
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "settlement-v1"
 RECOVERY = Path(__file__).parents[1] / "fixtures" / "recovery-v1" / "initial-btc-to-ln-v1.json"
+LN_RECOVERY = (
+    Path(__file__).parents[1]
+    / "fixtures"
+    / "recovery-v1"
+    / "initial-ln-to-btc-no-prepayment-v1.json"
+)
 
 
 @pytest.mark.native_crypto
@@ -133,6 +139,40 @@ def test_initial_recovery_static_commitments_with_native_crypto() -> None:
     assert report.recorded_binding_count == 0
     assert report.first_refund_eligible_height == 1101
     assert "export durability, age decryptability, and snapshot freshness" in report.unproven
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 to run pinned native interoperability",
+)
+def test_initial_ln_recovery_preimage_and_signatures_with_native_crypto() -> None:
+    from rill_crypto import Context  # noqa: PLC0415
+
+    original = json.loads(LN_RECOVERY.read_bytes())
+    network = NetworkIdentity.model_validate(original["network_identity"])
+    with Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto:
+        report = inspect_recovery_plaintext(
+            canonicalize(parse_json_strict(LN_RECOVERY.read_bytes())), network, crypto=crypto
+        )
+        assert report.profile_id == "ln-to-btc/v1"
+        assert report.recorded_binding_count == 0
+        assert "export durability, age decryptability, and snapshot freshness" in report.unproven
+
+        for area, field, bad in (
+            ("monotonic_knowledge", "preimage", "00" * 32),
+            ("verification_context", "provider_identity_signature", "00" * 64),
+            ("verification_context", "provider_terms_signature", "00" * 64),
+            ("verification_context", "client_acceptance_signature", "00" * 64),
+        ):
+            altered = copy.deepcopy(original)
+            altered[area][field] = bad
+            with pytest.raises(ValidationError):
+                inspect_recovery_plaintext(
+                    canonicalize(parse_json_strict(json.dumps(altered).encode())),
+                    network,
+                    crypto=crypto,
+                )
 
 
 @pytest.mark.native_crypto

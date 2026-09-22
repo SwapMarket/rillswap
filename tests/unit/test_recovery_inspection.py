@@ -441,6 +441,34 @@ def test_ln_to_btc_requires_client_preimage_from_initial_export() -> None:
             inspect_recovery_plaintext(_canonical(changed), _network(document), crypto=crypto)
 
 
+def test_pinned_signed_ln_no_prepayment_object_is_accepted_only_with_preimage() -> None:
+    manifest = json.loads((FIXTURES / "ln-no-prepayment-manifest.json").read_text())
+    contents = (FIXTURES / manifest["fixture_path"]).read_bytes()
+    assert hashlib.sha256(contents).hexdigest() == manifest["sha256"]
+    document: dict[str, Any] = json.loads(contents)
+    assert document["contract_terms"]["required_features"] == []
+    assert document["verification_context"]["handshake_init"]["required_features"] == []
+    assert document["verification_context"]["handshake_accept"]["required_features"] == []
+    original_taproot = next(
+        item["artifacts"]
+        for item in json.loads(TAPROOT.read_text())["valid"]
+        if item["profile_id"] == "ln-to-btc/v1"
+    )
+    crypto = FixtureCrypto(document, original_taproot)
+    report = inspect_recovery_plaintext(_canonical(document), _network(document), crypto=crypto)
+    assert report.profile_id == "ln-to-btc/v1"
+    assert report.recorded_binding_count == 0
+    assert "funding transactions, conflicts, UTXOs, and chain maturity" in report.unproven
+    without_preimage = copy.deepcopy(document)
+    without_preimage["monotonic_knowledge"] = {
+        "preimage_known": False,
+        "preimage": None,
+        "dangerous_signature_issued": False,
+    }
+    with pytest.raises(ValidationError):
+        inspect_recovery_plaintext(_canonical(without_preimage), _network(document), crypto=crypto)
+
+
 def test_unknown_required_features_reject_before_crypto_signatures() -> None:
     document = _source()
     crypto = _crypto(document)
