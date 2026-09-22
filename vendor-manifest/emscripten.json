@@ -1,0 +1,9 @@
+{
+  "name": "emscripten-core/emscripten",
+  "license": "MIT and other compatible component licenses",
+  "version": "6.0.10",
+  "tag": "6.0.10",
+  "commit": "d6c521a7f05449857c76bd99e396895583cf2083",
+  "container": "emscripten/emsdk@sha256:e077d54e2b8970575ebc4f185ac1de0b95c05f2b266134d4ba27449af7aebf65",
+  "notes": "Pinned build and test toolchain only, not linked into distributed runtime artifacts."
+}

@@ -1,0 +1,16 @@
+{
+  "name": "bitcoin-core/secp256k1",
+  "license": "MIT",
+  "version": "0.8.0",
+  "tag": "v0.8.0",
+  "commit": "6e2c8bc4ecdc6e71dbe7a368f360d8d453ce435d",
+  "tag_object": "18f07c42218765cd46148d74d9fe575795f56dce",
+  "source_url": "https://github.com/bitcoin-core/secp256k1/releases/download/v0.8.0/libsecp256k1-0.8.0.tar.gz",
+  "source_sha256": "dd685546f9e717b9adde329acd5a4cd8083d40f710fdb0a603ee5a83f908132b",
+  "modules": [
+    "extrakeys",
+    "schnorrsig",
+    "musig"
+  ],
+  "notes": "MuSig API is experimental upstream. RillSwap pins this exact source and exposes only its own versioned C ABI."
+}
