@@ -36,3 +36,7 @@ schema. The file is pretty-printed for review; canonicalize it to UTF-8 JSON
 before using it as age plaintext. It is not an encrypted age interoperability
 test, durable export proof,
 recovery importer, live funding evidence, or permission to sign or broadcast.
+`vectors/recovery/initial-ln-to-btc-no-prepayment-v1.json` adds a distinct
+signed, base-profile initial export with the user's required preimage. Its
+synthetic decoded invoice amount is recalculated for zero mining prepayment;
+it does not change or activate the existing optional-prepayment vectors.
