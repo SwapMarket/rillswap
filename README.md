@@ -23,6 +23,16 @@ match must never be treated as authorization to pay, reveal a preimage, or
 claim another deposit. Replacement lineage and extra-deposit reconciliation
 require separately verified, durable observations.
 
+`domain.funding_lineage` records accepted binding revisions separately from
+reversible best-chain observations. It only accepts facts already authenticated
+and independently checked by a host against live transactions and the current
+chain view. A previously accepted revision may win on-chain even after a later
+replacement was signed. Reorg invalidation removes the exact chain observation,
+not the binding history. No reducer state permits funding, payment, settlement,
+or recovery import by itself: storage, export verification, and any restored
+state must be validated by separate boundaries. Missing or partial history
+must not trigger an automatic rescan or reconstruct chain confirmation.
+
 Run local tests with `.venv/bin/pytest -q`. For the native crypto contract test,
 install the sibling `rill-crypto/python` package in the test environment, build
 its pinned native library, and run:
