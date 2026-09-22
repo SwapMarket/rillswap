@@ -10,6 +10,8 @@
 #  else
 #    define RILL_API __declspec(dllimport)
 #  endif
+#elif defined(__GNUC__) && defined(RILL_CRYPTO_BUILD)
+#  define RILL_API __attribute__((visibility("default")))
 #else
 #  define RILL_API
 #endif

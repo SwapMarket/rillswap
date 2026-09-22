@@ -6,6 +6,7 @@ include(FetchContent)
 find_package(Threads REQUIRED)
 
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static dependencies" FORCE)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(SECP256K1_ENABLE_MODULE_EXTRAKEYS ON CACHE BOOL "Enable extrakeys" FORCE)
 set(SECP256K1_ENABLE_MODULE_SCHNORRSIG ON CACHE BOOL "Enable Schnorr" FORCE)
 set(SECP256K1_ENABLE_MODULE_MUSIG ON CACHE BOOL "Enable MuSig2" FORCE)
@@ -26,7 +27,20 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(secp256k1)
 
-add_library(rill_crypto c/src/rill_crypto.c)
+if(EMSCRIPTEN)
+  add_library(rill_crypto STATIC c/src/rill_crypto.c)
+else()
+  add_library(rill_crypto SHARED c/src/rill_crypto.c)
+  target_compile_definitions(rill_crypto PRIVATE RILL_CRYPTO_BUILD RILL_CRYPTO_SHARED)
+  set_target_properties(
+    rill_crypto
+    PROPERTIES
+      C_VISIBILITY_PRESET hidden
+      VISIBILITY_INLINES_HIDDEN YES
+      VERSION ${PROJECT_VERSION}
+      SOVERSION 1
+  )
+endif()
 add_library(RillSwap::crypto ALIAS rill_crypto)
 target_compile_features(rill_crypto PUBLIC c_std_11)
 target_include_directories(
@@ -40,6 +54,10 @@ target_link_libraries(rill_crypto PRIVATE secp256k1)
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
   target_compile_options(rill_crypto PRIVATE -Wall -Wextra -Wconversion -Werror)
 endif()
+
+include(GNUInstallDirs)
+install(TARGETS rill_crypto LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(FILES c/include/rill_crypto.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 if(EMSCRIPTEN)
   add_executable(rill_crypto_wasm wasm/rill_crypto_wasm.c)
