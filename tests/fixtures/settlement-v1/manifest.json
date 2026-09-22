@@ -1,0 +1,17 @@
+{
+  "fixture_set": "rillswap-unilateral-settlement-v1-pre.1",
+  "sources": {
+    "settlement-cases-v1.json": {
+      "repository": "rill-docs",
+      "commit": "369f02a",
+      "path": "vectors/settlement/cases-v1.json",
+      "sha256": "c1d8cc33471011e2d47ed51f493102e4bcfcbe56b92b62c6b3bec326dcfcd814"
+    },
+    "taproot-cases-v1.json": {
+      "repository": "rill-docs",
+      "commit": "60c6068",
+      "path": "vectors/taproot/cases-v1.json",
+      "sha256": "31a94092a2b3614d43900a55b5eee9bdc68ca4891409ef2e6af162bbaa7bccf9"
+    }
+  }
+}
