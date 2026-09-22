@@ -74,7 +74,7 @@ if(EMSCRIPTEN)
       "-sFILESYSTEM=0"
       "-sENVIRONMENT=web,worker,node"
       "-sEXPORTED_RUNTIME_METHODS=['HEAPU8']"
-      "-sEXPORTED_FUNCTIONS=['_malloc','_free','_rill_crypto_abi_version','_rill_crypto_context_create','_rill_crypto_context_destroy','_rill_public_key_create','_rill_schnorr_sign','_rill_schnorr_verify','_rill_musig_output_key','_rill_musig_begin','_rill_musig_public_nonce_validate','_rill_musig_partial_sign_once','_rill_musig_partial_verify','_rill_musig_aggregate','_rill_musig_attempt_destroy']"
+      "-sEXPORTED_FUNCTIONS=['_malloc','_free','_rill_crypto_abi_version','_rill_crypto_context_create','_rill_crypto_context_destroy','_rill_public_key_create','_rill_schnorr_sign','_rill_schnorr_verify','_rill_musig_internal_key','_rill_musig_output_key','_rill_musig_begin','_rill_musig_public_nonce_validate','_rill_musig_partial_sign_once','_rill_musig_partial_verify','_rill_musig_aggregate','_rill_musig_attempt_destroy']"
   )
 endif()
 

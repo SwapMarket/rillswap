@@ -79,7 +79,19 @@ RILL_API rill_crypto_status rill_schnorr_verify(
     const unsigned char signature64[64]
 );
 
-/* Public keys are aggregated in the exact user, provider order. */
+/*
+ * Public keys are aggregated in the exact user, provider order. Parity is the
+ * parity of the untweaked full BIP327 aggregate point (zero even, one odd).
+ */
+RILL_API rill_crypto_status rill_musig_internal_key(
+    const rill_crypto_context *context,
+    const unsigned char user_public_key33[33],
+    const unsigned char provider_public_key33[33],
+    unsigned char internal_xonly_public_key32[32],
+    int *internal_parity
+);
+
+/* Applies the caller-provided x-only tweak to the ordered aggregate key. */
 RILL_API rill_crypto_status rill_musig_output_key(
     const rill_crypto_context *context,
     const unsigned char user_public_key33[33],

@@ -83,6 +83,21 @@ static rill_crypto_status rill_keyagg_tweaked(
     return RILL_CRYPTO_OK;
 }
 
+static rill_crypto_status rill_keyagg_internal(
+    const rill_crypto_context *context,
+    secp256k1_pubkey keys[2],
+    secp256k1_musig_keyagg_cache *cache,
+    secp256k1_pubkey *output
+) {
+    const secp256k1_pubkey *key_pointers[2] = {&keys[0], &keys[1]};
+    if (secp256k1_musig_pubkey_agg(
+            context->secp, NULL, cache, key_pointers, 2u) != 1 ||
+        secp256k1_musig_pubkey_get(context->secp, output, cache) != 1) {
+        return RILL_CRYPTO_INTERNAL_ERROR;
+    }
+    return RILL_CRYPTO_OK;
+}
+
 static rill_crypto_status rill_public_session_create(
     const rill_crypto_context *context,
     const unsigned char user_key33[33],
@@ -242,6 +257,38 @@ rill_crypto_status rill_schnorr_verify(
     if (secp256k1_schnorrsig_verify(
             context->secp, signature64, message32, 32u, &public_key) != 1) {
         return RILL_CRYPTO_INVALID_SIGNATURE;
+    }
+    return RILL_CRYPTO_OK;
+}
+
+rill_crypto_status rill_musig_internal_key(
+    const rill_crypto_context *context,
+    const unsigned char user_key33[33],
+    const unsigned char provider_key33[33],
+    unsigned char internal32[32],
+    int *internal_parity
+) {
+    secp256k1_pubkey keys[2];
+    secp256k1_pubkey internal;
+    secp256k1_xonly_pubkey xonly_internal;
+    secp256k1_musig_keyagg_cache cache;
+    rill_crypto_status status;
+    if (internal32 == NULL || internal_parity == NULL) {
+        return RILL_CRYPTO_INVALID_ARGUMENT;
+    }
+    status = rill_parse_keys(context, user_key33, provider_key33, keys);
+    if (status != RILL_CRYPTO_OK) {
+        return status;
+    }
+    status = rill_keyagg_internal(context, keys, &cache, &internal);
+    if (status != RILL_CRYPTO_OK) {
+        return status;
+    }
+    if (secp256k1_xonly_pubkey_from_pubkey(
+            context->secp, &xonly_internal, internal_parity, &internal) != 1 ||
+        secp256k1_xonly_pubkey_serialize(
+            context->secp, internal32, &xonly_internal) != 1) {
+        return RILL_CRYPTO_INTERNAL_ERROR;
     }
     return RILL_CRYPTO_OK;
 }

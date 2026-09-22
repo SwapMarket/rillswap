@@ -3,12 +3,17 @@ from __future__ import annotations
 import copy
 import os
 import pickle
+import shutil
+import subprocess
 from threading import Event, Thread
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from rill_crypto import Context, CryptoError
 from rill_crypto.binding import MusigAttempt
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 LIBRARY = os.environ.get("RILL_CRYPTO_LIBRARY")
 pytestmark = pytest.mark.skipif(not LIBRARY, reason="native library path is not configured")
@@ -48,6 +53,47 @@ def test_schnorr_sign_and_verify() -> None:
             context.schnorr_verify(public_key[1:], b"\x23" * 32, signature)
 
 
+def test_musig_internal_key_uses_ordered_bip327_aggregation() -> None:
+    # Independent BIP327 reference.py fixtures at acdce4d50c61f81d9ec6534a804b1fb14e84e565.
+    with Context(library_path=LIBRARY, context_random=b"\x11" * 32) as context:
+        user_key = context.public_key(scalar(1))
+        provider_key = context.public_key(scalar(2))
+        internal_key, parity = context.musig_internal_key(user_key, provider_key)
+        assert internal_key.hex() == (
+            "3b46d262d2f610e9038b44beabdfe97ab5a0feb89870acc2264edfb7f63ec2ec"
+        )
+        assert parity == 0
+        odd_key, odd_parity = context.musig_internal_key(
+            user_key,
+            context.public_key(scalar(3)),
+        )
+        assert odd_key.hex() == ("6e68b837de28101018371e7bf6e59b5852c9e39472794c28fd955c714b8174ba")
+        assert odd_parity == 1
+        reversed_key, _ = context.musig_internal_key(provider_key, user_key)
+        assert reversed_key != internal_key
+        with pytest.raises(CryptoError, match="duplicate public key"):
+            context.musig_internal_key(user_key, user_key)
+
+
+def test_new_binding_rejects_abi_v1_library_without_internal_key(
+    tmp_path: Path,
+) -> None:
+    compiler = shutil.which("cc")
+    if compiler is None:
+        pytest.skip("C compiler is unavailable")
+    library = tmp_path / "librill_crypto_old.so"
+    subprocess.run(  # noqa: S603
+        [compiler, "-shared", "-fPIC", "-x", "c", "-o", str(library), "-"],
+        input=("#include <stdint.h>\nuint32_t rill_crypto_abi_version(void) { return 1u; }\n"),
+        text=True,
+        check=True,
+    )
+    with pytest.raises(RuntimeError, match="missing required symbol") as error:
+        Context(library_path=library, context_random=b"\x11" * 32)
+    assert str(library) in str(error.value)
+    assert "rill_musig_internal_key" in str(error.value)
+
+
 def test_musig_attempt_is_one_shot_and_final_signature_verifies() -> None:
     with Context(library_path=LIBRARY, context_random=b"\x11" * 32) as context:
         user_key = context.public_key(scalar(1))
@@ -75,6 +121,9 @@ def test_musig_attempt_is_one_shot_and_final_signature_verifies() -> None:
             cooperation_id=cooperation_id,
         )
         with user_attempt, provider_attempt:
+            context.musig_public_nonce_validate(user_nonce)
+            with pytest.raises(CryptoError, match="invalid nonce"):
+                context.musig_public_nonce_validate(b"\x00" * 66)
             user_partial = user_attempt.partial_sign_once(provider_nonce)
             with pytest.raises(CryptoError, match="attempt consumed"):
                 user_attempt.partial_sign_once(provider_nonce)

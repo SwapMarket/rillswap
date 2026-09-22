@@ -49,6 +49,10 @@ int rill_schnorr_verify(
     const rill_crypto_context *, const unsigned char[32],
     const unsigned char[32], const unsigned char[64]
 );
+int rill_musig_internal_key(
+    const rill_crypto_context *, const unsigned char[33],
+    const unsigned char[33], unsigned char[32], int *
+);
 int rill_musig_output_key(
     const rill_crypto_context *, const unsigned char[33],
     const unsigned char[33], const unsigned char[32], unsigned char[32], int *
@@ -87,6 +91,7 @@ class _Lib(Protocol):
     def rill_public_key_create(self, *args: Any) -> int: ...
     def rill_schnorr_sign(self, *args: Any) -> int: ...
     def rill_schnorr_verify(self, *args: Any) -> int: ...
+    def rill_musig_internal_key(self, *args: Any) -> int: ...
     def rill_musig_output_key(self, *args: Any) -> int: ...
     def rill_musig_begin(self, *args: Any) -> int: ...
     def rill_musig_public_nonce_validate(self, *args: Any) -> int: ...
@@ -118,6 +123,13 @@ class _Native:
         self.lib = cast("_Lib", self.ffi.dlopen(selected))
         if self.lib.rill_crypto_abi_version() != _ABI_VERSION:
             raise RuntimeError("native rill-crypto ABI version mismatch")
+        try:
+            _ = self.lib.rill_musig_internal_key
+        except AttributeError as error:
+            raise RuntimeError(
+                f"native rill-crypto library {selected!r} is missing required symbol "
+                "rill_musig_internal_key",
+            ) from error
 
     @staticmethod
     def _select_library(library_path: str | os.PathLike[str] | None) -> str:
@@ -287,6 +299,36 @@ class Context:
                 ),
             )
             return self._native.bytes(output, 32), int(parity[0])
+
+    def musig_internal_key(
+        self,
+        user_public_key: bytes,
+        provider_public_key: bytes,
+    ) -> tuple[bytes, int]:
+        """Return the ordered untweaked BIP327 aggregate key and full-point parity."""
+        with self._operation():
+            output = self._native.output(32)
+            parity = self._native.ffi.new("int *")
+            _check(
+                self._native.lib.rill_musig_internal_key(
+                    self._pointer,
+                    self._native.input(user_public_key, 33, "user_public_key"),
+                    self._native.input(provider_public_key, 33, "provider_public_key"),
+                    output,
+                    parity,
+                ),
+            )
+            return self._native.bytes(output, 32), int(parity[0])
+
+    def musig_public_nonce_validate(self, public_nonce: bytes) -> None:
+        """Validate one serialized MuSig public nonce or raise `CryptoError`."""
+        with self._operation():
+            _check(
+                self._native.lib.rill_musig_public_nonce_validate(
+                    self._pointer,
+                    self._native.input(public_nonce, 66, "public_nonce"),
+                ),
+            )
 
     def musig_begin(
         self,

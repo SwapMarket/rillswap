@@ -30,8 +30,10 @@ int main(void) {
     unsigned char context_random[32];
     unsigned char user_secret[32] = {0};
     unsigned char provider_secret[32] = {0};
+    unsigned char odd_provider_secret[32] = {0};
     unsigned char user_key[33];
     unsigned char provider_key[33];
+    unsigned char odd_provider_key[33];
     unsigned char tweak[32] = {0};
     unsigned char message[32];
     unsigned char cooperation_id[32];
@@ -42,7 +44,23 @@ int main(void) {
     unsigned char user_partial[32];
     unsigned char provider_partial[32];
     unsigned char final_signature[64];
+    unsigned char internal_key[32];
     unsigned char output_key[32];
+    const unsigned char expected_internal_key[32] = {
+        /* BIP327 reference.py at acdce4d50c61f81d9ec6534a804b1fb14e84e565, [1G, 2G]. */
+        0x3b, 0x46, 0xd2, 0x62, 0xd2, 0xf6, 0x10, 0xe9,
+        0x03, 0x8b, 0x44, 0xbe, 0xab, 0xdf, 0xe9, 0x7a,
+        0xb5, 0xa0, 0xfe, 0xb8, 0x98, 0x70, 0xac, 0xc2,
+        0x26, 0x4e, 0xdf, 0xb7, 0xf6, 0x3e, 0xc2, 0xec
+    };
+    const unsigned char expected_odd_internal_key[32] = {
+        /* Same independent reference, ordered keys [1G, 3G]. */
+        0x6e, 0x68, 0xb8, 0x37, 0xde, 0x28, 0x10, 0x10,
+        0x18, 0x37, 0x1e, 0x7b, 0xf6, 0xe5, 0x9b, 0x58,
+        0x52, 0xc9, 0xe3, 0x94, 0x72, 0x79, 0x4c, 0x28,
+        0xfd, 0x95, 0x5c, 0x71, 0x4b, 0x81, 0x74, 0xba
+    };
+    int internal_parity = -1;
     int output_parity = -1;
     rill_crypto_context *context;
     rill_musig_attempt *user_attempt = NULL;
@@ -58,6 +76,7 @@ int main(void) {
     fill(provider_random, sizeof(provider_random), 0xe5u);
     user_secret[31] = 1u;
     provider_secret[31] = 2u;
+    odd_provider_secret[31] = 3u;
     tweak[31] = 3u;
 
     assert(rill_crypto_abi_version() == 1u);
@@ -65,6 +84,30 @@ int main(void) {
     assert(context != NULL);
     assert(rill_public_key_create(context, user_secret, user_key) == RILL_CRYPTO_OK);
     assert(rill_public_key_create(context, provider_secret, provider_key) == RILL_CRYPTO_OK);
+    assert(rill_public_key_create(
+        context, odd_provider_secret, odd_provider_key) == RILL_CRYPTO_OK);
+    assert(rill_musig_internal_key(
+        context, user_key, provider_key, internal_key, &internal_parity) ==
+        RILL_CRYPTO_OK);
+    assert(memcmp(internal_key, expected_internal_key, sizeof(internal_key)) == 0);
+    assert(internal_parity == 0);
+    assert(rill_musig_internal_key(
+        context, user_key, odd_provider_key, internal_key, &internal_parity) ==
+        RILL_CRYPTO_OK);
+    assert(memcmp(
+        internal_key, expected_odd_internal_key, sizeof(internal_key)) == 0);
+    assert(internal_parity == 1);
+    assert(rill_musig_internal_key(
+        context, provider_key, user_key, output_key, &output_parity) ==
+        RILL_CRYPTO_OK);
+    assert(memcmp(
+        expected_internal_key, output_key, sizeof(expected_internal_key)) != 0);
+    assert(rill_musig_internal_key(
+        context, user_key, user_key, internal_key, &internal_parity) ==
+        RILL_CRYPTO_DUPLICATE_PUBLIC_KEY);
+    assert(rill_musig_internal_key(
+        context, user_key, provider_key, NULL, &internal_parity) ==
+        RILL_CRYPTO_INVALID_ARGUMENT);
     assert(rill_musig_output_key(
         context, user_key, provider_key, tweak, output_key, &output_parity) ==
         RILL_CRYPTO_OK);
