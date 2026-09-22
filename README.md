@@ -13,6 +13,16 @@ Callers must supply authenticated contract terms, a correct key-operations
 implementation, and independently observed live funding outpoint data. Core
 authorization is not chain confirmation or current mempool acceptance.
 
+Funding-plan authorization compares version-two raw transaction bytes to an
+exact local wallet plan: declared native witness inputs, one common lineage
+anchor, the unchanged contract output, exact approved other outputs, and the
+signed funding fee cap. It also accepts canonical unsigned or witness-bearing
+serialization. The plan's prevout values and scripts are declarations, not
+UTXO evidence; witness presence is not signature validity. A funding-plan
+match must never be treated as authorization to pay, reveal a preimage, or
+claim another deposit. Replacement lineage and extra-deposit reconciliation
+require separately verified, durable observations.
+
 Run local tests with `.venv/bin/pytest -q`. For the native crypto contract test,
 install the sibling `rill-crypto/python` package in the test environment, build
 its pinned native library, and run:

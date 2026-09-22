@@ -1,5 +1,12 @@
 """Deterministic Bitcoin settlement construction and verification."""
 
+from rill_core.settlement.funding import (
+    FundingPlan,
+    FundingPlanAuthorization,
+    FundingPrevout,
+    PlannedFundingOutput,
+    authorize_funding_transaction,
+)
 from rill_core.settlement.taproot import (
     TaprootContract,
     TaprootKeyOperations,
@@ -19,6 +26,10 @@ from rill_core.settlement.unilateral import (
 
 __all__ = [
     "FundingOutput",
+    "FundingPlan",
+    "FundingPlanAuthorization",
+    "FundingPrevout",
+    "PlannedFundingOutput",
     "SchnorrVerifier",
     "TaprootContract",
     "TaprootKeyOperations",
@@ -26,6 +37,7 @@ __all__ = [
     "UnilateralPath",
     "UnilateralSpendPlan",
     "ValidatedUnilateralSpend",
+    "authorize_funding_transaction",
     "build_unilateral_spend",
     "finalize_unilateral_spend",
     "reconstruct_taproot_contract",
