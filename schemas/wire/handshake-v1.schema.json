@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spec.rillswap.invalid/schemas/wire/handshake-v1.schema.json",
+  "title": "RillSwap handshake v1 objects",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/init"
+    },
+    {
+      "$ref": "#/$defs/acceptPayload"
+    },
+    {
+      "$ref": "#/$defs/confirm"
+    }
+  ],
+  "$defs": {
+    "init": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "wire_version",
+        "profile_id",
+        "network_identity",
+        "session_id",
+        "client_challenge",
+        "client_session_xonly_key",
+        "expected_provider_identity_xonly_key",
+        "requested_encryption_suites",
+        "requested_capabilities",
+        "required_features",
+        "extensions"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "rillswap"
+        },
+        "wire_version": {
+          "const": "1"
+        },
+        "profile_id": {
+          "enum": ["btc-to-ln/v1", "ln-to-btc/v1"]
+        },
+        "network_identity": {
+          "$ref": "common-v1.schema.json#/$defs/networkIdentity"
+        },
+        "session_id": {
+          "$ref": "common-v1.schema.json#/$defs/hex32"
+        },
+        "client_challenge": {
+          "$ref": "common-v1.schema.json#/$defs/hex32"
+        },
+        "client_session_xonly_key": {
+          "$ref": "common-v1.schema.json#/$defs/hex32"
+        },
+        "expected_provider_identity_xonly_key": {
+          "$ref": "common-v1.schema.json#/$defs/hex32"
+        },
+        "requested_encryption_suites": {
+          "$ref": "#/$defs/identifierList"
+        },
+        "requested_capabilities": {
+          "$ref": "#/$defs/identifierList"
+        },
+        "required_features": {
+          "$ref": "common-v1.schema.json#/$defs/featureList"
+        },
+        "extensions": {
+          "$ref": "common-v1.schema.json#/$defs/extensions"
+        }
+      }
+    },
+    "accept": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "handshake_init_hash",
+        "protocol",
+        "wire_version",
+        "profile_id",
+        "network_identity",
+        "session_id",
+        "client_challenge",
+        "provider_challenge",
+        "client_session_xonly_key",
+        "provider_session_xonly_key",
+        "provider_identity_xonly_key",
+        "selected_encryption_suite",
+        "selected_capabilities",
+        "transport_endpoints",
+        "required_features",
+        "extensions"
+      ],
+      "properties": {
+        "handshake_init_hash": {
+          "$ref": "common-v1.schema.json#/$defs/hex32"
+        },
+        "protocol": {
+          "const": "rillswap"
+        },
+        "wire_version": {
+          "const": "1"
+        },
+        "profile_id": {
+          "enum": ["btc-to-ln/v1", "ln-to-btc/v1"]
+        },
+        "network_identity": {
+          "$ref": "common-v1.schema.json#/$defs/networkIdentity"
+        },
+        "session_id": {
+          "$ref": "common-v1.schema.json#/$defs/hex32"
+        },
+        "client_challenge": {
+          "$ref": "common-v1.schema.json#/$defs/hex32"
+        },
+        "provider_challenge": {
+          "$ref": "common-v1.schema.json#/$defs/hex32"
+        },
+        "client_session_xonly_key": {
+          "$ref": "common-v1.schema.json#/$defs/hex32"
+        },
+        "provider_session_xonly_key": {
+          "$ref": "common-v1.schema.json#/$defs/hex32"
+        },
+        "provider_identity_xonly_key": {
+          "$ref": "common-v1.schema.json#/$defs/hex32"
+        },
+        "selected_encryption_suite": {
+          "$ref": "common-v1.schema.json#/$defs/identifier"
+        },
+        "selected_capabilities": {
+          "$ref": "#/$defs/identifierList"
+        },
+        "transport_endpoints": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        },
+        "required_features": {
+          "$ref": "common-v1.schema.json#/$defs/featureList"
+        },
+        "extensions": {
+          "$ref": "common-v1.schema.json#/$defs/extensions"
+        }
+      }
+    },
+    "acceptPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["accept", "provider_identity_signature"],
+      "properties": {
+        "accept": {
+          "$ref": "#/$defs/accept"
+        },
+        "provider_identity_signature": {
+          "$ref": "common-v1.schema.json#/$defs/signature64"
+        }
+      }
+    },
+    "confirm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "handshake_hash",
+        "session_id",
+        "client_session_xonly_key",
+        "provider_session_xonly_key"
+      ],
+      "properties": {
+        "handshake_hash": {
+          "$ref": "common-v1.schema.json#/$defs/hex32"
+        },
+        "session_id": {
+          "$ref": "common-v1.schema.json#/$defs/hex32"
+        },
+        "client_session_xonly_key": {
+          "$ref": "common-v1.schema.json#/$defs/hex32"
+        },
+        "provider_session_xonly_key": {
+          "$ref": "common-v1.schema.json#/$defs/hex32"
+        }
+      }
+    },
+    "identifierList": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "common-v1.schema.json#/$defs/identifier"
+      }
+    }
+  }
+}
