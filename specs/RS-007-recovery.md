@@ -12,6 +12,26 @@ either one user-provided X25519 recipient or the age scrypt passphrase mode.
 Scrypt recipients MUST NOT be mixed with other recipient types. Armor is not
 part of version 1.
 
+For the pre-release CLI profile, "one recipient" means exactly one X25519
+key-wrapping stanza. Zero to four bounded GREASE stanzas (tags ending in
+`-grease`) MAY accompany it; they are not additional decrypting recipients.
+The scrypt stanza MUST be the only stanza, including no GREASE. The importer
+limits the binary header through its MAC line to 8192 bytes, ciphertext to
+256 KiB, and canonical plaintext to 128 KiB. A GREASE argument line is at
+most 256 bytes and its decoded body at most 1024 bytes. The scrypt work
+factor `logN` MUST be no greater than 19 (approximately 512 MiB for the
+scrypt allocation, plus process and implementation overhead)
+before invoking any KDF. These are conservative RillSwap resource bounds,
+not limits imposed by age itself; a rejected file must not authorize an
+automatic migration, scan, or funding action. Header preflight does not
+authenticate recipients or ciphertext; decryption and static import checks
+remain mandatory.
+The initial Python CLI can inspect conforming scrypt packages, but passphrase
+export remains disabled until its age backend can set a bounded work factor
+before encryption. A failed export creates no success state and cannot enable
+funding or payment. The X25519 create-only export does not implement atomic
+replacement updates or monotonic-knowledge reconciliation.
+
 Decryptability MUST be independent of browser origin, wallet master key,
 provider, discovery, and any hosted RillSwap service. Passphrases are obtained
 from a protected prompt or standard input, never a command-line argument.
