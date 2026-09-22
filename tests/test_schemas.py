@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from typing import Any
 
 import jsonschema
 import pytest
+import rfc8785
 from referencing import Registry, Resource
 
 ROOT = Path(__file__).parents[1]
@@ -48,3 +50,12 @@ def test_network_fixture_matches_wire_schema(path: Path) -> None:
         registry=registry,
     )
     validator.validate(load_json(path))
+
+
+def test_canonicalization_vectors_match_rfc8785() -> None:
+    vectors = load_json(ROOT / "vectors" / "canonicalization" / "cases-v1.json")
+    for case in vectors["valid"]:
+        canonical = rfc8785.dumps(case["value"])
+        assert canonical.decode("utf-8") == case["canonical_utf8"]
+
+        assert hashlib.sha256(canonical).hexdigest() == case["canonical_sha256"]
