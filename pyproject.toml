@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rill-cli"
+version = "0.1.0.dev0"
+description = "Pre-release, independent RillSwap recovery command-line tools"
+readme = "README.md"
+requires-python = ">=3.13"
+license = "MIT"
+dependencies = [
+  "rill-core==0.1.0.dev0",
+  "rill-crypto==0.1.0.dev0",
+  "pyrage==1.4.0",
+]
+
+[project.scripts]
+rill = "rill_cli.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rill_cli"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-config --strict-markers"
+markers = [
+  "native_crypto: opt-in native cryptographic interoperability checks",
+  "age_interop: opt-in independent Go age interoperability checks",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["C901", "COM812", "CPY001", "D105", "D203", "D213", "EM101", "EM102", "TRY003"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D", "INP001", "PLR2004", "S101"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["pyrage", "pyrage.*"]
+ignore_missing_imports = true
