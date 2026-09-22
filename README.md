@@ -13,4 +13,18 @@ Callers must supply authenticated contract terms, a correct key-operations
 implementation, and independently observed live funding outpoint data. Core
 authorization is not chain confirmation or current mempool acceptance.
 
+Run local tests with `.venv/bin/pytest -q`. For the native crypto contract test,
+install the sibling `rill-crypto/python` package in the test environment, build
+its pinned native library, and run:
+
+```sh
+RILLSWAP_RUN_NATIVE_CRYPTO=1 \
+RILL_CRYPTO_LIBRARY="$PWD/../rill-crypto/tmp/build/librill_crypto.so.0.1.0" \
+.venv/bin/pytest -q -m native_crypto
+```
+
+The native test is skipped by default and fails rather than skipping when
+explicitly enabled without the library or Python binding. Its fixture keys
+and deterministic signing randomness are public test data, never funds keys.
+
 Status: pre-release and not suitable for real funds.
