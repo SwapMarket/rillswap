@@ -33,6 +33,20 @@ or recovery import by itself: storage, export verification, and any restored
 state must be validated by separate boundaries. Missing or partial history
 must not trigger an automatic rescan or reconstruct chain confirmation.
 
+`recovery.inspect_recovery_plaintext` accepts canonical UTF-8 RS-007 plaintext
+bytes and a required expected network. It verifies static signed context,
+preimage/key consistency, Taproot reconstruction, and signed binding order,
+then returns only a redacted offline inspection report with explicit missing
+evidence. It neither decrypts age nor proves externally trusted provider
+identity, handshake confirmation, live funding, export durability, or snapshot
+freshness. The 128 KiB document limit and scan birthday at or before refund
+height are conservative local inspection constraints; they are not evidence of
+irrecoverability for a rejected package. Unsupported features, older/partial
+formats, and unknown state never authorize migration, scanning, signing,
+funding, payment, or broadcast. To use the pretty-printed synthetic docs
+fixture in tests, first canonicalize its decoded object; do not treat its file
+bytes as age plaintext.
+
 Run local tests with `.venv/bin/pytest -q`. For the native crypto contract test,
 install the sibling `rill-crypto/python` package in the test environment, build
 its pinned native library, and run:

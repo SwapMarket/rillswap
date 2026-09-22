@@ -67,11 +67,13 @@ def _validate_bounds(value: JsonValue, *, depth: int = 0) -> None:
     raise CanonicalizationError(f"unsupported JSON value type: {type(value).__name__}")
 
 
-def parse_json_strict(document: bytes) -> JsonValue:
+def parse_json_strict(document: bytes, *, max_bytes: int = MAX_JSON_BYTES) -> JsonValue:
     """Parse bounded UTF-8 JSON while rejecting duplicates and floats."""
     if not isinstance(document, bytes):
         raise CanonicalizationError("JSON document must be bytes")
-    if len(document) > MAX_JSON_BYTES:
+    if type(max_bytes) is not int or max_bytes < 1:
+        raise CanonicalizationError("JSON size limit must be a positive integer")
+    if len(document) > max_bytes:
         raise CanonicalizationError("JSON document exceeds the protocol limit")
     try:
         text = document.decode("utf-8", errors="strict")

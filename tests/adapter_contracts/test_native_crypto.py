@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 from dataclasses import fields
@@ -10,6 +11,8 @@ from typing import Any
 
 import pytest
 
+from rill_core.errors import ValidationError
+from rill_core.recovery import inspect_recovery_plaintext
 from rill_core.settlement import (
     FundingOutput,
     TaprootContract,
@@ -19,9 +22,13 @@ from rill_core.settlement import (
     reconstruct_taproot_contract,
     validate_unilateral_spend,
 )
-from rill_core.wire.messages import ContractTerms
+from rill_core.wire.canonical import canonicalize, parse_json_strict
+from rill_core.wire.hashes import funding_binding_hash
+from rill_core.wire.messages import ContractTerms, FundingBinding
+from rill_core.wire.types import NetworkIdentity
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "settlement-v1"
+RECOVERY = Path(__file__).parents[1] / "fixtures" / "recovery-v1" / "initial-btc-to-ln-v1.json"
 
 
 @pytest.mark.native_crypto
@@ -108,3 +115,78 @@ def test_pinned_native_crypto_reproduces_every_signed_unilateral_vector() -> Non
                     )
                     == validated
                 )
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 to run pinned native interoperability",
+)
+def test_initial_recovery_static_commitments_with_native_crypto() -> None:
+    from rill_crypto import Context  # noqa: PLC0415
+
+    record = json.loads(RECOVERY.read_bytes())
+    expected_network = NetworkIdentity.model_validate(record["network_identity"])
+    canonical = canonicalize(parse_json_strict(RECOVERY.read_bytes()))
+    with Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto:
+        report = inspect_recovery_plaintext(canonical, expected_network, crypto=crypto)
+    assert report.recorded_binding_count == 0
+    assert report.first_refund_eligible_height == 1101
+    assert "export durability, age decryptability, and snapshot freshness" in report.unproven
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 to run pinned native interoperability",
+)
+def test_native_signatures_check_static_replacement_history_without_chain_claim() -> None:
+    from rill_crypto import Context  # noqa: PLC0415
+
+    package = json.loads(RECOVERY.read_bytes())
+    context = package["verification_context"]
+    network = NetworkIdentity.model_validate(package["network_identity"])
+    client_secret = (2).to_bytes(32, "big")
+    provider_secret = (3).to_bytes(32, "big")
+    with Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto:
+        assert crypto.public_key(client_secret)[1:].hex() == context["client_session_xonly_key"]
+        assert crypto.public_key(provider_secret)[1:].hex() == context["provider_session_xonly_key"]
+        for revision, txid, predecessor in ((0, "aa" * 32, None), (1, "bb" * 32, "aa" * 32)):
+            binding = {
+                "contract_hash": package["contract_hash"],
+                "funding_attempt_id": "cc" * 32,
+                "binding_revision": revision,
+                "funder_role": "client",
+                "lineage_anchor_txid": "dd" * 32,
+                "lineage_anchor_vout": 1,
+                "funding_txid": txid,
+                "contract_vout": revision,
+                "contract_value_sat": package["contract_terms"]["economics"]["contract_amount_sat"],
+                "contract_script_pubkey": package["taproot_contract"]["script_pubkey"],
+                "replaces_txid": predecessor,
+                "created_at": 1700000200 + revision,
+            }
+            digest = funding_binding_hash(FundingBinding.model_validate(binding))
+            signature = crypto.schnorr_sign(client_secret, digest, b"\x33" * 32)
+            package["funding_history"].append(
+                {
+                    "binding": binding,
+                    "funder_session_signature": signature.hex(),
+                }
+            )
+        plaintext = canonicalize(parse_json_strict(json.dumps(package).encode()))
+        report = inspect_recovery_plaintext(plaintext, network, crypto=crypto)
+        assert report.recorded_binding_count == 2
+        assert "funding transactions, conflicts, UTXOs, and chain maturity" in report.unproven
+        wrong_signer = copy.deepcopy(package)
+        second = wrong_signer["funding_history"][1]
+        digest = funding_binding_hash(FundingBinding.model_validate(second["binding"]))
+        second["funder_session_signature"] = crypto.schnorr_sign(
+            provider_secret, digest, b"\x33" * 32
+        ).hex()
+        with pytest.raises(ValidationError):
+            inspect_recovery_plaintext(
+                canonicalize(parse_json_strict(json.dumps(wrong_signer).encode())),
+                network,
+                crypto=crypto,
+            )
