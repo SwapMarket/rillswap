@@ -1,0 +1,7 @@
+tmp/
+build/
+dist/
+.venv/
+__pycache__/
+*.so
+*.wasm
