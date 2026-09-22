@@ -25,3 +25,14 @@ RPC calls use `bitcoin-cli` through `docker exec`, so no daemon port is exposed
 to the host.
 Wallet-selected funding transactions are intentionally dynamic; only the
 versioned synthetic-outpoint vectors have stable transaction bytes.
+
+`vectors/recovery/initial-btc-to-ln-v1.json` is a synthetic decoded-object
+fixture for an initial plaintext export, assembled from signed
+authentication/economics and independently
+reconstructed Taproot vectors. It is unfunded (empty funding history), includes
+public test-only secret material, and uses a decoded invoice-binding fixture,
+not a verified BOLT11 invoice. The test verifies the published signatures and
+schema. The file is pretty-printed for review; canonicalize it to UTF-8 JSON
+before using it as age plaintext. It is not an encrypted age interoperability
+test, durable export proof,
+recovery importer, live funding evidence, or permission to sign or broadcast.
