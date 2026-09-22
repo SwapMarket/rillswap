@@ -16,6 +16,8 @@ from rill_core.domain.amounts import MAX_SATS
 from rill_core.errors import ValidationError
 from rill_core.settlement.taproot import TaprootKeyOperations, reconstruct_taproot_contract
 from rill_core.settlement.unilateral import SUPPORTED_CONSENSUS_PROFILE
+from rill_core.wire.hashes import contract_hash
+from rill_core.wire.messages import FundingBinding
 
 if TYPE_CHECKING:
     from rill_core.wire.messages import ContractTerms
@@ -125,6 +127,16 @@ class FundingPlanAuthorization:
 
 
 @dataclass(frozen=True, slots=True)
+class FundingBindingTransactionMatch:
+    """Static byte match, NOT a signed binding or live funding observation."""
+
+    funding_txid: str
+    contract_vout: int
+    lineage_anchor_txid: str
+    lineage_anchor_vout: int
+
+
+@dataclass(frozen=True, slots=True)
 class _ParsedInput:
     txid: bytes
     output_index: int
@@ -221,6 +233,66 @@ def authorize_funding_transaction(  # noqa: PLR0912
         input_sequences=tuple(tx_input.sequence for tx_input in parsed.inputs),
         lock_time=parsed.lock_time,
         has_witness_serialization=parsed.has_witness_serialization,
+    )
+
+
+def check_funding_binding_transaction(
+    raw_transaction: bytes,
+    binding: FundingBinding,
+    terms: ContractTerms,
+    *,
+    keys: TaprootKeyOperations,
+) -> FundingBindingTransactionMatch:
+    """Check a binding's exact transaction bytes without trusting its signature.
+
+    The host MUST separately authenticate the terms and funder session signature,
+    select the attempt ID, validate input prevouts and wallet approval, enforce
+    revision lineage, and obtain a current chain/mempool view. This result is
+    never evidence of a spendable UTXO or permission to fund, pay or settle.
+    """
+    if not isinstance(binding, FundingBinding):
+        raise ValidationError("funding byte check requires a parsed binding")
+    if terms.network_identity.consensus_profile != SUPPORTED_CONSENSUS_PROFILE:
+        raise ValidationError("unsupported funding consensus profile")
+    contract = reconstruct_taproot_contract(terms, keys=keys)
+    if (
+        binding.contract_hash != contract_hash(terms).hex()
+        or binding.funder_role != ("client" if terms.profile_id == "btc-to-ln/v1" else "provider")
+        or binding.contract_value_sat != terms.economics.contract_amount_sat
+        or binding.contract_script_pubkey != contract.script_pubkey.hex()
+    ):
+        raise ValidationError("funding binding differs from the expected contract")
+    _require_uint32(binding.contract_vout, field="bound contract output index")
+    _require_uint32(binding.lineage_anchor_vout, field="bound anchor output index")
+    parsed = _parse(raw_transaction)
+    if parsed.version != FUNDING_VERSION:
+        raise ValidationError("funding transaction version must be two")
+    txid = _hash256(parsed.base_bytes)[::-1].hex()
+    if binding.funding_txid != txid:
+        raise ValidationError("funding binding transaction ID differs from the bytes")
+    anchor = (bytes.fromhex(binding.lineage_anchor_txid), binding.lineage_anchor_vout)
+    outpoints = {(item.txid, item.output_index) for item in parsed.inputs}
+    if len(outpoints) != len(parsed.inputs) or anchor not in outpoints:
+        raise ValidationError("funding inputs repeat or omit the binding anchor")
+    if any(item.script_sig for item in parsed.inputs):
+        raise ValidationError("funding native witness input scriptSig must be empty")
+    contract_outputs = [
+        (index, value)
+        for index, (value, script) in enumerate(parsed.outputs)
+        if script == contract.script_pubkey
+    ]
+    if contract_outputs != [(binding.contract_vout, int(binding.contract_value_sat))]:
+        raise ValidationError("funding contract output differs from the binding")
+    if any(
+        not _noncontract_output(script)
+        for index, (_, script) in enumerate(parsed.outputs)
+        if index != binding.contract_vout
+    ):
+        raise ValidationError("funding has an unsupported change/destination output")
+    if sum(value for value, _ in parsed.outputs) > MAX_SATS:
+        raise ValidationError("funding aggregate value exceeds Bitcoin money range")
+    return FundingBindingTransactionMatch(
+        txid, binding.contract_vout, binding.lineage_anchor_txid, binding.lineage_anchor_vout
     )
 
 

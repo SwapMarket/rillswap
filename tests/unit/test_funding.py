@@ -14,8 +14,10 @@ from rill_core.settlement import (
     FundingPrevout,
     PlannedFundingOutput,
     authorize_funding_transaction,
+    check_funding_binding_transaction,
 )
-from rill_core.wire.messages import ContractTerms
+from rill_core.wire.hashes import contract_hash
+from rill_core.wire.messages import ContractTerms, FundingBinding
 
 TAPROOT_FIXTURE = Path(__file__).parents[1] / "fixtures" / "settlement-v1" / "taproot-cases-v1.json"
 P2WPKH = b"\x00\x14" + b"\x55" * 20
@@ -135,6 +137,123 @@ def _candidate(  # noqa: PLR0913
         terms,
         keys,
     )
+
+
+def _binding(
+    raw: bytes, plan: FundingPlan, terms: ContractTerms, *, vout: int = 1
+) -> FundingBinding:
+    # All inputs are synthetic public test outpoints, not real wallet UTXOs.
+    parsed_txid = hashlib.sha256(hashlib.sha256(raw).digest()).digest()[::-1].hex()
+    return FundingBinding.model_validate(
+        {
+            "contract_hash": contract_hash(terms).hex(),
+            "funding_attempt_id": "ab" * 32,
+            "binding_revision": 0,
+            "funder_role": "client" if terms.profile_id == "btc-to-ln/v1" else "provider",
+            "lineage_anchor_txid": plan.lineage_anchor.txid.hex(),
+            "lineage_anchor_vout": plan.lineage_anchor.output_index,
+            "funding_txid": parsed_txid,
+            "contract_vout": vout,
+            "contract_value_sat": terms.economics.contract_amount_sat,
+            "contract_script_pubkey": _terms_and_keys(
+                0 if terms.profile_id == "btc-to-ln/v1" else 1
+            )[3].hex(),
+            "replaces_txid": None,
+            "created_at": 1_700_000_000,
+        }
+    )
+
+
+@pytest.mark.parametrize("case_index", [0, 1])
+def test_binding_byte_match_checks_txid_anchor_and_contract_without_live_claim(
+    case_index: int,
+) -> None:
+    unsigned, plan, terms, keys = _candidate(case_index=case_index)
+    # A witness changes wtxid but not the binding txid; use the plan check's
+    # independent stripped-txid calculation to construct a realistic binding.
+    plan_match = authorize_funding_transaction(unsigned, terms, plan, keys=keys)
+    binding = _binding(unsigned, plan, terms)
+    assert binding.funding_txid == plan_match.txid
+    witness = ((b"\x30" * 72, b"\x02" * 33), (b"\x01",))
+    raw, _, _, _ = _candidate(case_index=case_index, witness=witness)
+    result = check_funding_binding_transaction(raw, binding, terms, keys=keys)
+    assert result.funding_txid == binding.funding_txid
+    assert result.contract_vout == 1
+    assert result.lineage_anchor_txid == binding.lineage_anchor_txid
+    assert result.lineage_anchor_vout == binding.lineage_anchor_vout
+
+    amount, script = _terms_and_keys(case_index)[2:]
+    moved, _, _, _ = _candidate(
+        case_index=case_index,
+        outputs_override=((amount, script), (9_500, P2TR)),
+    )
+    moved_binding = _binding(moved, plan, terms, vout=0)
+    assert (
+        check_funding_binding_transaction(moved, moved_binding, terms, keys=keys).contract_vout == 0
+    )
+
+
+def test_binding_byte_match_rejects_mismatched_fields_and_unsigned_context() -> None:
+    raw, plan, terms, keys = _candidate()
+    binding = _binding(raw, plan, terms)
+    for updates in (
+        {"contract_hash": "00" * 32},
+        {"funder_role": "provider"},
+        {"contract_value_sat": "102000"},
+        {"contract_script_pubkey": _terms_and_keys(1)[3].hex()},
+        {"funding_txid": "11" * 32},
+        {"lineage_anchor_txid": "33" * 32},
+        {"lineage_anchor_vout": 9},
+        {"contract_vout": 0},
+        {"contract_vout": 2**32},
+        {"lineage_anchor_vout": 2**32},
+    ):
+        changed = binding.model_copy(update=updates)
+        with pytest.raises(ValidationError):
+            check_funding_binding_transaction(raw, changed, terms, keys=keys)
+    with pytest.raises(ValidationError, match="parsed binding"):
+        check_funding_binding_transaction(raw, object(), terms, keys=keys)  # type: ignore[arg-type]
+    foreign = terms.model_copy(update={"max_funding_fee_sat": "999"})
+    with pytest.raises(ValidationError):
+        check_funding_binding_transaction(raw, binding, foreign, keys=keys)
+
+
+def test_binding_byte_match_rejects_malformed_or_conflicting_transaction() -> None:
+    raw, plan, terms, keys = _candidate()
+    binding = _binding(raw, plan, terms)
+    anchor = plan.lineage_anchor
+    other = plan.approved_inputs[1]
+    inputs = (
+        (anchor.txid, anchor.output_index, b"", 0xFFFFFFFD),
+        (other.txid, other.output_index, b"", 0xFFFFFFFF),
+    )
+    amount, script = _terms_and_keys()[2:]
+    candidates = (
+        b"",
+        raw[:-1],
+        raw + b"\x00",
+        _raw(inputs, ((amount, script),), version=3),
+        _raw((inputs[0], inputs[0]), ((amount, script),)),
+        _raw((inputs[1],), ((amount, script),)),
+        _raw(((anchor.txid, anchor.output_index, b"\x51", 0),), ((amount, script),)),
+        _raw(inputs, ((amount, script), (amount, script))),
+        _raw(inputs, ((amount - 1, script),)),
+        _raw(inputs, ((amount, script), (1, P2WSH))),
+        _raw(inputs, ((amount, script), (21_000_000 * 100_000_000, P2TR))),
+    )
+    for candidate in candidates:
+        # Deliberately replace the bound txid: none of these structural errors
+        # may be hidden by a mismatching txid early exit.
+        local_binding = binding.model_copy(
+            update={
+                "funding_txid": hashlib.sha256(hashlib.sha256(candidate).digest())
+                .digest()[::-1]
+                .hex(),
+                "contract_vout": 0,
+            }
+        )
+        with pytest.raises(ValidationError):
+            check_funding_binding_transaction(candidate, local_binding, terms, keys=keys)
 
 
 @pytest.mark.parametrize("case_index", [0, 1])

@@ -33,6 +33,14 @@ or recovery import by itself: storage, export verification, and any restored
 state must be validated by separate boundaries. Missing or partial history
 must not trigger an automatic rescan or reconstruct chain confirmation.
 
+`settlement.check_funding_binding_transaction` matches bounded transaction
+bytes to expected contract terms and a binding's txid, anchor input, exact
+contract output, and supported output script types. It does **not** verify the
+funder's binding signature, the wallet's approved inputs or other outputs,
+input amounts and fees, prior revisions, live chain/mempool/UTXO state, or
+funding-export safety. Hosts must verify those facts independently before
+adding a binding to a lineage; a byte match is not funding authorization.
+
 `recovery.inspect_recovery_plaintext` accepts canonical UTF-8 RS-007 plaintext
 bytes and a required expected network. It verifies static signed context,
 preimage/key consistency, Taproot reconstruction, and signed binding order,
