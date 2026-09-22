@@ -32,6 +32,41 @@ mkdir -p tmp
 
 No provider network service or release-safe funding workflow exists yet.
 
+The separate `core_tx_bytes.RegtestCoreTransactionReader` is an explicit,
+read-only **regtest-only** Bitcoin Core v30 RPC probe. It takes a numeric
+loopback address, port, owner-private Core cookie file, and a complete trusted
+network identity. Construction and opening either existing ledger make no RPC
+call. An explicit probe compares the configured identity to supplied contract
+terms, checks Core's chain label and genesis hash, and fetches transaction
+bytes by txid for the core static funding-binding byte check. It uses three
+read-only RPC methods (`getblockchaininfo`, `getblockhash`, `getrawtransaction`),
+with no wallet route, redirects, environment proxy, automatic retry, or writes.
+The deployment namespace and consensus profile are operator assertions, not
+facts Core attests. Arbitrary old confirmed transactions need Core `-txindex=1`
+already configured; this probe never enables indexing or initiates a reindex.
+RPC errors, absent indexed transactions, timeouts, and partial/older local
+state are **unavailable evidence**, never evidence of no funding. The result
+does not authenticate the binding signature or wallet inputs, establish a
+best-chain view, reserve funds, authorize funding, or close D07-D09. Existing
+SQLite databases are neither modified nor migrated by this optional probe.
+Its connect/read timeouts are inactivity limits, **not** a total deadline.
+A malfunctioning or malicious configured listener can trickle headers and
+block this synchronous call indefinitely. Do not integrate it into a daemon,
+background polling, service handler, or time-critical action without a new
+bounded transport contract and tests.
+An opt-in integration check runs pinned Bitcoin Core v30 in an isolated Docker
+network namespace with `-txindex=1` and a separate pinned Python test image:
+
+```sh
+RILLSWAP_RUN_BITCOIN_CORE=1 .venv/bin/pytest -q -m bitcoin_core --basetemp=tmp/pytest
+```
+
+It exercises real Core network preflight, confirmed transaction retrieval,
+rejection of a mined coinbase as funding, and an unavailable txid. The fake
+HTTP tests also pass a synthetic matching funding transaction through the
+real core static checker. Neither test proves a live signed swap funding
+workflow or complete backend reconciliation.
+
 The separate `payment_journal` records immutable BTC-to-LN outgoing payment
 requests and append-only backend-reported observations. Its database is bound
 to an exact network and backend, must be created explicitly, and never
