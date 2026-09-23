@@ -15,10 +15,15 @@ from typing import TYPE_CHECKING, Literal, cast
 
 import pyrage
 from pyrage import passphrase, x25519
-from rill_core.recovery import OfflineRecoveryInspection, inspect_recovery_plaintext
+from rill_core.recovery import (
+    OfflineRecoveryInspection,
+    inspect_recovery_plaintext,
+    inspect_recovery_selected_funding_binding,
+)
 
 if TYPE_CHECKING:
     from rill_core.recovery.inspection import RecoveryCrypto
+    from rill_core.wire.messages import FundingBinding
     from rill_core.wire.types import NetworkIdentity
 
 MAX_HEADER_BYTES = 8192
@@ -199,6 +204,13 @@ def _decrypt(ciphertext: bytes, credentials: RecoveryCredentials) -> bytes:
     return cast("bytes", passphrase.decrypt(ciphertext, credentials.passphrase))
 
 
+def _bounded_plaintext(ciphertext: bytes, credentials: RecoveryCredentials) -> bytes:
+    plaintext = _decrypt(ciphertext, credentials)
+    if len(plaintext) > MAX_PLAINTEXT_BYTES:
+        raise RecoveryContainerError("decrypted recovery plaintext exceeds resource limit")
+    return plaintext
+
+
 def inspect_container(
     ciphertext: bytes,
     expected_network: NetworkIdentity,
@@ -211,6 +223,36 @@ def inspect_container(
         return _inspect_container(ciphertext, expected_network, credentials, crypto)
     except Exception:  # noqa: BLE001, S110 - never log secret-bearing native errors
         pass
+    raise RecoveryContainerError("recovery decryption or static inspection failed")
+
+
+def inspect_container_selected_funding_binding(  # noqa: PLR0913 - explicit selected record
+    ciphertext: bytes,
+    expected_network: NetworkIdentity,
+    *,
+    credentials: RecoveryCredentials,
+    funding_attempt_id: str,
+    binding_revision: int,
+    crypto: RecoveryCrypto,
+) -> FundingBinding:
+    """Decrypt and return one public, explicitly selected static candidate.
+
+    The result is never a live UTXO, authorized outpoint, or latest revision.
+    The recovery plaintext, secrets, and third-party exceptions do not escape.
+    """
+    try:
+        plaintext = _bounded_plaintext(ciphertext, credentials)
+        result = inspect_recovery_selected_funding_binding(
+            plaintext,
+            expected_network,
+            funding_attempt_id=funding_attempt_id,
+            binding_revision=binding_revision,
+            crypto=crypto,
+        )
+    except Exception:  # noqa: BLE001, S110 - third-party errors may contain secrets
+        pass
+    else:
+        return result
     raise RecoveryContainerError("recovery decryption or static inspection failed")
 
 
@@ -237,9 +279,7 @@ def _verified_plaintext(
     credentials: RecoveryCredentials,
     crypto: RecoveryCrypto,
 ) -> bytes:
-    plaintext = _decrypt(ciphertext, credentials)
-    if len(plaintext) > MAX_PLAINTEXT_BYTES:
-        raise RecoveryContainerError("decrypted recovery plaintext exceeds resource limit")
+    plaintext = _bounded_plaintext(ciphertext, credentials)
     inspect_recovery_plaintext(plaintext, expected_network, crypto=crypto)
     return plaintext
 
@@ -250,9 +290,7 @@ def _inspect_container(
     credentials: RecoveryCredentials,
     crypto: RecoveryCrypto,
 ) -> OfflineRecoveryInspection:
-    plaintext = _decrypt(ciphertext, credentials)
-    if len(plaintext) > MAX_PLAINTEXT_BYTES:
-        raise RecoveryContainerError("decrypted recovery plaintext exceeds resource limit")
+    plaintext = _bounded_plaintext(ciphertext, credentials)
     return inspect_recovery_plaintext(plaintext, expected_network, crypto=crypto)
 
 

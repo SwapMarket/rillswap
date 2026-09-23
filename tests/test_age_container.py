@@ -10,6 +10,8 @@ import pyrage
 import pytest
 from pyrage import x25519
 from rill_core.wire.canonical import canonicalize
+from rill_core.wire.hashes import funding_binding_hash
+from rill_core.wire.messages import FundingBinding
 from rill_core.wire.types import NetworkIdentity
 
 from rill_cli import age_container
@@ -90,6 +92,150 @@ def test_passphrase_export_fails_before_any_kdf_even_for_valid_input(
         )
     assert error.value.__context__ is None
     assert error.value.__cause__ is None
+
+
+def test_selected_binding_projection_bounds_plaintext_and_redacts_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = b"synthetic canonical plaintext handled by core"
+    network = NetworkIdentity.model_validate(
+        json.loads((Path(__file__).parent / "fixtures" / "initial-btc-to-ln-v1.json").read_text())[
+            "network_identity"
+        ]
+    )
+    credentials = PassphraseCredentials("test-only password")
+    selected = object()
+    observed: list[tuple[bytes, str, int]] = []
+
+    def project(
+        plaintext: bytes,
+        _network: NetworkIdentity,
+        *,
+        funding_attempt_id: str,
+        binding_revision: int,
+        crypto: object,
+    ) -> object:
+        assert crypto is selected
+        observed.append((plaintext, funding_attempt_id, binding_revision))
+        return selected
+
+    monkeypatch.setattr(age_container, "_decrypt", lambda *_args: expected)
+    monkeypatch.setattr(age_container, "inspect_recovery_selected_funding_binding", project)
+    assert (
+        age_container.inspect_container_selected_funding_binding(
+            b"test ciphertext",
+            network,
+            credentials=credentials,
+            funding_attempt_id="11" * 32,
+            binding_revision=1,
+            crypto=selected,  # type: ignore[arg-type]
+        )
+        is selected
+    )
+    assert observed == [(expected, "11" * 32, 1)]
+
+    monkeypatch.setattr(
+        age_container, "_decrypt", lambda *_args: b"x" * (age_container.MAX_PLAINTEXT_BYTES + 1)
+    )
+    with pytest.raises(
+        RecoveryContainerError, match="recovery decryption or static inspection failed"
+    ):
+        age_container.inspect_container_selected_funding_binding(
+            b"test ciphertext",
+            network,
+            credentials=credentials,
+            funding_attempt_id="11" * 32,
+            binding_revision=1,
+            crypto=selected,  # type: ignore[arg-type]
+        )
+    assert len(observed) == 1
+
+    def fail(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("secret-bearing failure")
+
+    monkeypatch.setattr(age_container, "_decrypt", fail)
+    with pytest.raises(
+        RecoveryContainerError, match="recovery decryption or static inspection failed"
+    ) as error:
+        age_container.inspect_container_selected_funding_binding(
+            b"test ciphertext",
+            network,
+            credentials=credentials,
+            funding_attempt_id="11" * 32,
+            binding_revision=1,
+            crypto=selected,  # type: ignore[arg-type]
+        )
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert "secret-bearing" not in repr(error.value)
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    not os.environ.get("RILL_CRYPTO_LIBRARY"),
+    reason="set RILL_CRYPTO_LIBRARY for selected signed binding age interoperability",
+)
+def test_native_age_selected_binding_is_a_public_candidate_not_live_funding() -> None:
+    from rill_crypto import Context  # noqa: PLC0415
+
+    package = json.loads(
+        (Path(__file__).parent / "fixtures" / "initial-btc-to-ln-v1.json").read_text()
+    )
+    context = package["verification_context"]
+    network = NetworkIdentity.model_validate_json(json.dumps(package["network_identity"]))
+    session_secret = (2).to_bytes(32, "big")  # Pinned test-only session key.
+    binding = FundingBinding.model_validate_json(
+        json.dumps(
+            {
+                "contract_hash": package["contract_hash"],
+                "funding_attempt_id": "cc" * 32,
+                "binding_revision": 0,
+                "funder_role": "client",
+                "lineage_anchor_txid": "dd" * 32,
+                "lineage_anchor_vout": 1,
+                "funding_txid": "aa" * 32,
+                "contract_vout": 0,
+                "contract_value_sat": package["contract_terms"]["economics"]["contract_amount_sat"],
+                "contract_script_pubkey": package["taproot_contract"]["script_pubkey"],
+                "replaces_txid": None,
+                "created_at": 1700000200,
+            }
+        )
+    )
+    with Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto:
+        assert crypto.public_key(session_secret)[1:].hex() == context["client_session_xonly_key"]
+        signature = crypto.schnorr_sign(session_secret, funding_binding_hash(binding), b"\x33" * 32)
+        package["funding_history"].append(
+            {
+                "binding": binding.model_dump(mode="json"),
+                "funder_session_signature": signature.hex(),
+            }
+        )
+        plaintext = canonicalize(package)
+        identity = x25519.Identity.generate()
+        ciphertext = pyrage.encrypt(plaintext, [identity.to_public()])
+        credentials = X25519Credentials(str(identity.to_public()), str(identity))
+        selected = age_container.inspect_container_selected_funding_binding(
+            ciphertext,
+            network,
+            credentials=credentials,
+            funding_attempt_id="cc" * 32,
+            binding_revision=0,
+            crypto=crypto,
+        )
+        assert selected == binding
+        assert package["user_secret"]["contract_secret_key"] not in repr(selected)
+        with pytest.raises(
+            RecoveryContainerError, match="recovery decryption or static inspection failed"
+        ):
+            age_container.inspect_container_selected_funding_binding(
+                ciphertext,
+                network,
+                credentials=credentials,
+                funding_attempt_id="cc" * 32,
+                binding_revision=1,
+                crypto=crypto,
+            )
 
 
 @pytest.mark.parametrize(

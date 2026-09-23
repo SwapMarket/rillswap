@@ -70,6 +70,12 @@ canonical age plaintext. If export exits with code 3, the destination may
 already exist but its directory durability could not be confirmed: inspect
 and reconcile it manually, never retry or fund automatically. An absent path,
 absent metadata, or restored older file proves nothing about previous exports.
+The library-only `age_container.inspect_container_selected_funding_binding`
+can explicitly decrypt and statically validate a recovery file, then project
+one public funding binding by exact attempt ID and revision. This is not yet
+a CLI command, selected-chain observation, wallet import, or signing path.
+An older/restored file may omit later revisions; no latest or unspent binding
+is inferred. Invalid and absent records return redacted errors.
 
 For a **fail-closed local backup interoperability gate** on Linux amd64,
 download the official Go age v1.3.1 archive from
