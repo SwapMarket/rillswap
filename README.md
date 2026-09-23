@@ -115,13 +115,42 @@ configured regtest identity is **not independently attested** by this method.
 There is no startup call, journal mutation, submit, cancel, retry, invoice
 lookup, payment reconciliation, or payment permission. Previous-release v1
 journals remain untouched, including missing, partial, and restored states;
-the observer cannot infer safety from absence. Live pinned LND integration,
-multi-instance fencing, persisted intent/backend correlation, and the actual
-L03/D01-D09 release gates remain open.
+the observer cannot infer safety from absence. An opt-in pinned LND regtest
+empty-wallet check exercises TLS, restricted `offchain:read` authorization,
+raw `NOT_FOUND` for an unknown hash, and the observer's sanitized unknown
+result. It does not exercise an initiated, failed, or settled real payment.
+Actual payment-flow interoperability, multi-instance fencing, persisted
+intent/backend correlation, and the L03/D01-D09 release gates remain open.
 
 For developers, regenerate pinned messages (no generated payment-sending stub)
 after installing `requirements-dev.txt` with
 `.venv/bin/python scripts/generate_lnd_protos.py`. The pinned-source hashes
 and exact generation-tool versions are checked. The focused fake transport
 and real synthetic loopback gRPC TLS tests run in the normal pytest suite;
-they are **not** a real LND regtest integration check.
+the synthetic tests alone are **not** a real LND regtest integration check.
+
+To run the opt-in pinned **empty-wallet** check, keep `rill-core` and
+`rill-provider` as sibling source checkouts. Install `requirements-dev.txt`
+in this repository's local Python 3.14 `.venv` (including pinned
+`grpcio-tools`), and have Docker capable of running the pinned `linux/amd64`
+Core, LND, and Python images. From this repository:
+
+```sh
+RILLSWAP_RUN_LND=1 .venv/bin/pytest -q -m lnd --basetemp=tmp/pytest
+```
+
+The test creates uniquely named, run-labeled containers; Core has no network,
+and LND and the test client share Core's loopback namespace without published
+ports. It mounts the sibling source and local environment **read-only**, and
+uses tmpfs for Core data, LND wallet/credentials, and the client credential.
+The test-only wallet seed and admin macaroon are handled within the isolated
+sidecar and are not printed. Tmpfs is not a guarantee against host swap or
+crash dumps. No funds, blocks, channels, invoices, or payments are created.
+Cleanup verifies each container's run label before removal and attempts every
+container even if one cleanup step fails. If the runner is interrupted, check
+for leftover `rillswap-lnd-*` containers with `docker ps -a`, then verify the
+`org.rillswap.test-run` label and mounts using `docker inspect` on each exact
+container. After confirming the associated runner is no longer active, use
+`docker rm --force --volumes` only on those verified containers; do not delete
+other test runs or any host wallet. A missing/older journal remains unknown
+after this test, never a reason to send or retry.

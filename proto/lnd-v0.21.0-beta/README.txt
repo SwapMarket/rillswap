@@ -11,3 +11,7 @@ scripts/generate_lnd_protos.py. The generated package intentionally contains
 no RouterStub or methods capable of initiating a payment. This source pin is
 not proof of live LND behavior or authorization to send funds.
 The upstream LICENSE is also copied into the generated package and wheel.
+An additional walletunlocker.proto, Git blob
+f1375d45073a6405ed269edf4fc41dec9a21ed4e, is vendored only under
+tests/fixtures/lnd-v0.21.0-beta for disposable-wallet interoperability.
+It is never packaged with the provider runtime or invoked by the observer.

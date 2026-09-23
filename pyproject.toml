@@ -22,7 +22,10 @@ packages = ["src/rill_provider"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-config --strict-markers"
-markers = ["bitcoin_core: opt-in pinned regtest RPC adapter interoperability"]
+markers = [
+    "bitcoin_core: opt-in pinned regtest RPC adapter interoperability",
+    "lnd: opt-in pinned, disposable LND and Core read-only interoperability",
+]
 
 [tool.ruff]
 target-version = "py313"
