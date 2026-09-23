@@ -1,5 +1,6 @@
 -e .
 -e ../rill-core/packages/core
+-e ../rill-crypto/python
 pytest==9.1.1
 ruff==0.16.8
 mypy==2.3.1

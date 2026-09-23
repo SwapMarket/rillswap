@@ -11,6 +11,7 @@ requires-python = ">=3.13"
 license = "MIT"
 dependencies = [
     "rill-core==0.1.0.dev0",
+    "rill-crypto==0.1.0.dev0",
     "httpx==0.28.1",
     "grpcio==1.84.0",
     "protobuf==7.36.2",
@@ -25,6 +26,7 @@ addopts = "-ra --strict-config --strict-markers"
 markers = [
     "bitcoin_core: opt-in pinned regtest RPC adapter interoperability",
     "lnd: opt-in pinned, disposable LND and Core read-only interoperability",
+    "native_crypto: opt-in real native signature check against pinned rill-crypto",
 ]
 
 [tool.ruff]

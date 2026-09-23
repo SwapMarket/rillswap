@@ -32,6 +32,31 @@ mkdir -p tmp
 
 No provider network service or release-safe funding workflow exists yet.
 
+The explicit `handshake_diagnostic.verify_handshake_diagnostic` uses the pinned
+`rill-crypto` Python adapter and a caller-selected **absolute** native library
+path to check the three RS-001 handshake envelopes using Core's strict static
+verifier. Its caller supplies a trusted provider identity, complete network,
+profile, and allowed feature/suite/capability sets independently of the peer's
+documents. There is no library discovery fallback, startup loading, key
+custody, transport, journal, or side effect. It returns only a transcript
+digest. A recorded historical handshake passes again and **cannot** establish
+a live session, local provider secret custody, freshness, received order,
+payment authority, or permission to fund. Explicit operator installation of
+the separately pinned native library is required, a native ABI load failure
+is unavailable diagnostic evidence, and input errors are redacted. From a
+sibling `rill-crypto` build and this virtual environment, run the opt-in
+native interoperability check with:
+
+```sh
+RILLSWAP_RUN_NATIVE_CRYPTO=1 \
+RILL_CRYPTO_LIBRARY=/absolute/path/to/pinned/librill_crypto.so \
+  .venv/bin/pytest -q -m native_crypto --basetemp=tmp/pytest
+```
+
+Existing reservation and payment journals are neither opened nor migrated
+by this diagnostic. Missing, partial, old, or restored session records prove
+no historical safety and must not trigger reconstruction or an action.
+
 The separate `core_tx_bytes.RegtestCoreTransactionReader` is an explicit,
 read-only **regtest-only** Bitcoin Core v30 RPC probe. It takes a numeric
 loopback address, port, owner-private Core cookie file, and a complete trusted
