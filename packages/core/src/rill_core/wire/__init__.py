@@ -2,6 +2,7 @@
 
 from rill_core.wire.canonical import parse_model_json
 from rill_core.wire.envelope_authentication import verify_static_signed_envelope
+from rill_core.wire.handshake_authentication import verify_static_handshake_transcript
 from rill_core.wire.hashes import (
     client_acceptance_hash,
     contract_hash,
@@ -45,5 +46,6 @@ __all__ = [
     "parse_model_json",
     "provider_terms_hash",
     "unsigned_envelope_hash",
+    "verify_static_handshake_transcript",
     "verify_static_signed_envelope",
 ]

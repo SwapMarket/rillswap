@@ -16,6 +16,15 @@ linkage, and effect intent **before** any external action. In particular, a
 valid `handshake_confirm` envelope signature is not proof that its payload was
 accepted or delivered, and the digest is never funding or payment authority.
 Older or absent session records do not establish an empty history.
+`wire.verify_static_handshake_transcript` checks the three typed RS-001
+handshake envelopes against independently supplied provider identity, profile,
+network, and supported negotiation values. It verifies the identity-signed
+inner acceptance and client-session-signed confirmation, returning only the
+transcript hash. Init and accept outer wrappers are unsigned, so matching
+their linkage does not authenticate their delivery. A previously signed
+historical transcript passes this static test again: a host still needs its
+own durable pending challenge, locally owned provider key, receipt ordering,
+and replay policy before any session is established or any effect is allowed.
 
 The settlement package reconstructs RS-002 Taproot contracts and builds,
 finalizes, parses, and authorizes unilateral claim/refund transactions. BIP340

@@ -26,6 +26,7 @@ from rill_core.settlement import (
 )
 from rill_core.wire.canonical import canonicalize, parse_json_strict
 from rill_core.wire.envelope_authentication import verify_static_signed_envelope
+from rill_core.wire.handshake_authentication import verify_static_handshake_transcript
 from rill_core.wire.hashes import funding_binding_hash, unsigned_envelope_hash
 from rill_core.wire.messages import (
     ContractTerms,
@@ -100,6 +101,41 @@ def test_pinned_rs001_client_confirm_envelope_signature_with_native_crypto() -> 
         "eef562447f6afa99cc8e9c949c72b37613488e1b061a01207fa51bca349eb20b"
     )
     assert unsigned_envelope_hash(envelope) == expected_digest
+    context = json.loads(RECOVERY.read_text())["verification_context"]
+    initiation = context["handshake_init"]
+    acceptance = context["handshake_accept"]
+    common: dict[str, Any] = {
+        "protocol": "rillswap",
+        "wire_version": "1",
+        "profile_id": "btc-to-ln/v1",
+        "network_identity": network.model_dump(mode="json"),
+        "session_id": initiation["session_id"],
+        "contract_hash": None,
+        "required_features": [],
+        "extensions": {},
+        "signature": None,
+    }
+    init_envelope = {
+        **common,
+        "message_type": "handshake_init",
+        "sequence": 0,
+        "message_id": "12" * 32,
+        "in_reply_to": None,
+        "sender_session_key": initiation["client_session_xonly_key"],
+        "payload": initiation,
+    }
+    accept_envelope = {
+        **common,
+        "message_type": "handshake_accept",
+        "sequence": 0,
+        "message_id": "14" * 32,
+        "in_reply_to": "12" * 32,
+        "sender_session_key": acceptance["provider_session_xonly_key"],
+        "payload": {
+            "accept": acceptance,
+            "provider_identity_signature": context["provider_identity_signature"],
+        },
+    }
 
     def check() -> bytes:
         return verify_static_signed_envelope(
@@ -114,6 +150,18 @@ def test_pinned_rs001_client_confirm_envelope_signature_with_native_crypto() -> 
 
     with Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto:
         assert check() == expected_digest
+        assert verify_static_handshake_transcript(
+            json.dumps(init_envelope).encode(),
+            json.dumps(accept_envelope).encode(),
+            json.dumps(signed).encode(),
+            expected_provider_identity=initiation["expected_provider_identity_xonly_key"],
+            expected_profile="btc-to-ln/v1",
+            expected_network=network,
+            supported_features=frozenset(),
+            supported_encryption_suites=frozenset({"noise-xk-secp256k1-chachapoly-sha256/v1"}),
+            supported_capabilities=frozenset({"core/v1", "recovery/v1"}),
+            crypto=crypto,
+        ) == bytes.fromhex(context["handshake_hash"])
         signed["payload"]["session_id"] = "20" * 32
         with pytest.raises(ValidationError, match="invalid static signed envelope"):
             check()
