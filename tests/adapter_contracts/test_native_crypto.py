@@ -25,8 +25,15 @@ from rill_core.settlement import (
     verify_static_signed_funding_binding_history,
 )
 from rill_core.wire.canonical import canonicalize, parse_json_strict
-from rill_core.wire.hashes import funding_binding_hash
-from rill_core.wire.messages import ContractTerms, FundingBinding, HandshakeAccept, HandshakeInit
+from rill_core.wire.envelope_authentication import verify_static_signed_envelope
+from rill_core.wire.hashes import funding_binding_hash, unsigned_envelope_hash
+from rill_core.wire.messages import (
+    ContractTerms,
+    Envelope,
+    FundingBinding,
+    HandshakeAccept,
+    HandshakeInit,
+)
 from rill_core.wire.types import NetworkIdentity
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "settlement-v1"
@@ -37,6 +44,83 @@ LN_RECOVERY = (
     / "recovery-v1"
     / "initial-ln-to-btc-no-prepayment-v1.json"
 )
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 to run pinned native interoperability",
+)
+def test_pinned_rs001_client_confirm_envelope_signature_with_native_crypto() -> None:
+    from rill_crypto import Context  # noqa: PLC0415
+
+    # RS-001 authentication/cases-v1.json regtest-btc-to-ln confirmed envelope.
+    network = NetworkIdentity.model_validate_json(
+        json.dumps(
+            {
+                "family": "bitcoin",
+                "name": "regtest",
+                "genesis_hash": "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206",
+                "signet_challenge": None,
+                "consensus_profile": "bitcoin-core-v30.0-regtest-default",
+                "deployment_namespace": "rillswap-e2e-v1",
+            }
+        )
+    )
+    sender = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+    signed: dict[str, Any] = {
+        "protocol": "rillswap",
+        "wire_version": "1",
+        "profile_id": "btc-to-ln/v1",
+        "network_identity": network.model_dump(mode="json"),
+        "session_id": "10" * 32,
+        "message_id": "13" * 32,
+        "sender_session_key": sender,
+        "sequence": 1,
+        "in_reply_to": "14" * 32,
+        "contract_hash": None,
+        "message_type": "handshake_confirm",
+        "payload": {
+            "handshake_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8",
+            "session_id": "10" * 32,
+            "client_session_xonly_key": sender,
+            "provider_session_xonly_key": (
+                "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+            ),
+        },
+        "required_features": [],
+        "extensions": {},
+        "signature": (
+            "d8a7339977e4673e215e61339386e8208b0c6d1ecbe01621e985fe3d6c1399"
+            "384f7b321a32c9ddf5363cb484e78561b3fb6aa65e686a076fcf95c7263a13c3bb"
+        ),
+    }
+    envelope = Envelope.model_validate_json(json.dumps(signed))
+    expected_digest = bytes.fromhex(
+        "eef562447f6afa99cc8e9c949c72b37613488e1b061a01207fa51bca349eb20b"
+    )
+    assert unsigned_envelope_hash(envelope) == expected_digest
+
+    def check() -> bytes:
+        return verify_static_signed_envelope(
+            json.dumps(signed).encode(),
+            expected_session_id="10" * 32,
+            expected_profile="btc-to-ln/v1",
+            expected_network=network,
+            expected_sender_key=sender,
+            supported_features=frozenset(),
+            crypto=crypto,
+        )
+
+    with Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto:
+        assert check() == expected_digest
+        signed["payload"]["session_id"] = "20" * 32
+        with pytest.raises(ValidationError, match="invalid static signed envelope"):
+            check()
+        signed["payload"]["session_id"] = "10" * 32
+        signed["signature"] = "00" * 64
+        with pytest.raises(ValidationError, match="invalid static signed envelope"):
+            check()
 
 
 @pytest.mark.native_crypto

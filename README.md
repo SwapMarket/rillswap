@@ -6,6 +6,17 @@ The core package performs no network, disk, clock, database, or notification
 side effects. It validates messages and observations, reduces verified events,
 and returns explicit permitted effects.
 
+`wire.verify_static_signed_envelope` parses bounded strict JSON bytes and
+checks one post-init/accept envelope signature against caller-supplied session,
+profile, complete network, sender key, and supported features. It returns only
+the canonical unsigned digest. The caller must derive these expectations from
+an independently authenticated session and durably enforce RS-001 sender role,
+handshake confirmation, message order, replay/conflict handling, response
+linkage, and effect intent **before** any external action. In particular, a
+valid `handshake_confirm` envelope signature is not proof that its payload was
+accepted or delivered, and the digest is never funding or payment authority.
+Older or absent session records do not establish an empty history.
+
 The settlement package reconstructs RS-002 Taproot contracts and builds,
 finalizes, parses, and authorizes unilateral claim/refund transactions. BIP340
 signing stays outside core behind explicit key-operation and verifier protocols.
