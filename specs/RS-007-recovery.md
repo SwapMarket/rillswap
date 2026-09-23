@@ -29,8 +29,13 @@ remain mandatory.
 The initial Python CLI can inspect conforming scrypt packages, but passphrase
 export remains disabled until its age backend can set a bounded work factor
 before encryption. A failed export creates no success state and cannot enable
-funding or payment. The X25519 create-only export does not implement atomic
-replacement updates or monotonic-knowledge reconciliation.
+funding or payment. The X25519 create-only export can emit an explicit successor
+snapshot relative to one supplied, fully inspected prior age file, without
+replacing that file. It preserves monotonic knowledge only relative to that
+chosen snapshot: a valid older/restored file can omit knowledge stored in an
+unselected sibling. It does not implement atomic replacement of an active
+export, global client-state reconciliation, or authorization to fund, pay,
+sign, or broadcast.
 
 Decryptability MUST be independent of browser origin, wallet master key,
 provider, discovery, and any hosted RillSwap service. Passphrases are obtained
