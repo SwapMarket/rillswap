@@ -76,6 +76,11 @@ one public funding binding by exact attempt ID and revision. This is not yet
 a CLI command, selected-chain observation, wallet import, or signing path.
 An older/restored file may omit later revisions; no latest or unspent binding
 is inferred. Invalid and absent records return redacted errors.
+The parallel `inspect_container_selected_funding_context` returns only public
+validated terms alongside that exact candidate for future independent
+transaction-byte checking; it does not grant authority or expose designated
+recovery secrets. Signed public terms can include arbitrary extension values,
+so do not log the returned object.
 
 For a **fail-closed local backup interoperability gate** on Linux amd64,
 download the official Go age v1.3.1 archive from

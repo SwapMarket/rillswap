@@ -169,6 +169,23 @@ def test_selected_binding_projection_bounds_plaintext_and_redacts_failure(
     assert error.value.__context__ is None
     assert "secret-bearing" not in repr(error.value)
 
+    monkeypatch.setattr(age_container, "_decrypt", lambda *_args: expected)
+    monkeypatch.setattr(age_container, "inspect_recovery_selected_funding_context", fail)
+    with pytest.raises(
+        RecoveryContainerError, match="recovery decryption or static inspection failed"
+    ) as error:
+        age_container.inspect_container_selected_funding_context(
+            b"test ciphertext",
+            network,
+            credentials=credentials,
+            funding_attempt_id="11" * 32,
+            binding_revision=1,
+            crypto=selected,  # type: ignore[arg-type]
+        )
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert "secret-bearing" not in repr(error.value)
+
 
 @pytest.mark.native_crypto
 @pytest.mark.skipif(
@@ -225,6 +242,17 @@ def test_native_age_selected_binding_is_a_public_candidate_not_live_funding() ->
         )
         assert selected == binding
         assert package["user_secret"]["contract_secret_key"] not in repr(selected)
+        context_selected = age_container.inspect_container_selected_funding_context(
+            ciphertext,
+            network,
+            credentials=credentials,
+            funding_attempt_id="cc" * 32,
+            binding_revision=0,
+            crypto=crypto,
+        )
+        assert context_selected.binding == selected
+        assert context_selected.terms.network_identity == network
+        assert package["user_secret"]["contract_secret_key"] not in repr(context_selected)
         with pytest.raises(
             RecoveryContainerError, match="recovery decryption or static inspection failed"
         ):

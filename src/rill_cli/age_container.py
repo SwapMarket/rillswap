@@ -17,8 +17,10 @@ import pyrage
 from pyrage import passphrase, x25519
 from rill_core.recovery import (
     OfflineRecoveryInspection,
+    SelectedRecoveryFundingContext,
     inspect_recovery_plaintext,
     inspect_recovery_selected_funding_binding,
+    inspect_recovery_selected_funding_context,
 )
 
 if TYPE_CHECKING:
@@ -250,6 +252,32 @@ def inspect_container_selected_funding_binding(  # noqa: PLR0913 - explicit sele
             crypto=crypto,
         )
     except Exception:  # noqa: BLE001, S110 - third-party errors may contain secrets
+        pass
+    else:
+        return result
+    raise RecoveryContainerError("recovery decryption or static inspection failed")
+
+
+def inspect_container_selected_funding_context(  # noqa: PLR0913 - explicit selected record
+    ciphertext: bytes,
+    expected_network: NetworkIdentity,
+    *,
+    credentials: RecoveryCredentials,
+    funding_attempt_id: str,
+    binding_revision: int,
+    crypto: RecoveryCrypto,
+) -> SelectedRecoveryFundingContext:
+    """Project public terms and one binding, never decrypted secrets or authority."""
+    try:
+        plaintext = _bounded_plaintext(ciphertext, credentials)
+        result = inspect_recovery_selected_funding_context(
+            plaintext,
+            expected_network,
+            funding_attempt_id=funding_attempt_id,
+            binding_revision=binding_revision,
+            crypto=crypto,
+        )
+    except Exception:  # noqa: BLE001, S110 - no secret-bearing exception escapes
         pass
     else:
         return result
