@@ -11,6 +11,9 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from pyrage import x25519
 from rill_core.wire.canonical import canonicalize
+from rill_core.wire.hashes import funding_binding_hash
+from rill_core.wire.messages import FundingBinding
+from rill_crypto import Context
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -65,6 +68,54 @@ def _rill(args: Sequence[str], *, plaintext: bytes = b"") -> subprocess.Complete
     )
 
 
+def _signed_binding(package: dict[str, Any], revision: int, library: str) -> dict[str, Any]:
+    role = "client" if package["profile_id"] == "btc-to-ln/v1" else "provider"
+    secret_scalar = 2 if role == "client" else 9  # Public synthetic fixture-only session keys.
+    binding = FundingBinding.model_validate(
+        {
+            "contract_hash": package["contract_hash"],
+            "funding_attempt_id": "11" * 32,
+            "binding_revision": revision,
+            "funder_role": role,
+            "lineage_anchor_txid": "33" * 32,
+            "lineage_anchor_vout": 0,
+            "funding_txid": f"{revision + 34:02x}" * 32,
+            "contract_vout": revision + 1,
+            "contract_value_sat": package["contract_terms"]["economics"]["contract_amount_sat"],
+            "contract_script_pubkey": package["taproot_contract"]["script_pubkey"],
+            "replaces_txid": f"{revision + 33:02x}" * 32 if revision else None,
+            "created_at": 1_700_000_200 + revision,
+        }
+    )
+    with Context(library_path=library) as crypto:
+        signature = crypto.schnorr_sign(
+            secret_scalar.to_bytes(32, "big"), funding_binding_hash(binding), b"\x77" * 32
+        )
+    return {"binding": binding.model_dump(mode="json"), "funder_session_signature": signature.hex()}
+
+
+def _export_snapshot(
+    common: list[str],
+    recipient: str,
+    destination: Path,
+    package: dict[str, Any],
+    *,
+    previous: Path | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    return _rill(
+        [
+            "export-update" if previous is not None else "export",
+            *common,
+            "--recipient",
+            recipient,
+            "--output",
+            str(destination),
+            *(["--previous", str(previous)] if previous is not None else []),
+        ],
+        plaintext=canonicalize(package),
+    )
+
+
 @NATIVE_ONLY
 @pytest.mark.native_crypto
 @pytest.mark.parametrize("direction", ["btc-to-ln", "ln-to-btc"])
@@ -102,6 +153,117 @@ def test_real_native_age_export_and_inspect_are_redacted(tmp_path: Path, directi
         "secret-identity",
         "trusted-network.json",
     ]
+
+
+@NATIVE_ONLY
+@pytest.mark.native_crypto
+@pytest.mark.parametrize("direction", ["btc-to-ln", "ln-to-btc"])
+def test_successor_export_adds_two_signed_bindings_without_replacing_prior(
+    tmp_path: Path, direction: str
+) -> None:
+    common, _, recipient = _inputs(tmp_path, direction)
+    initial, _ = _fixture(direction)
+    first = tmp_path / "initial.age"
+    assert _export_snapshot(common, recipient, first, initial).returncode == 0
+    initial_bytes = first.read_bytes()
+    candidate = json.loads(json.dumps(initial))
+    candidate["updated_at"] += 1
+    candidate["funding_history"].append(_signed_binding(candidate, 0, str(NATIVE_LIBRARY)))
+    second = tmp_path / "binding-0.age"
+    result = _export_snapshot(common, recipient, second, candidate, previous=first)
+    assert result.returncode == 0, result.stderr
+    assert b"relative only to supplied previous file" in result.stdout
+    assert b"No funding authority" in result.stdout
+    assert b'"recorded_binding_count":1' in result.stdout
+    second_bytes = second.read_bytes()
+    candidate["updated_at"] += 1
+    candidate["funding_history"].append(_signed_binding(candidate, 1, str(NATIVE_LIBRARY)))
+    candidate["chain_scan_birthday_height"] -= 1
+    candidate["monotonic_knowledge"]["dangerous_signature_issued"] = True
+    third = tmp_path / "binding-1.age"
+    updated = _export_snapshot(common, recipient, third, candidate, previous=second)
+    assert updated.returncode == 0, updated.stderr
+    assert b'"recorded_binding_count":2' in updated.stdout
+    assert json.loads(_rill(["inspect", *common, str(third)]).stdout)["recorded_binding_count"] == 2
+    assert first.read_bytes() == initial_bytes
+    assert second.read_bytes() == second_bytes
+    assert third.stat().st_mode & 0o777 == 0o600
+    assert initial["user_secret"]["contract_secret_key"].encode() not in updated.stdout
+
+
+@NATIVE_ONLY
+@pytest.mark.native_crypto
+def test_successor_refuses_unknown_prior_rollback_cross_swap_and_overwrite(tmp_path: Path) -> None:
+    common, _, recipient = _inputs(tmp_path, "btc-to-ln")
+    initial, _ = _fixture("btc-to-ln")
+    prior = tmp_path / "previous.age"
+    assert _export_snapshot(common, recipient, prior, initial).returncode == 0
+    candidate = json.loads(json.dumps(initial))
+    candidate["updated_at"] += 1
+    candidate["monotonic_knowledge"]["dangerous_signature_issued"] = True
+    output = tmp_path / "new.age"
+    absent = tmp_path / "absent.age"
+    for bad_previous in (absent, prior.with_name("corrupt.age")):
+        if bad_previous.name == "corrupt.age":
+            bad_previous.write_bytes(b"not age")
+        failed = _export_snapshot(common, recipient, output, candidate, previous=bad_previous)
+        assert failed.returncode == 2
+        assert not output.exists()
+        assert failed.stdout == b""
+    link = tmp_path / "prior-link.age"
+    link.symlink_to(prior)
+    assert _export_snapshot(common, recipient, output, candidate, previous=link).returncode == 2
+    assert not output.exists()
+    first = _export_snapshot(common, recipient, output, candidate, previous=prior)
+    assert first.returncode == 0
+    preserved = output.read_bytes()
+    assert _export_snapshot(common, recipient, output, candidate, previous=prior).returncode == 2
+    assert output.read_bytes() == preserved
+    rollback = _export_snapshot(
+        common, recipient, tmp_path / "rollback.age", initial, previous=output
+    )
+    assert rollback.returncode == 2
+    assert not (tmp_path / "rollback.age").exists()
+    foreign, _ = _fixture("ln-to-btc")
+    cross_swap = _export_snapshot(
+        common, recipient, tmp_path / "cross.age", foreign, previous=prior
+    )
+    assert cross_swap.returncode == 2
+    assert not (tmp_path / "cross.age").exists()
+    assert prior.exists()
+
+
+@NATIVE_ONLY
+@pytest.mark.native_crypto
+def test_restored_old_prior_allows_only_pairwise_successor_not_global_knowledge(
+    tmp_path: Path,
+) -> None:
+    common, _, recipient = _inputs(tmp_path, "btc-to-ln")
+    initial, _ = _fixture("btc-to-ln")
+    old = tmp_path / "old.age"
+    assert _export_snapshot(common, recipient, old, initial).returncode == 0
+    old_bytes = old.read_bytes()
+    known = json.loads(json.dumps(initial))
+    known["updated_at"] += 1
+    known["monotonic_knowledge"]["dangerous_signature_issued"] = True
+    informed = tmp_path / "informed.age"
+    assert _export_snapshot(common, recipient, informed, known, previous=old).returncode == 0
+    informed_bytes = informed.read_bytes()
+    restored_candidate = json.loads(json.dumps(initial))
+    restored_candidate["updated_at"] += 1
+    less_informed = tmp_path / "less-informed.age"
+    outcome = _export_snapshot(common, recipient, less_informed, restored_candidate, previous=old)
+    assert outcome.returncode == 0
+    assert b"relative only to supplied previous file" in outcome.stdout
+    assert b"No funding authority" in outcome.stdout
+    assert old.read_bytes() == old_bytes
+    assert informed.read_bytes() == informed_bytes
+    # If the more-informed sibling is explicitly selected, rollback is refused.
+    rejected = _export_snapshot(
+        common, recipient, tmp_path / "rejected.age", restored_candidate, previous=informed
+    )
+    assert rejected.returncode == 2
+    assert not (tmp_path / "rejected.age").exists()
 
 
 @NATIVE_ONLY

@@ -214,6 +214,36 @@ def inspect_container(
     raise RecoveryContainerError("recovery decryption or static inspection failed")
 
 
+def decrypt_verified_plaintext(
+    ciphertext: bytes,
+    expected_network: NetworkIdentity,
+    *,
+    credentials: RecoveryCredentials,
+    crypto: RecoveryCrypto,
+) -> bytes:
+    """Decrypt one successor input for internal comparison, not for public reports."""
+    try:
+        plaintext = _verified_plaintext(ciphertext, expected_network, credentials, crypto)
+    except Exception:  # noqa: BLE001, S110 - third-party errors may contain plaintext
+        pass
+    else:
+        return plaintext
+    raise RecoveryContainerError("recovery decryption or static inspection failed")
+
+
+def _verified_plaintext(
+    ciphertext: bytes,
+    expected_network: NetworkIdentity,
+    credentials: RecoveryCredentials,
+    crypto: RecoveryCrypto,
+) -> bytes:
+    plaintext = _decrypt(ciphertext, credentials)
+    if len(plaintext) > MAX_PLAINTEXT_BYTES:
+        raise RecoveryContainerError("decrypted recovery plaintext exceeds resource limit")
+    inspect_recovery_plaintext(plaintext, expected_network, crypto=crypto)
+    return plaintext
+
+
 def _inspect_container(
     ciphertext: bytes,
     expected_network: NetworkIdentity,

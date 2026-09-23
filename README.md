@@ -15,7 +15,25 @@ ciphertext and checks the exact plaintext and signed contract before reporting
 success. The secret file must be regular, not a symlink, and accessible only to
 its owner (`0600`). Export never overwrites an existing file (including a
 symlink), makes no plaintext temporary file, and never sets a funding-ready
-marker. It does not update an existing recovery export after funding or RBF.
+marker. It does not overwrite an existing recovery export after funding or RBF.
+
+`rill recover export-update --previous OLD.age --output NEW.age` is an
+explicit, **create-only successor snapshot**, not replacement-in-place.
+It accepts new canonical RS-007 plaintext on standard input, decrypts and
+validates the explicitly supplied prior X25519 age file using the same
+protected identity, asks `rill-core` to check pairwise monotonic knowledge,
+then publishes a separate verified age file under the existing no-clobber
+durability protocol. It refuses absent, corrupt, partial, unsupported-format,
+or symlinked prior files; an existing output path, including the prior path,
+is never overwritten. No auto-discovery, migration, scan, or funding action
+occurs. A valid older/restored prior snapshot remains eligible; an unselected
+sibling may hold knowledge missing from the created successor. **Success proves
+only a relationship between the two selected snapshots, not freshness,
+authoritative client reconciliation,
+or a safe RBF workflow.** Interrupted publication is still uncertain (exit 3)
+and requires manual reconciliation. Client-state durability, atomic update
+of active recovery records, and independent unilateral recovery remain release
+gates.
 
 `rill recover inspect` decrypts an explicitly selected X25519 or age scrypt
 file and prints only redacted offline metadata and what remains unproved.
@@ -45,7 +63,7 @@ mkdir -p tmp
 Set `RILL_CRYPTO_LIBRARY` to the pinned local `librill_crypto.so` to enable
 native inspection tests. Optionally set `AGE_BINARY` to the Go `age` v1.3.1
 binary for two-direction independent X25519 interoperability tests. The CLI
-itself requires `--crypto-library` explicitly. Its `export` and `inspect`
+itself requires `--crypto-library` explicitly. Its `export`, `export-update`, and `inspect`
 subcommands require `--network`; run `rill recover --help` for their exact
 arguments. The pretty-printed JSON fixtures are decoded objects, **not**
 canonical age plaintext. If export exits with code 3, the destination may
