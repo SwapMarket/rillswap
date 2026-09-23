@@ -94,6 +94,83 @@ def _signed_binding(package: dict[str, Any], revision: int, library: str) -> dic
     return {"binding": binding.model_dump(mode="json"), "funder_session_signature": signature.hex()}
 
 
+@NATIVE_ONLY
+@pytest.mark.native_crypto
+def test_observe_funding_checks_selected_encrypted_record_before_any_core_rpc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pyrage  # noqa: PLC0415
+    from rill_core.settlement import FundingBindingTransactionMatch  # noqa: PLC0415
+
+    from rill_cli import main as cli_main  # noqa: PLC0415
+    from rill_cli.recovery_core_observation import RecoveryOutpointCandidate  # noqa: PLC0415
+
+    package, _ = _fixture("btc-to-ln")
+    package["funding_history"].append(_signed_binding(package, 0, str(NATIVE_LIBRARY)))
+    common, _, _ = _inputs(tmp_path, "btc-to-ln")
+    identity = x25519.Identity.from_str(Path(common[-1]).read_text().strip())
+    encrypted = tmp_path / "selected.age"
+    encrypted.write_bytes(pyrage.encrypt(canonicalize(package), [identity.to_public()]))
+    binding = FundingBinding.model_validate(package["funding_history"][0]["binding"])
+    seen: list[tuple[str, int]] = []
+
+    class Reader:
+        def __init__(self, **_kwargs: object) -> None:
+            seen.append(("connect", 0))
+
+        def observe(
+            self, selected: FundingBinding, _terms: object, *, keys: object
+        ) -> RecoveryOutpointCandidate:
+            assert selected == binding
+            assert isinstance(keys, Context)
+            seen.append(("observe", selected.binding_revision))
+            return RecoveryOutpointCandidate(
+                package["network_identity"],  # type: ignore[arg-type]
+                FundingBindingTransactionMatch(
+                    binding.funding_txid,
+                    binding.contract_vout,
+                    binding.lineage_anchor_txid,
+                    binding.lineage_anchor_vout,
+                ),
+                "ab" * 32,
+                100,
+                "bc" * 32,
+                99,
+                2,
+                1101,
+            )
+
+    monkeypatch.setattr(cli_main, "RegtestRecoveryCoreReader", Reader)
+    selected_args = [
+        "observe-funding",
+        *common,
+        "--funding-attempt-id",
+        "11" * 32,
+        "--binding-revision",
+        "0",
+        "--rpc-cookie",
+        str(tmp_path / "never-open-cookie"),
+        "--rpc-port",
+        "18443",
+        str(encrypted),
+    ]
+    report = json.loads(cli_main._run(cli_main._parser().parse_args(["recover", *selected_args])))  # noqa: SLF001
+    assert report["kind"] == "selected-funding-candidate-observation/v1"
+    assert report["static_transaction_bytes_match"] is True
+    assert report["funding_txid"] == binding.funding_txid
+    assert report["authority"].startswith("none")
+    assert seen == [("connect", 0), ("observe", 0)]
+    seen.clear()
+    tampered = json.loads(json.dumps(package))
+    tampered["funding_history"][0]["funder_session_signature"] = "00" * 64
+    for changes in ({"funding_history": []}, {"format_version": "older"}, tampered):
+        changed = {**package, **changes}
+        encrypted.write_bytes(pyrage.encrypt(canonicalize(changed), [identity.to_public()]))
+        assert cli_main.main(["recover", *selected_args]) == 2
+        assert seen == []
+
+
 def _export_snapshot(
     common: list[str],
     recipient: str,

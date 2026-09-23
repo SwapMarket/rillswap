@@ -13,6 +13,7 @@ dependencies = [
   "rill-core==0.1.0.dev0",
   "rill-crypto==0.1.0.dev0",
   "pyrage==1.4.0",
+  "httpx==0.28.1",
 ]
 
 [project.scripts]
@@ -27,6 +28,7 @@ addopts = "-ra --strict-config --strict-markers"
 markers = [
   "native_crypto: opt-in native cryptographic interoperability checks",
   "age_interop: opt-in independent Go age interoperability checks",
+  "bitcoin_core: opt-in disposable pinned Bitcoin Core read-only recovery observation",
 ]
 
 [tool.ruff]

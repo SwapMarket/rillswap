@@ -5,7 +5,46 @@ independent recovery executable.
 
 Status: pre-release and not suitable for real funds.
 
-The first implemented commands are **offline recovery only**. `rill recover
+`rill recover observe-funding` is a **read-only, explicitly requested regtest
+diagnostic**, not a refund transaction or an automatic watcher. It requires a
+complete independently trusted network JSON file, protected age X25519
+identity or passphrase prompt, pinned native crypto library, exact signed
+`--funding-attempt-id` and `--binding-revision`, a local Core cookie and RPC
+port, and an explicit encrypted recovery snapshot path. Example (test-only):
+
+```sh
+rill recover observe-funding \
+  --network trusted-regtest-network.json \
+  --crypto-library /absolute/path/to/pinned/librill_crypto.so \
+  --identity /protected/age-identity \
+  --funding-attempt-id EXACT_64_LOWERCASE_HEX \
+  --binding-revision 0 \
+  --rpc-cookie /protected/regtest/.cookie \
+  --rpc-port 18443 \
+  /path/to/selected-recovery.age
+```
+
+The selected file is decrypted and **all** recorded signed funding history is
+checked before any Core RPC. Only a numeric loopback address (default
+`127.0.0.1`) is accepted. The RPC client checks Core's regtest label and
+genesis, the chain-only UTXO sample (`gettxout` with mempool excluded), exact
+value and script, block-qualified transaction bytes against Core's funding
+transaction matcher, and sampled tip/lookup-block consistency. No `txindex`,
+wallet RPC, automatic scan, broadcast, or state update is required. Missing,
+spent, unconfirmed, stale, partial, older, or restored evidence cannot prove
+absence or latest funding, and a mempool spend can coexist with a chain-only
+sample. The JSON result labels the transaction lookup block separately from
+the sampled inclusion height and explicitly reports **no authority**. A
+rapidly changing chain and a later tip can stale a successful observation;
+the RPC listener is trusted by the operator, not cryptographically
+authenticated by loopback Basic auth. Read timeouts are inactivity limits,
+not a transaction deadline. Do not use this output to sign, fund, pay, or
+claim refund eligibility. Real regtest byte-matching for both swap profiles
+is opt-in with `RILLSWAP_RUN_BITCOIN_CORE=1 .venv/bin/pytest -q -m bitcoin_core`
+and requires the locally built sibling native library plus pinned Docker
+images. Neither test uses funds outside disposable regtest.
+
+The export, export-update, and inspect commands are **offline only**. `rill recover
 export` explicitly creates a new binary age v1 X25519 file from canonical
 RS-007 plaintext supplied on standard input. It requires one public age
 recipient, a matching private age identity file, a separately trusted complete

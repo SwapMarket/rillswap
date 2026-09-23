@@ -1,4 +1,4 @@
-"""Explicit create-only age recovery export and redacted offline inspection."""
+"""Explicit age recovery export, offline inspection, and read-only Core sampling."""
 
 from __future__ import annotations
 
@@ -25,12 +25,14 @@ from rill_cli.age_container import (
     decrypt_verified_plaintext,
     encrypt_verified_plaintext,
     inspect_container,
+    inspect_container_selected_funding_context,
     verify_export_ciphertext,
 )
 from rill_cli.publication import (
     RecoveryPublicationUncertainError,
     publish_new_ciphertext,
 )
+from rill_cli.recovery_core_observation import RegtestRecoveryCoreReader
 
 if TYPE_CHECKING:
     from rill_core.recovery import OfflineRecoveryInspection
@@ -78,6 +80,22 @@ def _parser() -> argparse.ArgumentParser:
         "--passphrase-prompt", action="store_true", help="prompt via terminal"
     )
     inspect.add_argument("file", help="encrypted age v1 binary recovery file")
+    observe = commands.add_parser(
+        "observe-funding", help="explicit regtest chain-only candidate (never signing authority)"
+    )
+    observe.add_argument("--network", required=True, help="complete trusted regtest network JSON")
+    observe.add_argument("--crypto-library", required=True, help="verified native library path")
+    observe.add_argument("--funding-attempt-id", required=True, help="exact recorded attempt hex")
+    observe.add_argument("--binding-revision", required=True, type=int, help="exact revision")
+    observe.add_argument("--rpc-cookie", required=True, help="protected local Core cookie path")
+    observe.add_argument("--rpc-port", required=True, type=int, help="local Core RPC port")
+    observe.add_argument("--rpc-host", default="127.0.0.1", help="numeric loopback only")
+    observe_mode = observe.add_mutually_exclusive_group(required=True)
+    observe_mode.add_argument("--identity", help="protected age X25519 secret-key file")
+    observe_mode.add_argument(
+        "--passphrase-prompt", action="store_true", help="prompt via terminal"
+    )
+    observe.add_argument("file", help="explicit encrypted age recovery file")
     return parser
 
 
@@ -181,7 +199,7 @@ def _run(args: argparse.Namespace) -> str:
                 else "Created encrypted recovery file. "
             )
             return prefix + "No funding authority. " + _report(report)
-        if args.command == "inspect":
+        if args.command in {"inspect", "observe-funding"}:
             inspection_credentials = (
                 PassphraseCredentials(_prompt())
                 if args.passphrase_prompt
@@ -189,10 +207,45 @@ def _run(args: argparse.Namespace) -> str:
             )
             with Path(args.file).open("rb") as stream:
                 ciphertext = stream.read(MAX_CIPHERTEXT_BYTES + 1)
-            return _report(
-                inspect_container(
-                    ciphertext, network, credentials=inspection_credentials, crypto=crypto
+            if args.command == "inspect":
+                return _report(
+                    inspect_container(
+                        ciphertext, network, credentials=inspection_credentials, crypto=crypto
+                    )
                 )
+            selected = inspect_container_selected_funding_context(
+                ciphertext,
+                network,
+                credentials=inspection_credentials,
+                funding_attempt_id=args.funding_attempt_id,
+                binding_revision=args.binding_revision,
+                crypto=crypto,
+            )
+            candidate = RegtestRecoveryCoreReader(
+                port=args.rpc_port,
+                host=args.rpc_host,
+                cookie_path=Path(args.rpc_cookie),
+                network=network,
+            ).observe(selected.binding, selected.terms, keys=crypto)
+            return json.dumps(
+                {
+                    "kind": "selected-funding-candidate-observation/v1",
+                    "network_identity": network.model_dump(mode="json"),
+                    "funding_attempt_id": selected.binding.funding_attempt_id,
+                    "binding_revision": selected.binding.binding_revision,
+                    "funding_txid": candidate.static_match.funding_txid,
+                    "contract_vout": candidate.static_match.contract_vout,
+                    "static_transaction_bytes_match": True,
+                    "tip_hash": candidate.tip_hash,
+                    "tip_height": candidate.tip_height,
+                    "transaction_lookup_block_hash": candidate.transaction_lookup_block_hash,
+                    "sampled_inclusion_height": candidate.sampled_inclusion_height,
+                    "chain_only_confirmations": candidate.chain_only_confirmations,
+                    "first_refund_eligible_height": candidate.refund_first_eligible_height,
+                    "authority": "none (staleable candidate; no signing or action permission)",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
             )
         raise RecoveryCLIError("unsupported recovery command")
 
@@ -204,7 +257,7 @@ def _inspect_identity_credentials(path: str) -> X25519Credentials:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run only explicitly requested, offline-only commands; sanitize errors."""
+    """Run explicit recovery commands only; sanitize errors and private input."""
     args = _parser().parse_args(argv)
     try:
         result = _run(args)
