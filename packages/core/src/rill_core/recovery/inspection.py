@@ -179,16 +179,78 @@ def inspect_recovery_plaintext(
     raise ValidationError("invalid or unsupported recovery plaintext")
 
 
+def inspect_recovery_successor(
+    previous: bytes,
+    candidate: bytes,
+    expected_network: NetworkIdentity,
+    *,
+    crypto: RecoveryCrypto,
+) -> OfflineRecoveryInspection:
+    """Validate one explicit pair of canonical offline recovery snapshots.
+
+    This compares only to the supplied previous file. A restored prior, an
+    unknown sibling, or another writer can hold more knowledge. No freshness,
+    global reconciliation, chain observation, or financial authority follows.
+    The secret-bearing parsed records are never returned to the caller.
+    """
+    try:
+        prior_record, _ = _validated_record(previous, expected_network, crypto)
+        next_record, result = _validated_record(candidate, expected_network, crypto)
+        _require_successor(prior_record, next_record)
+    except (CanonicalizationError, PydanticValidationError, ValueError, RuntimeError):
+        # The private models contain keys and preimages. Do not preserve a
+        # secret-bearing exception chain or echo any compared field value.
+        pass
+    else:
+        return result
+    raise ValidationError("invalid or nonmonotonic recovery successor")
+
+
 def _parse_and_inspect(
     document: bytes, expected_network: NetworkIdentity, crypto: RecoveryCrypto
 ) -> OfflineRecoveryInspection:
+    _, report = _validated_record(document, expected_network, crypto)
+    return report
+
+
+def _validated_record(
+    document: bytes, expected_network: NetworkIdentity, crypto: RecoveryCrypto
+) -> tuple[_RecoveryPlaintext, OfflineRecoveryInspection]:
     if not isinstance(expected_network, NetworkIdentity):
         raise ValidationError("expected network is required")
     parsed = parse_json_strict(document, max_bytes=MAX_RECOVERY_BYTES)
     if canonicalize(parsed) != document:
         raise ValidationError("recovery plaintext is not canonical UTF-8 JSON")
     record = _RecoveryPlaintext.model_validate_json(document, strict=True)
-    return _inspect(record, expected_network, crypto)
+    return record, _inspect(record, expected_network, crypto)
+
+
+def _require_successor(previous: _RecoveryPlaintext, candidate: _RecoveryPlaintext) -> None:
+    mutable = {"updated_at", "funding_history", "chain_scan_birthday_height", "monotonic_knowledge"}
+    _require(
+        canonicalize(previous.model_dump(mode="json", exclude=mutable))
+        == canonicalize(candidate.model_dump(mode="json", exclude=mutable)),
+        "recovery contract changed",
+    )
+    _require(candidate.updated_at >= previous.updated_at, "recovery timestamp regressed")
+    _require(
+        candidate.chain_scan_birthday_height <= previous.chain_scan_birthday_height,
+        "scan birthday regressed",
+    )
+    _require(
+        candidate.funding_history[: len(previous.funding_history)] == previous.funding_history,
+        "funding knowledge regressed",
+    )
+    earlier = previous.monotonic_knowledge
+    later = candidate.monotonic_knowledge
+    _require(
+        not earlier.preimage_known or (later.preimage_known and earlier.preimage == later.preimage),
+        "known preimage changed",
+    )
+    _require(
+        not earlier.dangerous_signature_issued or later.dangerous_signature_issued,
+        "issued signature knowledge regressed",
+    )
 
 
 def _require(condition: bool, message: str) -> None:  # noqa: FBT001 - internal predicate

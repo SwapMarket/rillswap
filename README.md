@@ -56,6 +56,15 @@ recovery fixtures are copied from pinned `rill-docs` commits and exercise native
 signature verification when opted in. First canonicalize their decoded objects;
 the pretty-printed file bytes are not age plaintext or verified BOLT11 invoices.
 
+`recovery.inspect_recovery_successor` additionally validates two canonical
+plaintext snapshots offline. It returns only a redacted report when immutable
+fields are identical and the supplied candidate retains the prior binding
+prefix, known preimage, issued-signature knowledge, and scan coverage. It
+compares **only** the explicitly supplied prior snapshot. A restored file or
+unknown sibling can hold more knowledge. Success never proves freshness,
+global reconciliation, durability, or permission to fund or pay. It does not
+replace authoritative persisted client-state reconciliation or update files.
+
 Run local tests with `.venv/bin/pytest -q`. For the native crypto contract test,
 install the sibling `rill-crypto/python` package in the test environment, build
 its pinned native library, and run:

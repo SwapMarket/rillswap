@@ -10,7 +10,11 @@ from typing import Any
 import pytest
 
 from rill_core.errors import CanonicalizationError, ValidationError
-from rill_core.recovery import OfflineRecoveryInspection, inspect_recovery_plaintext
+from rill_core.recovery import (
+    OfflineRecoveryInspection,
+    inspect_recovery_plaintext,
+    inspect_recovery_successor,
+)
 from rill_core.wire.canonical import canonicalize, parse_json_strict
 from rill_core.wire.hashes import (
     client_acceptance_hash,
@@ -476,3 +480,162 @@ def test_unknown_required_features_reject_before_crypto_signatures() -> None:
     with pytest.raises(ValidationError):
         inspect_recovery_plaintext(_canonical(document), _network(document), crypto=crypto)
     assert crypto.calls == []
+
+
+def _successor(
+    previous: dict[str, Any], candidate: dict[str, Any], crypto: FixtureCrypto
+) -> OfflineRecoveryInspection:
+    return inspect_recovery_successor(
+        _canonical(previous), _canonical(candidate), _network(previous), crypto=crypto
+    )
+
+
+def test_explicit_successor_preserves_signed_history_and_known_observations() -> None:
+    original = _source()
+    crypto = _crypto(original)
+    previous = copy.deepcopy(original)
+    _add_history(previous, crypto, 1)
+    candidate = copy.deepcopy(previous)
+    candidate["funding_history"] = []
+    _add_history(candidate, crypto, 2)
+    candidate["updated_at"] += 1
+    candidate["chain_scan_birthday_height"] -= 1
+    candidate["monotonic_knowledge"]["dangerous_signature_issued"] = True
+    report = _successor(previous, candidate, crypto)
+    assert report.recorded_binding_count == 2
+    assert original["user_secret"]["contract_secret_key"] not in repr(report)
+    # Equal timestamps and identical snapshots are allowed, but not proof of freshness.
+    assert _successor(previous, previous, crypto).recorded_binding_count == 1
+
+
+@pytest.mark.parametrize(
+    "changed_field",
+    [
+        "created_at",
+        "updated_at",
+        "birthday",
+        "history",
+        "dangerous",
+        "extensions",
+    ],
+)
+def test_successor_rejects_immutable_or_monotonic_regression(changed_field: str) -> None:
+    previous = _source()
+    crypto = _crypto(previous)
+    previous["monotonic_knowledge"]["dangerous_signature_issued"] = True
+    _add_history(previous, crypto, 1)
+    candidate = copy.deepcopy(previous)
+    if changed_field == "created_at":
+        candidate["created_at"] -= 1
+    elif changed_field == "updated_at":
+        candidate["updated_at"] -= 1
+    elif changed_field == "birthday":
+        candidate["chain_scan_birthday_height"] += 1
+    elif changed_field == "history":
+        candidate["funding_history"] = []
+    elif changed_field == "dangerous":
+        candidate["monotonic_knowledge"]["dangerous_signature_issued"] = False
+    else:
+        candidate["extensions"]["example.invalid/key"] = "changed"
+    with pytest.raises(
+        ValidationError, match="invalid or nonmonotonic recovery successor"
+    ) as error:
+        _successor(previous, candidate, crypto)
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+
+
+@pytest.mark.parametrize(
+    ("original", "changed"),
+    [
+        (True, 1),
+        (False, 0),
+        ({"nested": [True]}, {"nested": [1]}),
+        ({"nested": [False]}, {"nested": [0]}),
+        ("first", "second"),
+    ],
+)
+def test_immutable_extension_json_types_are_preserved(original: object, changed: object) -> None:
+    previous = _source()
+    crypto = _crypto(previous)
+    previous["extensions"]["example.invalid/type"] = original
+    candidate = copy.deepcopy(previous)
+    candidate["extensions"]["example.invalid/type"] = changed
+    network = _network(previous)
+    assert inspect_recovery_plaintext(_canonical(previous), network, crypto=crypto)
+    assert inspect_recovery_plaintext(_canonical(candidate), network, crypto=crypto)
+    assert _successor(previous, previous, crypto)
+    with pytest.raises(ValidationError, match="invalid or nonmonotonic recovery successor"):
+        _successor(previous, candidate, crypto)
+
+
+def test_successor_rejects_missing_corrupt_and_unsupported_prior_without_mutation() -> None:
+    previous = _source()
+    crypto = _crypto(previous)
+    candidate = copy.deepcopy(previous)
+    candidate["updated_at"] += 1
+    for prior in (
+        b"",
+        b"{",
+        b"{}",
+        _canonical({**previous, "format_version": "older"}),
+    ):
+        with pytest.raises(ValidationError, match="invalid or nonmonotonic recovery successor"):
+            inspect_recovery_successor(
+                prior, _canonical(candidate), _network(previous), crypto=crypto
+            )
+    assert _successor(previous, candidate, crypto).recorded_binding_count == 0
+
+
+def test_successor_cannot_forget_initial_ln_preimage() -> None:
+    manifest = json.loads((FIXTURES / "ln-no-prepayment-manifest.json").read_text())
+    previous = json.loads((FIXTURES / manifest["fixture_path"]).read_text())
+    other = next(
+        item
+        for item in json.loads(TAPROOT.read_text())["valid"]
+        if item["profile_id"] == "ln-to-btc/v1"
+    )
+    crypto = FixtureCrypto(previous, other["artifacts"])
+    candidate = copy.deepcopy(previous)
+    candidate["updated_at"] += 1
+    assert _successor(previous, candidate, crypto).profile_id == "ln-to-btc/v1"
+    candidate["monotonic_knowledge"] = {
+        "preimage_known": False,
+        "preimage": None,
+        "dangerous_signature_issued": False,
+    }
+    with pytest.raises(ValidationError):
+        _successor(previous, candidate, crypto)
+
+
+def test_successor_can_learn_btc_preimage_but_never_forget_it() -> None:
+    previous = _source()
+    crypto = _crypto(previous)
+    learned = copy.deepcopy(previous)
+    learned["monotonic_knowledge"].update({"preimage_known": True, "preimage": "42" * 32})
+    assert _successor(previous, learned, crypto).profile_id == "btc-to-ln/v1"
+    with pytest.raises(ValidationError, match="invalid or nonmonotonic recovery successor"):
+        _successor(learned, previous, crypto)
+
+
+def test_successor_rejects_divergent_but_independently_signed_history() -> None:
+    previous = _source()
+    crypto = _crypto(previous)
+    _add_history(previous, crypto, 1)
+    candidate = copy.deepcopy(previous)
+    other = candidate["funding_history"][0]
+    other["binding"]["funding_txid"] = "44" * 32
+    other["funder_session_signature"] = "aa" * 64
+    crypto.allow(
+        candidate["verification_context"]["client_session_xonly_key"],
+        funding_binding_hash(FundingBinding.model_validate(other["binding"])),
+        other["funder_session_signature"],
+    )
+    assert (
+        inspect_recovery_plaintext(
+            _canonical(candidate), _network(previous), crypto=crypto
+        ).recorded_binding_count
+        == 1
+    )
+    with pytest.raises(ValidationError, match="invalid or nonmonotonic recovery successor"):
+        _successor(previous, candidate, crypto)
