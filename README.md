@@ -70,3 +70,34 @@ canonical age plaintext. If export exits with code 3, the destination may
 already exist but its directory durability could not be confirmed: inspect
 and reconcile it manually, never retry or fund automatically. An absent path,
 absent metadata, or restored older file proves nothing about previous exports.
+
+For a **fail-closed local backup interoperability gate** on Linux amd64,
+download the official Go age v1.3.1 archive from
+`https://github.com/FiloSottile/age/releases/download/v1.3.1/age-v1.3.1-linux-amd64.tar.gz`
+into this repository's `tmp/` directory. The committed gate verifies its
+SHA-256 `bdc69c09cbdd6cf8b1f333d372a1f58247b3a33146406333e30c0f26e8f51377`
+before extracting or executing `age/age`. Separately build the pinned sibling
+`rill-crypto` library and independently record its SHA-256. With the local
+Python 3.14 `.venv` and both sibling checkouts installed:
+
+```sh
+.venv/bin/python scripts/check_age_interop.py \
+  --age-archive "$PWD/tmp/age-v1.3.1-linux-amd64.tar.gz" \
+  --native-library "$PWD/../rill-crypto/tmp/build/librill_crypto.so" \
+  --native-sha256 YOUR_INDEPENDENTLY_RECORDED_LIBRARY_SHA256
+```
+
+The gate refuses a wrong archive digest/version, missing sibling source,
+library digest mismatch, a skipped test, or fewer than three passing checks.
+It uses a fresh private test directory rather than deleting an existing
+scratch path, and requires a structured report with exactly the three intended
+cases. Inherited pytest plugins, assertion mode, and Python optimization
+settings cannot silently turn this check into a skipped or assertion-free run.
+It exercises Python-to-Go and Go-to-Python age X25519 in both profiles plus
+the separately generated Go scrypt fixture with native inspection. It records
+each component source revision and whether its worktree is dirty; a caller-
+supplied native hash identifies tested bytes but does not attest binary origin.
+This is **local verification only**. There are no repository remotes or hosted
+CI workflows configured yet, so required CI enforcement and independent
+reproducible artifact provenance remain open release gates. None of these
+checks permits refund signing, broadcast, funding, or payment.

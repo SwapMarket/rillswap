@@ -430,6 +430,9 @@ def test_two_direction_independent_go_age_interoperability(tmp_path: Path, direc
         plaintext=canonical,
     )
     assert exported.returncode == 0, exported.stderr
+    assert output.is_file()
+    assert output.stat().st_mode & 0o777 == 0o600
+    assert not list(tmp_path.glob(".rill-recovery-*.tmp"))
     decrypted = subprocess.run(  # noqa: S603 - explicitly selected pinned Go binary, no shell
         [str(AGE_BINARY), "-d", "-i", common[-1]],
         input=output.read_bytes(),
