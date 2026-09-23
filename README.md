@@ -91,3 +91,37 @@ Separate journals cannot coordinate submissions to one shared backend; no
 multi-instance fencing or backend attempt correlation has been implemented.
 There is no RPC or automated reconciliation in this increment, so crash and
 restart storage tests do not complete the D01, D02, or D09 release gates.
+
+An **explicit outgoing-only LND observation diagnostic** is available as
+`RegtestLndPaymentObserver.track(payment_hash)` in
+`rill_provider.lnd_payment_observation`. It uses the vendored official LND
+`v0.21.0-beta` protobuf definitions (source commit and hashes in
+`proto/lnd-v0.21.0-beta/README.txt`), pinned Python gRPC runtime, a numeric
+loopback endpoint, a locally configured TLS trust-root certificate with
+hostname verification (not exact leaf-certificate pinning), and a protected
+read-only macaroon. Operators must provision a narrowly restricted
+`offchain:read` macaroon; this diagnostic cannot inspect its permissions;
+never use an admin macaroon or expose it through CLI arguments, logs, or
+backups. The observer uses only `TrackPaymentV2`, with one total gRPC deadline,
+a 256 KiB response limit, 16-update limit, disabled gRPC RPC retries, and no
+application reconnect loop. It returns only
+typed payment-level and separately typed HTLC-attempt status/IDs. `INITIATED`
+does not mean `IN_FLIGHT`, and LND's numeric HTLC attempt ID is **not** the
+Rill journal's local attempt ID. No protobuf response, preimage, route, or
+credential is returned or persisted. Missing history, not-found, timeout,
+auth rejection, and interrupted tracking remain unknown, not proof of failure
+or absence. The observer does not query backend identity or network consensus;
+configured regtest identity is **not independently attested** by this method.
+There is no startup call, journal mutation, submit, cancel, retry, invoice
+lookup, payment reconciliation, or payment permission. Previous-release v1
+journals remain untouched, including missing, partial, and restored states;
+the observer cannot infer safety from absence. Live pinned LND integration,
+multi-instance fencing, persisted intent/backend correlation, and the actual
+L03/D01-D09 release gates remain open.
+
+For developers, regenerate pinned messages (no generated payment-sending stub)
+after installing `requirements-dev.txt` with
+`.venv/bin/python scripts/generate_lnd_protos.py`. The pinned-source hashes
+and exact generation-tool versions are checked. The focused fake transport
+and real synthetic loopback gRPC TLS tests run in the normal pytest suite;
+they are **not** a real LND regtest integration check.

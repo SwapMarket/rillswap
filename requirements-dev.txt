@@ -20,6 +20,12 @@ certifi==2026.7.22
     # via
     #   httpcore
     #   httpx
+grpcio==1.84.0
+    # via
+    #   grpcio-tools
+    #   rill-provider
+grpcio-tools==1.84.0
+    # via -r requirements-dev.in
 h11==0.16.0
     # via httpcore
 httpcore==1.0.9
@@ -44,6 +50,10 @@ pathspec==1.1.1
     # via mypy
 pluggy==1.6.0
     # via pytest
+protobuf==7.36.2
+    # via
+    #   grpcio-tools
+    #   rill-provider
 pydantic==2.13.5
     # via rill-core
 pydantic-core==2.46.5
@@ -56,12 +66,18 @@ rfc8785==0.1.4
     # via rill-core
 ruff==0.16.8
     # via -r requirements-dev.in
+types-grpcio==1.83.0.20260730
+    # via -r requirements-dev.in
 typing-extensions==4.16.0
     # via
     #   anyio
+    #   grpcio
     #   mypy
     #   pydantic
     #   pydantic-core
     #   typing-inspection
 typing-inspection==0.4.4
     # via pydantic
+
+# The following packages are considered to be unsafe in a requirements file:
+# setuptools
