@@ -8,6 +8,7 @@ import secrets
 import shutil
 import subprocess
 import time
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -55,6 +56,8 @@ import json, os
 from pathlib import Path
 from rill_core.errors import ValidationError
 from rill_core.wire.messages import ContractTerms, FundingBinding
+from rill_core.settlement import FundingBindingTransactionMatch
+from rill_provider import core_tx_bytes
 from rill_provider.core_tx_bytes import CoreUnavailableError, RegtestCoreTransactionReader
 fixture = json.loads(Path('/work/provider/tests/fixtures/initial-btc-to-ln-v1.json').read_bytes())
 terms = ContractTerms.model_validate_json(json.dumps(fixture['contract_terms']))
@@ -88,7 +91,25 @@ except CoreUnavailableError:
     pass
 else:
     raise AssertionError('unavailable transaction unexpectedly matched')
-print('Core v30 byte retrieval and conservative rejection passed')
+coinbase_binding = binding.model_copy(update={
+    'funding_txid': os.environ['RILL_TEST_SPEND_TXID'],
+    'contract_vout': int(os.environ['RILL_TEST_SPEND_VOUT']),
+    'contract_script_pubkey': os.environ['RILL_TEST_SCRIPT'],
+    'contract_value_sat': os.environ['RILL_TEST_VALUE_SAT'],
+})
+# Deliberately bypass only the static binding checker for this transport test:
+# an ordinary wallet payment cannot satisfy a real funding binding. The earlier
+# call confirms that the real checker rejects coinbase funding. This checks
+# Core's actual noncoinbase gettxout response with no false success claim.
+core_tx_bytes.check_funding_binding_transaction = (
+    lambda raw, current, terms, *, keys: FundingBindingTransactionMatch(
+        current.funding_txid, current.contract_vout,
+        current.lineage_anchor_txid, current.lineage_anchor_vout))
+candidate = reader.observe_candidate_outpoint(coinbase_binding, terms, keys=Keys())
+assert candidate.tip_height >= 1
+assert candidate.chain_only_confirmations >= 1
+assert candidate.static_match.contract_vout == int(os.environ['RILL_TEST_SPEND_VOUT'])
+print('Core v30 static rejection, UTXO response, and unknown lookup passed')
 """
 
 
@@ -117,6 +138,7 @@ def test_pinned_core_regtest_http_retrieval_is_not_funding_authority(tmp_path: P
             "-discover=0",
             "-dnsseed=0",
             "-txindex=1",
+            "-fallbackfee=0.0002",
             "-rpcbind=0.0.0.0",
             "-rpcallowip=127.0.0.1",
             "-printtoconsole=1",
@@ -145,9 +167,25 @@ def test_pinned_core_regtest_http_retrieval_is_not_funding_authority(tmp_path: P
         else:
             raise AssertionError("pinned Core did not start within the test budget")
         _bitcoin_cli(container, "createwallet", "read-only-adapter-test")
-        address = _bitcoin_cli(container, "-rpcwallet=read-only-adapter-test", "getnewaddress")
+        address = _bitcoin_cli(
+            container, "-rpcwallet=read-only-adapter-test", "getnewaddress", "", "bech32m"
+        )
         block = json.loads(_bitcoin_cli(container, "generatetoaddress", "1", address))[0]
         coinbase = json.loads(_bitcoin_cli(container, "getblock", block, "1"))["tx"][0]
+        _bitcoin_cli(container, "generatetoaddress", "100", address)
+        spend_txid = _bitcoin_cli(
+            container, "-rpcwallet=read-only-adapter-test", "sendtoaddress", address, "0.001"
+        )
+        spend = json.loads(_bitcoin_cli(container, "getrawtransaction", spend_txid, "true"))
+        sent = [vout for vout in spend["vout"] if vout["scriptPubKey"].get("address") == address]
+        assert len(sent) == 1
+        spend_vout = sent[0]["n"]
+        _bitcoin_cli(container, "generatetoaddress", "1", address)
+        spend_utxo = json.loads(
+            _bitcoin_cli(container, "gettxout", spend_txid, str(spend_vout), "false")
+        )
+        assert spend_utxo["coinbase"] is False
+        value_sat = int(Decimal(str(spend_utxo["value"])) * 100_000_000)
         cookie = tmp_path / "core.cookie"
         _docker("cp", f"{container}:/home/bitcoin/.bitcoin/regtest/.cookie", str(cookie))
         cookie.chmod(0o600)
@@ -169,12 +207,20 @@ def test_pinned_core_regtest_http_retrieval_is_not_funding_authority(tmp_path: P
             "/work/provider/src:/work/core/packages/core/src",
             "--env",
             f"RILL_TEST_TXID={coinbase}",
+            "--env",
+            f"RILL_TEST_SPEND_TXID={spend_txid}",
+            "--env",
+            f"RILL_TEST_SPEND_VOUT={spend_vout}",
+            "--env",
+            f"RILL_TEST_SCRIPT={spend_utxo['scriptPubKey']['hex']}",
+            "--env",
+            f"RILL_TEST_VALUE_SAT={value_sat}",
             PYTHON_IMAGE,
             "python",
             "-c",
             PYTHON_CHECK,
         )
-        assert result == "Core v30 byte retrieval and conservative rejection passed"
+        assert result == "Core v30 static rejection, UTXO response, and unknown lookup passed"
     finally:
         subprocess.run(  # noqa: S603 - best-effort cleanup, no secrets in command
             [DOCKER, "rm", "--force", "--volumes", container],

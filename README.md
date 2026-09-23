@@ -38,8 +38,12 @@ loopback address, port, owner-private Core cookie file, and a complete trusted
 network identity. Construction and opening either existing ledger make no RPC
 call. An explicit probe compares the configured identity to supplied contract
 terms, checks Core's chain label and genesis hash, and fetches transaction
-bytes by txid for the core static funding-binding byte check. It uses three
-read-only RPC methods (`getblockchaininfo`, `getblockhash`, `getrawtransaction`),
+bytes by txid for the core static funding-binding byte check. A second explicit
+`observe_candidate_outpoint` probe also samples chain-only `gettxout` evidence
+between two matching tip readings. It returns a **candidate** at a named tip,
+not a best-chain lineage entry, and does not check mempool spends. It uses only
+four read-only RPC methods (`getblockchaininfo`, `getblockhash`,
+`getrawtransaction`, `gettxout`),
 with no wallet route, redirects, environment proxy, automatic retry, or writes.
 The deployment namespace and consensus profile are operator assertions, not
 facts Core attests. Arbitrary old confirmed transactions need Core `-txindex=1`
@@ -62,7 +66,10 @@ RILLSWAP_RUN_BITCOIN_CORE=1 .venv/bin/pytest -q -m bitcoin_core --basetemp=tmp/p
 ```
 
 It exercises real Core network preflight, confirmed transaction retrieval,
-rejection of a mined coinbase as funding, and an unavailable txid. The fake
+rejection of a mined coinbase as funding, sampled chain-only UTXO response,
+and an unavailable txid. The UTXO transport test deliberately substitutes a
+static checker after proving that the real checker rejects coinbase funding;
+it does not claim a live signed binding. The fake
 HTTP tests also pass a synthetic matching funding transaction through the
 real core static checker. Neither test proves a live signed swap funding
 workflow or complete backend reconciliation.

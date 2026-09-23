@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager, suppress
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -423,3 +424,162 @@ def test_fetched_bytes_pass_real_core_static_checker_only(tmp_path: Path) -> Non
         changed = binding.model_copy(update={"funding_txid": "88" * 32})
         with pytest.raises(ValidationError, match="transaction ID differs"):
             reader.fetch_binding_byte_match(changed, terms, keys=Keys())
+
+
+def _candidate_reply(  # noqa: PLR0912 - explicit malformed Core response variants
+    payload: dict[str, Any], binding: FundingBinding, *, change: str = "none"
+) -> tuple[int, bytes]:
+    tip = "aa" * 32
+    info: dict[str, Any] = {
+        "chain": "regtest",
+        "blocks": 105,
+        "bestblockhash": tip,
+        "initialblockdownload": False,
+    }
+    output: dict[str, Any] = {
+        "bestblock": tip,
+        "confirmations": 3,
+        "coinbase": False,
+        "value": int(binding.contract_value_sat) / 100_000_000,
+        "scriptPubKey": {"hex": binding.contract_script_pubkey},
+    }
+    if change == "tip" and payload["id"] == 5:
+        info["bestblockhash"] = "bb" * 32
+    if change == "height" and payload["id"] == 5:
+        info["blocks"] = 106
+    if change == "unsynced":
+        info["initialblockdownload"] = True
+    if change == "script":
+        output["scriptPubKey"]["hex"] = "51" + "20" + "44" * 32
+    if change == "value":
+        output["value"] = 0.00000001
+    if change == "fractional-sat":
+        output["value"] = 0.001010001
+    if change == "bestblock":
+        output["bestblock"] = "bb" * 32
+    if change == "boolean-confirms":
+        output["confirmations"] = True
+    if change == "excess-confirmations":
+        output["confirmations"] = 106
+    if change == "coinbase":
+        output["coinbase"] = True
+    if change == "missing-coinbase":
+        output.pop("coinbase")
+    if change == "malformed-coinbase":
+        output["coinbase"] = 0
+    if change == "tiny-fraction":
+        output["value"] = Decimal("0.001010000000000000000000000000000000000001")
+    if change == "huge-exponent":
+        output["value"] = Decimal("1e1000000")
+    if change == "tiny-exponent":
+        output["value"] = Decimal("1e-1000000")
+    if change == "unrepresentable-exponent":
+        output["value"] = "UNREPRESENTABLE_EXPONENT_PLACEHOLDER"
+    result: object = {
+        "getblockchaininfo": info,
+        "getblockhash": GENESIS,
+        "getrawtransaction": "02000000000100",
+        "gettxout": output if change != "null" else None,
+    }[payload["method"]]
+    if isinstance(output.get("value"), Decimal):
+        # Preserve the literal JSON numeric token; serializing through float
+        # would erase exactly the malformed precision being tested.
+        encoded = json.dumps({"jsonrpc": "2.0", "id": payload["id"], "result": result}, default=str)
+        quoted = json.dumps(str(output["value"]))
+        return 200, encoded.replace(f'"value": {quoted}', f'"value": {output["value"]}').encode()
+    if change == "unrepresentable-exponent":
+        encoded = json.dumps({"jsonrpc": "2.0", "id": payload["id"], "result": result})
+        return 200, encoded.replace(
+            '"UNREPRESENTABLE_EXPONENT_PLACEHOLDER"',
+            "1e99999999999999999999999999999999999999999999999",
+        ).encode()
+    return 200, json.dumps({"jsonrpc": "2.0", "id": payload["id"], "result": result}).encode()
+
+
+def test_candidate_is_a_named_tip_utxo_sample_not_lineage_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    terms, binding, network = _context()
+    match = FundingBindingTransactionMatch(
+        binding.funding_txid,
+        binding.contract_vout,
+        binding.lineage_anchor_txid,
+        binding.lineage_anchor_vout,
+    )
+    calls: list[bytes] = []
+
+    def checker(raw: bytes, *_args: object, **_kwargs: object) -> FundingBindingTransactionMatch:
+        calls.append(raw)
+        return match
+
+    monkeypatch.setattr(core_tx_bytes, "check_funding_binding_transaction", checker)
+    requests: list[dict[str, Any]] = []
+    with _server(lambda payload: _candidate_reply(payload, binding), requests) as port:
+        reader = RegtestCoreTransactionReader(
+            port=port, cookie_path=_cookie(tmp_path), network=network
+        )
+        result = reader.observe_candidate_outpoint(binding, terms, keys=None)  # type: ignore[arg-type]
+    assert calls == [bytes.fromhex("02000000000100")]
+    assert result.network_identity == network
+    assert result.static_match == match
+    assert result.tip_hash == "aa" * 32
+    assert result.tip_height == 105
+    assert result.chain_only_confirmations == 3
+    assert [request["method"] for request in requests] == [
+        "getblockchaininfo",
+        "getblockhash",
+        "getrawtransaction",
+        "gettxout",
+        "getblockchaininfo",
+    ]
+    assert requests[3]["params"] == [binding.funding_txid, binding.contract_vout, False]
+    assert len(requests) == 5
+
+
+@pytest.mark.parametrize(
+    ("change", "error_type"),
+    [
+        ("tip", CoreUnavailableError),
+        ("height", CoreUnavailableError),
+        ("null", CoreUnavailableError),
+        ("bestblock", CoreUnavailableError),
+        ("unsynced", CoreProtocolError),
+        ("script", CoreProtocolError),
+        ("value", CoreProtocolError),
+        ("fractional-sat", CoreProtocolError),
+        ("boolean-confirms", CoreProtocolError),
+        ("excess-confirmations", CoreProtocolError),
+        ("coinbase", CoreProtocolError),
+        ("missing-coinbase", CoreProtocolError),
+        ("malformed-coinbase", CoreProtocolError),
+        ("tiny-fraction", CoreProtocolError),
+        ("huge-exponent", CoreProtocolError),
+        ("tiny-exponent", CoreProtocolError),
+        ("unrepresentable-exponent", CoreProtocolError),
+    ],
+)
+def test_candidate_unknown_or_mismatched_chain_never_returns_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str, error_type: type[Exception]
+) -> None:
+    terms, binding, network = _context()
+    monkeypatch.setattr(
+        core_tx_bytes,
+        "check_funding_binding_transaction",
+        lambda *_args, **_kwargs: FundingBindingTransactionMatch(
+            binding.funding_txid,
+            binding.contract_vout,
+            binding.lineage_anchor_txid,
+            binding.lineage_anchor_vout,
+        ),
+    )
+    requests: list[dict[str, Any]] = []
+    with _server(
+        lambda payload: _candidate_reply(payload, binding, change=change), requests
+    ) as port:
+        reader = RegtestCoreTransactionReader(
+            port=port, cookie_path=_cookie(tmp_path), network=network
+        )
+        with pytest.raises(error_type):
+            reader.observe_candidate_outpoint(binding, terms, keys=None)  # type: ignore[arg-type]
+    assert len(requests) in (1, 4, 5)
+    assert [item["method"] for item in requests].count("gettxout") <= 1
