@@ -426,7 +426,7 @@ def test_fetched_bytes_pass_real_core_static_checker_only(tmp_path: Path) -> Non
             reader.fetch_binding_byte_match(changed, terms, keys=Keys())
 
 
-def _candidate_reply(  # noqa: PLR0912 - explicit malformed Core response variants
+def _candidate_reply(  # noqa: PLR0912, PLR0915 - explicit malformed Core response variants
     payload: dict[str, Any], binding: FundingBinding, *, change: str = "none"
 ) -> tuple[int, bytes]:
     tip = "aa" * 32
@@ -443,9 +443,9 @@ def _candidate_reply(  # noqa: PLR0912 - explicit malformed Core response varian
         "value": int(binding.contract_value_sat) / 100_000_000,
         "scriptPubKey": {"hex": binding.contract_script_pubkey},
     }
-    if change == "tip" and payload["id"] == 5:
+    if change == "tip" and payload["id"] == 7:
         info["bestblockhash"] = "bb" * 32
-    if change == "height" and payload["id"] == 5:
+    if change == "height" and payload["id"] == 7:
         info["blocks"] = 106
     if change == "unsynced":
         info["initialblockdownload"] = True
@@ -461,6 +461,8 @@ def _candidate_reply(  # noqa: PLR0912 - explicit malformed Core response varian
         output["confirmations"] = True
     if change == "excess-confirmations":
         output["confirmations"] = 106
+    if change in ("tip-inclusion", "tip-inclusion-mismatch"):
+        output["confirmations"] = 1
     if change == "coinbase":
         output["coinbase"] = True
     if change == "missing-coinbase":
@@ -475,12 +477,31 @@ def _candidate_reply(  # noqa: PLR0912 - explicit malformed Core response varian
         output["value"] = Decimal("1e-1000000")
     if change == "unrepresentable-exponent":
         output["value"] = "UNREPRESENTABLE_EXPONENT_PLACEHOLDER"
+    block_hash = (
+        tip if payload["method"] == "getblockhash" and payload["params"] == [105] else "cc" * 32
+    )
+    if change == "bad-inclusion-hash" and payload["id"] == 5:
+        block_hash = "CC" * 32
+    if change == "tip-inclusion-mismatch" and payload["id"] == 5:
+        block_hash = "bb" * 32
+    if change == "block-bytes-differ" and payload["id"] == 6:
+        transaction = "01000000000100"
+    else:
+        transaction = "02000000000100"
     result: object = {
         "getblockchaininfo": info,
-        "getblockhash": GENESIS,
-        "getrawtransaction": "02000000000100",
+        "getblockhash": GENESIS if payload["params"] == [0] else block_hash,
+        "getrawtransaction": transaction,
         "gettxout": output if change != "null" else None,
     }[payload["method"]]
+    if change == "block-not-found" and payload["id"] == 6:
+        return 200, json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": payload["id"],
+                "error": {"code": -5, "message": "not found"},
+            }
+        ).encode()
     if isinstance(output.get("value"), Decimal):
         # Preserve the literal JSON numeric token; serializing through float
         # would erase exactly the malformed precision being tested.
@@ -525,15 +546,50 @@ def test_candidate_is_a_named_tip_utxo_sample_not_lineage_authority(
     assert result.tip_hash == "aa" * 32
     assert result.tip_height == 105
     assert result.chain_only_confirmations == 3
+    assert result.inclusion_height == 103
+    assert result.inclusion_block_hash == "cc" * 32
     assert [request["method"] for request in requests] == [
         "getblockchaininfo",
         "getblockhash",
         "getrawtransaction",
         "gettxout",
+        "getblockhash",
+        "getrawtransaction",
         "getblockchaininfo",
     ]
     assert requests[3]["params"] == [binding.funding_txid, binding.contract_vout, False]
-    assert len(requests) == 5
+    assert requests[4]["params"] == [103]
+    assert requests[5]["params"] == [binding.funding_txid, False, "cc" * 32]
+    assert len(requests) == 7
+
+
+def test_candidate_tip_block_inclusion_is_still_not_lineage_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    terms, binding, network = _context()
+    monkeypatch.setattr(
+        core_tx_bytes,
+        "check_funding_binding_transaction",
+        lambda *_args, **_kwargs: FundingBindingTransactionMatch(
+            binding.funding_txid,
+            binding.contract_vout,
+            binding.lineage_anchor_txid,
+            binding.lineage_anchor_vout,
+        ),
+    )
+    requests: list[dict[str, Any]] = []
+    with _server(
+        lambda payload: _candidate_reply(payload, binding, change="tip-inclusion"), requests
+    ) as port:
+        reader = RegtestCoreTransactionReader(
+            port=port, cookie_path=_cookie(tmp_path), network=network
+        )
+        result = reader.observe_candidate_outpoint(binding, terms, keys=None)  # type: ignore[arg-type]
+    assert result.inclusion_height == 105
+    assert result.inclusion_block_hash == "aa" * 32
+    assert result.__class__ is core_tx_bytes.CandidateFundingOutpoint
+    assert len(requests) == 7
 
 
 @pytest.mark.parametrize(
@@ -556,6 +612,10 @@ def test_candidate_is_a_named_tip_utxo_sample_not_lineage_authority(
         ("huge-exponent", CoreProtocolError),
         ("tiny-exponent", CoreProtocolError),
         ("unrepresentable-exponent", CoreProtocolError),
+        ("bad-inclusion-hash", CoreProtocolError),
+        ("tip-inclusion-mismatch", CoreProtocolError),
+        ("block-bytes-differ", CoreProtocolError),
+        ("block-not-found", CoreUnavailableError),
     ],
 )
 def test_candidate_unknown_or_mismatched_chain_never_returns_authority(
@@ -581,5 +641,5 @@ def test_candidate_unknown_or_mismatched_chain_never_returns_authority(
         )
         with pytest.raises(error_type):
             reader.observe_candidate_outpoint(binding, terms, keys=None)  # type: ignore[arg-type]
-    assert len(requests) in (1, 4, 5)
+    assert len(requests) in (1, 4, 5, 6, 7)
     assert [item["method"] for item in requests].count("gettxout") <= 1

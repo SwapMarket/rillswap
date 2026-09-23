@@ -39,7 +39,7 @@ MAX_SATS = 21_000_000 * 100_000_000
 
 @dataclass(frozen=True, slots=True)
 class CandidateFundingOutpoint:
-    """Named-tip read-only evidence, not permission or a lineage observation.
+    """Named-tip read-only candidate inclusion, not lineage or permission.
 
     A succeeding RPC is immediately staleable. It cannot authenticate the
     binding, rule out mempool spends, or prove durable funding after restart.
@@ -50,6 +50,8 @@ class CandidateFundingOutpoint:
     tip_hash: str
     tip_height: int
     chain_only_confirmations: int
+    inclusion_height: int
+    inclusion_block_hash: str
 
 
 class CoreReadError(Exception):
@@ -209,7 +211,7 @@ class RegtestCoreTransactionReader:
         *,
         keys: TaprootKeyOperations,
     ) -> CandidateFundingOutpoint:
-        """Check exact chain-only UTXO at a named Core tip, with no action authority.
+        """Sample chain-only UTXO and block-qualified bytes, with no action authority.
 
         This explicit synchronous diagnostic does not install a lineage view,
         rule out mempool spends, prove permanent confirmations, or satisfy
@@ -242,12 +244,36 @@ class RegtestCoreTransactionReader:
                     client, "gettxout", [binding.funding_txid, binding.contract_vout, False], 4
                 )
                 confirmations = _checked_outpoint(output, binding, tip_height)
-                end_hash, end_height = _chain_tip(self._rpc(client, "getblockchaininfo", [], 5))
+                inclusion_height = tip_height - confirmations + 1
+                inclusion_hash = self._rpc(client, "getblockhash", [inclusion_height], 5)
+                if not _hash(inclusion_hash) or (
+                    inclusion_height == tip_height and inclusion_hash != tip_hash
+                ):
+                    raise CoreProtocolError("Core inclusion-height block differs from sampled tip")
+                block_raw = _transaction_bytes(
+                    self._rpc(
+                        client,
+                        "getrawtransaction",
+                        [binding.funding_txid, False, inclusion_hash],
+                        6,
+                    )
+                )
+                if block_raw != raw:
+                    raise CoreProtocolError("Core block-qualified transaction bytes differ")
+                end_hash, end_height = _chain_tip(self._rpc(client, "getblockchaininfo", [], 7))
         except httpx.HTTPError:
             raise CoreUnavailableError("Core RPC transport unavailable") from None
         if tip_hash != end_hash or tip_height != end_height or output["bestblock"] != tip_hash:
             raise CoreUnavailableError("Core chain view changed; no current outpoint proof")
-        return CandidateFundingOutpoint(self._network, match, tip_hash, tip_height, confirmations)
+        return CandidateFundingOutpoint(
+            self._network,
+            match,
+            tip_hash,
+            tip_height,
+            confirmations,
+            inclusion_height,
+            inclusion_hash,
+        )
 
     def _rpc(
         self,

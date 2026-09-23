@@ -108,6 +108,8 @@ core_tx_bytes.check_funding_binding_transaction = (
 candidate = reader.observe_candidate_outpoint(coinbase_binding, terms, keys=Keys())
 assert candidate.tip_height >= 1
 assert candidate.chain_only_confirmations >= 1
+assert candidate.inclusion_height == candidate.tip_height - candidate.chain_only_confirmations + 1
+assert candidate.inclusion_block_hash == os.environ['RILL_TEST_INCLUSION_BLOCK']
 assert candidate.static_match.contract_vout == int(os.environ['RILL_TEST_SPEND_VOUT'])
 print('Core v30 static rejection, UTXO response, and unknown lookup passed')
 """
@@ -181,6 +183,7 @@ def test_pinned_core_regtest_http_retrieval_is_not_funding_authority(tmp_path: P
         assert len(sent) == 1
         spend_vout = sent[0]["n"]
         _bitcoin_cli(container, "generatetoaddress", "1", address)
+        inclusion_block = _bitcoin_cli(container, "getbestblockhash")
         spend_utxo = json.loads(
             _bitcoin_cli(container, "gettxout", spend_txid, str(spend_vout), "false")
         )
@@ -215,6 +218,8 @@ def test_pinned_core_regtest_http_retrieval_is_not_funding_authority(tmp_path: P
             f"RILL_TEST_SCRIPT={spend_utxo['scriptPubKey']['hex']}",
             "--env",
             f"RILL_TEST_VALUE_SAT={value_sat}",
+            "--env",
+            f"RILL_TEST_INCLUSION_BLOCK={inclusion_block}",
             PYTHON_IMAGE,
             "python",
             "-c",
