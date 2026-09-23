@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import pickle
 import shutil
 import subprocess
+from pathlib import Path
 from threading import Event, Thread
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pytest
 from rill_crypto import Context, CryptoError
 from rill_crypto.binding import MusigAttempt
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 LIBRARY = os.environ.get("RILL_CRYPTO_LIBRARY")
 pytestmark = pytest.mark.skipif(not LIBRARY, reason="native library path is not configured")
@@ -51,6 +50,23 @@ def test_schnorr_sign_and_verify() -> None:
         context.schnorr_verify(public_key[1:], b"\x22" * 32, signature)
         with pytest.raises(CryptoError):
             context.schnorr_verify(public_key[1:], b"\x23" * 32, signature)
+
+
+def test_pinned_bip340_verify_vectors_match_wasm_cases() -> None:
+    """Native and WASM exercise the exact same official BIP340 fixtures."""
+    fixtures = json.loads(
+        (Path(__file__).parents[1] / "fixtures/bip340-verify-vectors.json").read_text()
+    )
+    with Context(library_path=LIBRARY, context_random=b"\x11" * 32) as context:
+        for case in fixtures["cases"]:
+            key = bytes.fromhex(case["key"])
+            message = bytes.fromhex(case["message"])
+            signature = bytes.fromhex(case["signature"])
+            if case["expected"]:
+                context.schnorr_verify(key, message, signature)
+            else:
+                with pytest.raises(CryptoError):
+                    context.schnorr_verify(key, message, signature)
 
 
 def test_musig_internal_key_uses_ordered_bip327_aggregation() -> None:

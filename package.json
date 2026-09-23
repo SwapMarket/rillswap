@@ -1,0 +1,14 @@
+{
+  "name": "@rillswap/crypto-verify-dev",
+  "version": "0.1.0-dev.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test:wasm-verify": "bun test tests/ffi/schnorr_verify.test.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "typescript": "7.0.2"
+  }
+}
