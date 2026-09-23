@@ -12,7 +12,10 @@ from typing import Any
 import pytest
 
 from rill_core.errors import ValidationError
-from rill_core.recovery import inspect_recovery_plaintext
+from rill_core.recovery import (
+    inspect_recovery_plaintext,
+    inspect_recovery_selected_funding_binding,
+)
 from rill_core.settlement import (
     FundingOutput,
     SignedFundingBinding,
@@ -352,6 +355,16 @@ def test_native_signatures_check_static_replacement_history_without_chain_claim(
         report = inspect_recovery_plaintext(plaintext, network, crypto=crypto)
         assert report.recorded_binding_count == 2
         assert "funding transactions, conflicts, UTXOs, and chain maturity" in report.unproven
+        selected = inspect_recovery_selected_funding_binding(
+            plaintext,
+            network,
+            funding_attempt_id="cc" * 32,
+            binding_revision=1,
+            crypto=crypto,
+        )
+        assert selected.funding_txid == "bb" * 32
+        assert selected.contract_vout == 1
+        assert package["user_secret"]["contract_secret_key"] not in repr(selected)
         terms = ContractTerms.model_validate_json(json.dumps(package["contract_terms"]))
         verify_static_signed_funding_binding_history(
             terms=terms,

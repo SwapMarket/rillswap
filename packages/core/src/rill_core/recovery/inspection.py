@@ -51,6 +51,7 @@ from rill_core.wire.types import (
 )
 
 MAX_RECOVERY_BYTES = 128 * 1024
+FUNDING_ATTEMPT_HEX_LENGTH = 64
 PURPOSE_KEY_COUNT = 6
 type _Parity = Annotated[int, Field(strict=True, ge=0, le=1)]
 UNPROVEN = (
@@ -206,6 +207,46 @@ def inspect_recovery_successor(
     else:
         return result
     raise ValidationError("invalid or nonmonotonic recovery successor")
+
+
+def inspect_recovery_selected_funding_binding(
+    document: bytes,
+    expected_network: NetworkIdentity,
+    *,
+    funding_attempt_id: str,
+    binding_revision: int,
+    crypto: RecoveryCrypto,
+) -> FundingBinding:
+    """Project one explicitly selected, statically valid *candidate* binding.
+
+    All records and signatures are checked before selection. This proves no
+    transaction existence, unspent state, inclusion, freshness, or authority.
+    A valid restored snapshot may omit later binding knowledge.
+    """
+    try:
+        record, _ = _validated_record(document, expected_network, crypto)
+        _require(
+            not (
+                type(funding_attempt_id) is not str
+                or len(funding_attempt_id) != FUNDING_ATTEMPT_HEX_LENGTH
+                or any(char not in "0123456789abcdef" for char in funding_attempt_id)
+                or type(binding_revision) is not int
+                or binding_revision < 0
+            ),
+            "invalid explicit funding selector",
+        )
+        for item in record.funding_history:
+            binding = item.binding
+            if (
+                binding.funding_attempt_id == funding_attempt_id
+                and binding.binding_revision == binding_revision
+            ):
+                return binding
+    except Exception:  # noqa: BLE001, S110 - adapter errors can echo secret key bytes
+        # Errors from signed record parsing/crypto may echo secrets. Suppress
+        # exception chaining and return no partial or inferred latest history.
+        pass
+    raise ValidationError("invalid or unavailable recovery funding binding")
 
 
 def _parse_and_inspect(

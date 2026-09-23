@@ -84,6 +84,12 @@ compares **only** the explicitly supplied prior snapshot. A restored file or
 unknown sibling can hold more knowledge. Success never proves freshness,
 global reconciliation, durability, or permission to fund or pay. It does not
 replace authoritative persisted client-state reconciliation or update files.
+`recovery.inspect_recovery_selected_funding_binding` requires an exact attempt
+ID and revision, validates the complete selected RS-007 plaintext and every
+signed history entry first, then returns just the selected immutable public
+`FundingBinding`. It never infers the latest record, exports the secret or
+preimage, or proves transaction existence, current inclusion, UTXO state, or
+freshness. Missing/older/restored histories give no absence or action proof.
 
 `settlement.verify_static_signed_funding_binding_history` is an explicit
 effect-free check of nonempty signed funding declarations. Its caller supplies

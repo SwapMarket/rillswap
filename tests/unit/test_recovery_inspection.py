@@ -13,6 +13,7 @@ from rill_core.errors import CanonicalizationError, ValidationError
 from rill_core.recovery import (
     OfflineRecoveryInspection,
     inspect_recovery_plaintext,
+    inspect_recovery_selected_funding_binding,
     inspect_recovery_successor,
 )
 from rill_core.settlement import SignedFundingBinding, verify_static_signed_funding_binding_history
@@ -339,6 +340,116 @@ def _add_history(document: dict[str, Any], crypto: FixtureCrypto, revisions: int
                 "funder_session_signature": signature,
             }
         )
+
+
+def test_selected_recovery_binding_requires_full_history_and_explicit_revision() -> None:
+    document = _source()
+    crypto = _crypto(document)
+    _add_history(document, crypto, 2)
+    for revision in (0, 1):
+        selected = inspect_recovery_selected_funding_binding(
+            _canonical(document),
+            _network(document),
+            funding_attempt_id="11" * 32,
+            binding_revision=revision,
+            crypto=crypto,
+        )
+        assert selected == FundingBinding.model_validate(
+            document["funding_history"][revision]["binding"]
+        )
+        assert selected.binding_revision == revision
+        assert "user_secret" not in repr(selected)
+        assert document["user_secret"]["contract_secret_key"] not in repr(selected)
+        assert "funder_session_signature" not in repr(selected)
+    changed = copy.deepcopy(document)
+    changed["funding_history"][1]["binding"]["contract_value_sat"] = "1"
+    with pytest.raises(ValidationError, match="invalid or unavailable recovery funding binding"):
+        inspect_recovery_selected_funding_binding(
+            _canonical(changed),
+            _network(changed),
+            funding_attempt_id="11" * 32,
+            binding_revision=0,
+            crypto=crypto,
+        )
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        ("22" * 32, 0),
+        ("11" * 32, 2),
+        ("broken", 0),
+        ("11" * 32, True),
+        ("11" * 32, -1),
+    ],
+)
+def test_selected_recovery_binding_never_infers_missing_or_invalid_history(
+    selector: tuple[str, int],
+) -> None:
+    document = _source()
+    crypto = _crypto(document)
+    _add_history(document, crypto, 2)
+    with pytest.raises(
+        ValidationError, match="invalid or unavailable recovery funding binding"
+    ) as error:
+        inspect_recovery_selected_funding_binding(
+            _canonical(document),
+            _network(document),
+            funding_attempt_id=selector[0],
+            binding_revision=selector[1],
+            crypto=crypto,
+        )
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+
+
+def test_selected_recovery_binding_rejects_absent_and_unsupported_history() -> None:
+    document = _source()
+    crypto = _crypto(document)
+    with pytest.raises(ValidationError, match="invalid or unavailable recovery funding binding"):
+        inspect_recovery_selected_funding_binding(
+            _canonical(document),
+            _network(document),
+            funding_attempt_id="11" * 32,
+            binding_revision=0,
+            crypto=crypto,
+        )
+    _add_history(document, crypto, 1)
+    document["format_version"] = "older"
+    with pytest.raises(ValidationError, match="invalid or unavailable recovery funding binding"):
+        inspect_recovery_selected_funding_binding(
+            _canonical(document),
+            _network(document),
+            funding_attempt_id="11" * 32,
+            binding_revision=0,
+            crypto=crypto,
+        )
+
+
+def test_selected_recovery_binding_redacts_nonstandard_crypto_adapter_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = _source()
+    crypto = _crypto(document)
+    _add_history(document, crypto, 1)
+
+    def fail(secret: bytes) -> bytes:
+        raise OSError("secret-bearing adapter failure: " + secret.hex())
+
+    monkeypatch.setattr(crypto, "public_key", fail)
+    with pytest.raises(
+        ValidationError, match="invalid or unavailable recovery funding binding"
+    ) as error:
+        inspect_recovery_selected_funding_binding(
+            _canonical(document),
+            _network(document),
+            funding_attempt_id="11" * 32,
+            binding_revision=0,
+            crypto=crypto,
+        )
+    assert document["user_secret"]["contract_secret_key"] not in repr(error.value)
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
 
 
 def test_signature_checked_history_is_not_live_transaction_evidence() -> None:
