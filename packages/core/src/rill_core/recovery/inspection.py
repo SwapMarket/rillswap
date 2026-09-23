@@ -16,12 +16,16 @@ from pydantic import Field
 from pydantic import ValidationError as PydanticValidationError
 
 from rill_core.errors import CanonicalizationError, ValidationError
+from rill_core.settlement.funding_authentication import (
+    MAX_BINDING_HISTORY,
+    SignedFundingBinding,
+    _check_static_binding_history,
+)
 from rill_core.settlement.taproot import TaprootKeyOperations, reconstruct_taproot_contract
 from rill_core.wire.canonical import JsonValue, canonicalize, parse_json_strict
 from rill_core.wire.hashes import (
     client_acceptance_hash,
     contract_hash,
-    funding_binding_hash,
     handshake_accept_hash,
     handshake_hash,
     provider_terms_hash,
@@ -47,8 +51,6 @@ from rill_core.wire.types import (
 )
 
 MAX_RECOVERY_BYTES = 128 * 1024
-MAX_HISTORY = 64
-MAX_UINT32 = 0xFFFFFFFF
 PURPOSE_KEY_COUNT = 6
 type _Parity = Annotated[int, Field(strict=True, ge=0, le=1)]
 UNPROVEN = (
@@ -138,7 +140,7 @@ class _RecoveryPlaintext(StrictModel):
     verification_context: _VerificationContext
     taproot_contract: _TaprootArtifacts
     user_secret: _UserSecret
-    funding_history: tuple[_FundingRecord, ...] = Field(max_length=MAX_HISTORY)
+    funding_history: tuple[_FundingRecord, ...] = Field(max_length=MAX_BINDING_HISTORY)
     chain_scan_birthday_height: ExactInteger
     fee_policy: _FeePolicy
     recovery_authorization_xonly_key: XOnlyKey
@@ -389,34 +391,14 @@ def _check_static_history(record: _RecoveryPlaintext, crypto: RecoveryCrypto) ->
         if role == "client"
         else record.verification_context.provider_session_xonly_key
     )
-    history = record.funding_history
-    for revision, item in enumerate(history):
-        binding = item.binding
-        _require(binding.contract_hash == record.contract_hash, "binding contract hash")
-        _require(binding.funder_role == role, "binding funder")
-        _require(binding.binding_revision == revision, "binding revision")
-        _require(
-            binding.contract_value_sat == terms.economics.contract_amount_sat, "binding amount"
-        )
-        _require(
-            binding.contract_script_pubkey == record.taproot_contract.script_pubkey,
-            "binding script",
-        )
-        _require(
-            binding.contract_vout <= MAX_UINT32 and binding.lineage_anchor_vout <= MAX_UINT32,
-            "binding outpoint index",
-        )
-        if revision:
-            previous = history[revision - 1].binding
-            _require(binding.funding_attempt_id == previous.funding_attempt_id, "binding attempt")
-            _require(binding.replaces_txid == previous.funding_txid, "binding predecessor")
-            _require(
-                (binding.lineage_anchor_txid, binding.lineage_anchor_vout)
-                == (previous.lineage_anchor_txid, previous.lineage_anchor_vout),
-                "binding anchor",
-            )
-            _require(
-                all(old.binding.funding_txid != binding.funding_txid for old in history[:revision]),
-                "binding duplicate transaction",
-            )
-        _verify(crypto, session_key, funding_binding_hash(binding), item.funder_session_signature)
+    _check_static_binding_history(
+        tuple(
+            SignedFundingBinding(item.binding, item.funder_session_signature)
+            for item in record.funding_history
+        ),
+        terms,
+        record.contract_hash,
+        record.taproot_contract.script_pubkey,
+        session_key,
+        crypto=crypto,
+    )

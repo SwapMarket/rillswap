@@ -15,16 +15,18 @@ from rill_core.errors import ValidationError
 from rill_core.recovery import inspect_recovery_plaintext
 from rill_core.settlement import (
     FundingOutput,
+    SignedFundingBinding,
     TaprootContract,
     UnilateralAuthorization,
     build_unilateral_spend,
     finalize_unilateral_spend,
     reconstruct_taproot_contract,
     validate_unilateral_spend,
+    verify_static_signed_funding_binding_history,
 )
 from rill_core.wire.canonical import canonicalize, parse_json_strict
 from rill_core.wire.hashes import funding_binding_hash
-from rill_core.wire.messages import ContractTerms, FundingBinding
+from rill_core.wire.messages import ContractTerms, FundingBinding, HandshakeAccept, HandshakeInit
 from rill_core.wire.types import NetworkIdentity
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "settlement-v1"
@@ -218,6 +220,27 @@ def test_native_signatures_check_static_replacement_history_without_chain_claim(
         report = inspect_recovery_plaintext(plaintext, network, crypto=crypto)
         assert report.recorded_binding_count == 2
         assert "funding transactions, conflicts, UTXOs, and chain maturity" in report.unproven
+        terms = ContractTerms.model_validate_json(json.dumps(package["contract_terms"]))
+        verify_static_signed_funding_binding_history(
+            terms=terms,
+            handshake_init=HandshakeInit.model_validate_json(json.dumps(context["handshake_init"])),
+            handshake_accept=HandshakeAccept.model_validate_json(
+                json.dumps(context["handshake_accept"])
+            ),
+            provider_identity_signature=context["provider_identity_signature"],
+            provider_terms_signature=context["provider_terms_signature"],
+            client_acceptance_signature=context["client_acceptance_signature"],
+            signed_bindings=tuple(
+                SignedFundingBinding(
+                    FundingBinding.model_validate_json(json.dumps(item["binding"])),
+                    item["funder_session_signature"],
+                )
+                for item in package["funding_history"]
+            ),
+            expected_provider_identity=terms.provider_identity_key,
+            expected_network=network,
+            crypto=crypto,
+        )
         wrong_signer = copy.deepcopy(package)
         second = wrong_signer["funding_history"][1]
         digest = funding_binding_hash(FundingBinding.model_validate(second["binding"]))
@@ -230,3 +253,62 @@ def test_native_signatures_check_static_replacement_history_without_chain_claim(
                 network,
                 crypto=crypto,
             )
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 to run pinned native interoperability",
+)
+def test_real_crypto_provider_funder_signed_context_stays_static_only() -> None:
+    from rill_crypto import Context  # noqa: PLC0415
+
+    document = json.loads(LN_RECOVERY.read_bytes())
+    context = document["verification_context"]
+    terms = ContractTerms.model_validate_json(json.dumps(document["contract_terms"]))
+    network = NetworkIdentity.model_validate(document["network_identity"])
+    provider_secret = (9).to_bytes(32, "big")  # Pinned synthetic test-only session key.
+    wrong_secret = (2).to_bytes(32, "big")
+    binding = FundingBinding.model_validate_json(
+        json.dumps(
+            {
+                "contract_hash": document["contract_hash"],
+                "funding_attempt_id": "cc" * 32,
+                "binding_revision": 0,
+                "funder_role": "provider",
+                "lineage_anchor_txid": "dd" * 32,
+                "lineage_anchor_vout": 1,
+                "funding_txid": "aa" * 32,
+                "contract_vout": 0,
+                "contract_value_sat": terms.economics.contract_amount_sat,
+                "contract_script_pubkey": document["taproot_contract"]["script_pubkey"],
+                "replaces_txid": None,
+                "created_at": 1_700_000_200,
+            }
+        )
+    )
+    with Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto:
+        assert crypto.public_key(provider_secret)[1:].hex() == context["provider_session_xonly_key"]
+
+        def verify(signer: bytes) -> None:
+            signature = crypto.schnorr_sign(signer, funding_binding_hash(binding), b"\x31" * 32)
+            verify_static_signed_funding_binding_history(
+                terms=terms,
+                handshake_init=HandshakeInit.model_validate_json(
+                    json.dumps(context["handshake_init"])
+                ),
+                handshake_accept=HandshakeAccept.model_validate_json(
+                    json.dumps(context["handshake_accept"])
+                ),
+                provider_identity_signature=context["provider_identity_signature"],
+                provider_terms_signature=context["provider_terms_signature"],
+                client_acceptance_signature=context["client_acceptance_signature"],
+                signed_bindings=(SignedFundingBinding(binding, signature.hex()),),
+                expected_provider_identity=terms.provider_identity_key,
+                expected_network=network,
+                crypto=crypto,
+            )
+
+        verify(provider_secret)
+        with pytest.raises(ValidationError, match="invalid static signed funding declaration"):
+            verify(wrong_secret)

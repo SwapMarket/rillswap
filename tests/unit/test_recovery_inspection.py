@@ -15,6 +15,7 @@ from rill_core.recovery import (
     inspect_recovery_plaintext,
     inspect_recovery_successor,
 )
+from rill_core.settlement import SignedFundingBinding, verify_static_signed_funding_binding_history
 from rill_core.wire.canonical import canonicalize, parse_json_strict
 from rill_core.wire.hashes import (
     client_acceptance_hash,
@@ -639,3 +640,171 @@ def test_successor_rejects_divergent_but_independently_signed_history() -> None:
     )
     with pytest.raises(ValidationError, match="invalid or nonmonotonic recovery successor"):
         _successor(previous, candidate, crypto)
+
+
+def _signed_context(
+    document: dict[str, Any],
+    crypto: FixtureCrypto,
+    *,
+    trusted_key: str | None = None,
+) -> None:
+    context = document["verification_context"]
+    terms = ContractTerms.model_validate_json(json.dumps(document["contract_terms"]))
+    verify_static_signed_funding_binding_history(
+        terms=terms,
+        handshake_init=HandshakeInit.model_validate_json(json.dumps(context["handshake_init"])),
+        handshake_accept=HandshakeAccept.model_validate_json(
+            json.dumps(context["handshake_accept"])
+        ),
+        provider_identity_signature=context["provider_identity_signature"],
+        provider_terms_signature=context["provider_terms_signature"],
+        client_acceptance_signature=context["client_acceptance_signature"],
+        signed_bindings=tuple(
+            SignedFundingBinding(
+                FundingBinding.model_validate_json(json.dumps(item["binding"])),
+                item["funder_session_signature"],
+            )
+            for item in document["funding_history"]
+        ),
+        expected_provider_identity=trusted_key or terms.provider_identity_key,
+        expected_network=_network(document),
+        crypto=crypto,
+    )
+
+
+@pytest.mark.parametrize("profile", ["btc-to-ln", "ln-to-btc"])
+def test_static_signed_context_checks_both_profiles_without_funding_authority(profile: str) -> None:
+    if profile == "btc-to-ln":
+        document = _source()
+    else:
+        manifest = json.loads((FIXTURES / "ln-no-prepayment-manifest.json").read_text())
+        document = json.loads((FIXTURES / manifest["fixture_path"]).read_text())
+    if profile == "btc-to-ln":
+        crypto = _crypto(document)
+    else:
+        other = next(
+            item
+            for item in json.loads(TAPROOT.read_text())["valid"]
+            if item["profile_id"] == "ln-to-btc/v1"
+        )
+        crypto = FixtureCrypto(document, other["artifacts"])
+    _add_history(document, crypto, 2)
+    _signed_context(document, crypto)
+    assert len(crypto.calls) == 5  # Three signed context objects plus two bindings.
+    assert crypto.terms.network_identity == _network(document)
+
+
+@pytest.mark.parametrize(
+    "part",
+    [
+        "trusted-provider",
+        "network",
+        "provider-identity-signature",
+        "provider-terms-signature",
+        "client-acceptance-signature",
+        "handshake",
+        "session",
+        "contract-amount",
+        "script",
+        "funder",
+        "revision",
+        "predecessor",
+        "anchor",
+        "duplicate-txid",
+        "binding-signature",
+    ],
+)
+def test_static_signed_context_rejects_substitution_and_lineage_forks(  # noqa: PLR0912 - explicit adversarial cases
+    part: str,
+) -> None:
+    document = _source()
+    crypto = _crypto(document)
+    _add_history(document, crypto, 2)
+    changed = copy.deepcopy(document)
+    trusted_key = None
+    if part == "trusted-provider":
+        trusted_key = "ee" * 32
+    elif part == "network":
+        changed["network_identity"]["deployment_namespace"] = "other"
+    elif part in (
+        "provider-identity-signature",
+        "provider-terms-signature",
+        "client-acceptance-signature",
+    ):
+        changed["verification_context"][part.replace("-", "_")] = "aa" * 64
+    elif part == "handshake":
+        changed["verification_context"]["handshake_accept"]["client_challenge"] = "ff" * 32
+    elif part == "session":
+        changed["verification_context"]["handshake_accept"]["provider_session_xonly_key"] = (
+            "ee" * 32
+        )
+    elif part == "contract-amount":
+        changed["funding_history"][0]["binding"]["contract_value_sat"] = "1"
+    elif part == "script":
+        changed["funding_history"][0]["binding"]["contract_script_pubkey"] = "5120" + "ee" * 32
+    elif part == "funder":
+        changed["funding_history"][0]["binding"]["funder_role"] = "provider"
+    elif part == "revision":
+        changed["funding_history"][1]["binding"]["binding_revision"] = 2
+    elif part == "predecessor":
+        changed["funding_history"][1]["binding"]["replaces_txid"] = "ee" * 32
+    elif part == "anchor":
+        changed["funding_history"][1]["binding"]["lineage_anchor_txid"] = "ee" * 32
+    elif part == "duplicate-txid":
+        changed["funding_history"][1]["binding"]["funding_txid"] = changed["funding_history"][0][
+            "binding"
+        ]["funding_txid"]
+    else:
+        changed["funding_history"][1]["funder_session_signature"] = "ee" * 64
+    with pytest.raises(ValidationError, match="invalid static signed funding declaration") as error:
+        _signed_context(changed, crypto, trusted_key=trusted_key)
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+
+
+def test_static_signed_context_requires_nonempty_history_and_never_leaks_adapter_error() -> None:
+    document = _source()
+    crypto = _crypto(document)
+    with pytest.raises(ValidationError, match="invalid static signed funding declaration"):
+        _signed_context(document, crypto)
+    _add_history(document, crypto, 1)
+    crypto.permitted.clear()
+    with pytest.raises(ValidationError, match="invalid static signed funding declaration") as error:
+        _signed_context(document, crypto)
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert document["user_secret"]["contract_secret_key"] not in repr(error.value)
+
+
+@pytest.mark.parametrize("field", ["attempt", "predecessor", "anchor", "duplicate-txid"])
+def test_static_lineage_guards_reject_even_freshly_permitted_signature(field: str) -> None:
+    document = _source()
+    crypto = _crypto(document)
+    _add_history(document, crypto, 2)
+    later = document["funding_history"][1]
+    if field == "attempt":
+        later["binding"]["funding_attempt_id"] = "ee" * 32
+    elif field == "predecessor":
+        later["binding"]["replaces_txid"] = "ee" * 32
+    elif field == "anchor":
+        later["binding"]["lineage_anchor_txid"] = "ee" * 32
+    else:
+        later["binding"]["funding_txid"] = document["funding_history"][0]["binding"]["funding_txid"]
+    crypto.allow(
+        document["verification_context"]["client_session_xonly_key"],
+        funding_binding_hash(FundingBinding.model_validate_json(json.dumps(later["binding"]))),
+        later["funder_session_signature"],
+    )
+    with pytest.raises(ValidationError, match="invalid static signed funding declaration"):
+        _signed_context(document, crypto)
+
+
+def test_static_verifier_rejects_crypto_adapter_returning_false_instead_of_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = _source()
+    crypto = _crypto(document)
+    _add_history(document, crypto, 1)
+    monkeypatch.setattr(crypto, "schnorr_verify", lambda *_args: False)
+    with pytest.raises(ValidationError, match="invalid static signed funding declaration"):
+        _signed_context(document, crypto)

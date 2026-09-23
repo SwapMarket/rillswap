@@ -65,6 +65,21 @@ unknown sibling can hold more knowledge. Success never proves freshness,
 global reconciliation, durability, or permission to fund or pay. It does not
 replace authoritative persisted client-state reconciliation or update files.
 
+`settlement.verify_static_signed_funding_binding_history` is an explicit
+effect-free check of nonempty signed funding declarations. Its caller supplies
+an expected provider identity and complete network from an **independent**
+trusted source, plus typed handshake/terms context and a crypto adapter whose
+Schnorr verifier raises on invalid signatures. It checks transcript and
+purpose-key consistency, the three signed context objects, reconstructed
+Taproot script, role-selected binding signatures, and contiguous replacement
+history. This is static signature consistency, **not** confirmation that the
+handshake was delivered or accepted in order, that a funding transaction or
+approved anchor exists, that an outpoint is unspent, or that a watch or action
+is authorized. Validation-bypassing Pydantic construction is not an accepted
+input path: parse untrusted wire data through strict models first. Recovery
+inspection reuses only the binding-history invariant; its self-declared
+provider key still does not establish independent provider provenance.
+
 Run local tests with `.venv/bin/pytest -q`. For the native crypto contract test,
 install the sibling `rill-crypto/python` package in the test environment, build
 its pinned native library, and run:
