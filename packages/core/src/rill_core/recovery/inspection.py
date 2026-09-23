@@ -161,6 +161,18 @@ class OfflineRecoveryInspection:
     unproven: tuple[str, ...] = UNPROVEN
 
 
+@dataclass(frozen=True, slots=True)
+class SelectedRecoveryFundingContext:
+    """Signed public terms and one candidate binding, never action authority.
+
+    Terms may contain caller-defined extensions; never log this entire value.
+    Frozen models do not deep-freeze extension mappings.
+    """
+
+    terms: ContractTerms
+    binding: FundingBinding
+
+
 def inspect_recovery_plaintext(
     document: bytes,
     expected_network: NetworkIdentity,
@@ -224,29 +236,76 @@ def inspect_recovery_selected_funding_binding(
     A valid restored snapshot may omit later binding knowledge.
     """
     try:
-        record, _ = _validated_record(document, expected_network, crypto)
-        _require(
-            not (
-                type(funding_attempt_id) is not str
-                or len(funding_attempt_id) != FUNDING_ATTEMPT_HEX_LENGTH
-                or any(char not in "0123456789abcdef" for char in funding_attempt_id)
-                or type(binding_revision) is not int
-                or binding_revision < 0
-            ),
-            "invalid explicit funding selector",
-        )
-        for item in record.funding_history:
-            binding = item.binding
-            if (
-                binding.funding_attempt_id == funding_attempt_id
-                and binding.binding_revision == binding_revision
-            ):
-                return binding
+        return _selected_funding_context(
+            document,
+            expected_network,
+            funding_attempt_id,
+            binding_revision,
+            crypto,
+        ).binding
     except Exception:  # noqa: BLE001, S110 - adapter errors can echo secret key bytes
         # Errors from signed record parsing/crypto may echo secrets. Suppress
         # exception chaining and return no partial or inferred latest history.
         pass
     raise ValidationError("invalid or unavailable recovery funding binding")
+
+
+def inspect_recovery_selected_funding_context(
+    document: bytes,
+    expected_network: NetworkIdentity,
+    *,
+    funding_attempt_id: str,
+    binding_revision: int,
+    crypto: RecoveryCrypto,
+) -> SelectedRecoveryFundingContext:
+    """Project public terms with one exact binding after full static validation.
+
+    The pair can support a future explicit chain/transaction-byte query. It
+    exposes no designated recovery secret, preimage, signature, history,
+    freshness, or permission to sign. Signed public terms can carry arbitrary
+    extension values and should not be logged; restored files can be stale.
+    """
+    try:
+        result = _selected_funding_context(
+            document,
+            expected_network,
+            funding_attempt_id,
+            binding_revision,
+            crypto,
+        )
+    except Exception:  # noqa: BLE001, S110 - secret-bearing adapter errors stay private
+        pass
+    else:
+        return result
+    raise ValidationError("invalid or unavailable recovery funding context")
+
+
+def _selected_funding_context(
+    document: bytes,
+    expected_network: NetworkIdentity,
+    funding_attempt_id: str,
+    binding_revision: int,
+    crypto: RecoveryCrypto,
+) -> SelectedRecoveryFundingContext:
+    record, _ = _validated_record(document, expected_network, crypto)
+    _require(
+        not (
+            type(funding_attempt_id) is not str
+            or len(funding_attempt_id) != FUNDING_ATTEMPT_HEX_LENGTH
+            or any(char not in "0123456789abcdef" for char in funding_attempt_id)
+            or type(binding_revision) is not int
+            or binding_revision < 0
+        ),
+        "invalid explicit funding selector",
+    )
+    for item in record.funding_history:
+        binding = item.binding
+        if (
+            binding.funding_attempt_id == funding_attempt_id
+            and binding.binding_revision == binding_revision
+        ):
+            return SelectedRecoveryFundingContext(record.contract_terms, binding)
+    raise ValidationError("explicit funding selection is not in this snapshot")
 
 
 def _parse_and_inspect(

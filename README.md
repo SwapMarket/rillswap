@@ -90,6 +90,13 @@ signed history entry first, then returns just the selected immutable public
 `FundingBinding`. It never infers the latest record, exports the secret or
 preimage, or proves transaction existence, current inclusion, UTXO state, or
 freshness. Missing/older/restored histories give no absence or action proof.
+`recovery.inspect_recovery_selected_funding_context` additionally projects
+only those public signed contract terms needed to reconstruct and check the
+selected transaction bytes. It does not return private recovery fields, an
+authenticated provider admission, or a chain observation.
+Signed public terms may contain arbitrary extension values, and their frozen
+model does not deep-freeze those mappings. Treat the result as ordinary input
+data, never a validation capability or safe-to-log report.
 
 `settlement.verify_static_signed_funding_binding_history` is an explicit
 effect-free check of nonempty signed funding declarations. Its caller supplies

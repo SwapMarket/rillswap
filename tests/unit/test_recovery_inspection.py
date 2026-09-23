@@ -14,6 +14,7 @@ from rill_core.recovery import (
     OfflineRecoveryInspection,
     inspect_recovery_plaintext,
     inspect_recovery_selected_funding_binding,
+    inspect_recovery_selected_funding_context,
     inspect_recovery_successor,
 )
 from rill_core.settlement import SignedFundingBinding, verify_static_signed_funding_binding_history
@@ -367,6 +368,39 @@ def test_selected_recovery_binding_requires_full_history_and_explicit_revision()
         inspect_recovery_selected_funding_binding(
             _canonical(changed),
             _network(changed),
+            funding_attempt_id="11" * 32,
+            binding_revision=0,
+            crypto=crypto,
+        )
+
+
+def test_selected_public_context_excludes_secrets_and_cannot_skip_bad_history() -> None:
+    document = _source()
+    crypto = _crypto(document)
+    _add_history(document, crypto, 2)
+    selected = inspect_recovery_selected_funding_context(
+        _canonical(document),
+        _network(document),
+        funding_attempt_id="11" * 32,
+        binding_revision=0,
+        crypto=crypto,
+    )
+    assert selected.terms == ContractTerms.model_validate_json(
+        json.dumps(document["contract_terms"])
+    )
+    assert selected.binding == FundingBinding.model_validate_json(
+        json.dumps(document["funding_history"][0]["binding"])
+    )
+    assert {field.name for field in fields(selected)} == {"terms", "binding"}
+    assert document["user_secret"]["contract_secret_key"] not in repr(selected)
+    assert "monotonic_knowledge" not in repr(selected)
+    assert document["funding_history"][0]["funder_session_signature"] not in repr(selected)
+    corrupted = copy.deepcopy(document)
+    corrupted["funding_history"][1]["binding"]["contract_value_sat"] = "1"
+    with pytest.raises(ValidationError, match="invalid or unavailable recovery funding context"):
+        inspect_recovery_selected_funding_context(
+            _canonical(corrupted),
+            _network(corrupted),
             funding_attempt_id="11" * 32,
             binding_revision=0,
             crypto=crypto,
