@@ -103,6 +103,23 @@ create or migrate them and no startup path reads them. Independent non-rollback
 admission ownership, protected production signing, and authenticated ordered
 delivery remain required before this primitive can be connected to live swaps.
 
+`_nip44_v2` is an **internal, disconnected NIP-44 v2 decoder** exercised by
+official, attributed interoperability vectors. It uses the matching native
+`rill-crypto` optional constant-time ECDH primitive and a pinned ChaCha20
+backend. It bounds encoded payloads to 128 KiB, checks canonical base64,
+version, size, HMAC **before** decryption, padding, and UTF-8, and returns
+only decoded text to an in-process caller. NIP-44 requires verifying the
+enclosing signed NIP-01 event **before** calling this decoder; there is no
+provider caller, relay subscription, signed event verifier, NIP-59 gift-wrap
+or seal processing, authenticated application frame, or session admission.
+Never pass relay input directly to this private helper. Missing or mismatched
+native capability produces a distinct sanitized configuration failure; an
+unsupported version is distinct from malformed v2 input. Neither the native
+ECDH result nor decoded Python text is guaranteed erased from process memory.
+An installation upgrading from the previous release gains a dependency and
+these unused functions only: absent, partial, older, or restored transport
+state cannot enable receive, key creation, migration, a rescan, or a swap.
+
 An explicit local cross-repository baseline gate lives at
 `scripts/check_integration_lock.py`. Run from this repository with a trusted
 Python 3.14 environment, `uv`, CMake, a C compiler, and network access to
