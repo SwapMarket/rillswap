@@ -120,6 +120,16 @@ An installation upgrading from the previous release gains a dependency and
 these unused functions only: absent, partial, older, or restored transport
 state cannot enable receive, key creation, migration, a rescan, or a swap.
 
+`_nip01_event` is another **disconnected internal primitive**. It verifies a
+bounded NIP-01 signed event's seven fields, recomputed compact-JSON ID, and
+native BIP340 signature. Its exact-member, tag-shape, and timestamp bounds
+are a stricter RillSwap input policy, not universal Nostr rules. The verifier
+does not check event kind, recipient routing, peer session ownership, rumor
+author, or application transcript. No relay traffic reaches it yet. Raw
+events may remain in caller-owned memory; exception handling does not erase
+caller frames or the signed event returned on success. Existing installations
+gain no transport activation or state migration from this module.
+
 An explicit local cross-repository baseline gate lives at
 `scripts/check_integration_lock.py`. Run from this repository with a trusted
 Python 3.14 environment, `uv`, CMake, a C compiler, and network access to
