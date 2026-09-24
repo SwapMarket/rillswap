@@ -262,7 +262,9 @@ from pathlib import Path
 import grpc
 from rill_core.wire.types import NetworkIdentity
 from rill_provider._lnd_proto import lightning_pb2
+from rill_provider._lnd_proto.invoicesrpc import invoices_pb2
 from rill_provider._lnd_proto.routerrpc import router_pb2
+from rill_provider.lnd_invoice_observation import RegtestLndInvoiceObserver
 from rill_provider.lnd_payment_observation import (
     RegtestLndInfoObserver, RegtestLndPaymentObserver, LndUnavailableError,
 )
@@ -323,6 +325,11 @@ info_baked = bake(lightning_pb2.BakeMacaroonRequest(
     root_key_id=0, allow_external_permissions=False), metadata=metadata(admin), timeout=3)
 info_restricted = bytes.fromhex(info_baked.macaroon)
 assert 0 < len(info_restricted) <= 4096
+invoice_baked = bake(lightning_pb2.BakeMacaroonRequest(
+    permissions=[lightning_pb2.MacaroonPermission(entity='invoices', action='read')],
+    root_key_id=0, allow_external_permissions=False), metadata=metadata(admin), timeout=3)
+invoice_restricted = bytes.fromhex(invoice_baked.macaroon)
+assert 0 < len(invoice_restricted) <= 4096
 admin = b''
 print('PHASE: restricted_info', file=sys.stderr)
 try:
@@ -338,6 +345,44 @@ raw_track = channel.unary_stream('/routerrpc.Router/TrackPaymentV2',
     request_serializer=router_pb2.TrackPaymentRequest.SerializeToString,
     response_deserializer=lightning_pb2.Payment.FromString)
 payment_hash = bytes.fromhex('00' * 31 + '01')
+print('PHASE: invoices_only', file=sys.stderr)
+lookup = unary(channel, '/lnrpc.Lightning/LookupInvoice',
+    lightning_pb2.PaymentHash, lightning_pb2.Invoice)
+try:
+    lookup(lightning_pb2.PaymentHash(r_hash=payment_hash),
+        metadata=metadata(invoice_restricted), timeout=3)
+except grpc.RpcError as error:
+    assert error.code() == grpc.StatusCode.NOT_FOUND
+else:
+    raise AssertionError('missing invoice must not be reported as observed')
+add_hold = unary(channel, '/invoicesrpc.Invoices/AddHoldInvoice',
+    invoices_pb2.AddHoldInvoiceRequest, invoices_pb2.AddHoldInvoiceResp)
+try:
+    add_hold(invoices_pb2.AddHoldInvoiceRequest(hash=payment_hash, value_msat=1000),
+        metadata=metadata(invoice_restricted), timeout=3)
+except grpc.RpcError as error:
+    assert error.code() == grpc.StatusCode.UNKNOWN
+    assert 'permission denied' in (error.details() or '').lower()
+else:
+    raise AssertionError('invoices:read must not create a hold invoice')
+invoice_private = Path('/tmp/rill-invoice-only.macaroon')
+fd = os.open(invoice_private, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+with os.fdopen(fd, 'wb') as output:
+    output.write(invoice_restricted)
+selected_network = NetworkIdentity.model_validate(json.loads(
+    Path('/work/provider/tests/fixtures/initial-btc-to-ln-v1.json').read_text()
+)['contract_terms']['network_identity'])
+invoice_observer = RegtestLndInvoiceObserver(host='127.0.0.1', port=10009,
+    tls_certificate_path='/work/public/tls.cert', invoice_macaroon_path=invoice_private,
+    network=selected_network)
+try:
+    invoice_observer.lookup(payment_hash, deadline_seconds=3)
+except LndUnavailableError as error:
+    assert str(error) == 'LND invoice lookup unavailable; no absence claim'
+    assert error.__context__ is None and error.__cause__ is None
+else:
+    raise AssertionError('missing invoice never provides usable hold evidence')
+invoice_private.unlink()
 print('PHASE: info_only', file=sys.stderr)
 reported = info(lightning_pb2.GetInfoRequest(), metadata=metadata(info_restricted), timeout=3)
 assert reported.identity_pubkey == identity.identity_pubkey

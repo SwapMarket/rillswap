@@ -334,14 +334,30 @@ result. It does not exercise an initiated, failed, or settled real payment.
 Actual payment-flow interoperability, multi-instance fencing, persisted
 intent/backend correlation, and the L03/D01-D09 release gates remain open.
 
-The pinned LND source now also includes exact `invoicesrpc/invoices.proto`
-and generated **message classes only** for an eventual separately reviewed
-held-invoice observation/trial. Although their descriptors list mutating
+The pinned LND source also includes exact `invoicesrpc/invoices.proto`
+and generated **message classes only**. Although their descriptors list mutating
 `AddHoldInvoice`, `CancelInvoice`, and `SettleInvoice` RPCs, no callable
-`InvoicesStub` or provider invoice adapter is generated. No hold-invoice
-creation, acceptance evidence, settlement, cancellation, or funded channel
-trial exists from this addition. A previous installation does not read or
-migrate any invoice record; missing or restored state gives no absence proof.
+`InvoicesStub` is generated. An independent, explicitly invoked
+`RegtestLndInvoiceObserver.lookup(payment_hash)` reads one backend-reported
+invoice over TLS with an operator-provisioned `invoices:read` macaroon. It
+returns only bounded typed selected non-secret payment-hash, invoice state and amount,
+timing, and **all** HTLC channel/index, state, amount, acceptance-height,
+expiry-height, and MPP-total fields. It rejects a wrong hash, duplicate HTLC
+identifier pair, unknown status, AMP/keysend/blinded invoices, custom-channel
+data, or oversized responses. Ordinary custom-TLV payments may be conservatively
+refused. Payment hashes, channel IDs, and amounts remain sensitive operational
+metadata and must not be logged or broadcast. Partial
+amounts, zero expiries, empty HTLC lists, and canceled history are reported,
+not called safely accepted; no preimage, custom records, raw protobuf, or
+backend credential is returned. `NOT_FOUND`, timeout, malformed or rejected
+responses prove no invoice absence or funding safety. There is no invoice
+creation, settlement, cancellation, funded hold trial, or policy caller; the
+operator must independently reconcile actual HTLC state and earliest expiry
+under RS-004 before *any* funding action. The pinned empty-wallet test only
+proves that the restricted `invoices:read` macaroon can look up a missing hash
+and cannot call AddHoldInvoice. It does not test an accepted invoice. A
+previous installation does not invoke, read, or migrate invoice records at
+startup; missing, partial, older, or restored state gives no absence proof.
 
 For developers, regenerate pinned messages (no generated payment-sending or invoice stub)
 after installing `requirements-dev.txt` with
