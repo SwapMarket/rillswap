@@ -22,6 +22,12 @@ from rill_core.settlement.funding_authentication import (
     _check_static_binding_history,
 )
 from rill_core.settlement.taproot import TaprootKeyOperations, reconstruct_taproot_contract
+from rill_core.settlement.unilateral import (
+    FundingOutput,
+    UnilateralAuthorization,
+    build_unilateral_spend,
+    finalize_unilateral_spend,
+)
 from rill_core.wire.canonical import JsonValue, canonicalize, parse_json_strict
 from rill_core.wire.hashes import (
     client_acceptance_hash,
@@ -52,6 +58,7 @@ from rill_core.wire.types import (
 
 MAX_RECOVERY_BYTES = 128 * 1024
 FUNDING_ATTEMPT_HEX_LENGTH = 64
+SCHNORR_AUXILIARY_BYTES = 32
 PURPOSE_KEY_COUNT = 6
 type _Parity = Annotated[int, Field(strict=True, ge=0, le=1)]
 UNPROVEN = (
@@ -71,6 +78,14 @@ class RecoveryCrypto(TaprootKeyOperations, Protocol):
 
     def public_key(self, secret_key: bytes) -> bytes:
         """Return a compressed secp256k1 public key or raise an exception."""
+        ...
+
+
+class RecoveryRefundCrypto(RecoveryCrypto, Protocol):
+    """Native one-shot signer used only inside the validated recovery boundary."""
+
+    def schnorr_sign(self, secret_key: bytes, message: bytes, auxiliary_random: bytes) -> bytes:
+        """Produce a BIP340 signature for one validated refund digest or raise."""
         ...
 
 
@@ -288,6 +303,15 @@ def _selected_funding_context(
     crypto: RecoveryCrypto,
 ) -> SelectedRecoveryFundingContext:
     record, _ = _validated_record(document, expected_network, crypto)
+    selected = _select_record_binding(record, funding_attempt_id, binding_revision)
+    return SelectedRecoveryFundingContext(record.contract_terms, selected)
+
+
+def _select_record_binding(
+    record: _RecoveryPlaintext,
+    funding_attempt_id: str,
+    binding_revision: int,
+) -> FundingBinding:
     _require(
         not (
             type(funding_attempt_id) is not str
@@ -304,8 +328,68 @@ def _selected_funding_context(
             binding.funding_attempt_id == funding_attempt_id
             and binding.binding_revision == binding_revision
         ):
-            return SelectedRecoveryFundingContext(record.contract_terms, binding)
+            return binding
     raise ValidationError("explicit funding selection is not in this snapshot")
+
+
+def construct_selected_recovery_refund(  # noqa: PLR0913 - all independent checks explicit
+    document: bytes,
+    expected_network: NetworkIdentity,
+    *,
+    funding_attempt_id: str,
+    binding_revision: int,
+    live_funding: FundingOutput,
+    sampled_tip_height: int,
+    fee_sat: int,
+    auxiliary_random: bytes,
+    crypto: RecoveryRefundCrypto,
+) -> bytes:
+    """Return a signed BTC-to-LN user refund for one externally checked outpoint.
+
+    All recovery secrets remain internal. Caller-supplied chain data is NOT
+    certified here: the caller must separately sample the selected Core UTXO,
+    including mempool spends, and recheck before any *manual* broadcast.
+    This never proves completion, absence of payment, or global lineage.
+    """
+    try:
+        record, _ = _validated_record(document, expected_network, crypto)
+        binding = _select_record_binding(record, funding_attempt_id, binding_revision)
+        terms = record.contract_terms
+        _require(
+            terms.profile_id == "btc-to-ln/v1"
+            and terms.refund_party == "client"
+            and type(sampled_tip_height) is int
+            and sampled_tip_height > terms.refund_lock_height
+            and type(fee_sat) is int
+            and type(auxiliary_random) is bytes
+            and len(auxiliary_random) == SCHNORR_AUXILIARY_BYTES
+            and type(live_funding) is FundingOutput
+            and live_funding.txid == bytes.fromhex(binding.funding_txid)
+            and live_funding.output_index == binding.contract_vout
+            and live_funding.value_sat == int(binding.contract_value_sat)
+            and live_funding.script_pubkey == bytes.fromhex(binding.contract_script_pubkey),
+            "selected funding or refund maturity differs from signed recovery",
+        )
+        authorization = UnilateralAuthorization.from_terms(
+            terms,
+            live_funding,
+            "refund",
+            keys=crypto,
+        )
+        _require(
+            authorization.signer_public_key
+            == bytes.fromhex(terms.client_contract_compressed_key)[1:],
+            "recovery refund does not belong to client",
+        )
+        plan = build_unilateral_spend(authorization, fee_sat=fee_sat)
+        secret = bytes.fromhex(record.user_secret.contract_secret_key)
+        signature = crypto.schnorr_sign(secret, plan.signature_hash, auxiliary_random)
+        result = finalize_unilateral_spend(plan, signature, verifier=crypto).raw_transaction
+    except Exception:  # noqa: BLE001, S110 - no secret, signer, or record errors escape
+        pass
+    else:
+        return result
+    raise ValidationError("recovery refund construction refused")
 
 
 def _parse_and_inspect(

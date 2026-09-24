@@ -97,6 +97,18 @@ authenticated provider admission, or a chain observation.
 Signed public terms may contain arbitrary extension values, and their frozen
 model does not deep-freeze those mappings. Treat the result as ordinary input
 data, never a validation capability or safe-to-log report.
+`recovery.construct_selected_recovery_refund` is a separately and **explicitly**
+invoked BTC-to-LN client-refund-only transaction constructor. It validates the
+entire canonical RS-007 snapshot and exact selected signed binding, requires a
+caller-supplied exact `FundingOutput` and sampled tip height strictly greater
+than the refund lock height, enforces the signed fee cap and destination via
+RS-002, signs only inside the secret-bearing boundary, and verifies the
+resulting transaction. It returns signed bytes only and never broadcasts or
+changes state. The caller's chain data is not certified by Core: an earlier
+read-only observation is staleable and is not permission to broadcast or to
+conclude payment failed. The operation rejects the LN-to-BTC user role; that
+profile's independent recovery is a separate **claim** flow involving the
+preimage. Python secret bytes are not guaranteed erased from memory.
 
 `settlement.verify_static_signed_funding_binding_history` is an explicit
 effect-free check of nonempty signed funding declarations. Its caller supplies

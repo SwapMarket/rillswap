@@ -12,12 +12,17 @@ import pytest
 from rill_core.errors import CanonicalizationError, ValidationError
 from rill_core.recovery import (
     OfflineRecoveryInspection,
+    construct_selected_recovery_refund,
     inspect_recovery_plaintext,
     inspect_recovery_selected_funding_binding,
     inspect_recovery_selected_funding_context,
     inspect_recovery_successor,
 )
-from rill_core.settlement import SignedFundingBinding, verify_static_signed_funding_binding_history
+from rill_core.settlement import (
+    FundingOutput,
+    SignedFundingBinding,
+    verify_static_signed_funding_binding_history,
+)
 from rill_core.wire.canonical import canonicalize, parse_json_strict
 from rill_core.wire.hashes import (
     client_acceptance_hash,
@@ -405,6 +410,89 @@ def test_selected_public_context_excludes_secrets_and_cannot_skip_bad_history() 
             binding_revision=0,
             crypto=crypto,
         )
+
+
+def test_refund_construction_requires_exact_selected_record_and_maturity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = _source()
+    crypto = _crypto(document)
+    _add_history(document, crypto, 1)
+    binding = FundingBinding.model_validate(document["funding_history"][0]["binding"])
+    funding = FundingOutput(
+        bytes.fromhex(binding.funding_txid),
+        binding.contract_vout,
+        int(binding.contract_value_sat),
+        bytes.fromhex(binding.contract_script_pubkey),
+    )
+    signed: list[bytes] = []
+
+    def sign(secret: bytes, digest: bytes, auxiliary: bytes) -> bytes:
+        assert secret.hex() == document["user_secret"]["contract_secret_key"]
+        assert auxiliary == b"\x55" * 32
+        signed.append(digest)
+        crypto.allow(
+            document["contract_terms"]["client_contract_compressed_key"][2:], digest, "44" * 64
+        )
+        return b"\x44" * 64
+
+    monkeypatch.setattr(crypto, "schnorr_sign", sign, raising=False)
+    options: dict[str, Any] = {
+        "funding_attempt_id": binding.funding_attempt_id,
+        "binding_revision": 0,
+        "live_funding": funding,
+        "sampled_tip_height": document["contract_terms"]["refund_lock_height"] + 1,
+        "fee_sat": 200,
+        "auxiliary_random": b"\x55" * 32,
+        "crypto": crypto,
+    }
+
+    def construct(record: dict[str, Any] = document, **changes: object) -> bytes:
+        arguments = {**options, **changes}
+        return construct_selected_recovery_refund(_canonical(record), _network(record), **arguments)
+
+    raw = construct()
+    assert raw.startswith(b"\x02\x00\x00\x00")
+    assert len(signed) == 1
+    rejected = (
+        {"sampled_tip_height": document["contract_terms"]["refund_lock_height"]},
+        {"binding_revision": 1},
+        {"funding_attempt_id": "00" * 32},
+        {
+            "live_funding": FundingOutput(
+                funding.txid, funding.output_index, funding.value_sat + 1, funding.script_pubkey
+            )
+        },
+        {"fee_sat": int(document["contract_terms"]["max_refund_fee_sat"]) + 1},
+        {"auxiliary_random": b"\x00"},
+    )
+    for mismatch in rejected:
+        with pytest.raises(ValidationError, match="recovery refund construction refused") as error:
+            construct(**mismatch)
+        assert error.value.__cause__ is None
+        assert error.value.__context__ is None
+    assert len(signed) == 1
+    invalid = copy.deepcopy(document)
+    invalid["funding_history"][0]["funder_session_signature"] = "00" * 64
+    with pytest.raises(ValidationError, match="recovery refund construction refused"):
+        construct(invalid)
+    assert len(signed) == 1
+
+    monkeypatch.setattr(crypto, "schnorr_sign", lambda *_args: b"\x00" * 64, raising=False)
+    with pytest.raises(ValidationError, match="recovery refund construction refused") as error:
+        construct()
+    assert error.value.__context__ is None
+    assert error.value.__cause__ is None
+
+    def leak(secret: bytes, *_args: bytes) -> bytes:
+        raise OSError("secret-bearing native failure: " + secret.hex())
+
+    monkeypatch.setattr(crypto, "schnorr_sign", leak, raising=False)
+    with pytest.raises(ValidationError, match="recovery refund construction refused") as error:
+        construct()
+    assert document["user_secret"]["contract_secret_key"] not in repr(error.value)
+    assert error.value.__context__ is None
+    assert error.value.__cause__ is None
 
 
 @pytest.mark.parametrize(

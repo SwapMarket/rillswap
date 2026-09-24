@@ -13,6 +13,7 @@ import pytest
 
 from rill_core.errors import ValidationError
 from rill_core.recovery import (
+    construct_selected_recovery_refund,
     inspect_recovery_plaintext,
     inspect_recovery_selected_funding_binding,
 )
@@ -366,6 +367,44 @@ def test_native_signatures_check_static_replacement_history_without_chain_claim(
         assert selected.contract_vout == 1
         assert package["user_secret"]["contract_secret_key"] not in repr(selected)
         terms = ContractTerms.model_validate_json(json.dumps(package["contract_terms"]))
+        funding = FundingOutput(
+            bytes.fromhex(selected.funding_txid),
+            selected.contract_vout,
+            int(selected.contract_value_sat),
+            bytes.fromhex(selected.contract_script_pubkey),
+        )
+        raw_refund = construct_selected_recovery_refund(
+            plaintext,
+            network,
+            funding_attempt_id="cc" * 32,
+            binding_revision=1,
+            live_funding=funding,
+            sampled_tip_height=terms.refund_lock_height + 1,
+            fee_sat=200,
+            auxiliary_random=b"\x55" * 32,
+            crypto=crypto,
+        )
+        refund_authorization = UnilateralAuthorization.from_terms(
+            terms,
+            funding,
+            "refund",
+            keys=crypto,
+        )
+        parsed_refund = validate_unilateral_spend(raw_refund, refund_authorization, verifier=crypto)
+        assert parsed_refund.fee_sat == 200
+        assert parsed_refund.raw_transaction == raw_refund
+        with pytest.raises(ValidationError, match="recovery refund construction refused"):
+            construct_selected_recovery_refund(
+                plaintext,
+                network,
+                funding_attempt_id="cc" * 32,
+                binding_revision=1,
+                live_funding=funding,
+                sampled_tip_height=terms.refund_lock_height,
+                fee_sat=200,
+                auxiliary_random=b"\x55" * 32,
+                crypto=crypto,
+            )
         verify_static_signed_funding_binding_history(
             terms=terms,
             handshake_init=HandshakeInit.model_validate_json(json.dumps(context["handshake_init"])),
@@ -455,5 +494,34 @@ def test_real_crypto_provider_funder_signed_context_stays_static_only() -> None:
             )
 
         verify(provider_secret)
+        document["funding_history"].append(
+            {
+                "binding": binding.model_dump(mode="json"),
+                "funder_session_signature": crypto.schnorr_sign(
+                    provider_secret,
+                    funding_binding_hash(binding),
+                    b"\x31" * 32,
+                ).hex(),
+            }
+        )
+        plaintext = canonicalize(parse_json_strict(json.dumps(document).encode()))
+        funding = FundingOutput(
+            bytes.fromhex(binding.funding_txid),
+            binding.contract_vout,
+            int(binding.contract_value_sat),
+            bytes.fromhex(binding.contract_script_pubkey),
+        )
+        with pytest.raises(ValidationError, match="recovery refund construction refused"):
+            construct_selected_recovery_refund(
+                plaintext,
+                network,
+                funding_attempt_id="cc" * 32,
+                binding_revision=0,
+                live_funding=funding,
+                sampled_tip_height=terms.refund_lock_height + 1,
+                fee_sat=200,
+                auxiliary_random=b"\x55" * 32,
+                crypto=crypto,
+            )
         with pytest.raises(ValidationError, match="invalid static signed funding declaration"):
             verify(wrong_secret)
