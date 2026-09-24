@@ -103,6 +103,36 @@ create or migrate them and no startup path reads them. Independent non-rollback
 admission ownership, protected production signing, and authenticated ordered
 delivery remain required before this primitive can be connected to live swaps.
 
+An explicit local cross-repository baseline gate lives at
+`scripts/check_integration_lock.py`. Run from this repository with a trusted
+Python 3.14 environment, `uv`, CMake, a C compiler, and network access to
+the pinned upstream native source and Python dependency index:
+
+```sh
+.venv/bin/python scripts/check_integration_lock.py --source-root .. --verify-only
+.venv/bin/python scripts/check_integration_lock.py --source-root ..
+```
+
+`integration-lock.json` records **six exact Git commits and trees**, two
+independently compared Python producer-wheel SHA-256 digests, and an exact
+23-case provider native-test inventory. Missing, partial, unsupported,
+unavailable, or changed source refs refuse execution. The runner reads the
+explicit local repositories only as immutable Git object sources; it builds
+the pinned crypto/core and provider wheels from isolated archives, compiles
+and tests the pinned native library, installs **non-editable wheels** into a
+new disposable venv, and requires every native provider case to execute
+without skips or failures. It prints the actual consumed artifact digests as
+a local run receipt; the native shared-library and provider-wheel digests are
+**recorded, not independently release-pinned**, and the Python dependency
+packages use version pins rather than verified hashes. The snapshot pins the
+provider commit immediately **before** this runner was added: a file committed
+inside the provider repo cannot contain its own resulting commit ID. This
+baseline checks that historical provider behavior integrates with these exact
+producers, not the working tree or later provider commits. Review and update
+the snapshot deliberately before any future release. No hosted CI is claimed
+without immutable, retrievable remote artifacts and appropriate host setup;
+local success is not a release or live-swap authorization.
+
 `handshake_store.PreparedHandshakeStore` is a separate **offline-only**,
 explicitly bootstrapped SQLite PREPARED registry. It can record a canonical
 RS-001 initiation and acceptance pair, a validated provider identity signature

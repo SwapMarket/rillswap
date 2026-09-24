@@ -1,0 +1,40 @@
+{
+  "schema": "rillswap-provider-integration-lock/v1",
+  "components": {
+    "rill-docs": {"commit": "0b19f2a86b351fa3cb7b6d08ac5bc9f0227dfd2f", "tree": "ea970ce363316c8ca8ac600dd48a9eeac661f070"},
+    "rill-crypto": {"commit": "1715fd87fdc69d5a9cb387703529160a3e989063", "tree": "484b34bfe849d661bac92bb14c4ac2439507fc1c"},
+    "rill-core": {"commit": "31b5cbe9cc0db5e737b53e56e40629195b769090", "tree": "a920ec96931edefbf2c028b0041f91d112592d36"},
+    "rill-provider": {"commit": "15d0d3ebf3d0c40578d159047e74eb537d390a72", "tree": "ca799ad7352a06bb1c675f2cf1c1ca45036d91e4"},
+    "rill-cli": {"commit": "abc9f1ad07ca3d7025e94b45a51d09a36c701c43", "tree": "119ac4261086e34cb6cc5d37c6bf7329ae3406fd"},
+    "rill-web": {"commit": "61dfe564e41224f383cd0ac05226689188155843", "tree": "bb8151330b0868c52497759536c14ce626fd45f5"}
+  },
+  "python_wheels": {
+    "rill_crypto-0.1.0.dev0-py3-none-any.whl": "776571c81df8011d8ec55f9277fac94e7f985d3f99b0be65ea3a34f81523e2c6",
+    "rill_core-0.1.0.dev0-py3-none-any.whl": "562970f9500876ece7b6175180361c2b7c5a14ffe52ce381ffba6bc5e2377d50"
+  },
+  "native_cases": [
+    "tests.test_handshake_custody_offline::test_absent_partial_wrong_root_and_restored_custody_never_auto_provisions",
+    "tests.test_handshake_custody_offline::test_concurrent_session_provisioning_has_one_immutable_winner",
+    "tests.test_handshake_custody_offline::test_explicit_encrypted_identity_and_session_survive_restart_without_admission",
+    "tests.test_handshake_custody_offline::test_uncertain_publication_never_regenerates_or_returns_a_success_ref",
+    "tests.test_handshake_diagnostic::test_real_native_handshake_is_only_a_historical_diagnostic",
+    "tests.test_handshake_signing::test_acceptance_signing_rejects_wrong_context_or_custody[accept-init-hash]",
+    "tests.test_handshake_signing::test_acceptance_signing_rejects_wrong_context_or_custody[accept-key]",
+    "tests.test_handshake_signing::test_acceptance_signing_rejects_wrong_context_or_custody[accept-session]",
+    "tests.test_handshake_signing::test_acceptance_signing_rejects_wrong_context_or_custody[bad-ref]",
+    "tests.test_handshake_signing::test_acceptance_signing_rejects_wrong_context_or_custody[bad-signature]",
+    "tests.test_handshake_signing::test_acceptance_signing_rejects_wrong_context_or_custody[boolean-verifier]",
+    "tests.test_handshake_signing::test_acceptance_signing_rejects_wrong_context_or_custody[capabilities]",
+    "tests.test_handshake_signing::test_acceptance_signing_rejects_wrong_context_or_custody[duplicate-accept]",
+    "tests.test_handshake_signing::test_acceptance_signing_rejects_wrong_context_or_custody[duplicate-init]",
+    "tests.test_handshake_signing::test_acceptance_signing_rejects_wrong_context_or_custody[features]",
+    "tests.test_handshake_signing::test_acceptance_signing_rejects_wrong_context_or_custody[init-identity]",
+    "tests.test_handshake_signing::test_acceptance_signing_rejects_wrong_context_or_custody[network]",
+    "tests.test_handshake_signing::test_acceptance_signing_rejects_wrong_context_or_custody[profile]",
+    "tests.test_handshake_signing::test_acceptance_signing_rejects_wrong_context_or_custody[suite]",
+    "tests.test_handshake_signing::test_acceptance_signing_rejects_wrong_context_or_custody[wrong-ref]",
+    "tests.test_handshake_signing::test_concurrent_identical_reservations_are_idempotent_and_conflict_refused",
+    "tests.test_handshake_signing::test_real_identity_signature_and_test_only_live_session_reservation",
+    "tests.test_handshake_store::test_real_native_provider_identity_signature_is_verified_before_prepare"
+  ]
+}
