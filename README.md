@@ -11,8 +11,9 @@ This is a **local-only development preview**, not a swap client. It bundles a
 strict TypeScript/Vite static shell with relative asset paths. Chain-mode
 selection does not contact or verify a node; the provider-description field
 renders only inert pasted text. The manual signed-advertisement panel verifies
-canonical PUBLIC provider metadata against an independently entered identity
-and locally defined network/profile, and holds a revision maximum in memory
+either canonical PUBLIC application metadata or, when explicitly selected, a
+PUBLIC raw private-regtest signed NIP-01 event object against an independently
+entered identity and locally defined network/profile. It holds a revision maximum in memory
 for this tab only. Endpoints remain inert plain text, not approved connections.
 There is no relay discovery, quote, contract verification, wallet, signer,
 swap, watcher, recovery import, or payment UI.
@@ -78,13 +79,15 @@ networks are not selectable here. A missing, partial, older-version, or
 restored cache proves no revision/currentness and triggers no automatic repair,
 rescan, network access, or state migration on upgrade.
 
-`src/nostrProviderAnnouncement.ts` is a **disconnected** verifier for the
+`src/nostrProviderAnnouncement.ts` is an offline-only verifier for the
 private-regtest RS-005 kind-39417 event binding. It requires a separately
 approved provider identity and complete network/profile, authenticates the
 outer NIP-01 ID/signature and the nested application signature, and checks
 exact ordered tags, address `d`, matching signer/timestamp, size and nesting
-bounds, and the single-regtest-network restriction. It is not called by the
-manual-import panel, and does not subscribe to a relay. A future relay caller
+bounds, and the single-regtest-network restriction. The manual-import panel
+calls it only after explicit selection of the private-regtest NIP-01 paste
+format and a verification click. Its default application-signed import mode
+is unchanged. It does not subscribe to a relay. A future relay caller
 must also cap the entire raw `EVENT` message to 128 KiB **before** extracting
 the event-object bytes. It returns a historical signed candidate, not globally
 current revision, endpoint approval, session ownership, or financial

@@ -5,6 +5,7 @@ import signet from "./networks/signet.json";
 import testnet3 from "./networks/testnet3.json";
 import testnet4 from "./networks/testnet4.json";
 import { verifyManualProviderAdvertisement } from "./manualProviderAdvertisement";
+import { verifyPrivateRegtestAnnouncement } from "./nostrProviderAnnouncement";
 
 const NETWORKS = {
   mainnet, signet, testnet3, testnet4,
@@ -22,7 +23,14 @@ export function mountManualProviderImport(root: HTMLElement): void {
   const heading = document.createElement("h2");
   heading.textContent = "Manual signed provider advertisement (read-only)";
   const disclosure = document.createElement("p");
-  disclosure.textContent = "Only paste PUBLIC canonical advertisement JSON. Choose the network independently and enter a provider identity verified out of band. No endpoint is contacted, no key is saved, and a valid signature proves neither liquidity nor current authority.";
+  disclosure.textContent = "Only paste PUBLIC signed advertisement JSON or a private-regtest NIP-01 event object. Choose the network independently and enter a provider identity verified out of band. No endpoint is contacted, no key is saved, and valid signatures prove neither liquidity nor current authority.";
+
+  const format = document.createElement("select");
+  format.id = "provider-advertisement-format";
+  format.append(
+    new Option("Application-signed advertisement (default)", "application"),
+    new Option("Private-regtest signed NIP-01 event object", "nostr-regtest"),
+  );
 
   const identity = document.createElement("input");
   identity.id = "approved-provider-identity";
@@ -58,6 +66,15 @@ export function mountManualProviderImport(root: HTMLElement): void {
   // This local-only map tracks the maximum revision observed *in this tab*,
   // never global currentness. An absent entry proves nothing about the past.
   const observedRevisions = new Map<string, number>();
+  format.addEventListener("change", () => {
+    advertisement.value = "";
+    advertisement.maxLength = format.value === "nostr-regtest" ? 128 * 1024 : 64 * 1024;
+    advertisement.placeholder = format.value === "nostr-regtest"
+      ? "Raw signed kind-39417 event object JSON, not a relay EVENT frame"
+      : "Canonical, signed public RS-005 advertisement JSON only";
+    details.textContent = "";
+    status.textContent = "Format changed. Choose independently, then paste PUBLIC signed data. This tab has no saved trust or global revision history.";
+  });
 
   importButton.addEventListener("click", () => {
     const selectedNetwork = NETWORKS[network.value as keyof typeof NETWORKS];
@@ -67,9 +84,13 @@ export function mountManualProviderImport(root: HTMLElement): void {
       return;
     }
     try {
-      const candidate = verifyManualProviderAdvertisement(
-        advertisement.value, identity.value, selectedNetwork, profile.value,
-      );
+      const candidate = format.value === "nostr-regtest"
+        ? verifyPrivateRegtestAnnouncement(
+          advertisement.value, identity.value, selectedNetwork, profile.value,
+        )
+        : verifyManualProviderAdvertisement(
+          advertisement.value, identity.value, selectedNetwork, profile.value,
+        );
       const revisionKey = JSON.stringify([
         candidate.identityXOnlyKey, candidate.networkIdentityJcs, candidate.slot,
       ]);
@@ -79,8 +100,15 @@ export function mountManualProviderImport(root: HTMLElement): void {
         return;
       }
       observedRevisions.set(revisionKey, candidate.revision);
-      status.textContent = "Application signature verified for this explicit selection. Historical offer only; no connection, session admission, or swap action. Prior revision history is unknown.";
+      status.textContent = candidate.source === "signed-nip01-announcement"
+        ? "NIP-01 and application signatures verified for this explicit selection. Historical offer only; no relay connection, endpoint approval, session admission, or swap action. Prior revision history is unknown."
+        : "Application signature verified for this explicit selection. Historical offer only; no connection, session admission, or swap action. Prior revision history is unknown.";
       details.textContent = [
+        "Last successfully verified historical offer (not current authority):",
+        `Verified source: ${candidate.source}`,
+        ...(candidate.source === "signed-nip01-announcement"
+          ? [`NIP-01 event ID: ${candidate.outerEventId}`, `Address d: ${candidate.addressD}`]
+          : []),
         `Approved identity: ${candidate.identityXOnlyKey}`,
         `Network: ${candidate.networkIdentityJcs}`,
         `Profile: ${candidate.profileId}`,
@@ -94,6 +122,7 @@ export function mountManualProviderImport(root: HTMLElement): void {
   });
   root.append(
     heading, disclosure,
+    labelFor(format.id, "Pasted public advertisement format"), format,
     labelFor(identity.id, "Provider identity approved out of band (x-only hex)"), identity,
     labelFor(network.id, "Independently selected network"), network,
     labelFor(profile.id, "Selected settlement profile"), profile,
