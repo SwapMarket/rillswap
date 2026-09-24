@@ -46,7 +46,7 @@ An installation upgrading from the prior version receives no listener, key,
 database read/migration, reprocessing, or swap action, regardless of absent,
 partial, old, or restored browser state. `bun test unit/nip59Transport.test.ts`
 checks the isolated producer with disposable synthetic keys.
-`scripts/emit-nip59-test-wrap.ts` is test-only stdin/stdout glue for a pinned
+`scripts/emit-nip59-test-wrap.ts` is test-only stdin/stdout glue for a local
 provider interoperability test. It must never receive production secrets.
 
 The embedded build label is disclosure, **not** authenticated release pinning.
