@@ -130,6 +130,26 @@ events may remain in caller-owned memory; exception handling does not erase
 caller frames or the signed event returned on success. Existing installations
 gain no transport activation or state migration from this module.
 
+`_nip59_receive` composes those two internal primitives into a **disconnected,
+read-only candidate decoder** for the private-regtest RS-006 binding. The
+caller explicitly supplies the selected mailbox scalar and independently
+expected mailbox public key, complete network and profile. It verifies the
+signed outer gift wrap **before** decrypting, requires durable kind 1059 and
+exactly one matching recipient `p`, then verifies the signed empty-tag
+kind-13 seal **before** decrypting its unsigned rumor. It checks exact rumor
+kind/tags/ID, the direct canonical RS-001 envelope and its 16 KiB bound, and
+equality of seal author, rumor author, and envelope sender. It returns only an
+`_UntrustedFrameCandidate`: even a perfectly valid candidate can come from a
+stranger addressing a public inbox. This module cannot prove which key role
+the supplied scalar was assigned, sender freshness, authenticated session
+ownership, negotiated handshake, application signature/transcript validity,
+replay disposition, or financial effect safety. There is still **no relay
+listener, producer, durable inbox/outbox, admission, or sending path**. Test
+wrappers use isolated synthetic credentials, not independent external Nostr
+interoperability. An existing installation receives no transport listener,
+state read, or migration from this code; missing, partial, old, or restored
+transport records cannot activate it.
+
 An explicit local cross-repository baseline gate lives at
 `scripts/check_integration_lock.py`. Run from this repository with a trusted
 Python 3.14 environment, `uv`, CMake, a C compiler, and network access to

@@ -61,6 +61,23 @@ def _unique_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _event_id(
+    pubkey: str,
+    created_at: int,
+    kind: int,
+    tags: list[list[str]],
+    content: str,
+) -> str:
+    """Hash NIP-01's ordered event array, never the RS-001 JCS document."""
+    serialized = json.dumps(
+        [0, pubkey, created_at, kind, tags, content],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
 def _parse(raw: bytes) -> _SignedEvent:
     _require(type(raw) is bytes and 0 < len(raw) <= MAX_EVENT_BYTES)
     try:
@@ -82,22 +99,16 @@ def _parse(raw: bytes) -> _SignedEvent:
         _require(type(tag) is list and 1 <= len(tag) <= MAX_TAG_MEMBERS)
         _require(all(type(member) is str for member in tag))
     try:
-        serialized = json.dumps(
-            [
-                0,
-                document["pubkey"],
-                document["created_at"],
-                document["kind"],
-                tags,
-                document["content"],
-            ],
-            ensure_ascii=False,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
+        calculated_id = _event_id(
+            document["pubkey"],
+            document["created_at"],
+            document["kind"],
+            tags,
+            document["content"],
+        )
     except UnicodeEncodeError:
         raise Nip01InvalidEventError("NIP-01 signed event refused") from None
-    _require(hashlib.sha256(serialized).hexdigest() == document["id"])
+    _require(calculated_id == document["id"])
     return _SignedEvent(
         id=document["id"],
         pubkey=document["pubkey"],
