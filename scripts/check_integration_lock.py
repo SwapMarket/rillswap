@@ -43,7 +43,8 @@ WHEELS = frozenset(
 )
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
-MIN_NATIVE_CASES = 23
+V1_NATIVE_CASES = 23
+V2_NATIVE_CASES = 53
 WEB_NIP59_CASES = frozenset(
     {
         (
@@ -117,12 +118,12 @@ def _lock(path: Path) -> dict[str, Any]:
         or type(lock["python_wheels"]) is not dict
         or set(lock["python_wheels"]) != WHEELS
         or type(lock["native_cases"]) is not list
-        or len(lock["native_cases"]) != MIN_NATIVE_CASES
+        or len(lock["native_cases"]) != (V2_NATIVE_CASES if v2 else V1_NATIVE_CASES)
         or any(
             type(case) is not str or not case.startswith("tests.test_") or case.count("::") != 1
             for case in lock["native_cases"]
         )
-        or len(set(lock["native_cases"])) != MIN_NATIVE_CASES
+        or len(set(lock["native_cases"])) != (V2_NATIVE_CASES if v2 else V1_NATIVE_CASES)
     ):
         raise IntegrationLockError("unsupported or incomplete integration lock")
     if v2 and (

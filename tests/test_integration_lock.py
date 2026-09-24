@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from types import ModuleType
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "check_integration_lock.py"
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def _runner() -> ModuleType:
@@ -77,7 +78,7 @@ def _committed_repos(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
         "schema": "rillswap-provider-integration-lock/v1",
         "components": components,
         "python_wheels": dict.fromkeys(runner.WHEELS, "ab" * 32),
-        "native_cases": json.loads((SCRIPT.parents[1] / "integration-lock.json").read_text())[
+        "native_cases": json.loads((FIXTURES / "integration-lock-v1.json").read_text())[
             "native_cases"
         ],
     }
@@ -91,6 +92,7 @@ def _v2(lock: dict[str, Any]) -> dict[str, Any]:
         "schema": runner.V2,
         "bun_version": "1.3.11",
         "web_nip59_cases": sorted(runner.WEB_NIP59_CASES),
+        "native_cases": json.loads((FIXTURES / "integration-native-v2.json").read_text()),
     }
 
 
@@ -110,6 +112,7 @@ def test_v2_lock_requires_exact_bun_and_web_inventory_and_preserves_v1(tmp_path:
         "bad-bun",
         "duplicate-web",
         "wrong-web",
+        "short-native",
     ):
         modified = json.loads(json.dumps(current))
         if mutation == "old-extra":
@@ -122,6 +125,8 @@ def test_v2_lock_requires_exact_bun_and_web_inventory_and_preserves_v1(tmp_path:
             modified["bun_version"] = "latest"
         elif mutation == "duplicate-web":
             modified["web_nip59_cases"][0] = modified["web_nip59_cases"][1]
+        elif mutation == "short-native":
+            modified["native_cases"].pop()
         else:
             modified["web_nip59_cases"][0] += "_impostor"
         manifest.write_text(json.dumps(modified))
@@ -280,7 +285,7 @@ def test_modified_producer_wheel_is_refused_before_install(
 
 def test_native_inventory_requires_exact_cases_with_no_skips_or_errors(tmp_path: Path) -> None:
     runner = _runner()
-    expected = json.loads((SCRIPT.parents[1] / "integration-lock.json").read_text())["native_cases"]
+    expected = json.loads((FIXTURES / "integration-lock-v1.json").read_text())["native_cases"]
     report = tmp_path / "results.xml"
 
     def write_report(names: list[str], bad_tag: str | None = None) -> None:
@@ -312,6 +317,41 @@ def test_native_inventory_requires_exact_cases_with_no_skips_or_errors(tmp_path:
         write_report(expected, marker)
         with pytest.raises(runner.IntegrationLockError, match="inventory"):
             runner._check_native_report(report, expected)  # noqa: SLF001
+
+
+def test_v2_inventory_includes_all_old_cases_and_requires_exact_new_cases(tmp_path: Path) -> None:
+    runner = _runner()
+    native = json.loads((FIXTURES / "integration-native-v2.json").read_text())
+    historical = json.loads((FIXTURES / "integration-lock-v1.json").read_text())["native_cases"]
+    assert len(native) == 53
+    assert len(set(native)) == 53
+    assert set(historical).issubset(native)
+    report = tmp_path / "new-native.xml"
+
+    def write_report(names: list[str], problem: str | None = None) -> None:
+        suite = ET.Element("testsuite")
+        for item in names:
+            classname, name = item.split("::", 1)
+            case = ET.SubElement(suite, "testcase", classname=classname, name=name)
+            if problem is not None and name == native[0].split("::", 1)[1]:
+                ET.SubElement(case, problem)
+        report.write_bytes(ET.tostring(suite))
+
+    write_report(native)
+    assert runner._check_native_report(report, native) == 53  # noqa: SLF001
+    for changed in (
+        native[:-1],
+        [*native, "tests.extra::test_case"],
+        [*native[:-1], native[0]],
+        [*native[:-1], "tests.test_nip59_receive::test_other"],
+    ):
+        write_report(changed)
+        with pytest.raises(runner.IntegrationLockError, match="inventory"):
+            runner._check_native_report(report, native)  # noqa: SLF001
+    for problem in ("skipped", "failure", "error"):
+        write_report(native, problem)
+        with pytest.raises(runner.IntegrationLockError, match="inventory"):
+            runner._check_native_report(report, native)  # noqa: SLF001
 
 
 def test_web_inventory_requires_two_exact_profile_cases_no_skips_or_errors(tmp_path: Path) -> None:
