@@ -22,7 +22,10 @@ RILLSWAP_RUN_BITCOIN_CORE=1 .venv/bin/pytest -q -m bitcoin_core
 That test requires Docker and the pinned linux/amd64 image recorded in the
 test. The image digest is immutable but the image publisher is unofficial.
 RPC calls use `bitcoin-cli` through `docker exec`, so no daemon port is exposed
-to the host.
+to the host. Bulk `generatetoaddress` calls have a bounded 180-second process
+timeout (other RPC calls retain 30 seconds); a timed-out mining request is not
+retried blindly because its regtest chain may already have advanced. The test
+removes its disposable container on failure.
 Wallet-selected funding transactions are intentionally dynamic; only the
 versioned synthetic-outpoint vectors have stable transaction bytes.
 

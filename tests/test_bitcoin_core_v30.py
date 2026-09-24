@@ -25,6 +25,7 @@ IMAGE = (
 )
 REFUND_HEIGHT = 1100
 SATOSHIS_PER_BTC = Decimal(100_000_000)
+BULK_MINE_TIMEOUT = 180
 
 
 def _run_docker(*arguments: str, timeout: int = 60) -> str:
@@ -90,7 +91,14 @@ class RpcClient:
             check=False,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=(
+                BULK_MINE_TIMEOUT
+                if method == "generatetoaddress"
+                and params
+                and type(params[0]) is int
+                and params[0] > 100
+                else 30
+            ),
         )
         if result.returncode != 0:
             detail = "\n".join(
@@ -287,6 +295,25 @@ def _dynamic_spend(
 
 def _raw(spend) -> str:
     return spend.transaction.serialize_with_witness(spend.witnesses).hex()
+
+
+def test_only_bulk_regtest_mining_gets_longer_rpc_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    budgets: list[int] = []
+
+    def fake_run(_args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        budgets.append(kwargs["timeout"])
+        return subprocess.CompletedProcess([], 0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    client = RpcClient("disposable-container", "synthetic-user", "synthetic-password")
+    assert client.call("getblockchaininfo") == []
+    assert client.call("generatetoaddress", 1, "synthetic-address", wallet="fund") == []
+    assert (
+        client.call("generatetoaddress", 997, "synthetic-address", wallet="fund") == []
+    )
+    assert budgets == [30, 30, BULK_MINE_TIMEOUT]
 
 
 @pytest.mark.bitcoin_core
