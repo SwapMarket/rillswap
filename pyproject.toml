@@ -29,6 +29,7 @@ markers = [
     "bitcoin_core: opt-in pinned regtest RPC adapter interoperability",
     "lnd: opt-in pinned, disposable LND and Core read-only interoperability",
     "native_crypto: opt-in real native signature check against pinned rill-crypto",
+    "web_nip59_interop: opt-in disposable web-producer to native-provider interoperability",
 ]
 
 [tool.ruff]

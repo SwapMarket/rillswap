@@ -150,6 +150,21 @@ interoperability. An existing installation receives no transport listener,
 state read, or migration from this code; missing, partial, old, or restored
 transport records cannot activate it.
 
+`RILLSWAP_RUN_WEB_NIP59=1 RILL_CRYPTO_LIBRARY=/absolute/path/to/librill_crypto.so
+ .venv/bin/pytest -q -m web_nip59_interop` is an **opt-in local** test against
+the sibling working-tree web producer and docs authentication vectors. Install
+the web `bun.lock` dependencies first. It covers both regtest settlement
+profiles using real fixture-signed RS-001 envelopes, independent Bun
+construction and native provider decoding. Missing Bun, configured native
+crypto library, fixture, or web dependencies fails the explicit opt-in instead
+of skipping it.
+Repeated fresh wraps preserve the signed application message while changing
+the outer identity; replaying one wrap still decodes. Session admission and
+replay disposition are **not exercised**. This is neither relay delivery nor
+authorization. It is not
+part of the historical `integration-lock.json` release set until that lock is
+explicitly revised and tested from clean archives.
+
 An explicit local cross-repository baseline gate lives at
 `scripts/check_integration_lock.py`. Run from this repository with a trusted
 Python 3.14 environment, `uv`, CMake, a C compiler, and network access to
