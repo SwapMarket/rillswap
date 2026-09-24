@@ -44,6 +44,13 @@ def _new_lineage(case_index: int = 0) -> FundingLineage:
     return lineage
 
 
+def _depth_context(case_index: int) -> tuple[ContractTerms, FundingLineage]:
+    case: dict[str, Any] = json.loads(VECTORS.read_text())["valid"][case_index]
+    original = ContractTerms.model_validate_json(json.dumps(case["contract_terms"]))
+    terms = original.model_copy(update={"funding_confirmations": 3})
+    return terms, FundingLineage.for_terms(terms, "bb" * 32, keys=FixtureKeys(case, terms))
+
+
 def _binding(
     lineage: FundingLineage,
     revision: int,
@@ -172,6 +179,59 @@ def test_reorg_removes_exact_view_without_rewriting_accepted_bindings() -> None:
         restored.remove_verified_best_chain(first_view)
     with pytest.raises(TransitionError, match="different or absent"):
         cleared.remove_verified_best_chain(first_view)
+
+
+@pytest.mark.parametrize("case_index", [0, 1])
+def test_funding_depth_requires_bound_terms_and_current_observation(case_index: int) -> None:
+    terms, empty = _depth_context(case_index)
+    first = _binding(empty, 0)
+    lineage = empty.append_verified_binding(first)
+    for state in (empty, lineage):
+        with pytest.raises(TransitionError, match="confirmations"):
+            state.require_funding_confirmations(terms)
+        assert state.best_chain is None
+    below = _observation(first, tip_height=101)  # depth 2 of signed requirement 3
+    state = lineage.observe_verified_best_chain(below)
+    with pytest.raises(TransitionError, match="confirmations"):
+        state.require_funding_confirmations(terms)
+    assert state.best_chain is below
+
+    at_threshold = _observation(first, tip_height=102)
+    state = state.remove_verified_best_chain(below).observe_verified_best_chain(at_threshold)
+    assert state.require_funding_confirmations(terms) is at_threshold
+    # Binding a later revision cannot displace a confirmed earlier outpoint.
+    state = state.append_verified_binding(_binding(empty, 1))
+    assert state.require_funding_confirmations(terms) is at_threshold
+    greater = _observation(first, tip_height=103)
+    state = state.remove_verified_best_chain(at_threshold).observe_verified_best_chain(greater)
+    assert state.require_funding_confirmations(terms) is greater
+
+    for different in (
+        terms.model_copy(update={"funding_confirmations": 1}),
+        ContractTerms.model_validate_json(
+            json.dumps(
+                json.loads(VECTORS.read_text())["valid"][1 - case_index]["contract_terms"],
+            )
+        ),
+    ):
+        with pytest.raises(TransitionError, match="terms differ"):
+            state.require_funding_confirmations(different)
+    with pytest.raises(ValidationError, match="parsed contract terms"):
+        state.require_funding_confirmations(object())  # type: ignore[arg-type]
+    assert state.best_chain is greater
+
+    cleared = state.remove_verified_best_chain(greater)
+    with pytest.raises(TransitionError, match="confirmations"):
+        cleared.require_funding_confirmations(terms)
+    shallower_replacement = _observation(
+        first, block_hash="ca" * 32, tip_hash="ca" * 32, tip_height=100
+    )
+    changed = cleared.observe_verified_best_chain(shallower_replacement)
+    with pytest.raises(TransitionError, match="confirmations"):
+        changed.require_funding_confirmations(terms)
+    # An old immutable snapshot still passes. The caller, not this in-memory
+    # predicate, must fence stale views and serialize decisions across reorgs.
+    assert state.require_funding_confirmations(terms) is greater
 
 
 def test_invalid_or_independent_outpoints_never_become_lineage_evidence() -> None:

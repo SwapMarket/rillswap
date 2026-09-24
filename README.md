@@ -48,7 +48,12 @@ reversible best-chain observations. It only accepts facts already authenticated
 and independently checked by a host against live transactions and the current
 chain view. A previously accepted revision may win on-chain even after a later
 replacement was signed. Reorg invalidation removes the exact chain observation,
-not the binding history. No reducer state permits funding, payment, settlement,
+not the binding history. `require_funding_confirmations(terms)` checks the
+entire signed-term hash and requires the caller-verified current best-chain
+view to reach the signed depth in either direction; it returns that exact
+observation, not an action token. An older immutable lineage object can still
+hold a now-stale view, so the host must serialize chain validation and action
+decisions and fence stale instances. No reducer state permits funding, payment, settlement,
 or recovery import by itself: storage, export verification, and any restored
 state must be validated by separate boundaries. Missing or partial history
 must not trigger an automatic rescan or reconstruct chain confirmation.

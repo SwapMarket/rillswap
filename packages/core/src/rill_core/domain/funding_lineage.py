@@ -14,10 +14,9 @@ from typing import TYPE_CHECKING
 from rill_core.errors import TransitionError, ValidationError
 from rill_core.settlement.taproot import TaprootKeyOperations, reconstruct_taproot_contract
 from rill_core.wire.hashes import contract_hash
-from rill_core.wire.messages import FundingBinding
+from rill_core.wire.messages import ContractTerms, FundingBinding
 
 if TYPE_CHECKING:
-    from rill_core.wire.messages import ContractTerms
     from rill_core.wire.types import NetworkIdentity
 
 MAX_UINT32 = 0xFFFFFFFF
@@ -169,6 +168,21 @@ class FundingLineage:
         if self.best_chain is not None:
             raise TransitionError("remove the prior best-chain observation before replacing it")
         return replace(self, best_chain=observation)
+
+    def require_funding_confirmations(self, terms: ContractTerms) -> BestChainObservation:
+        """Check signed-term depth against this caller-verified current view.
+
+        The host must authenticate the terms and serialize chain observation
+        and action decisions. Returning this snapshot is not a durable or
+        revocable authorization: an old lineage instance may outlive a reorg.
+        """
+        if not isinstance(terms, ContractTerms):
+            raise ValidationError("funding depth requires parsed contract terms")
+        if contract_hash(terms).hex() != self.contract_hash:
+            raise TransitionError("funding depth terms differ from accepted contract")
+        if self.best_chain is None or self.best_chain.depth < terms.funding_confirmations:
+            raise TransitionError("required funding confirmations are not observed")
+        return self.best_chain
 
     def remove_verified_best_chain(
         self,
