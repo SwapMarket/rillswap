@@ -36,6 +36,27 @@ def test_create_only_refund_is_private_exact_and_no_clobber(tmp_path: Path) -> N
     assert error.value.__cause__ is None
 
 
+def test_create_only_exact_intent_durably_precedes_possible_submission(tmp_path: Path) -> None:
+    intent = b'{"kind":"regtest-refund-submission-intent/v1","state":"submission_may_occur"}'
+    output = tmp_path / "intent.json"
+    observed: list[bytes] = []
+    publication.publish_new_broadcast_intent(
+        output,
+        intent,
+        verify_from_disk=observed.append,
+    )
+    assert observed == [intent]
+    assert output.read_bytes() == intent
+    assert output.stat().st_mode & 0o777 == 0o600
+    with pytest.raises(publication.RefundPublicationError):
+        publication.publish_new_broadcast_intent(
+            output,
+            b"different",
+            verify_from_disk=observed.append,
+        )
+    assert output.read_bytes() == intent
+
+
 def test_invalid_verifier_failure_is_redacted_without_new_file(tmp_path: Path) -> None:
     output = tmp_path / "refund.raw"
 

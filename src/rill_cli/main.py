@@ -35,8 +35,16 @@ from rill_cli.publication import (
     publish_new_ciphertext,
 )
 from rill_cli.recovery_core_observation import RegtestRecoveryCoreReader
+from rill_cli.refund_broadcast import (
+    RefundPreflightError,
+    RefundSubmissionUnknownError,
+    create_refund_intent,
+    submit_prepared_refund,
+    verify_refund_intent,
+)
 from rill_cli.refund_publication import (
     RefundPublicationUncertainError,
+    publish_new_broadcast_intent,
     publish_new_signed_refund,
 )
 
@@ -89,6 +97,7 @@ def _parser() -> argparse.ArgumentParser:
     for command, description in (
         ("observe-funding", "explicit regtest candidate (never signing authority)"),
         ("sign-refund", "explicit BTC-to-LN refund artifact (never broadcasts)"),
+        ("broadcast-refund", "explicit regtest refund submit (never retries)"),
     ):
         operation = commands.add_parser(command, help=description)
         operation.add_argument(
@@ -109,11 +118,18 @@ def _parser() -> argparse.ArgumentParser:
         mode = operation.add_mutually_exclusive_group(required=True)
         mode.add_argument("--identity", help="protected age X25519 secret-key file")
         mode.add_argument("--passphrase-prompt", action="store_true", help="prompt via terminal")
-        if command == "sign-refund":
+        if command in {"sign-refund", "broadcast-refund"}:
             operation.add_argument("--fee-sat", required=True, type=int, help="exact refund fee")
-            operation.add_argument(
-                "--output", required=True, help="create-only raw transaction file"
-            )
+            if command == "sign-refund":
+                operation.add_argument(
+                    "--output", required=True, help="create-only raw transaction file"
+                )
+            else:
+                operation.add_argument(
+                    "--intent",
+                    required=True,
+                    help="create-only durable exact-byte submission intent",
+                )
         operation.add_argument("file", help="explicit encrypted age recovery file")
     return parser
 
@@ -178,7 +194,7 @@ def _report(report: OfflineRecoveryInspection) -> str:
     )
 
 
-def _run(args: argparse.Namespace) -> str:
+def _run(args: argparse.Namespace) -> str:  # noqa: PLR0915 - explicit ordered recovery boundaries
     network = _network(args.network)
     with Context(library_path=args.crypto_library) as crypto:
         if args.command in ("export", "export-update"):
@@ -218,7 +234,7 @@ def _run(args: argparse.Namespace) -> str:
                 else "Created encrypted recovery file. "
             )
             return prefix + "No funding authority. " + _report(report)
-        if args.command in {"inspect", "observe-funding", "sign-refund"}:
+        if args.command in {"inspect", "observe-funding", "sign-refund", "broadcast-refund"}:
             inspection_credentials = (
                 PassphraseCredentials(_prompt())
                 if args.passphrase_prompt
@@ -240,23 +256,24 @@ def _run(args: argparse.Namespace) -> str:
                 binding_revision=args.binding_revision,
                 crypto=crypto,
             )
-            if args.command == "sign-refund" and (
+            if args.command in {"sign-refund", "broadcast-refund"} and (
                 selected.terms.profile_id != "btc-to-ln/v1"
                 or selected.terms.refund_party != "client"
             ):
                 raise RecoveryCLIError("selected recovery is not a client refund")
-            candidate = RegtestRecoveryCoreReader(
+            reader = RegtestRecoveryCoreReader(
                 port=args.rpc_port,
                 host=args.rpc_host,
                 cookie_path=Path(args.rpc_cookie),
                 network=network,
-            ).observe(
+            )
+            candidate = reader.observe(
                 selected.binding,
                 selected.terms,
                 keys=crypto,
-                for_refund=args.command == "sign-refund",
+                for_refund=args.command in {"sign-refund", "broadcast-refund"},
             )
-            if args.command == "sign-refund":
+            if args.command in {"sign-refund", "broadcast-refund"}:
                 funding = FundingOutput(
                     bytes.fromhex(selected.binding.funding_txid),
                     selected.binding.contract_vout,
@@ -281,6 +298,60 @@ def _run(args: argparse.Namespace) -> str:
                     "refund",
                     keys=crypto,
                 )
+                if args.command == "broadcast-refund":
+                    validated = validate_unilateral_spend(signed, authorization, verifier=crypto)
+                    if validated.fee_sat != args.fee_sat:
+                        raise RecoveryCLIError("signed refund fee differs from requested fee")
+                    intent = create_refund_intent(
+                        signed,
+                        txid=validated.txid,
+                        binding=selected.binding,
+                        terms=selected.terms,
+                        fee_sat=args.fee_sat,
+                        candidate=candidate,
+                    )
+
+                    def check_intent_readback(stored: bytes) -> None:
+                        persisted_raw = verify_refund_intent(stored, intent)
+                        persisted_spend = validate_unilateral_spend(
+                            persisted_raw,
+                            authorization,
+                            verifier=crypto,
+                        )
+                        if (
+                            persisted_raw != signed
+                            or persisted_spend.txid != validated.txid
+                            or persisted_spend.fee_sat != args.fee_sat
+                        ):
+                            raise RecoveryCLIError("persisted refund differs from selected spend")
+
+                    publish_new_broadcast_intent(
+                        args.intent,
+                        intent,
+                        verify_from_disk=check_intent_readback,
+                    )
+                    submitted_tip = submit_prepared_refund(
+                        reader,
+                        selected.binding,
+                        selected.terms,
+                        keys=crypto,
+                        raw=signed,
+                        expected_txid=validated.txid,
+                    )
+                    return json.dumps(
+                        {
+                            "kind": "explicit-regtest-refund-submission/v1",
+                            "refund_txid": validated.txid,
+                            "submission": "node_accepted",
+                            "chain_observation": "unobserved_after_send",
+                            "intent_path": str(Path(args.intent).absolute()),
+                            "sampled_tip_hash": submitted_tip.tip_hash,
+                            "broadcast_attempts_this_invocation": 1,
+                            "authority": "none (not confirmed; no payment or lineage proof)",
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
                 checked = None
 
                 def verify_from_disk(stored: bytes) -> None:
@@ -353,6 +424,18 @@ def main(argv: list[str] | None = None) -> int:
             "do not automatically retry or broadcast.\n"
         )
         return 3
+    except RefundSubmissionUnknownError:
+        sys.stderr.write(
+            "Refund submission may have occurred; inspect exact durable intent and chain "
+            "manually. Do not retry automatically or create another signed attempt.\n"
+        )
+        return 4
+    except RefundPreflightError:
+        sys.stderr.write(
+            "Refund preflight refused; no send attempted by this invocation. "
+            "An intent may remain; do not automatically retry.\n"
+        )
+        return 2
     except Exception:  # noqa: BLE001 - must not print secret native/library errors
         sys.stderr.write("Recovery operation failed; no payment or funding authority.\n")
         return 2

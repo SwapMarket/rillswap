@@ -297,8 +297,21 @@ class RegtestRecoveryCoreReader:
             terms.refund_lock_height + 1,
         )
 
-    def _rpc(self, client: httpx.Client, method: str, params: list[object], request_id: int) -> Any:  # noqa: ANN401
-        if method not in {"getblockchaininfo", "getblockhash", "gettxout", "getrawtransaction"}:
+    def _rpc(
+        self,
+        client: httpx.Client,
+        method: str,
+        params: list[object],
+        request_id: int,
+        *,
+        submission: bool = False,
+    ) -> Any:  # noqa: ANN401
+        permitted = (
+            {"testmempoolaccept", "sendrawtransaction"}
+            if submission
+            else {"getblockchaininfo", "getblockhash", "gettxout", "getrawtransaction"}
+        )
+        if method not in permitted:
             raise RecoveryCoreProtocolError("unsupported read-only Core method")
         try:
             with client.stream(

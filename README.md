@@ -85,6 +85,33 @@ erasure of private key material from memory. The opt-in pinned Core test mines
 to height T+1, checks `testmempoolaccept` without broadcasting, and never
 uses funds outside disposable regtest.
 
+`rill recover broadcast-refund` is a **separate, explicit, regtest-only
+submission** of a BTC-to-LN client refund, not a retry of `sign-refund` and
+not a production recovery workflow. Supply the same independent trusted
+network, protected age identity, native library, exact attempt and revision,
+Core cookie/loopback port, encrypted snapshot, and `--fee-sat` as
+`sign-refund`, plus a **new** `--intent /trusted/private/new-intent.json`
+instead of `--output`. The command revalidates the full signed snapshot and
+exact outpoint, signs and validates only that refund, then durably creates and
+reads back a private, canonical intent containing the exact transaction bytes,
+txid, byte hash, network, selection, fee, and sampled tip. The intent is
+marked `submission_may_occur` **before** the first send attempt. Publication
+uncertainty (exit 3) prevents sending. It samples Core again, requires exact
+`testmempoolaccept` on those bytes, and calls `sendrawtransaction` at most once
+per invocation. A valid returned txid is reported as `node_accepted`, never
+as confirmed, final, paid, or swap-recovered. A lost/malformed response after
+the send begins returns **unknown** (exit 4) without an automatic retry.
+Existing intent paths are never overwritten or automatically resumed; the
+operator must reconcile exact txid, mempool, selected chain, conflicts, and
+LN state before any separate manual action. Even a `node_accepted` response
+can become stale or compete with a claim; `testmempoolaccept` is not a chain
+reservation. The intent directory must be operator-trusted, fsync-capable
+local storage. Partial or restored recovery files prove neither nonpayment
+nor complete funding lineage. **Do not use this regtest-only command with
+real funds or treat it as a production-ready refund broadcaster.** The
+opt-in pinned Core test submits once, verifies mempool entry, mines the refund,
+and checks exact block-qualified transaction bytes on disposable regtest.
+
 The export, export-update, and inspect commands are **offline only**. `rill recover
 export` explicitly creates a new binary age v1 X25519 file from canonical
 RS-007 plaintext supplied on standard input. It requires one public age

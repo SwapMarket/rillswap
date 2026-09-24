@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 MAX_REFUND_BYTES = 100_000
+MAX_INTENT_BYTES = 16 * 1024
 
 
 class RefundPublicationError(OSError):
@@ -42,7 +43,41 @@ def publish_new_signed_refund(
     `verify_from_disk` must fully revalidate the signed transaction against
     the previously checked binding and terms. This does not recheck the chain.
     """
-    if type(transaction) is not bytes or not 0 < len(transaction) <= MAX_REFUND_BYTES:
+    _publish_new_exact_file(
+        destination,
+        transaction,
+        verify_from_disk=verify_from_disk,
+        max_bytes=MAX_REFUND_BYTES,
+    )
+
+
+def publish_new_broadcast_intent(
+    destination: str | os.PathLike[str],
+    intent: bytes,
+    *,
+    verify_from_disk: Callable[[bytes], None],
+) -> None:
+    """Record the complete proposed send durably before any RPC submission.
+
+    The content verifier must check the exact selected recovery, signed bytes,
+    digest, and txid. Existence of a file is never permission to retry a send.
+    """
+    _publish_new_exact_file(
+        destination,
+        intent,
+        verify_from_disk=verify_from_disk,
+        max_bytes=MAX_INTENT_BYTES,
+    )
+
+
+def _publish_new_exact_file(
+    destination: str | os.PathLike[str],
+    transaction: bytes,
+    *,
+    verify_from_disk: Callable[[bytes], None],
+    max_bytes: int,
+) -> None:
+    if type(transaction) is not bytes or not 0 < len(transaction) <= max_bytes:
         raise RefundPublicationError("signed refund bytes exceed resource limit")
     path = Path(destination).absolute()
     if path.name in ("", ".", ".."):
@@ -68,7 +103,7 @@ def publish_new_signed_refund(
             os.fsync(stream.fileno())
         read_fd = os.open(temp_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
         with os.fdopen(read_fd, "rb", closefd=True) as stream:
-            stored = stream.read(MAX_REFUND_BYTES + 1)
+            stored = stream.read(max_bytes + 1)
         _require_readback_matches(stored, transaction)
         verify_from_disk(stored)
         os.link(

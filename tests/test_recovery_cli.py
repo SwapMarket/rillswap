@@ -96,12 +96,13 @@ def _signed_binding(package: dict[str, Any], revision: int, library: str) -> dic
 
 @NATIVE_ONLY
 @pytest.mark.native_crypto
-def test_observe_funding_checks_selected_encrypted_record_before_any_core_rpc(
+def test_observe_funding_checks_selected_encrypted_record_before_any_core_rpc(  # noqa: PLR0915 - ordered native recovery commands
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import pyrage  # noqa: PLC0415
     from rill_core.settlement import FundingBindingTransactionMatch  # noqa: PLC0415
+    from rill_core.wire.types import NetworkIdentity  # noqa: PLC0415
 
     from rill_cli import main as cli_main  # noqa: PLC0415
     from rill_cli.recovery_core_observation import RecoveryOutpointCandidate  # noqa: PLC0415
@@ -131,7 +132,7 @@ def test_observe_funding_checks_selected_encrypted_record_before_any_core_rpc(
             assert isinstance(keys, Context)
             seen.append(("refund" if for_refund else "observe", selected.binding_revision))
             return RecoveryOutpointCandidate(
-                package["network_identity"],  # type: ignore[arg-type]
+                NetworkIdentity.model_validate(package["network_identity"]),
                 FundingBindingTransactionMatch(
                     binding.funding_txid,
                     binding.contract_vout,
@@ -196,13 +197,95 @@ def test_observe_funding_checks_selected_encrypted_record_before_any_core_rpc(
     seen.clear()
     assert cli_main.main(signing_args) == 2  # Never overwrite the signed output.
     assert seen == [("connect", 0), ("refund", 0)]
+    seen.clear()
+    intent = tmp_path / "broadcast-intent.json"
+
+    def assert_persisted_then_submit(
+        _reader: object,
+        submitted_binding: FundingBinding,
+        _terms: object,
+        *,
+        keys: object,
+        raw: bytes,
+        expected_txid: str,
+    ) -> RecoveryOutpointCandidate:
+        from rill_cli.refund_broadcast import verify_refund_intent  # noqa: PLC0415
+
+        assert submitted_binding == binding
+        assert isinstance(keys, Context)
+        assert verify_refund_intent(intent.read_bytes(), intent.read_bytes()) == raw
+        assert len(expected_txid) == 64
+        seen.append(("send", 1))
+        return Reader().observe(binding, _terms, keys=keys, for_refund=True)
+
+    monkeypatch.setattr(cli_main, "submit_prepared_refund", assert_persisted_then_submit)
+    broadcast_args = [
+        "recover",
+        "broadcast-refund",
+        *selected_args[1:-1],
+        "--fee-sat",
+        "200",
+        "--intent",
+        str(intent),
+        str(encrypted),
+    ]
+    submitted = json.loads(cli_main._run(cli_main._parser().parse_args(broadcast_args)))  # noqa: SLF001
+    assert submitted["submission"] == "node_accepted"
+    assert submitted["chain_observation"] == "unobserved_after_send"
+    assert submitted["broadcast_attempts_this_invocation"] == 1
+    assert intent.stat().st_mode & 0o777 == 0o600
+    assert seen[:2] == [("connect", 0), ("refund", 0)]
+    assert seen.count(("send", 1)) == 1
+    seen.clear()
+    assert cli_main.main(broadcast_args) == 2
+    assert ("send", 1) not in seen
+    from rill_cli.refund_broadcast import RefundSubmissionUnknownError  # noqa: PLC0415
+    from rill_cli.refund_publication import RefundPublicationUncertainError  # noqa: PLC0415
+
+    another_intent = tmp_path / "uncertain-publication.json"
+    another_args = [
+        "recover",
+        "broadcast-refund",
+        *selected_args[1:-1],
+        "--fee-sat",
+        "200",
+        "--intent",
+        str(another_intent),
+        str(encrypted),
+    ]
+    original_publish = cli_main.publish_new_broadcast_intent
+
+    def cannot_confirm_persistence(*_args: object, **_kwargs: object) -> None:
+        raise RefundPublicationUncertainError("private failure")
+
+    monkeypatch.setattr(cli_main, "publish_new_broadcast_intent", cannot_confirm_persistence)
+    seen.clear()
+    assert cli_main.main(another_args) == 3
+    assert ("send", 1) not in seen
+    monkeypatch.setattr(cli_main, "publish_new_broadcast_intent", original_publish)
+
+    def ambiguous_submit(*_args: object, **_kwargs: object) -> None:
+        assert another_intent.exists()
+        seen.append(("send", 1))
+        raise RefundSubmissionUnknownError("private upstream result")
+
+    monkeypatch.setattr(cli_main, "submit_prepared_refund", ambiguous_submit)
+    seen.clear()
+    assert cli_main.main(another_args) == 4
+    assert seen.count(("send", 1)) == 1
+    assert another_intent.is_file()
+    seen.clear()
+    assert cli_main.main(another_args) == 2
+    assert ("send", 1) not in seen
 
 
 @NATIVE_ONLY
 @pytest.mark.native_crypto
+@pytest.mark.parametrize("command", ["sign-refund", "broadcast-refund"])
 def test_sign_refund_rejects_provider_refund_profile_before_rpc(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    command: str,
 ) -> None:
     import pyrage  # noqa: PLC0415
 
@@ -224,7 +307,7 @@ def test_sign_refund_rejects_provider_refund_profile_before_rpc(
         cli_main.main(
             [
                 "recover",
-                "sign-refund",
+                command,
                 *common,
                 "--funding-attempt-id",
                 "11" * 32,
@@ -236,7 +319,7 @@ def test_sign_refund_rejects_provider_refund_profile_before_rpc(
                 "18443",
                 "--fee-sat",
                 "200",
-                "--output",
+                "--output" if command == "sign-refund" else "--intent",
                 str(output),
                 str(encrypted),
             ]

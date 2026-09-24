@@ -205,6 +205,36 @@ else:
     print(json.dumps({'raw_hex': destination.read_bytes().hex(), 'txid': report['refund_txid']}))
 """
 
+PYTHON_BROADCAST_CHECK = """
+import contextlib, io, json, os
+from pathlib import Path
+from rill_cli.main import main
+work = Path('/work/cookie')
+intent_path = work / 'durable-refund-intent.json'
+args = ['recover', 'broadcast-refund', '--network', str(work / 'network.json'),
+        '--crypto-library', os.environ['RILL_CRYPTO_LIBRARY'],
+        '--identity', str(work / 'identity'),
+        '--funding-attempt-id', 'cc' * 32, '--binding-revision', '0',
+        '--rpc-cookie', str(work / 'core.cookie'), '--rpc-port', '18443',
+        '--fee-sat', '500', '--intent', str(intent_path), str(work / 'selected.age')]
+stdout, stderr = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+    status = main(args)
+assert status == 0, stderr.getvalue()
+report = json.loads(stdout.getvalue())
+assert report['kind'] == 'explicit-regtest-refund-submission/v1'
+assert report['submission'] == 'node_accepted'
+assert report['chain_observation'] == 'unobserved_after_send'
+assert report['broadcast_attempts_this_invocation'] == 1
+assert intent_path.stat().st_mode & 0o777 == 0o600
+persisted = json.loads(intent_path.read_bytes())
+assert persisted['refund_txid'] == report['refund_txid']
+assert persisted['state'] == 'submission_may_occur'
+with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+    assert main(args) == 2  # Never repeats submission with an existing intent.
+print(json.dumps({'txid': report['refund_txid'], 'raw_hex': persisted['signed_refund_hex']}))
+"""
+
 
 @pytest.mark.bitcoin_core
 @pytest.mark.skipif(
@@ -218,7 +248,7 @@ else:
         "initial-ln-to-btc-no-prepayment-v1.json",
     ],
 )
-def test_pinned_core_v30_observes_signed_age_binding_without_txindex(
+def test_pinned_core_v30_observes_and_refunds_without_txindex(  # noqa: PLR0915 - one disposable chain
     tmp_path: Path,
     fixture_name: str,
 ) -> None:
@@ -349,6 +379,22 @@ def test_pinned_core_v30_observes_signed_age_binding_without_txindex(
             assert len(acceptance) == 1
             assert acceptance[0]["allowed"] is True
             assert acceptance[0]["txid"] == signed["txid"]
+            assert not json.loads(_cli(container, "getmempoolinfo"))["size"]
+            submitted = json.loads(_python_check(container, tmp_path, PYTHON_BROADCAST_CHECK))
+            assert submitted["txid"] == signed["txid"]
+            entry = json.loads(_cli(container, "getmempoolentry", submitted["txid"]))
+            assert entry["wtxid"]
+            assert len(entry["wtxid"]) == 64
+            assert entry["height"] == 1101
+            assert entry["fees"]["base"] > 0
+            block = json.loads(_cli(container, "generatetoaddress", "1", mining))[0]
+            confirmed = json.loads(
+                _cli(container, "getrawtransaction", submitted["txid"], "true", block)
+            )
+            assert confirmed["in_active_chain"] is True
+            assert confirmed["blockhash"] == block
+            assert confirmed["hex"] == submitted["raw_hex"]
+            assert confirmed["confirmations"] >= 1
             assert not json.loads(_cli(container, "getmempoolinfo"))["size"]
     finally:
         subprocess.run(  # noqa: S603 - best-effort isolated container cleanup
