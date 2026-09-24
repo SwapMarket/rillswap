@@ -75,7 +75,10 @@ test("blocked or quota-limited storage fails without a commitment path", async (
   await page.goto(ROOT);
   await page.getByRole("button", { name: "Test browser storage" }).click();
   await expect(page.locator("#storage-status")).toContainText("Storage round-trip failed.");
-  expect(await page.getByRole("button").allTextContents()).toEqual(["Test browser storage"]);
+  expect(await page.getByRole("button").allTextContents()).toEqual([
+    "Test browser storage",
+    "Verify manual advertisement",
+  ]);
 });
 
 test("quota failure during the write aborts the diagnostic and cleans up", async ({ page }) => {

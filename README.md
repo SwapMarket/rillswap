@@ -8,10 +8,14 @@ reliable `file://` operation is not promised.
 Status: pre-release and not suitable for real funds.
 
 This is a **local-only development preview**, not a swap client. It bundles a
-small strict TypeScript/Vite static shell with relative asset paths. Chain-mode
+strict TypeScript/Vite static shell with relative asset paths. Chain-mode
 selection does not contact or verify a node; the provider-description field
-renders only inert pasted text. There is no provider discovery, quote, contract
-verification, wallet, signer, swap, watcher, recovery import, or payment UI.
+renders only inert pasted text. The manual signed-advertisement panel verifies
+canonical PUBLIC provider metadata against an independently entered identity
+and locally defined network/profile, and holds a revision maximum in memory
+for this tab only. Endpoints remain inert plain text, not approved connections.
+There is no relay discovery, quote, contract verification, wallet, signer,
+swap, watcher, recovery import, or payment UI.
 No financial action exists even if a diagnostic succeeds. Never enter secrets
 or send funds to this preview.
 
@@ -49,8 +53,9 @@ checks the isolated producer with disposable synthetic keys.
 `scripts/emit-nip59-test-wrap.ts` is test-only stdin/stdout glue for a local
 provider interoperability test. It must never receive production secrets.
 
-`src/manualProviderAdvertisement.ts` is a second **disconnected, read-only**
-boundary. It verifies only the RS-005 *application-signed* canonical manual
+`src/manualProviderAdvertisement.ts` is a **read-only** application verifier
+used only by the explicit manual-import panel. It verifies the RS-005
+*application-signed* canonical manual
 advertisement against an identity approved independently by the user, a
 complete selected network and profile, supported suite, bounded creation and
 expiry times, strict vendored JSON schemas, and RS-001 numeric bounds. The
@@ -63,12 +68,15 @@ Chromium's existing no-`unsafe-eval` CSP remains effective. Use
 The result is an authenticated **historical offer**, not evidence of liquidity,
 currentness beyond signed expiry, owner-controlled endpoint availability, or
 signing/admission authority. Advertised endpoints and mailbox keys are inert
-proposals; no connection or key allocation occurs. This function does **not**
-verify NIP-01 announcement IDs/signatures/tags and is never called by the
-browser preview. There is no registry, relay discovery, trust-pin persistence,
-automatic refresh, or manual import UI yet. A missing, partial, older-version,
-or restored cache proves no revision/currentness and triggers no automatic
-repair, rescan, network access, or state migration on upgrade.
+proposals; no connection or key allocation occurs. It does **not** verify
+NIP-01 announcement IDs/signatures/tags. There is no registry, relay
+discovery, trust-pin persistence, or automatic refresh. Same/lower revisions
+cannot replace an offer already observed in this tab, but reload loses that
+history and **cannot prove** global currentness or absence of a newer offer.
+The five locally defined network identities are vendored from rill-docs; custom
+networks are not selectable here. A missing, partial, older-version, or
+restored cache proves no revision/currentness and triggers no automatic repair,
+rescan, network access, or state migration on upgrade.
 
 The embedded build label is disclosure, **not** authenticated release pinning.
 There is no automatic update check, but reloading a mutable hosted URL can run

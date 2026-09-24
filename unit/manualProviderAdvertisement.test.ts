@@ -37,6 +37,16 @@ test("vendored discovery schema and signed fixture match reviewed docs hashes", 
     ["vectors/discovery/manual-advertisement-regtest-v1.json",
       "unit/fixtures/manual-advertisement-regtest-v1.json",
       "9a76830053da440eeb86280f7f633d5697226e3f4f47c8e08255d6535e8a9e10"],
+    ["networks/mainnet.json", "src/networks/mainnet.json",
+      "189ab9e2e8019c52320e602711f55e818ac92d72690a0bb2b0fcf985c5ae794b"],
+    ["networks/signet.json", "src/networks/signet.json",
+      "c9b93e9504a834fe1815b728c8a01bab4001abe22602ce12db8b0b1c07dfd751"],
+    ["networks/testnet3.json", "src/networks/testnet3.json",
+      "6c131991f6d0d4b99ea83660dfeec9ab65a0ae2a3ce6ba482685d332cf03ed47"],
+    ["networks/testnet4.json", "src/networks/testnet4.json",
+      "9726708f8e7eef112c307a729d5c68c60f15a4f976fb522f4d880cae33bbaf16"],
+    ["networks/regtest-rillswap-e2e-v1.json", "src/networks/regtest-rillswap-e2e-v1.json",
+      "1459c6aba0e5388d1fe2237ed735b1011f4ecace9bcd022566cb2d2f9caa1c7d"],
   ];
   for (const [docsRelative, webRelative, hash] of sources) {
     if (!docsRelative || !webRelative || !hash) throw new Error("test source missing");

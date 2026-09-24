@@ -1,4 +1,5 @@
 import "./style.css";
+import { mountManualProviderImport } from "./manualProviderImportUi";
 import { testBrowserStorage, type ProbeResult } from "./storageProbe";
 
 const BUILD_ID = "0.1.0-dev.0";
@@ -84,6 +85,7 @@ function mount(root: HTMLElement): void {
     });
   });
   root.append(probe, status, explanation);
+  mountManualProviderImport(root);
 }
 
 const root = document.getElementById("app");
