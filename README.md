@@ -12,6 +12,13 @@ defined by the versioned `specs/`, `schemas/`, and `vectors/` artifacts.
 ## Local conformance tests
 
 Run the static specification and vector suite with `.venv/bin/pytest -q`.
+`.github/workflows/static-conformance.yml` defines a read-only, source-checkout
+GitHub Actions job using Python 3.14, pinned actions and uv, hash-locked test
+dependencies, and an explicit exclusion of the Docker-only Core marker. It
+does not run the pinned Core integration case, publish artifacts, attest
+provenance, or constitute a release gate. There is no configured repository
+remote or hosted run evidence yet; local tests cannot establish that the
+hosted workflow has executed.
 The Bitcoin Core execution suite is opt-in because it starts a container and
 mines a regtest chain:
 
