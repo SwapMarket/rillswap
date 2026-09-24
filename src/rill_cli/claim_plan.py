@@ -194,6 +194,63 @@ def _verify_encrypted_claim_plan(  # noqa: PLR0913 - independent readback inputs
     )
 
 
+def load_verified_claim_bytes_for_regtest_disclosure(  # noqa: PLR0913 - trust inputs explicit
+    plan_ciphertext: bytes,
+    recovery_ciphertext: bytes,
+    expected_network: NetworkIdentity,
+    *,
+    credentials: X25519Credentials,
+    funding_attempt_id: str,
+    binding_revision: int,
+    crypto: RecoveryRefundCrypto,
+) -> tuple[bytes, ClaimPlanReceipt]:
+    """Release secret-bearing bytes ONLY to the explicit experimental CLI boundary.
+
+    Never log, publish in plaintext, pass to preflight before durable intent,
+    or treat a restored plan as evidence of no earlier disclosure.
+    """
+    try:
+        result = _load_verified_claim_bytes(
+            plan_ciphertext,
+            recovery_ciphertext,
+            expected_network,
+            credentials=credentials,
+            funding_attempt_id=funding_attempt_id,
+            binding_revision=binding_revision,
+            crypto=crypto,
+        )
+    except Exception:  # noqa: BLE001, S110 - no secret-bearing helper exception escapes
+        pass
+    else:
+        return result
+    raise ClaimPlanError("encrypted claim plan unavailable for experimental disclosure")
+
+
+def _load_verified_claim_bytes(  # noqa: PLR0913 - exact protected inputs explicit
+    plan_ciphertext: bytes,
+    recovery_ciphertext: bytes,
+    expected_network: NetworkIdentity,
+    *,
+    credentials: X25519Credentials,
+    funding_attempt_id: str,
+    binding_revision: int,
+    crypto: RecoveryRefundCrypto,
+) -> tuple[bytes, ClaimPlanReceipt]:
+    _require(type(credentials) is X25519Credentials, "protected X25519 credentials required")
+    recovery_plaintext = _bounded_plaintext(recovery_ciphertext, credentials)
+    plan_plaintext = _bounded_plaintext(plan_ciphertext, credentials)
+    receipt = _verify_plan(
+        plan_plaintext,
+        recovery_plaintext,
+        expected_network,
+        funding_attempt_id=funding_attempt_id,
+        binding_revision=binding_revision,
+        crypto=crypto,
+    )
+    plan = parse_model_json(_ClaimPlan, plan_plaintext)
+    return bytes.fromhex(plan.signed_claim_hex), receipt
+
+
 def prepare_encrypted_claim_plan(  # noqa: PLR0913 - no implicit chain/selector inputs
     recovery_ciphertext: bytes,
     expected_network: NetworkIdentity,

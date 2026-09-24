@@ -82,11 +82,38 @@ anyone with the public recipient can encrypt a replacement. Static recovery
 signatures and the claim transaction are revalidated on readback. A stored or
 restored plan may contain an out-of-date binding, fee, or witness; it does not
 prove current unspent funding, fee viability, complete lineage, LN state, or
-safe first disclosure. A future disclosure operation must separately
-reconcile those facts and record durable intent before revealing a preimage.
+safe first disclosure. Production disclosure still requires independently
+reconciling those facts and durable, rollback-safe exposure knowledge.
 Missing, partial, older-version, corrupt, or restored plan files never trigger
 automatic construction, migration, retry, or sending. Interrupted publication
 is uncertain (exit 3) and requires manual inspection rather than retry.
+
+`rill recover broadcast-claim` is an **EXPERIMENTAL, disposable-regtest-only
+preimage disclosure attempt**, not the production disclosure operation above.
+Supply the same trusted network, native library, age identity, exact selected
+attempt/revision, Core cookie/port, and encrypted recovery file as
+`observe-claim`, plus `--plan /trusted/private/prepared-claim.age`,
+`--intent /trusted/private/new-disclosure-intent.age`, and the required explicit
+`--acknowledge-regtest-preimage-disclosure` flag. **Never use a preimage also
+used with a real Lightning invoice, a funded swap, or another network.** The
+test fixture contains only a public synthetic preimage and disposable regtest
+coins. This command checks the signed plan against the selected recovery
+snapshot, samples Core, durably publishes and revalidates a private X25519
+encrypted create-only exact-byte intent marked `disclosure_may_occur`, then
+resamples the selected outpoint before one `testmempoolaccept` and at most one
+`sendrawtransaction`. **Even preflight can disclose the preimage to Core.** A
+definitive preflight rejection still reports exposure/submission **unknown**
+(exit 4), with no automatic retry. Intent durability uncertainty is exit 3;
+refusal before any witness-bearing RPC is exit 2; matching node acceptance is
+exit 0, **not confirmation or LN settlement**. Repeated invocations at the
+same intent path cannot send again, but another path, a deleted marker, or an
+older/restored snapshot can bypass that local check. Missing, partial, wrong-
+version, or restored intent is never an automatic migration or a fresh-secret
+proof. The operator must reconcile exposure and payment outside this tool.
+Neither the stdout receipt nor the encrypted intent is safe first-disclosure
+authority. No live LND hold/HTLC status, current complete funding lineage,
+fee-market viability, crash-safe global disclosure journal, recovery watcher,
+or rollback-safe replay fence is implemented.
 
 `rill recover sign-refund` constructs a **BTC-to-LN client refund only** for
 one explicitly selected signed funding binding, on disposable regtest. It
@@ -120,7 +147,7 @@ broadcast, or ongoing spendability.** A rapid reorganization, unobserved
 mempool activity, restored/older snapshots, and later spending can invalidate
 the sampled evidence. Recheck independently and reconcile every relevant
 outpoint before contemplating manual broadcast. An LN-to-BTC user does not own
-the refund key and must use a separate claim flow (not implemented). The local
+the refund key and must use the separate, experimental-only claim flow. The local
 directory must not be writable by untrusted actors; this tool is not a
 hostile-directory or ancestor-symlink defense. An interrupted publication may
 leave an artifact without a success report (exit 3 if detected), which requires

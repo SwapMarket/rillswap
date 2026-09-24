@@ -331,6 +331,45 @@ with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.St
 print(report['claim_txid'])  # Public, not a claim witness or disclosure authority.
 """
 
+PYTHON_BROADCAST_CLAIM = """
+import contextlib, io, json, os
+from pathlib import Path
+import pyrage
+from pyrage import x25519
+from rill_cli.main import main
+work = Path('/work/cookie')
+intent = work / 'experimental-disclosure-intent.age'
+args = ['recover', 'broadcast-claim', '--network', str(work / 'network.json'),
+        '--crypto-library', os.environ['RILL_CRYPTO_LIBRARY'],
+        '--identity', str(work / 'identity'),
+        '--funding-attempt-id', 'cc' * 32, '--binding-revision', '0',
+        '--rpc-cookie', str(work / 'core.cookie'), '--rpc-port', '18443',
+        '--plan', str(work / 'encrypted-claim-plan.age'), '--intent', str(intent),
+        '--acknowledge-regtest-preimage-disclosure', str(work / 'selected.age')]
+stdout, stderr = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+    status = main(args)
+assert status == 0, stderr.getvalue()
+report = json.loads(stdout.getvalue())
+assert report['kind'] == 'experimental-regtest-claim-disclosure/v1'
+assert report['submission'] == 'node_accepted'
+assert report['authority'].startswith('none')
+assert report['disclosure'] == 'may_have_occurred'
+assert intent.stat().st_mode & 0o777 == 0o600
+identity = x25519.Identity.from_str((work / 'identity').read_text().strip())
+plan = json.loads(pyrage.decrypt((work / 'encrypted-claim-plan.age').read_bytes(), [identity]))
+disclosure = json.loads(pyrage.decrypt(intent.read_bytes(), [identity]))
+assert disclosure['disclosure_may_occur'] is True
+assert disclosure['signed_claim_hex'] == plan['signed_claim_hex']
+assert disclosure['signed_claim_txid'] == report['claim_txid']
+assert '5252525252525252' not in stdout.getvalue() + stderr.getvalue()
+assert plan['signed_claim_hex'] not in stdout.getvalue() + stderr.getvalue()
+assert '5252525252525252' not in intent.read_bytes().decode('latin1')
+with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+    assert main(args) == 2  # No reuse even after node acceptance.
+print(report['claim_txid'])
+"""
+
 
 @pytest.mark.bitcoin_core
 @pytest.mark.skipif(
@@ -546,6 +585,126 @@ def test_pinned_core_v30_observes_and_refunds_without_txindex(  # noqa: PLR0915 
                 )
                 == "claim observation refused without preimage"
             )
+    finally:
+        subprocess.run(  # noqa: S603 - best-effort isolated container cleanup
+            [DOCKER, "rm", "--force", "--volumes", container],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+
+
+@pytest.mark.bitcoin_core
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_BITCOIN_CORE") != "1",
+    reason="set RILLSWAP_RUN_BITCOIN_CORE=1 for disposable pinned Core regtest",
+)
+def test_pinned_core_v30_experimental_claim_discloses_only_after_encrypted_intent(
+    tmp_path: Path,
+) -> None:
+    assert DOCKER is not None
+    assert (CRYPTO / "tmp/build/librill_crypto.so").is_file()
+    container = f"rillswap-recovery-claim-disclosure-{secrets.token_hex(6)}"
+    try:
+        _docker(
+            "run",
+            "--detach",
+            "--name",
+            container,
+            "--platform",
+            "linux/amd64",
+            "--network",
+            "none",
+            CORE_IMAGE,
+            "-regtest=1",
+            "-server=1",
+            "-listen=0",
+            "-discover=0",
+            "-dnsseed=0",
+            "-txindex=0",
+            "-fallbackfee=0.00001000",
+            "-rpcbind=0.0.0.0",
+            "-rpcallowip=127.0.0.1",
+            "-printtoconsole=1",
+        )
+        for _ in range(60):
+            ready = subprocess.run(  # noqa: S603 - fixed pinned Core container
+                [
+                    DOCKER,
+                    "exec",
+                    "--user",
+                    "bitcoin:bitcoin",
+                    container,
+                    "bitcoin-cli",
+                    "-regtest",
+                    "-datadir=/home/bitcoin/.bitcoin",
+                    "getblockchaininfo",
+                ],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            if ready.returncode == 0:
+                break
+            time.sleep(0.2)
+        else:
+            raise AssertionError("pinned Core did not become ready")
+        _cli(container, "createwallet", "experimental-claim-test")
+        mining = _cli(
+            container, "-rpcwallet=experimental-claim-test", "getnewaddress", "", "bech32m"
+        )
+        _cli(container, "generatetoaddress", "101", mining)
+        fixture_name = "initial-ln-to-btc-no-prepayment-v1.json"
+        fixture = json.loads((ROOT / "tests/fixtures" / fixture_name).read_text())
+        address = _p2tr_regtest_address(bytes.fromhex(fixture["taproot_contract"]["script_pubkey"]))
+        amount = int(fixture["contract_terms"]["economics"]["contract_amount_sat"])
+        funding_txid = _cli(
+            container,
+            "-rpcwallet=experimental-claim-test",
+            "sendtoaddress",
+            address,
+            f"{amount / 100_000_000:.8f}",
+        )
+        _cli(container, "generatetoaddress", "1", mining)
+        block = _cli(container, "getbestblockhash")
+        transaction = _cli(container, "getrawtransaction", funding_txid, "true", block)
+        _docker(
+            "cp",
+            f"{container}:/home/bitcoin/.bitcoin/regtest/.cookie",
+            str(tmp_path / "core.cookie"),
+        )
+        (tmp_path / "core.cookie").chmod(0o600)
+        assert (
+            _python_check(
+                container,
+                tmp_path,
+                PYTHON_CHECK,
+                "--env",
+                f"RILL_TEST_TXID={funding_txid}",
+                "--env",
+                f"RILL_TEST_TRANSACTION={transaction}",
+                "--env",
+                f"RILL_TEST_INCLUSION_BLOCK={block}",
+                "--env",
+                f"RILL_TEST_FIXTURE={fixture_name}",
+            )
+            == "pinned Core v30 byte-matched selected read-only recovery candidate; no txindex"
+        )
+        assert not (tmp_path / "experimental-disclosure-intent.age").exists()
+        _cli(container, "generatetoaddress", "1", mining)
+        prepared_txid = _python_check(container, tmp_path, PYTHON_PREPARE_CLAIM)
+        assert not json.loads(_cli(container, "getmempoolinfo"))["size"]
+        disclosed_txid = _python_check(container, tmp_path, PYTHON_BROADCAST_CLAIM)
+        assert disclosed_txid == prepared_txid
+        entry = json.loads(_cli(container, "getmempoolentry", disclosed_txid))
+        assert entry["wtxid"]
+        assert len(entry["wtxid"]) == 64
+        confirmed_block = json.loads(_cli(container, "generatetoaddress", "1", mining))[0]
+        confirmed = json.loads(
+            _cli(container, "getrawtransaction", disclosed_txid, "true", confirmed_block)
+        )
+        assert confirmed["in_active_chain"] is True
+        assert confirmed["confirmations"] >= 1
     finally:
         subprocess.run(  # noqa: S603 - best-effort isolated container cleanup
             [DOCKER, "rm", "--force", "--volumes", container],

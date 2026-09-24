@@ -30,6 +30,12 @@ from rill_cli.age_container import (
     inspect_container_selected_funding_context,
     verify_export_ciphertext,
 )
+from rill_cli.claim_disclosure import (
+    ClaimDisclosureRefusedError,
+    ClaimDisclosureUnknownError,
+    ClaimIntentUncertainError,
+    disclose_claim_on_regtest,
+)
 from rill_cli.claim_plan import prepare_encrypted_claim_plan, verify_encrypted_claim_plan
 from rill_cli.publication import (
     RecoveryPublicationUncertainError,
@@ -99,6 +105,7 @@ def _parser() -> argparse.ArgumentParser:
         ("observe-funding", "explicit regtest candidate (never signing authority)"),
         ("observe-claim", "read-only LN-to-BTC claim candidate (no preimage)"),
         ("prepare-claim", "create encrypted LN-to-BTC claim plan (no disclosure)"),
+        ("broadcast-claim", "EXPERIMENTAL regtest preimage disclosure and one send"),
         ("sign-refund", "explicit BTC-to-LN refund artifact (never broadcasts)"),
         ("broadcast-refund", "explicit regtest refund submit (never retries)"),
     ):
@@ -137,6 +144,17 @@ def _parser() -> argparse.ArgumentParser:
                 operation.add_argument(
                     "--output", required=True, help="create-only encrypted claim plan file"
                 )
+        if command == "broadcast-claim":
+            operation.add_argument("--plan", required=True, help="selected encrypted claim plan")
+            operation.add_argument(
+                "--intent", required=True, help="create-only encrypted disclosure intent"
+            )
+            operation.add_argument(
+                "--acknowledge-regtest-preimage-disclosure",
+                required=True,
+                action="store_true",
+                help="test-only key; may reveal it even on rejection",
+            )
         operation.add_argument("file", help="explicit encrypted age recovery file")
     return parser
 
@@ -246,10 +264,11 @@ def _run(args: argparse.Namespace) -> str:  # noqa: PLR0911, PLR0912, PLR0915 - 
             "observe-funding",
             "observe-claim",
             "prepare-claim",
+            "broadcast-claim",
             "sign-refund",
             "broadcast-refund",
         }:
-            if args.command == "prepare-claim" and not args.identity:
+            if args.command in {"prepare-claim", "broadcast-claim"} and not args.identity:
                 raise RecoveryCLIError("protected X25519 identity required for claim plan")
             inspection_credentials = (
                 PassphraseCredentials(_prompt())
@@ -277,7 +296,7 @@ def _run(args: argparse.Namespace) -> str:  # noqa: PLR0911, PLR0912, PLR0915 - 
                 or selected.terms.refund_party != "client"
             ):
                 raise RecoveryCLIError("selected recovery is not a client refund")
-            if args.command in {"observe-claim", "prepare-claim"} and (
+            if args.command in {"observe-claim", "prepare-claim", "broadcast-claim"} and (
                 selected.terms.profile_id != "ln-to-btc/v1" or selected.terms.claimant != "client"
             ):
                 raise RecoveryCLIError("selected recovery is not a client claim")
@@ -287,6 +306,38 @@ def _run(args: argparse.Namespace) -> str:  # noqa: PLR0911, PLR0912, PLR0915 - 
                 cookie_path=Path(args.rpc_cookie),
                 network=network,
             )
+            if args.command == "broadcast-claim":
+                if not isinstance(inspection_credentials, X25519Credentials):
+                    raise RecoveryCLIError("protected X25519 identity required")
+                with Path(args.plan).open("rb") as stream:
+                    plan_ciphertext = stream.read(MAX_CIPHERTEXT_BYTES + 1)
+                result = disclose_claim_on_regtest(
+                    reader,
+                    selected.binding,
+                    selected.terms,
+                    keys=crypto,
+                    recovery_ciphertext=ciphertext,
+                    plan_ciphertext=plan_ciphertext,
+                    network=network,
+                    credentials=inspection_credentials,
+                    funding_attempt_id=args.funding_attempt_id,
+                    binding_revision=args.binding_revision,
+                    intent_path=args.intent,
+                )
+                return json.dumps(
+                    {
+                        "kind": "experimental-regtest-claim-disclosure/v1",
+                        "claim_txid": result.claim_txid,
+                        "sampled_tip_hash": result.sampled_tip_hash,
+                        "sampled_tip_height": result.sampled_tip_height,
+                        "submission": "node_accepted",
+                        "disclosure": "may_have_occurred",
+                        "chain_observation": "unobserved_after_send",
+                        "authority": "none (not LN settlement or safe first-disclosure proof)",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
             if args.command in {"observe-claim", "prepare-claim"}:
                 candidate = reader.observe_claim(selected.binding, selected.terms, keys=crypto)
             else:
@@ -506,7 +557,7 @@ def _inspect_identity_credentials(path: str) -> X25519Credentials:
     return X25519Credentials(str(recipient), identity)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911 - distinct failure exit codes
     """Run explicit recovery commands only; sanitize errors and private input."""
     args = _parser().parse_args(argv)
     try:
@@ -529,6 +580,23 @@ def main(argv: list[str] | None = None) -> int:
             "manually. Do not retry automatically or create another signed attempt.\n"
         )
         return 4
+    except ClaimIntentUncertainError:
+        sys.stderr.write(
+            "Encrypted claim disclosure intent durability uncertain; do not retry or reveal.\n"
+        )
+        return 3
+    except ClaimDisclosureUnknownError:
+        sys.stderr.write(
+            "Experimental claim preimage may have reached Core; submission unknown. "
+            "Reconcile manually; never retry automatically.\n"
+        )
+        return 4
+    except ClaimDisclosureRefusedError:
+        sys.stderr.write(
+            "Experimental claim refused before witness-bearing RPC; encrypted intent may remain. "
+            "Do not retry automatically.\n"
+        )
+        return 2
     except RefundPreflightError:
         sys.stderr.write(
             "Refund preflight refused; no send attempted by this invocation. "
