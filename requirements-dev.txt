@@ -68,6 +68,8 @@ pydantic-core==2.46.5
     # via pydantic
 pygments==2.21.0
     # via pytest
+pyrage==1.4.0
+    # via rill-provider
 pytest==9.1.1
     # via -r requirements-dev.in
 rfc8785==0.1.4

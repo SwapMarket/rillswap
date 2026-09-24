@@ -64,14 +64,44 @@ available session-key reference and configured provider identity, validates
 offered/selected negotiation and signer identity, verifies the returned BIP340
 signature, and returns only the identity signature on the **inner** acceptance.
 It never admits a session, persists a pending record, sends an accept, or
-authorizes funding/payment. The only key-custody implementation is an
-**explicitly test-only in-memory fixture in the test suite**: it cannot
-resume on restart and must never be deployed. Production identity custody,
-durable session-key availability, pending intent/replay store, transport,
-ordering, and effect fencing are still missing. Without durable custody and
-a committed response, no acceptance may be sent. Upgrading from the previous
-provider release does not create, migrate, or scan any session state; absent,
-partial, old, or restored state grants no key allocation or action authority.
+authorizes funding/payment. The only implementation of the live
+`HandshakeCustody` signing interface is an **explicitly test-only in-memory
+fixture**: it cannot resume on restart and must never be deployed. Production
+signing integration, pending intent/replay store, transport, ordering, and
+effect fencing are still missing. Without an independently authoritative,
+durably committed response, no acceptance may be sent. Upgrading from the
+previous provider release does not create, migrate, or scan any session state;
+absent, partial, old, or restored state grants no key allocation or action
+authority.
+
+`handshake_custody_offline.OfflineHandshakeCustody` is an optional, **offline
+key-availability primitive**, deliberately not an implementation of the live
+signing interface. Its protected age X25519 identity is an external operator
+root, supplied explicitly at `create_new` and `open_existing` and backed up
+separately. The API explicitly provisions a new identity and then a session
+key for one complete `SessionReservation` in immutable X25519-encrypted files.
+It returns public `IdentityRef`/`SessionKeyRef` values, which the operator must
+pin outside the writable store. `open_existing` requires the previously pinned
+custody ID and complete network; `require_identity_exact` and
+`require_session_exact` only check that the expected key is locally available
+and bound to the recorded public intent. These calls never allocate missing
+keys. No API exposes the decrypted private scalars for signing, sends or
+receives a handshake, opens the PREPARED SQLite registry, or grants session,
+funding, payment, or recovery authority. Treat the protected identity and the
+trusted local private directory **and its ancestors** as sensitive. The
+implementation uses owner-private directories and files, `O_NOFOLLOW` on the
+final component, create-only hard links, bounded ciphertext/plaintext, exact
+readback, and file/directory fsync; it does not defend against an untrusted
+ancestor-path writer, a compromised process, or stolen decryption credentials.
+An interruption after publication has an **uncertain** result and must be
+reconciled manually; never retry, replace, or regenerate based on absent,
+partial, older, newer, or restored files. Even a valid restored encrypted copy
+can omit later allocations and can pass every exact local check: age encryption
+protects confidentiality and integrity, **not freshness or provenance**.
+These files have never existed in earlier releases, so upgrading does not
+create or migrate them and no startup path reads them. Independent non-rollback
+admission ownership, protected production signing, and authenticated ordered
+delivery remain required before this primitive can be connected to live swaps.
 
 `handshake_store.PreparedHandshakeStore` is a separate **offline-only**,
 explicitly bootstrapped SQLite PREPARED registry. It can record a canonical
