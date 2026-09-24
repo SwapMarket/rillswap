@@ -13,6 +13,7 @@ import pytest
 
 from rill_core.errors import ValidationError
 from rill_core.recovery import (
+    construct_selected_recovery_claim,
     construct_selected_recovery_refund,
     inspect_recovery_plaintext,
     inspect_recovery_selected_funding_binding,
@@ -393,6 +394,19 @@ def test_native_signatures_check_static_replacement_history_without_chain_claim(
         parsed_refund = validate_unilateral_spend(raw_refund, refund_authorization, verifier=crypto)
         assert parsed_refund.fee_sat == 200
         assert parsed_refund.raw_transaction == raw_refund
+        with pytest.raises(ValidationError, match="recovery claim preparation refused"):
+            construct_selected_recovery_claim(
+                plaintext,
+                network,
+                funding_attempt_id="cc" * 32,
+                binding_revision=1,
+                live_funding=funding,
+                sampled_tip_height=100,
+                sampled_confirmations=2,
+                fee_sat=200,
+                auxiliary_random=b"\x55" * 32,
+                crypto=crypto,
+            )
         with pytest.raises(ValidationError, match="recovery refund construction refused"):
             construct_selected_recovery_refund(
                 plaintext,
@@ -523,5 +537,28 @@ def test_real_crypto_provider_funder_signed_context_stays_static_only() -> None:
                 auxiliary_random=b"\x55" * 32,
                 crypto=crypto,
             )
+        claim = construct_selected_recovery_claim(
+            plaintext,
+            network,
+            funding_attempt_id="cc" * 32,
+            binding_revision=0,
+            live_funding=funding,
+            sampled_tip_height=100,
+            sampled_confirmations=2,
+            fee_sat=200,
+            auxiliary_random=b"\x55" * 32,
+            crypto=crypto,
+        )
+        preimage = bytes.fromhex(document["monotonic_knowledge"]["preimage"])
+        assert preimage in claim
+        claim_authorization = UnilateralAuthorization.from_terms(
+            terms,
+            funding,
+            "claim",
+            keys=crypto,
+        )
+        parsed = validate_unilateral_spend(claim, claim_authorization, verifier=crypto)
+        assert parsed.fee_sat == 200
+        assert parsed.raw_transaction == claim
         with pytest.raises(ValidationError, match="invalid static signed funding declaration"):
             verify(wrong_secret)

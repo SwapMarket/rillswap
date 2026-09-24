@@ -12,6 +12,7 @@ import pytest
 from rill_core.errors import CanonicalizationError, ValidationError
 from rill_core.recovery import (
     OfflineRecoveryInspection,
+    construct_selected_recovery_claim,
     construct_selected_recovery_refund,
     inspect_recovery_plaintext,
     inspect_recovery_selected_funding_binding,
@@ -463,6 +464,30 @@ def test_refund_construction_requires_exact_selected_record_and_maturity(
                 funding.txid, funding.output_index, funding.value_sat + 1, funding.script_pubkey
             )
         },
+        {
+            "live_funding": FundingOutput(
+                b"\xee" * 32,
+                funding.output_index,
+                funding.value_sat,
+                funding.script_pubkey,
+            )
+        },
+        {
+            "live_funding": FundingOutput(
+                funding.txid,
+                funding.output_index + 1,
+                funding.value_sat,
+                funding.script_pubkey,
+            )
+        },
+        {
+            "live_funding": FundingOutput(
+                funding.txid,
+                funding.output_index,
+                funding.value_sat,
+                b"\x51\x20" + b"\xaa" * 32,
+            )
+        },
         {"fee_sat": int(document["contract_terms"]["max_refund_fee_sat"]) + 1},
         {"auxiliary_random": b"\x00"},
     )
@@ -489,6 +514,115 @@ def test_refund_construction_requires_exact_selected_record_and_maturity(
 
     monkeypatch.setattr(crypto, "schnorr_sign", leak, raising=False)
     with pytest.raises(ValidationError, match="recovery refund construction refused") as error:
+        construct()
+    assert document["user_secret"]["contract_secret_key"] not in repr(error.value)
+    assert error.value.__context__ is None
+    assert error.value.__cause__ is None
+
+
+def test_claim_preparation_is_secret_bearing_but_not_disclosure_authority(  # noqa: PLR0915 - negative matrix
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document: dict[str, Any] = json.loads(
+        (FIXTURES / "initial-ln-to-btc-no-prepayment-v1.json").read_bytes()
+    )
+    other = next(
+        item
+        for item in json.loads(TAPROOT.read_text())["valid"]
+        if item["profile_id"] == "ln-to-btc/v1"
+    )
+    crypto = FixtureCrypto(document, other["artifacts"])
+    _add_history(document, crypto, 1)
+    binding = FundingBinding.model_validate(document["funding_history"][0]["binding"])
+    funding = FundingOutput(
+        bytes.fromhex(binding.funding_txid),
+        binding.contract_vout,
+        int(binding.contract_value_sat),
+        bytes.fromhex(binding.contract_script_pubkey),
+    )
+    knowledge = document["monotonic_knowledge"]
+    assert knowledge["preimage_known"] is True
+    preimage = bytes.fromhex(knowledge["preimage"])
+    calls: list[bytes] = []
+
+    def sign(secret: bytes, digest: bytes, auxiliary: bytes) -> bytes:
+        assert secret.hex() == document["user_secret"]["contract_secret_key"]
+        assert auxiliary == b"\x55" * 32
+        calls.append(digest)
+        crypto.allow(
+            document["contract_terms"]["client_contract_compressed_key"][2:], digest, "44" * 64
+        )
+        return b"\x44" * 64
+
+    monkeypatch.setattr(crypto, "schnorr_sign", sign, raising=False)
+    options: dict[str, Any] = {
+        "funding_attempt_id": binding.funding_attempt_id,
+        "binding_revision": binding.binding_revision,
+        "live_funding": funding,
+        "sampled_tip_height": 1094,
+        "sampled_confirmations": 2,
+        "fee_sat": 200,
+        "auxiliary_random": b"\x55" * 32,
+        "crypto": crypto,
+    }
+
+    def construct(record: dict[str, Any] = document, **changes: object) -> bytes:
+        return construct_selected_recovery_claim(
+            _canonical(record),
+            _network(document),
+            **{**options, **changes},
+        )
+
+    raw = construct()
+    assert preimage in raw  # Witness reveals it, so never publish this result by default.
+    assert len(calls) == 1
+    failures = (
+        {"sampled_confirmations": 1},
+        {"sampled_confirmations": True},
+        {"sampled_confirmations": 1096},
+        {"sampled_tip_height": 1095},  # h + delta == T + 1 is insufficient.
+        {"sampled_tip_height": False},
+        {"sampled_tip_height": -1},
+        {"funding_attempt_id": "00" * 32},
+        {"binding_revision": 1},
+        {
+            "live_funding": FundingOutput(
+                funding.txid, funding.output_index, funding.value_sat + 1, funding.script_pubkey
+            )
+        },
+        {"fee_sat": int(document["contract_terms"]["max_claim_fee_sat"]) + 1},
+        {"auxiliary_random": b"\x00"},
+    )
+    for mismatch in failures:
+        with pytest.raises(ValidationError, match="recovery claim preparation refused") as error:
+            construct(**mismatch)
+        assert error.value.__cause__ is None
+        assert error.value.__context__ is None
+    assert len(calls) == 1
+    for mutation in ("no-preimage", "wrong-preimage", "wrong-key", "wrong-history"):
+        changed = copy.deepcopy(document)
+        if mutation == "no-preimage":
+            changed["monotonic_knowledge"].update(preimage_known=False, preimage=None)
+        elif mutation == "wrong-preimage":
+            changed["monotonic_knowledge"]["preimage"] = "00" * 32
+        elif mutation == "wrong-key":
+            changed["user_secret"]["contract_secret_key"] = "01" * 32
+        else:
+            changed["funding_history"][0]["funder_session_signature"] = "00" * 64
+        with pytest.raises(ValidationError, match="recovery claim preparation refused"):
+            construct(changed)
+    assert len(calls) == 1
+    monkeypatch.setattr(crypto, "schnorr_sign", lambda *_args: b"\x00" * 64, raising=False)
+    with pytest.raises(ValidationError, match="recovery claim preparation refused") as error:
+        construct()
+    assert error.value.__context__ is None
+    assert error.value.__cause__ is None
+
+    def leak(secret: bytes, *_args: bytes) -> bytes:
+        raise OSError("secret-bearing native failure: " + secret.hex())
+
+    monkeypatch.setattr(crypto, "schnorr_sign", leak, raising=False)
+    with pytest.raises(ValidationError, match="recovery claim preparation refused") as error:
         construct()
     assert document["user_secret"]["contract_secret_key"] not in repr(error.value)
     assert error.value.__context__ is None

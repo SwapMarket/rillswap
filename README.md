@@ -109,6 +109,20 @@ read-only observation is staleable and is not permission to broadcast or to
 conclude payment failed. The operation rejects the LN-to-BTC user role; that
 profile's independent recovery is a separate **claim** flow involving the
 preimage. Python secret bytes are not guaranteed erased from memory.
+`recovery.construct_selected_recovery_claim` is a separate, explicitly invoked
+LN-to-BTC **client pre-disclosure preparation** function. It checks the full
+signed record and selected binding, the caller-supplied exact outpoint,
+minimum signed funding confirmations, and the signed timing condition
+`sampled_tip_height + claim_confirmation_blocks < refund_lock_height + 1`.
+It reuses RS-002's authenticated destination, fee cap, and final BIP340
+signature checks. **Its returned signed transaction bytes contain the client
+preimage in the claim witness.** Do not print, transmit, publish, or submit
+those bytes to Core without a separate independent disclosure decision,
+confirmed funding and fee viability, and durable recovery planning. Caller
+samples are untrusted; success does not prove chain freshness or payment state.
+The function performs no IO, RPC, broadcast, or persisted-state update. Its
+pre-disclosure deadline is not a general veto on an urgent claim after the
+preimage has already been exposed.
 
 `settlement.verify_static_signed_funding_binding_history` is an explicit
 effect-free check of nonempty signed funding declarations. Its caller supplies

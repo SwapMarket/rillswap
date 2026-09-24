@@ -3,6 +3,7 @@
 from rill_core.recovery.inspection import (
     OfflineRecoveryInspection,
     SelectedRecoveryFundingContext,
+    construct_selected_recovery_claim,
     construct_selected_recovery_refund,
     inspect_recovery_plaintext,
     inspect_recovery_selected_funding_binding,
@@ -13,6 +14,7 @@ from rill_core.recovery.inspection import (
 __all__ = [
     "OfflineRecoveryInspection",
     "SelectedRecoveryFundingContext",
+    "construct_selected_recovery_claim",
     "construct_selected_recovery_refund",
     "inspect_recovery_plaintext",
     "inspect_recovery_selected_funding_binding",

@@ -392,6 +392,80 @@ def construct_selected_recovery_refund(  # noqa: PLR0913 - all independent check
     raise ValidationError("recovery refund construction refused")
 
 
+def construct_selected_recovery_claim(  # noqa: PLR0913 - independent policy inputs explicit
+    document: bytes,
+    expected_network: NetworkIdentity,
+    *,
+    funding_attempt_id: str,
+    binding_revision: int,
+    live_funding: FundingOutput,
+    sampled_tip_height: int,
+    sampled_confirmations: int,
+    fee_sat: int,
+    auxiliary_random: bytes,
+    crypto: RecoveryRefundCrypto,
+) -> bytes:
+    """Prepare an LN-to-BTC user claim, NOT permission to disclose its preimage.
+
+    The returned transaction bytes CONTAIN the client's preimage in the claim
+    witness. Caller-supplied height/confirmations/UTXO are untrusted here and
+    do not establish freshness, fee viability, durable recovery, or safety to
+    expose this transaction to any external party (including a Core RPC).
+    This function has no network, file, broadcast, or state side effects.
+    The pre-disclosure margin is not a general prohibition on an urgent claim
+    after the preimage has already become public.
+    """
+    try:
+        record, _ = _validated_record(document, expected_network, crypto)
+        binding = _select_record_binding(record, funding_attempt_id, binding_revision)
+        terms = record.contract_terms
+        knowledge = record.monotonic_knowledge
+        _require(
+            terms.profile_id == "ln-to-btc/v1"
+            and terms.claimant == "client"
+            and terms.timing_policy.kind == "ln-to-btc"
+            and type(sampled_tip_height) is int
+            and sampled_tip_height >= 0
+            and type(sampled_confirmations) is int
+            and sampled_confirmations >= terms.funding_confirmations
+            and sampled_confirmations <= sampled_tip_height + 1
+            and sampled_tip_height + terms.timing_policy.claim_confirmation_blocks
+            < terms.refund_lock_height + 1
+            and type(fee_sat) is int
+            and type(auxiliary_random) is bytes
+            and len(auxiliary_random) == SCHNORR_AUXILIARY_BYTES
+            and type(live_funding) is FundingOutput
+            and live_funding.txid == bytes.fromhex(binding.funding_txid)
+            and live_funding.output_index == binding.contract_vout
+            and live_funding.value_sat == int(binding.contract_value_sat)
+            and live_funding.script_pubkey == bytes.fromhex(binding.contract_script_pubkey)
+            and knowledge.preimage_known
+            and knowledge.preimage is not None,
+            "selected claim pre-disclosure conditions are not established",
+        )
+        authorization = UnilateralAuthorization.from_terms(
+            terms,
+            live_funding,
+            "claim",
+            keys=crypto,
+        )
+        _require(
+            authorization.signer_public_key
+            == bytes.fromhex(terms.client_contract_compressed_key)[1:],
+            "recovery claim does not belong to client",
+        )
+        preimage = bytes.fromhex(knowledge.preimage or "")
+        plan = build_unilateral_spend(authorization, fee_sat=fee_sat, claim_preimage=preimage)
+        secret = bytes.fromhex(record.user_secret.contract_secret_key)
+        signature = crypto.schnorr_sign(secret, plan.signature_hash, auxiliary_random)
+        result = finalize_unilateral_spend(plan, signature, verifier=crypto).raw_transaction
+    except Exception:  # noqa: BLE001, S110 - preimage, secret, and signer errors stay private
+        pass
+    else:
+        return result
+    raise ValidationError("recovery claim preparation refused")
+
+
 def _parse_and_inspect(
     document: bytes, expected_network: NetworkIdentity, crypto: RecoveryCrypto
 ) -> OfflineRecoveryInspection:
