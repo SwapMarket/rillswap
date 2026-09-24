@@ -369,7 +369,7 @@ and exact generation-tool versions are checked. The focused fake transport
 and real synthetic loopback gRPC TLS tests run in the normal pytest suite;
 the synthetic tests alone are **not** a real LND regtest integration check.
 
-To run the two opt-in pinned **empty-wallet** diagnostics, keep `rill-core` and
+To run the three opt-in pinned **disposable-regtest** diagnostics, keep `rill-core` and
 `rill-provider` as sibling source checkouts. Install `requirements-dev.txt`
 in this repository's local Python 3.14 `.venv` (including pinned
 `grpcio-tools`), and have Docker capable of running the pinned `linux/amd64`
@@ -379,7 +379,7 @@ Core, LND, and Python images. From this repository:
 RILLSWAP_RUN_LND=1 .venv/bin/pytest -q -m lnd --basetemp=tmp/pytest
 ```
 
-Each test creates uniquely named, run-labeled containers; Core has no network,
+Each test creates uniquely named, run-labeled containers; Core has no external network,
 and LND and the test client share Core's loopback namespace without published
 ports. It mounts the sibling source and local environment **read-only**, and
 uses tmpfs for Core data, LND wallet/credentials, and the client credential.
@@ -391,10 +391,18 @@ one OP_RETURN regtest block (no spendable output or wallet), waits for LND
 `SERVER_ACTIVE`, then creates one unfunded hold invoice with a fresh hash,
 observes OPEN and CANCELED through an `invoices:read` macaroon, and makes no
 channel or payment. An ambiguous creation result is never retried; the owned
-tmpfs containers are removed. Neither is a funded LN-to-BTC trial.
+tmpfs containers are removed. The third diagnostic creates a fresh Core
+**test-only** wallet inside container tmpfs, mines 101 regtest blocks to mature
+coinbase, funds one LND wallet with 0.02 test BTC, connects two distinct LND
+nodes, and opens one private 1,000,000-sat channel using a single submission.
+It confirms the same active funding outpoint, capacity, and peer identity on
+both nodes, and a confirmed P2WSH funding output in Core. No invoice, HTLC,
+Lightning payment, or swap occurs in this third test. Failed or ambiguous
+channel submissions are never retried; all owned containers are torn down.
+This is infrastructure evidence, **not** an accepted-hold or funded swap trial.
 Cleanup verifies each container's run label before removal and attempts every
 container even if one cleanup step fails. If the runner is interrupted, check
-for leftover `rillswap-lnd-*` or `rillswap-invoice-*` containers with
+for leftover `rillswap-lnd-*`, `rillswap-invoice-*`, or `rillswap-channel-*` containers with
 `docker ps -a`, then verify the
 `org.rillswap.test-run` label and mounts using `docker inspect` on each exact
 container. After confirming the associated runner is no longer active, use

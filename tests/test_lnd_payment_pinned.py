@@ -3,7 +3,8 @@
 The original NOT_FOUND/permission diagnostic mines no blocks and creates no
 invoices. Its separate OPEN/CANCELED invoice counterpart mines one unspendable
 OP_RETURN block and creates one unfunded hold, with no channel or payment.
-Both keep wallet credentials in container tmpfs, never in host wallet mounts.
+The third test funds a private channel between two disposable nodes, with no
+invoice or payment. All keep credentials in container tmpfs, never host wallets.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import secrets
 import shutil
 import subprocess
 import time
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -54,14 +56,24 @@ def _docker(*args: str, timeout: int = 60, check: bool = True) -> str:
         phases = re.findall(r"^PHASE: ([a-z_]+)$", completed.stderr, re.MULTILINE)
         error_types = re.findall(r"\b([_A-Za-z]+Error):", completed.stderr)
         grpc_codes = re.findall(r"StatusCode\.([A-Z_]+)", completed.stderr)
+        diagnostics = re.findall(
+            r"^DIAGNOSTIC: (peer_not_ready|insufficient_funds|"
+            r"unconfirmed_funds|fee_rejected|other)$",
+            completed.stderr,
+            re.MULTILINE,
+        )
         phase = phases[-1] if phases else "unidentified"
         category = error_types[-1] if error_types else "unidentified"
         grpc_code = grpc_codes[-1] if grpc_codes else "none"
-        raise AssertionError(f"disposable LND failed in {phase} ({category}, grpc={grpc_code})")
+        diagnostic = diagnostics[-1] if diagnostics else "none"
+        raise AssertionError(
+            f"disposable LND failed in {phase} "
+            f"({category}, grpc={grpc_code}, diagnostic={diagnostic})"
+        )
     return completed.stdout.strip() if completed.returncode == 0 else ""
 
 
-def _core_cli(container: str, *args: str) -> str:
+def _core_cli(container: str, *args: str, timeout: int = 5) -> str:
     return _docker(
         "exec",
         "--user",
@@ -73,7 +85,7 @@ def _core_cli(container: str, *args: str) -> str:
         "-rpcuser=rill-disposable",
         "-rpcpassword=disposable-regtest-only",
         *args,
-        timeout=5,
+        timeout=timeout,
     )
 
 
@@ -824,3 +836,326 @@ def test_pinned_lnd_unfunded_invoice_observation(tmp_path: Path) -> None:
         assert result == "Pinned LND unfunded invoice OPEN and CANCELED observations passed"
     finally:
         _cleanup_containers((sidecar, lnd, core), run_id, cert)
+
+
+# Infrastructure-only: no invoice, HTLC, payment, swap, or production journal.
+# One mutation per fresh disposable test. A lost response is never retried.
+CHANNEL_BOOTSTRAP = """
+import json, secrets, sys, time
+from decimal import Decimal
+from pathlib import Path
+import grpc
+import httpx
+from rill_provider._lnd_proto import lightning_pb2 as ln
+import walletunlocker_pb2 as unlock
+import stateservice_pb2 as state
+
+def unary(channel, path, request, response):
+    return channel.unary_unary(path, request_serializer=request.SerializeToString,
+                               response_deserializer=response.FromString)
+def metadata(secret):
+    return (('macaroon', secret.hex()),)
+def dial(cert, port):
+    return grpc.secure_channel('127.0.0.1:' + str(port),
+        grpc.ssl_channel_credentials(root_certificates=cert))
+def ready(channel, secret):
+    rpc = unary(channel, '/lnrpc.State/GetState', state.GetStateRequest, state.GetStateResponse)
+    for _ in range(100):
+        try:
+            status = rpc(state.GetStateRequest(), metadata=metadata(secret), timeout=1)
+            if status.state == state.SERVER_ACTIVE:
+                return
+        except grpc.RpcError:
+            pass
+        time.sleep(0.2)
+    raise AssertionError('pinned LND did not reach SERVER_ACTIVE')
+def call(channel, secret, name, req, resp, value, *, timeout=5):
+    return unary(channel, '/lnrpc.Lightning/' + name, req, resp)(
+        value, metadata=metadata(secret), timeout=timeout)
+
+nodes = {}
+print('PHASE: channel_wallets', file=sys.stderr)
+for label, port in (('a', 10009), ('b', 10010)):
+    cert = Path('/work/public/' + label + '.cert').read_bytes()
+    channel = dial(cert, port)
+    seed = unary(channel, '/lnrpc.WalletUnlocker/GenSeed',
+        unlock.GenSeedRequest, unlock.GenSeedResponse)(unlock.GenSeedRequest(), timeout=10)
+    initiated = unary(channel, '/lnrpc.WalletUnlocker/InitWallet',
+        unlock.InitWalletRequest, unlock.InitWalletResponse)(unlock.InitWalletRequest(
+        wallet_password=secrets.token_bytes(24), cipher_seed_mnemonic=seed.cipher_seed_mnemonic,
+        recovery_window=0, stateless_init=True), timeout=20)
+    assert initiated.admin_macaroon
+    channel.close()
+    channel = dial(cert, port)
+    ready(channel, initiated.admin_macaroon)
+    info = call(channel, initiated.admin_macaroon, 'GetInfo',
+        ln.GetInfoRequest, ln.GetInfoResponse, ln.GetInfoRequest())
+    assert len(info.chains) == 1
+    assert info.chains[0].chain == 'bitcoin' and info.chains[0].network == 'regtest'
+    assert info.block_height == 101 and info.synced_to_chain
+    nodes[label] = (channel, initiated.admin_macaroon, info.identity_pubkey)
+assert nodes['a'][2] != nodes['b'][2]
+a, a_secret, a_key = nodes['a']
+b, b_secret, b_key = nodes['b']
+
+print('PHASE: channel_receive', file=sys.stderr)
+address = call(a, a_secret, 'NewAddress', ln.NewAddressRequest, ln.NewAddressResponse,
+    ln.NewAddressRequest(type=ln.WITNESS_PUBKEY_HASH)).address
+assert address.startswith('bcrt1')
+with httpx.Client(base_url='http://127.0.0.1:18443',
+    auth=httpx.BasicAuth('rill-disposable', 'disposable-regtest-only'),
+    timeout=httpx.Timeout(30, connect=3), trust_env=False, follow_redirects=False) as core:
+    def rpc(method, params, *, wallet=None):
+        path = '/wallet/' + wallet if wallet else '/'
+        response = core.post(path,
+            json={'jsonrpc':'1.0','id':'test','method':method,'params':params})
+        response.raise_for_status()
+        body = response.json(parse_float=Decimal)
+        assert body['error'] is None
+        return body['result']
+    print('PHASE: channel_fund_once', file=sys.stderr)
+    mining_address = rpc('getnewaddress', ['', 'bech32m'], wallet='fund')
+    rpc('sendtoaddress', [address, 0.02], wallet='fund')
+    blocks = rpc('generatetoaddress', [1, mining_address], wallet='fund')
+    assert len(blocks) == 1
+    print('PHASE: channel_wallet_balance', file=sys.stderr)
+    for _ in range(100):
+        info = call(a, a_secret, 'GetInfo', ln.GetInfoRequest, ln.GetInfoResponse,
+            ln.GetInfoRequest())
+        balance = call(a, a_secret, 'WalletBalance', ln.WalletBalanceRequest,
+            ln.WalletBalanceResponse, ln.WalletBalanceRequest())
+        if (info.block_height == 102 and info.synced_to_chain
+                and balance.confirmed_balance >= 2000000):
+            break
+        time.sleep(0.2)
+    else:
+        raise AssertionError('fresh wallet deposit not confirmed')
+    print('PHASE: channel_connect_once', file=sys.stderr)
+    call(a, a_secret, 'ConnectPeer', ln.ConnectPeerRequest, ln.ConnectPeerResponse,
+        ln.ConnectPeerRequest(addr=ln.LightningAddress(pubkey=b_key, host='127.0.0.1:9736'),
+                              perm=False, timeout=10), timeout=12)
+    for _ in range(100):
+        peers_a = call(a, a_secret, 'ListPeers', ln.ListPeersRequest, ln.ListPeersResponse,
+            ln.ListPeersRequest())
+        peers_b = call(b, b_secret, 'ListPeers', ln.ListPeersRequest, ln.ListPeersResponse,
+            ln.ListPeersRequest())
+        if (any(peer.pub_key == b_key for peer in peers_a.peers)
+                and any(peer.pub_key == a_key for peer in peers_b.peers)):
+            break
+        time.sleep(0.2)
+    else:
+        raise AssertionError('two-node peer connection not independently visible')
+    print('PHASE: channel_open_once', file=sys.stderr)
+    try:
+        point = call(a, a_secret, 'OpenChannelSync', ln.OpenChannelRequest, ln.ChannelPoint,
+            ln.OpenChannelRequest(node_pubkey=bytes.fromhex(b_key), local_funding_amount=1000000,
+                push_sat=0, private=True, min_confs=1, sat_per_vbyte=2), timeout=30)
+    except grpc.RpcError as error:
+        detail = (error.details() or '').lower()
+        if 'peer' in detail and ('not' in detail or 'connect' in detail):
+            category = 'peer_not_ready'
+        elif 'insufficient' in detail or 'not enough' in detail:
+            category = 'insufficient_funds'
+        elif 'unconfirmed' in detail or 'confirmations' in detail:
+            category = 'unconfirmed_funds'
+        elif 'fee' in detail:
+            category = 'fee_rejected'
+        else:
+            category = 'other'
+        print('DIAGNOSTIC: ' + category, file=sys.stderr)
+        raise RuntimeError('one-shot channel open response uncertain') from None
+    txid = point.funding_txid_str if point.WhichOneof('funding_txid') == 'funding_txid_str' \
+        else point.funding_txid_bytes[::-1].hex()
+    assert len(txid) == 64
+    assert len(rpc('generatetoaddress', [1, mining_address], wallet='fund')) == 1
+    print('PHASE: channel_active', file=sys.stderr)
+    for _ in range(150):
+        views = []
+        for channel, secret, peer in ((a, a_secret, b_key), (b, b_secret, a_key)):
+            reported = call(channel, secret, 'ListChannels', ln.ListChannelsRequest,
+                ln.ListChannelsResponse, ln.ListChannelsRequest(active_only=True))
+            views.append([x for x in reported.channels if x.remote_pubkey == peer and x.active])
+        if all(len(view) == 1 for view in views):
+            break
+        time.sleep(0.2)
+    else:
+        raise AssertionError('confirmed channel not active on both LND nodes')
+    assert all(view[0].capacity == 1000000 for view in views)
+    assert all(view[0].channel_point == txid + ':' + str(point.output_index) for view in views)
+    assert all(view[0].private for view in views)
+    assert views[0][0].local_balance > 0
+    assert views[1][0].remote_balance > 0
+    output = rpc('gettxout', [txid, point.output_index, False])
+    assert output is not None and output['confirmations'] >= 1
+    assert output['value'] == Decimal('0.01000000')
+    script = output['scriptPubKey']['hex']
+    assert len(script) == 68 and script.startswith('0020')
+    print(json.dumps({'funding_txid': txid, 'vout': point.output_index,
+        'capacity_sat': views[0][0].capacity, 'confirmations': output['confirmations']}))
+"""
+
+
+@pytest.mark.lnd
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_LND") != "1",
+    reason="set RILLSWAP_RUN_LND=1 for pinned disposable LND",
+)
+def test_pinned_two_node_funded_channel_bootstrap(tmp_path: Path) -> None:  # noqa: PLR0915
+    """Fund one disposable private channel, not an LN payment or swap."""
+    assert DOCKER is not None
+    public = tmp_path / "public"
+    public.mkdir(mode=0o700)
+    generated = tmp_path / "generated"
+    _wallet_messages(generated)
+    _state_messages(generated)
+    run_id = secrets.token_hex(16)
+    label = f"org.rillswap.test-run={run_id}"
+    core = f"rillswap-channel-core-{secrets.token_hex(6)}"
+    a = f"rillswap-channel-lnd-a-{secrets.token_hex(6)}"
+    b = f"rillswap-channel-lnd-b-{secrets.token_hex(6)}"
+    sidecar = f"rillswap-channel-client-{secrets.token_hex(6)}"
+    cert_a, cert_b = public / "a.cert", public / "b.cert"
+    try:
+        _docker(
+            "run",
+            "--detach",
+            "--name",
+            core,
+            "--label",
+            label,
+            "--platform",
+            "linux/amd64",
+            "--network",
+            "none",
+            "--tmpfs",
+            "/home/bitcoin/.bitcoin:rw,uid=101,gid=101,mode=0700",
+            CORE_IMAGE,
+            "-regtest=1",
+            "-server=1",
+            "-listen=0",
+            "-discover=0",
+            "-dnsseed=0",
+            "-fallbackfee=0.00001000",
+            "-rpcuser=rill-disposable",
+            "-rpcpassword=disposable-regtest-only",
+            "-rpcbind=127.0.0.1",
+            "-rpcallowip=127.0.0.1",
+            "-zmqpubrawblock=tcp://127.0.0.1:28332",
+            "-zmqpubrawtx=tcp://127.0.0.1:28333",
+            "-printtoconsole=1",
+        )
+        _wait_for_core(core)
+        created = json.loads(_core_cli(core, "createwallet", "fund"))
+        assert created["name"] == "fund"
+        address = _core_cli(core, "-rpcwallet=fund", "getnewaddress", "", "bech32m")
+        blocks = json.loads(
+            _core_cli(
+                core,
+                "-rpcwallet=fund",
+                "generatetoaddress",
+                "101",
+                address,
+                timeout=180,
+            )
+        )
+        assert len(blocks) == 101
+        view = json.loads(_core_cli(core, "getblockchaininfo"))
+        assert view["chain"] == "regtest"
+        assert view["blocks"] == view["headers"] == 101
+        assert view["initialblockdownload"] is False
+        tip = json.loads(_core_cli(core, "getblockheader", blocks[-1]))
+        assert tip["height"] == 101
+        assert abs(time.time() - tip["time"]) < 60
+        for name, port, peer_port in ((a, 10009, 9735), (b, 10010, 9736)):
+            _docker(
+                "run",
+                "--detach",
+                "--name",
+                name,
+                "--label",
+                label,
+                "--platform",
+                "linux/amd64",
+                "--network",
+                f"container:{core}",
+                "--tmpfs",
+                "/root/.lnd:rw,mode=0700",
+                LND_IMAGE,
+                "--bitcoin.active",
+                "--bitcoin.regtest",
+                "--bitcoin.node=bitcoind",
+                "--bitcoin.defaultchanconfs=1",
+                "--bitcoind.rpchost=127.0.0.1:18443",
+                "--bitcoind.rpcuser=rill-disposable",
+                "--bitcoind.rpcpass=disposable-regtest-only",
+                "--bitcoind.zmqpubrawblock=tcp://127.0.0.1:28332",
+                "--bitcoind.zmqpubrawtx=tcp://127.0.0.1:28333",
+                f"--rpclisten=127.0.0.1:{port}",
+                f"--listen=127.0.0.1:{peer_port}",
+                "--norest",
+                "--nobootstrap",
+            )
+        for container, path in (
+            (core, "/home/bitcoin/.bitcoin"),
+            (a, "/root/.lnd"),
+            (b, "/root/.lnd"),
+        ):
+            tmpfs = json.loads(
+                _docker("inspect", container, "--format", "{{json .HostConfig.Tmpfs}}")
+            )
+            assert path in tmpfs
+            mounts = json.loads(_docker("inspect", container, "--format", "{{json .Mounts}}"))
+            assert all(entry["Type"] != "volume" for entry in mounts)
+        _wait_for_public_certificate(a, cert_a)
+        _wait_for_public_certificate(b, cert_b)
+        result = _docker(
+            "run",
+            "--rm",
+            "--name",
+            sidecar,
+            "--label",
+            label,
+            "--platform",
+            "linux/amd64",
+            "--network",
+            f"container:{core}",
+            "--tmpfs",
+            "/tmp:rw,mode=0700,noexec,nosuid,nodev",  # noqa: S108 - test tmpfs
+            "--mount",
+            f"type=bind,src={ROOT},dst=/work/provider,readonly",
+            "--mount",
+            f"type=bind,src={CORE},dst=/work/core,readonly",
+            "--mount",
+            f"type=bind,src={public},dst=/work/public,readonly",
+            "--mount",
+            f"type=bind,src={generated},dst=/work/generated,readonly",
+            "--env",
+            "PYTHONPATH=/work/provider/.venv/lib/python3.14/site-packages:"
+            "/work/provider/src:/work/core/packages/core/src:/work/generated",
+            PYTHON_IMAGE,
+            "python",
+            "-c",
+            CHANNEL_BOOTSTRAP,
+            timeout=210,
+        )
+        evidence = json.loads(result)
+        assert evidence["capacity_sat"] == 1_000_000
+        assert len(evidence["funding_txid"]) == 64
+        assert type(evidence["vout"]) is int
+        output = json.loads(
+            _core_cli(
+                core,
+                "gettxout",
+                evidence["funding_txid"],
+                str(evidence["vout"]),
+                "false",
+            ),
+            parse_float=Decimal,
+        )
+        assert output["confirmations"] >= 1
+        assert output["value"] == Decimal("0.01000000")
+    finally:
+        try:
+            _cleanup_containers((sidecar, b, a, core), run_id, cert_a)
+        finally:
+            cert_b.unlink(missing_ok=True)
