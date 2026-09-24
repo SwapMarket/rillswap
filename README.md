@@ -62,6 +62,32 @@ valid restored recovery file may lack later signed bindings. The disposable
 pinned Core test verifies refusal before required confirmations and after an
 independently created synthetic claim enters the mempool.
 
+`rill recover prepare-claim` adds `--fee-sat` and a new `--output` path to the
+`observe-claim` arguments. It requires a **matching protected age X25519
+identity** (passphrase output is unsupported). After the read-only claim
+sample, it signs and locally verifies an LN-to-BTC client claim, then writes
+only a private age-encrypted, create-only `rillswap-opaque-claim-plan/v1` file
+in an operator-trusted, fsync-capable directory. The canonical plaintext
+contains the complete network identity, contract hash, SHA-256 of the exact
+selected recovery plaintext, attempt/revision, and the signed transaction
+hex (bounded to 6 KiB). The witness **contains the preimage**. The file is
+X25519 encrypted and decrypted again for exact plaintext and independent
+signature/outpoint verification before and after disk readback. The CLI prints
+only public txid/fee/selection and says `broadcast: false`, with **no
+preimage-release authority**. Do not send the ciphertext to an untrusted
+decryptor or the decrypted bytes to Core, a provider, a network service, a
+log, or a plaintext file. Python cannot promise key erasure from memory.
+Age encryption gives confidentiality and integrity, **not provenance**:
+anyone with the public recipient can encrypt a replacement. Static recovery
+signatures and the claim transaction are revalidated on readback. A stored or
+restored plan may contain an out-of-date binding, fee, or witness; it does not
+prove current unspent funding, fee viability, complete lineage, LN state, or
+safe first disclosure. A future disclosure operation must separately
+reconcile those facts and record durable intent before revealing a preimage.
+Missing, partial, older-version, corrupt, or restored plan files never trigger
+automatic construction, migration, retry, or sending. Interrupted publication
+is uncertain (exit 3) and requires manual inspection rather than retry.
+
 `rill recover sign-refund` constructs a **BTC-to-LN client refund only** for
 one explicitly selected signed funding binding, on disposable regtest. It
 accepts the same network, identity, native library, exact attempt/revision,

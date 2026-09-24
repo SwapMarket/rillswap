@@ -12,7 +12,7 @@ import pytest
 from pyrage import x25519
 from rill_core.wire.canonical import canonicalize
 from rill_core.wire.hashes import funding_binding_hash
-from rill_core.wire.messages import FundingBinding
+from rill_core.wire.messages import ContractTerms, FundingBinding
 from rill_crypto import Context
 
 if TYPE_CHECKING:
@@ -401,6 +401,27 @@ def test_claim_observation_checks_profile_and_signed_record_before_rpc(
     if profile == "btc-to-ln":
         assert cli_main.main(arguments) == 2
         assert not seen
+        wrong_profile_plan = [
+            "recover",
+            "prepare-claim",
+            *common,
+            "--funding-attempt-id",
+            "11" * 32,
+            "--binding-revision",
+            "0",
+            "--rpc-cookie",
+            str(tmp_path / "never-open-cookie"),
+            "--rpc-port",
+            "18443",
+            "--fee-sat",
+            "300",
+            "--output",
+            str(tmp_path / "no-plan.age"),
+            str(encrypted),
+        ]
+        assert cli_main.main(wrong_profile_plan) == 2
+        assert not (tmp_path / "no-plan.age").exists()
+        assert not seen
         return
     report = json.loads(cli_main._run(cli_main._parser().parse_args(arguments)))  # noqa: SLF001
     assert report["kind"] == "selected-claim-candidate-observation/v1"
@@ -415,7 +436,327 @@ def test_claim_observation_checks_profile_and_signed_record_before_rpc(
     damaged["funding_history"][0]["funder_session_signature"] = "00" * 64
     encrypted.write_bytes(pyrage.encrypt(canonicalize(damaged), [identity.to_public()]))
     assert cli_main.main(arguments) == 2
+    plan_args = [
+        "recover",
+        "prepare-claim",
+        *common,
+        "--funding-attempt-id",
+        "11" * 32,
+        "--binding-revision",
+        "0",
+        "--rpc-cookie",
+        str(tmp_path / "never-open-cookie"),
+        "--rpc-port",
+        "18443",
+        "--fee-sat",
+        "300",
+        "--output",
+        str(tmp_path / "no-plan.age"),
+        str(encrypted),
+    ]
+    assert cli_main.main(plan_args) == 2
+    assert not (tmp_path / "no-plan.age").exists()
     assert not seen
+    passphrase_args = [arg for arg in plan_args if arg not in ("--identity", common[-1])]
+    passphrase_args.insert(4, "--passphrase-prompt")
+    assert cli_main.main(passphrase_args) == 2
+    assert not seen
+
+
+@NATIVE_ONLY
+@pytest.mark.native_crypto
+def test_prepare_claim_publishes_only_encrypted_verified_selected_transaction(  # noqa: PLR0915 - native end-to-end negative matrix
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import pyrage  # noqa: PLC0415
+    from rill_core.settlement import (  # noqa: PLC0415
+        FundingBindingTransactionMatch,
+        FundingOutput,
+        UnilateralAuthorization,
+        validate_unilateral_spend,
+    )
+    from rill_core.wire.types import NetworkIdentity  # noqa: PLC0415
+
+    from rill_cli import claim_plan  # noqa: PLC0415
+    from rill_cli import main as cli_main  # noqa: PLC0415
+    from rill_cli.age_container import X25519Credentials  # noqa: PLC0415
+    from rill_cli.claim_plan import ClaimPlanError, verify_encrypted_claim_plan  # noqa: PLC0415
+    from rill_cli.recovery_core_observation import RecoveryOutpointCandidate  # noqa: PLC0415
+
+    package, _ = _fixture("ln-to-btc")
+    package["funding_history"].append(_signed_binding(package, 0, str(NATIVE_LIBRARY)))
+    common, _, _ = _inputs(tmp_path, "ln-to-btc")
+    identity = x25519.Identity.from_str(Path(common[-1]).read_text().strip())
+    credentials = X25519Credentials(str(identity.to_public()), str(identity))
+    recovery = tmp_path / "selected.age"
+    recovery.write_bytes(pyrage.encrypt(canonicalize(package), [identity.to_public()]))
+    binding = FundingBinding.model_validate(package["funding_history"][0]["binding"])
+    network = NetworkIdentity.model_validate(package["network_identity"])
+    public_sample = RecoveryOutpointCandidate(
+        network,
+        FundingBindingTransactionMatch(
+            binding.funding_txid,
+            binding.contract_vout,
+            binding.lineage_anchor_txid,
+            binding.lineage_anchor_vout,
+        ),
+        "ab" * 32,
+        103,
+        "bc" * 32,
+        102,
+        2,
+        1101,
+    )
+    calls: list[str] = []
+
+    class Reader:
+        def __init__(self, **_kwargs: object) -> None:
+            calls.append("connect")
+
+        def observe_claim(
+            self,
+            selected: FundingBinding,
+            _terms: object,
+            *,
+            keys: object,
+        ) -> RecoveryOutpointCandidate:
+            assert selected == binding
+            assert isinstance(keys, Context)
+            calls.append("claim-read-only")
+            return public_sample
+
+    monkeypatch.setattr(cli_main, "RegtestRecoveryCoreReader", Reader)
+    destination = tmp_path / "private-claim.age"
+    args = [
+        "recover",
+        "prepare-claim",
+        *common,
+        "--funding-attempt-id",
+        "11" * 32,
+        "--binding-revision",
+        "0",
+        "--rpc-cookie",
+        str(tmp_path / "test-only-cookie"),
+        "--rpc-port",
+        "18443",
+        "--fee-sat",
+        "300",
+        "--output",
+        str(destination),
+        str(recovery),
+    ]
+    assert cli_main.main(args) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    report = json.loads(captured.out)
+    assert report["kind"] == "encrypted-ln-to-btc-claim-preparation/v1"
+    assert report["broadcast"] is False
+    assert report["preimage_external_disclosure"] is False
+    assert report["authority"].startswith("none")
+    assert calls == ["connect", "claim-read-only"]
+    ciphertext = destination.read_bytes()
+    assert ciphertext.startswith(b"age-encryption.org/v1\n")
+    assert destination.stat().st_mode & 0o777 == 0o600
+    preimage = package["monotonic_knowledge"]["preimage"]
+    assert preimage not in captured.out
+    assert preimage not in ciphertext.decode("latin1")
+    plan = json.loads(pyrage.decrypt(ciphertext, [identity]))
+    assert plan["kind"] == "rillswap-opaque-claim-plan/v1"
+    assert plan["recovery_plaintext_sha256"] == hashlib.sha256(canonicalize(package)).hexdigest()
+    assert bytes.fromhex(preimage) in bytes.fromhex(plan["signed_claim_hex"])
+    if AGE_BINARY:
+        decrypted = subprocess.run(  # noqa: S603 - pinned age executable, synthetic fixture
+            [AGE_BINARY, "--decrypt", "--identity", common[-1]],
+            input=ciphertext,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        assert decrypted.returncode == 0
+        assert decrypted.stdout == canonicalize(plan)
+        encrypted_by_go = subprocess.run(  # noqa: S603 - pinned age executable
+            [AGE_BINARY, "--encrypt", "--recipient", str(identity.to_public())],
+            input=canonicalize(plan),
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        assert encrypted_by_go.returncode == 0
+    with Context(library_path=str(NATIVE_LIBRARY)) as crypto:
+        receipt = verify_encrypted_claim_plan(
+            ciphertext,
+            recovery.read_bytes(),
+            network,
+            credentials=credentials,
+            funding_attempt_id=binding.funding_attempt_id,
+            binding_revision=0,
+            crypto=crypto,
+        )
+        funding = FundingOutput(
+            bytes.fromhex(binding.funding_txid),
+            binding.contract_vout,
+            int(binding.contract_value_sat),
+            bytes.fromhex(binding.contract_script_pubkey),
+        )
+        terms = ContractTerms.model_validate_json(json.dumps(package["contract_terms"]))
+        authorization = UnilateralAuthorization.from_terms(terms, funding, "claim", keys=crypto)
+        checked = validate_unilateral_spend(
+            bytes.fromhex(plan["signed_claim_hex"]),
+            authorization,
+            verifier=crypto,
+        )
+        assert receipt.claim_txid == checked.txid == report["claim_txid"]
+        assert receipt.fee_sat == checked.fee_sat == 300
+        if AGE_BINARY:
+            assert (
+                verify_encrypted_claim_plan(
+                    encrypted_by_go.stdout,
+                    recovery.read_bytes(),
+                    network,
+                    credentials=credentials,
+                    funding_attempt_id=binding.funding_attempt_id,
+                    binding_revision=0,
+                    crypto=crypto,
+                )
+                == receipt
+            )
+        for mutation in ("network_identity", "signed_claim_hex", "kind", "digest"):
+            changed = json.loads(json.dumps(plan))
+            if mutation == "network_identity":
+                changed["network_identity"]["deployment_namespace"] = "other"
+            elif mutation == "signed_claim_hex":
+                changed["signed_claim_hex"] = "00" + changed["signed_claim_hex"][2:]
+            elif mutation == "kind":
+                changed["kind"] = "older-version"
+            else:
+                changed["recovery_plaintext_sha256"] = "00" * 32
+            altered = pyrage.encrypt(canonicalize(changed), [identity.to_public()])
+            with pytest.raises(ClaimPlanError) as error:
+                verify_encrypted_claim_plan(
+                    altered,
+                    recovery.read_bytes(),
+                    network,
+                    credentials=credentials,
+                    funding_attempt_id=binding.funding_attempt_id,
+                    binding_revision=0,
+                    crypto=crypto,
+                )
+            assert error.value.__cause__ is None
+            assert error.value.__context__ is None
+        other_identity = x25519.Identity.generate()
+        with pytest.raises(ClaimPlanError):
+            verify_encrypted_claim_plan(
+                ciphertext,
+                recovery.read_bytes(),
+                network,
+                credentials=X25519Credentials(str(other_identity.to_public()), str(other_identity)),
+                funding_attempt_id=binding.funding_attempt_id,
+                binding_revision=0,
+                crypto=crypto,
+            )
+        plan_ciphertext = pyrage.encrypt(b'{"unexpected":"secret witness"}', [identity.to_public()])
+
+        def assert_no_retained_internal_plaintext(error: ClaimPlanError) -> None:
+            assert error.__context__ is None
+            assert error.__cause__ is None
+            frames = []
+            traceback = error.__traceback__
+            while traceback is not None:
+                if traceback.tb_frame.f_code.co_filename == claim_plan.__file__:
+                    frames.append(traceback.tb_frame)
+                traceback = traceback.tb_next
+            assert frames
+            assert all(
+                frame.f_code.co_name
+                not in {
+                    "_verify_encrypted_claim_plan",
+                    "_prepare_encrypted_claim_plan",
+                    "_verify_plan",
+                }
+                for frame in frames
+            )
+            sensitive = {"recovery_plaintext", "plan_plaintext", "raw", "plan", "plaintext"}
+            assert all(not sensitive.intersection(frame.f_locals) for frame in frames)
+
+        with pytest.raises(ClaimPlanError) as rejected_plan:
+            verify_encrypted_claim_plan(
+                plan_ciphertext,
+                recovery.read_bytes(),
+                network,
+                credentials=credentials,
+                funding_attempt_id=binding.funding_attempt_id,
+                binding_revision=0,
+                crypto=crypto,
+            )
+        assert_no_retained_internal_plaintext(rejected_plan.value)
+
+        def private_failure(*_args: object, **_kwargs: object) -> None:
+            raise OSError("internal preimage " + preimage)
+
+        with monkeypatch.context() as failure:
+            failure.setattr(claim_plan, "_verify_plan", private_failure)
+            with pytest.raises(ClaimPlanError) as signing_failure:
+                claim_plan.prepare_encrypted_claim_plan(
+                    recovery.read_bytes(),
+                    network,
+                    credentials=credentials,
+                    funding_attempt_id=binding.funding_attempt_id,
+                    binding_revision=0,
+                    candidate=public_sample,
+                    fee_sat=300,
+                    auxiliary_random=b"\x55" * 32,
+                    crypto=crypto,
+                )
+            assert_no_retained_internal_plaintext(signing_failure.value)
+            assert preimage not in repr(signing_failure.value)
+
+        with monkeypatch.context() as failure:
+            failure.setattr(claim_plan.pyrage, "encrypt", private_failure)
+            with pytest.raises(ClaimPlanError) as encryption_failure:
+                claim_plan.prepare_encrypted_claim_plan(
+                    recovery.read_bytes(),
+                    network,
+                    credentials=credentials,
+                    funding_attempt_id=binding.funding_attempt_id,
+                    binding_revision=0,
+                    candidate=public_sample,
+                    fee_sat=300,
+                    auxiliary_random=b"\x55" * 32,
+                    crypto=crypto,
+                )
+            assert_no_retained_internal_plaintext(encryption_failure.value)
+        original_decrypt = claim_plan.pyrage.decrypt
+        decrypt_calls = 0
+
+        def fail_plan_decrypt(*args: object, **kwargs: object) -> bytes:
+            nonlocal decrypt_calls
+            decrypt_calls += 1
+            if decrypt_calls == 2:
+                raise OSError("post-sign decryption failed with " + preimage)
+            return original_decrypt(*args, **kwargs)
+
+        with monkeypatch.context() as failure:
+            failure.setattr(claim_plan.pyrage, "decrypt", fail_plan_decrypt)
+            with pytest.raises(ClaimPlanError) as decryption_failure:
+                claim_plan.prepare_encrypted_claim_plan(
+                    recovery.read_bytes(),
+                    network,
+                    credentials=credentials,
+                    funding_attempt_id=binding.funding_attempt_id,
+                    binding_revision=0,
+                    candidate=public_sample,
+                    fee_sat=300,
+                    auxiliary_random=b"\x55" * 32,
+                    crypto=crypto,
+                )
+            assert decrypt_calls == 2
+            assert_no_retained_internal_plaintext(decryption_failure.value)
+    calls.clear()
+    assert cli_main.main(args) == 2  # No overwrite or automatic preparation retry.
+    assert destination.read_bytes() == ciphertext
+    assert calls == ["connect", "claim-read-only"]
 
 
 def _export_snapshot(

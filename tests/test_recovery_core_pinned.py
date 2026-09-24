@@ -295,6 +295,42 @@ assert bytes.fromhex(source['monotonic_knowledge']['preimage']) in raw
 print(raw.hex())  # Public synthetic fixture preimage, test-only setup, never observation output.
 """
 
+PYTHON_PREPARE_CLAIM = """
+import contextlib, io, json, os
+from pathlib import Path
+import pyrage
+from pyrage import x25519
+from rill_cli.main import main
+work = Path('/work/cookie')
+destination = work / 'encrypted-claim-plan.age'
+args = ['recover', 'prepare-claim', '--network', str(work / 'network.json'),
+        '--crypto-library', os.environ['RILL_CRYPTO_LIBRARY'],
+        '--identity', str(work / 'identity'),
+        '--funding-attempt-id', 'cc' * 32, '--binding-revision', '0',
+        '--rpc-cookie', str(work / 'core.cookie'), '--rpc-port', '18443',
+        '--fee-sat', '300', '--output', str(destination), str(work / 'selected.age')]
+stdout, stderr = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+    status = main(args)
+assert status == 0, stderr.getvalue()
+report = json.loads(stdout.getvalue())
+assert report['kind'] == 'encrypted-ln-to-btc-claim-preparation/v1'
+assert report['fee_sat'] == 300
+assert report['broadcast'] is False
+assert report['preimage_external_disclosure'] is False
+assert report['authority'].startswith('none')
+assert destination.stat().st_mode & 0o777 == 0o600
+identity = x25519.Identity.from_str((work / 'identity').read_text().strip())
+plan = json.loads(pyrage.decrypt(destination.read_bytes(), [identity]))
+assert plan['kind'] == 'rillswap-opaque-claim-plan/v1'
+assert '5252525252525252' not in stdout.getvalue()
+assert plan['signed_claim_hex'] not in stdout.getvalue()
+assert bytes.fromhex('52' * 32) in bytes.fromhex(plan['signed_claim_hex'])
+with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+    assert main(args) == 2  # Never overwrite or automatically retry.
+print(report['claim_txid'])  # Public, not a claim witness or disclosure authority.
+"""
+
 
 @pytest.mark.bitcoin_core
 @pytest.mark.skipif(
@@ -486,11 +522,14 @@ def test_pinned_core_v30_observes_and_refunds_without_txindex(  # noqa: PLR0915 
                 )
                 == "confirmed read-only claim candidate without preimage"
             )
+            prepared_txid = _python_check(container, tmp_path, PYTHON_PREPARE_CLAIM)
+            assert len(prepared_txid) == 64
+            assert not json.loads(_cli(container, "getmempoolinfo"))["size"]
             raw_claim = _python_check(container, tmp_path, PYTHON_TEST_CLAIM_SPEND)
             accepted = json.loads(_cli(container, "testmempoolaccept", json.dumps([raw_claim])))
             assert accepted[0]["allowed"] is True
             txid = _cli(container, "sendrawtransaction", raw_claim, "0")
-            assert len(txid) == 64
+            assert txid == prepared_txid
             chain_only = _cli(container, "gettxout", funding_txid, str(fixture_vout), "false")
             assert json.loads(chain_only)["confirmations"] >= 2
             assert _cli(container, "gettxout", funding_txid, str(fixture_vout), "true") in {

@@ -18,8 +18,6 @@ from rill_cli.age_container import MAX_CIPHERTEXT_BYTES, RecoveryContainerError
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from rill_core.recovery import OfflineRecoveryInspection
-
 
 class RecoveryPublicationError(OSError):
     """A recovery ciphertext was NOT successfully verified and published."""
@@ -29,16 +27,16 @@ class RecoveryPublicationUncertainError(RecoveryPublicationError):
     """Destination may exist, but publication durability was not confirmed."""
 
 
-def publish_new_ciphertext(
+def publish_new_ciphertext[Report](
     destination: str | os.PathLike[str],
     ciphertext: bytes,
     *,
-    verify_from_disk: Callable[[bytes], OfflineRecoveryInspection],
-) -> OfflineRecoveryInspection:
+    verify_from_disk: Callable[[bytes], Report],
+) -> Report:
     """Publish only a verified encrypted file, never overwrite an existing path.
 
-    `verify_from_disk` MUST decrypt, compare the complete original plaintext,
-    and rerun static inspection with a real crypto implementation. It cannot
+    `verify_from_disk` MUST decrypt, compare the selected original plaintext,
+    and revalidate its format and cryptographic commitments. It cannot
     substitute for restored-client state or fresh chain/backend evidence.
     """
     if not isinstance(ciphertext, bytes) or not 0 < len(ciphertext) <= MAX_CIPHERTEXT_BYTES:

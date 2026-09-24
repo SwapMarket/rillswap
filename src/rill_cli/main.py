@@ -30,6 +30,7 @@ from rill_cli.age_container import (
     inspect_container_selected_funding_context,
     verify_export_ciphertext,
 )
+from rill_cli.claim_plan import prepare_encrypted_claim_plan, verify_encrypted_claim_plan
 from rill_cli.publication import (
     RecoveryPublicationUncertainError,
     publish_new_ciphertext,
@@ -97,6 +98,7 @@ def _parser() -> argparse.ArgumentParser:
     for command, description in (
         ("observe-funding", "explicit regtest candidate (never signing authority)"),
         ("observe-claim", "read-only LN-to-BTC claim candidate (no preimage)"),
+        ("prepare-claim", "create encrypted LN-to-BTC claim plan (no disclosure)"),
         ("sign-refund", "explicit BTC-to-LN refund artifact (never broadcasts)"),
         ("broadcast-refund", "explicit regtest refund submit (never retries)"),
     ):
@@ -119,17 +121,21 @@ def _parser() -> argparse.ArgumentParser:
         mode = operation.add_mutually_exclusive_group(required=True)
         mode.add_argument("--identity", help="protected age X25519 secret-key file")
         mode.add_argument("--passphrase-prompt", action="store_true", help="prompt via terminal")
-        if command in {"sign-refund", "broadcast-refund"}:
-            operation.add_argument("--fee-sat", required=True, type=int, help="exact refund fee")
+        if command in {"sign-refund", "broadcast-refund", "prepare-claim"}:
+            operation.add_argument("--fee-sat", required=True, type=int, help="exact spend fee")
             if command == "sign-refund":
                 operation.add_argument(
                     "--output", required=True, help="create-only raw transaction file"
                 )
-            else:
+            elif command == "broadcast-refund":
                 operation.add_argument(
                     "--intent",
                     required=True,
                     help="create-only durable exact-byte submission intent",
+                )
+            else:
+                operation.add_argument(
+                    "--output", required=True, help="create-only encrypted claim plan file"
                 )
         operation.add_argument("file", help="explicit encrypted age recovery file")
     return parser
@@ -195,7 +201,7 @@ def _report(report: OfflineRecoveryInspection) -> str:
     )
 
 
-def _run(args: argparse.Namespace) -> str:  # noqa: PLR0912, PLR0915 - ordered recovery boundaries
+def _run(args: argparse.Namespace) -> str:  # noqa: PLR0911, PLR0912, PLR0915 - recovery boundaries
     network = _network(args.network)
     with Context(library_path=args.crypto_library) as crypto:
         if args.command in ("export", "export-update"):
@@ -239,9 +245,12 @@ def _run(args: argparse.Namespace) -> str:  # noqa: PLR0912, PLR0915 - ordered r
             "inspect",
             "observe-funding",
             "observe-claim",
+            "prepare-claim",
             "sign-refund",
             "broadcast-refund",
         }:
+            if args.command == "prepare-claim" and not args.identity:
+                raise RecoveryCLIError("protected X25519 identity required for claim plan")
             inspection_credentials = (
                 PassphraseCredentials(_prompt())
                 if args.passphrase_prompt
@@ -268,7 +277,7 @@ def _run(args: argparse.Namespace) -> str:  # noqa: PLR0912, PLR0915 - ordered r
                 or selected.terms.refund_party != "client"
             ):
                 raise RecoveryCLIError("selected recovery is not a client refund")
-            if args.command == "observe-claim" and (
+            if args.command in {"observe-claim", "prepare-claim"} and (
                 selected.terms.profile_id != "ln-to-btc/v1" or selected.terms.claimant != "client"
             ):
                 raise RecoveryCLIError("selected recovery is not a client claim")
@@ -278,7 +287,7 @@ def _run(args: argparse.Namespace) -> str:  # noqa: PLR0912, PLR0915 - ordered r
                 cookie_path=Path(args.rpc_cookie),
                 network=network,
             )
-            if args.command == "observe-claim":
+            if args.command in {"observe-claim", "prepare-claim"}:
                 candidate = reader.observe_claim(selected.binding, selected.terms, keys=crypto)
             else:
                 candidate = reader.observe(
@@ -392,6 +401,56 @@ def _run(args: argparse.Namespace) -> str:  # noqa: PLR0912, PLR0915 - ordered r
                     sort_keys=True,
                     separators=(",", ":"),
                 )
+            if args.command == "prepare-claim":
+                if not isinstance(inspection_credentials, X25519Credentials):
+                    raise RecoveryCLIError("protected X25519 identity required")
+                prepared = prepare_encrypted_claim_plan(
+                    ciphertext,
+                    network,
+                    credentials=inspection_credentials,
+                    funding_attempt_id=args.funding_attempt_id,
+                    binding_revision=args.binding_revision,
+                    candidate=candidate,
+                    fee_sat=args.fee_sat,
+                    auxiliary_random=os.urandom(32),
+                    crypto=crypto,
+                )
+
+                def verify_claim_readback(stored: bytes) -> object:
+                    checked = verify_encrypted_claim_plan(
+                        stored,
+                        ciphertext,
+                        network,
+                        credentials=inspection_credentials,
+                        funding_attempt_id=args.funding_attempt_id,
+                        binding_revision=args.binding_revision,
+                        crypto=crypto,
+                    )
+                    if checked != prepared.receipt:
+                        raise RecoveryCLIError("encrypted claim plan readback differs")
+                    return checked
+
+                publish_new_ciphertext(
+                    args.output,
+                    prepared.ciphertext,
+                    verify_from_disk=verify_claim_readback,
+                )
+                return json.dumps(
+                    {
+                        "kind": "encrypted-ln-to-btc-claim-preparation/v1",
+                        "funding_txid": prepared.receipt.funding_txid,
+                        "contract_vout": prepared.receipt.contract_vout,
+                        "claim_txid": prepared.receipt.claim_txid,
+                        "fee_sat": prepared.receipt.fee_sat,
+                        "sampled_tip_hash": candidate.tip_hash,
+                        "sampled_tip_height": candidate.tip_height,
+                        "broadcast": False,
+                        "preimage_external_disclosure": False,
+                        "authority": "none (encrypted plan; no permission to reveal or broadcast)",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
             if args.command == "observe-claim":
                 return json.dumps(
                     {
@@ -455,7 +514,7 @@ def main(argv: list[str] | None = None) -> int:
     except RecoveryPublicationUncertainError:
         sys.stderr.write(
             "Recovery destination may be published, durability unconfirmed; "
-            "verify manually, do not fund or pay.\n"
+            "verify manually, do not fund, pay, reveal a preimage, or broadcast.\n"
         )
         return 3
     except RefundPublicationUncertainError:
