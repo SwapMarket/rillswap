@@ -57,6 +57,22 @@ Existing reservation and payment journals are neither opened nor migrated
 by this diagnostic. Missing, partial, old, or restored session records prove
 no historical safety and must not trigger reconstruction or an action.
 
+`handshake_signing.session_reservation_for_init` constructs a public,
+independently constrained binding from bounded inner initiation bytes. The
+purpose-scoped `sign_handshake_accept` requires a separately held, currently
+available session-key reference and configured provider identity, validates
+offered/selected negotiation and signer identity, verifies the returned BIP340
+signature, and returns only the identity signature on the **inner** acceptance.
+It never admits a session, persists a pending record, sends an accept, or
+authorizes funding/payment. The only key-custody implementation is an
+**explicitly test-only in-memory fixture in the test suite**: it cannot
+resume on restart and must never be deployed. Production identity custody,
+durable session-key availability, pending intent/replay store, transport,
+ordering, and effect fencing are still missing. Without durable custody and
+a committed response, no acceptance may be sent. Upgrading from the previous
+provider release does not create, migrate, or scan any session state; absent,
+partial, old, or restored state grants no key allocation or action authority.
+
 The separate `core_tx_bytes.RegtestCoreTransactionReader` is an explicit,
 read-only **regtest-only** Bitcoin Core v30 RPC probe. It takes a numeric
 loopback address, port, owner-private Core cookie file, and a complete trusted
