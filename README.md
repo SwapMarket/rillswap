@@ -78,6 +78,18 @@ networks are not selectable here. A missing, partial, older-version, or
 restored cache proves no revision/currentness and triggers no automatic repair,
 rescan, network access, or state migration on upgrade.
 
+`src/nostrProviderAnnouncement.ts` is a **disconnected** verifier for the
+private-regtest RS-005 kind-39417 event binding. It requires a separately
+approved provider identity and complete network/profile, authenticates the
+outer NIP-01 ID/signature and the nested application signature, and checks
+exact ordered tags, address `d`, matching signer/timestamp, size and nesting
+bounds, and the single-regtest-network restriction. It is not called by the
+manual-import panel, and does not subscribe to a relay. A future relay caller
+must also cap the entire raw `EVENT` message to 128 KiB **before** extracting
+the event-object bytes. It returns a historical signed candidate, not globally
+current revision, endpoint approval, session ownership, or financial
+authority. No new state is read or written during startup or upgrade.
+
 The embedded build label is disclosure, **not** authenticated release pinning.
 There is no automatic update check, but reloading a mutable hosted URL can run
 different executable code. Active-swap upgrade handling, independent recovery,

@@ -1,0 +1,16 @@
+{
+  "vector_version": "private-regtest-nostr-announcement-v1",
+  "source_application_vector": "vectors/discovery/manual-advertisement-regtest-v1.json",
+  "kind": 39417,
+  "pubkey": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+  "created_at": 1703021488,
+  "tags": [
+    ["rillswap", "nostr-experimental-1"],
+    ["network", "regtest"],
+    ["d", "ccfc6ba66e36b1834d08100ced3ece900ce8edd2dd89c965a5d04b53311f02f9"]
+  ],
+  "content_utf8_length": 1064,
+  "content_sha256": "5b383fdf2fe52b2a066e4df2f206496eccca4fdfe37d0218a31a12fdff6049cc",
+  "id": "4ee86b47582e8f96da7aa74f1f9680566ca93387de397d04c5d2bcdd450e9f0f",
+  "sig": "b807fc8ecf24057a24feb724453c073d93f4dab4999ed486cebccf9a4df6cd06e27b51fdd96a26b605f217ae0ec33d41604f35d21c9f1791664b7f6eedd4dce5"
+}
