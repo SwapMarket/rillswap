@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spec.rillswap.invalid/schemas/wire/common-v1.schema.json",
+  "title": "RillSwap wire v1 common definitions",
+  "$defs": {
+    "hex32": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "hex33": {
+      "type": "string",
+      "pattern": "^(02|03)[0-9a-f]{64}$"
+    },
+    "signature64": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{128}$"
+    },
+    "decimalSats": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,15})$"
+    },
+    "decimalMillisats": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,18})$"
+    },
+    "exactInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "positiveCount": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._/-]{0,127}$"
+    },
+    "scriptHex": {
+      "type": "string",
+      "pattern": "^([0-9a-f]{2}){1,10000}$"
+    },
+    "networkIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "family",
+        "name",
+        "genesis_hash",
+        "signet_challenge",
+        "consensus_profile",
+        "deployment_namespace"
+      ],
+      "properties": {
+        "family": {
+          "const": "bitcoin"
+        },
+        "name": {
+          "enum": ["mainnet", "signet", "regtest", "testnet3", "testnet4", "custom"]
+        },
+        "genesis_hash": {
+          "$ref": "#/$defs/hex32"
+        },
+        "signet_challenge": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/scriptHex"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "consensus_profile": {
+          "$ref": "#/$defs/identifier"
+        },
+        "deployment_namespace": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "name": {
+                "const": "signet"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "signet_challenge": {
+                "$ref": "#/$defs/scriptHex"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "name": {
+                "const": "regtest"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "deployment_namespace": {
+                "$ref": "#/$defs/identifier"
+              },
+              "signet_challenge": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "name": {
+                "enum": ["mainnet", "testnet3", "testnet4"]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "signet_challenge": {
+                "type": "null"
+              },
+              "deployment_namespace": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "extensions": {
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": {
+        "pattern": "^[a-z0-9][a-z0-9.-]{0,62}/[a-z0-9][a-z0-9._-]{0,62}$"
+      }
+    },
+    "featureList": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/identifier"
+      }
+    }
+  }
+}

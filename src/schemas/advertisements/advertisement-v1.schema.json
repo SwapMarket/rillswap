@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spec.rillswap.invalid/schemas/advertisements/advertisement-v1.schema.json",
+  "title": "RillSwap experimental provider advertisement v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["advertisement", "signature"],
+  "properties": {
+    "advertisement": {
+      "$ref": "#/$defs/advertisement"
+    },
+    "signature": {
+      "$ref": "../wire/common-v1.schema.json#/$defs/signature64"
+    }
+  },
+  "$defs": {
+    "advertisement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "binding_version",
+        "provider_identity_xonly_key",
+        "network_identities",
+        "profiles",
+        "amount_bands",
+        "indicative_fee_policy",
+        "communication_suites",
+        "transport_endpoints",
+        "epoch_inbox_xonly_keys",
+        "slot",
+        "revision",
+        "created_at",
+        "expires_at",
+        "extensions"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "rillswap"
+        },
+        "binding_version": {
+          "const": "nostr-experimental-1"
+        },
+        "provider_identity_xonly_key": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/hex32"
+        },
+        "network_identities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "$ref": "../wire/common-v1.schema.json#/$defs/networkIdentity"
+          }
+        },
+        "profiles": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["btc-to-ln/v1", "ln-to-btc/v1"]
+          }
+        },
+        "amount_bands": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["minimum_sat", "maximum_sat"],
+            "properties": {
+              "minimum_sat": {
+                "$ref": "../wire/common-v1.schema.json#/$defs/decimalSats"
+              },
+              "maximum_sat": {
+                "$ref": "../wire/common-v1.schema.json#/$defs/decimalSats"
+              }
+            }
+          }
+        },
+        "indicative_fee_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["base_sat", "proportional_millionths"],
+          "properties": {
+            "base_sat": {
+              "$ref": "../wire/common-v1.schema.json#/$defs/decimalSats"
+            },
+            "proportional_millionths": {
+              "$ref": "../wire/common-v1.schema.json#/$defs/exactInteger"
+            }
+          }
+        },
+        "communication_suites": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "../wire/common-v1.schema.json#/$defs/identifier"
+          }
+        },
+        "transport_endpoints": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        },
+        "epoch_inbox_xonly_keys": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "../wire/common-v1.schema.json#/$defs/hex32"
+          }
+        },
+        "slot": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/identifier"
+        },
+        "revision": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/exactInteger"
+        },
+        "created_at": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/exactInteger"
+        },
+        "expires_at": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/exactInteger"
+        },
+        "extensions": {
+          "$ref": "../wire/common-v1.schema.json#/$defs/extensions"
+        }
+      }
+    }
+  }
+}

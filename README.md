@@ -49,6 +49,27 @@ checks the isolated producer with disposable synthetic keys.
 `scripts/emit-nip59-test-wrap.ts` is test-only stdin/stdout glue for a local
 provider interoperability test. It must never receive production secrets.
 
+`src/manualProviderAdvertisement.ts` is a second **disconnected, read-only**
+boundary. It verifies only the RS-005 *application-signed* canonical manual
+advertisement against an identity approved independently by the user, a
+complete selected network and profile, supported suite, bounded creation and
+expiry times, strict vendored JSON schemas, and RS-001 numeric bounds. The
+local profile additionally requires positive advertised amount-band minima
+and valid x-only epoch inbox keys. The two vendored schemas and expired,
+disposable signed fixture are SHA-pinned to rill-docs in the unit test. Ajv
+validators are generated at build time and `bun run build` checks them, so
+Chromium's existing no-`unsafe-eval` CSP remains effective. Use
+`bun test unit/manualProviderAdvertisement.test.ts` for the focused tests.
+The result is an authenticated **historical offer**, not evidence of liquidity,
+currentness beyond signed expiry, owner-controlled endpoint availability, or
+signing/admission authority. Advertised endpoints and mailbox keys are inert
+proposals; no connection or key allocation occurs. This function does **not**
+verify NIP-01 announcement IDs/signatures/tags and is never called by the
+browser preview. There is no registry, relay discovery, trust-pin persistence,
+automatic refresh, or manual import UI yet. A missing, partial, older-version,
+or restored cache proves no revision/currentness and triggers no automatic
+repair, rescan, network access, or state migration on upgrade.
+
 The embedded build label is disclosure, **not** authenticated release pinning.
 There is no automatic update check, but reloading a mutable hosted URL can run
 different executable code. Active-swap upgrade handling, independent recovery,
