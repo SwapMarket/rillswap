@@ -165,7 +165,7 @@ def submit_prepared_refund(  # noqa: PLR0913 - exact read-only checks explicit
             )
         if returned == expected_txid:
             return candidate
-    except Exception:  # noqa: BLE001, S110 - only definitely pre-send failures are refused
+    except (Exception, KeyboardInterrupt):  # noqa: BLE001, S110 - Ctrl-C can leave a sent tx unknown
         pass
     if send_started:
         raise RefundSubmissionUnknownError("refund submission result unknown")

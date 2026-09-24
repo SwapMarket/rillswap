@@ -106,7 +106,14 @@ def test_exact_refund_intent_is_canonical_and_detects_readback_changes() -> None
         "preflight-denied",
         "preflight-malformed",
         "preflight-transport",
+        "observe-ctrl-c",
+        "client-enter-ctrl-c",
+        "preflight-ctrl-c",
+        "preflight-ctrl-c-subclass",
         "send-timeout",
+        "send-ctrl-c",
+        "send-ctrl-c-subclass",
+        "client-exit-ctrl-c",
         "wrong-txid",
     ],
 )
@@ -118,6 +125,9 @@ def test_submit_once_only_after_fresh_observation_and_exact_preflight(
     observed: list[str] = []
     raw = b"\x02\x00\x00\x00test-only signed bytes"
     txid = "11" * 32
+
+    class ScopedInterrupt(KeyboardInterrupt):
+        """Do not rely on exact KeyboardInterrupt type matching."""
 
     class Reader:
         _cookie_path = Path("/never-read")
@@ -132,6 +142,8 @@ def test_submit_once_only_after_fresh_observation_and_exact_preflight(
             observed.append("observe")
             if mode == "observe-unavailable":
                 raise TimeoutError("private stale chain evidence")
+            if mode == "observe-ctrl-c":
+                raise KeyboardInterrupt("private chain observation")
             return candidate
 
         def _rpc(
@@ -143,11 +155,19 @@ def test_submit_once_only_after_fresh_observation_and_exact_preflight(
             if method == "testmempoolaccept":
                 if mode == "preflight-transport":
                     raise TimeoutError("private preflight request")
+                if mode == "preflight-ctrl-c":
+                    raise KeyboardInterrupt("private preflight interrupt")
+                if mode == "preflight-ctrl-c-subclass":
+                    raise ScopedInterrupt("private preflight interrupt")
                 if mode == "preflight-malformed":
                     return [{"allowed": 1, "txid": txid}]
                 return [{"allowed": mode != "preflight-denied", "txid": txid}]
             if mode == "send-timeout":
                 raise TimeoutError("private send request with cookie")
+            if mode == "send-ctrl-c":
+                raise KeyboardInterrupt("private send interrupt")
+            if mode == "send-ctrl-c-subclass":
+                raise ScopedInterrupt("private send interrupt")
             return "22" * 32 if mode == "wrong-txid" else txid
 
     class Client:
@@ -155,10 +175,13 @@ def test_submit_once_only_after_fresh_observation_and_exact_preflight(
             observed.append("client")
 
         def __enter__(self) -> Self:
+            if mode == "client-enter-ctrl-c":
+                raise KeyboardInterrupt("private client entry")
             return self
 
         def __exit__(self, *_args: object) -> None:
-            return None
+            if mode == "client-exit-ctrl-c":
+                raise KeyboardInterrupt("private client cleanup")
 
     monkeypatch.setattr(broadcast, "_cookie", lambda _path: ("__cookie__", "private"))
     monkeypatch.setattr(broadcast.httpx, "Client", Client)
@@ -178,7 +201,14 @@ def test_submit_once_only_after_fresh_observation_and_exact_preflight(
     else:
         category = (
             broadcast.RefundSubmissionUnknownError
-            if mode in {"send-timeout", "wrong-txid"}
+            if mode
+            in {
+                "send-timeout",
+                "send-ctrl-c",
+                "send-ctrl-c-subclass",
+                "client-exit-ctrl-c",
+                "wrong-txid",
+            }
             else broadcast.RefundPreflightError
         )
         with pytest.raises(category) as error:
@@ -194,8 +224,76 @@ def test_submit_once_only_after_fresh_observation_and_exact_preflight(
         assert error.value.__cause__ is None
         assert "private" not in repr(error.value)
     assert observed[:3] == (
-        ["observe"] if mode == "observe-unavailable" else ["observe", "client", "testmempoolaccept"]
+        ["observe"]
+        if mode in {"observe-unavailable", "observe-ctrl-c"}
+        else ["observe", "client"]
+        if mode == "client-enter-ctrl-c"
+        else ["observe", "client", "testmempoolaccept"]
     )
     assert observed.count("sendrawtransaction") == (
-        1 if mode in {"accepted", "send-timeout", "wrong-txid"} else 0
+        1
+        if mode
+        in {
+            "accepted",
+            "send-timeout",
+            "send-ctrl-c",
+            "send-ctrl-c-subclass",
+            "client-exit-ctrl-c",
+            "wrong-txid",
+        }
+        else 0
+    )
+
+
+@pytest.mark.parametrize("phase", ["preflight", "send"])
+@pytest.mark.parametrize("control", [SystemExit, GeneratorExit])
+def test_non_interrupt_process_control_propagates_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    control: type[BaseException],
+) -> None:
+    terms, binding, _, candidate = _fixture()
+    attempts: list[str] = []
+
+    class Reader:
+        _cookie_path = Path("/never-read")
+        _url = "http://127.0.0.1:18443/"
+
+        def observe(self, *_args: object, **_kwargs: object) -> RecoveryOutpointCandidate:
+            return candidate
+
+        def _rpc(self, _client: object, method: str, *_args: object, **_kwargs: object) -> object:
+            attempts.append(method)
+            if method == ("testmempoolaccept" if phase == "preflight" else "sendrawtransaction"):
+                raise control("control flow must not be disguised as a classified refund result")
+            return [{"allowed": True, "txid": "11" * 32}]
+
+    class Client:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+    monkeypatch.setattr(broadcast, "_cookie", lambda _path: ("__cookie__", "private"))
+    monkeypatch.setattr(broadcast.httpx, "Client", Client)
+    with pytest.raises(control):
+        broadcast.submit_prepared_refund(
+            Reader(),
+            binding,
+            terms,
+            keys=object(),
+            raw=b"test bytes",
+            expected_txid="11" * 32,
+        )
+    assert attempts == (
+        ["testmempoolaccept"]
+        if phase == "preflight"
+        else [
+            "testmempoolaccept",
+            "sendrawtransaction",
+        ]
     )

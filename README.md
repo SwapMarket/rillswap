@@ -172,6 +172,13 @@ uncertainty (exit 3) prevents sending. It samples Core again, requires exact
 per invocation. A valid returned txid is reported as `node_accepted`, never
 as confirmed, final, paid, or swap-recovered. A lost/malformed response after
 the send begins returns **unknown** (exit 4) without an automatic retry.
+Ctrl+C **caught during submission checks or RPC execution** before the send
+boundary is a no-send preflight refusal (exit 2); after the boundary it is
+conservatively unknown (exit 4), including interruption during client cleanup.
+This does not guarantee classification for interruptions during earlier intent
+preparation/publication or after the helper returns. Other process-control
+exceptions are not translated. Neither signal classification nor a returned
+txid proves chain inclusion or makes a second attempt safe.
 Existing intent paths are never overwritten or automatically resumed; the
 operator must reconcile exact txid, mempool, selected chain, conflicts, and
 LN state before any separate manual action. Even a `node_accepted` response
