@@ -46,6 +46,10 @@ int main(void) {
     unsigned char final_signature[64];
     unsigned char internal_key[32];
     unsigned char output_key[32];
+    unsigned char shared_x[32];
+    unsigned char invalid_scalar[32] = {0};
+    unsigned char invalid_peer[32];
+    unsigned char overlapping_secret[32];
     const unsigned char expected_internal_key[32] = {
         /* BIP327 reference.py at acdce4d50c61f81d9ec6534a804b1fb14e84e565, [1G, 2G]. */
         0x3b, 0x46, 0xd2, 0x62, 0xd2, 0xf6, 0x10, 0xe9,
@@ -84,6 +88,51 @@ int main(void) {
     assert(context != NULL);
     assert(rill_public_key_create(context, user_secret, user_key) == RILL_CRYPTO_OK);
     assert(rill_public_key_create(context, provider_secret, provider_key) == RILL_CRYPTO_OK);
+    assert(rill_nip44_shared_x(
+        context, user_secret, &provider_key[1], shared_x) == RILL_CRYPTO_OK);
+    assert(memcmp(shared_x, &provider_key[1], 32u) == 0);
+    assert(rill_nip44_shared_x(
+        context, provider_secret, &user_key[1], shared_x) == RILL_CRYPTO_OK);
+    assert(memcmp(shared_x, &provider_key[1], 32u) == 0);
+    fill(shared_x, 32u, 0xaau);
+    assert(rill_nip44_shared_x(
+        context, invalid_scalar, &provider_key[1], shared_x) ==
+        RILL_CRYPTO_INVALID_SECRET_KEY);
+    assert(memcmp(shared_x, invalid_scalar, 32u) == 0);
+    fill(invalid_scalar, 32u, 0xffu);
+    fill(shared_x, 32u, 0xaau);
+    assert(rill_nip44_shared_x(
+        context, invalid_scalar, &provider_key[1], shared_x) ==
+        RILL_CRYPTO_INVALID_SECRET_KEY);
+    assert(memcmp(shared_x, (unsigned char[32]){0}, 32u) == 0);
+    fill(invalid_peer, 32u, 0xffu);
+    fill(shared_x, 32u, 0xaau);
+    assert(rill_nip44_shared_x(context, user_secret, invalid_peer, shared_x) ==
+           RILL_CRYPTO_INVALID_PUBLIC_KEY);
+    assert(memcmp(shared_x, (unsigned char[32]){0}, 32u) == 0);
+    fill(shared_x, 32u, 0xaau);
+    assert(rill_nip44_shared_x(NULL, user_secret, &provider_key[1], shared_x) ==
+           RILL_CRYPTO_INVALID_ARGUMENT);
+    assert(memcmp(shared_x, (unsigned char[32]){0}, 32u) == 0);
+    fill(shared_x, 32u, 0xaau);
+    assert(rill_nip44_shared_x(context, NULL, &provider_key[1], shared_x) ==
+           RILL_CRYPTO_INVALID_ARGUMENT);
+    assert(memcmp(shared_x, (unsigned char[32]){0}, 32u) == 0);
+    fill(shared_x, 32u, 0xaau);
+    assert(rill_nip44_shared_x(context, user_secret, NULL, shared_x) ==
+           RILL_CRYPTO_INVALID_ARGUMENT);
+    assert(memcmp(shared_x, (unsigned char[32]){0}, 32u) == 0);
+    assert(rill_nip44_shared_x(context, user_secret, &provider_key[1], NULL) ==
+           RILL_CRYPTO_INVALID_ARGUMENT);
+    fill(shared_x, 32u, 0xaau);
+    assert(rill_nip44_shared_x(context, user_secret, shared_x, shared_x) ==
+           RILL_CRYPTO_INVALID_ARGUMENT);
+    assert(memcmp(shared_x, (unsigned char[32]){0}, 32u) == 0);
+    memcpy(overlapping_secret, user_secret, 32u);
+    assert(rill_nip44_shared_x(
+        context, overlapping_secret, &provider_key[1], overlapping_secret) ==
+        RILL_CRYPTO_INVALID_ARGUMENT);
+    assert(memcmp(overlapping_secret, (unsigned char[32]){0}, 32u) == 0);
     assert(rill_public_key_create(
         context, odd_provider_secret, odd_provider_key) == RILL_CRYPTO_OK);
     assert(rill_musig_internal_key(

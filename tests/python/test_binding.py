@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import hmac
 import json
 import os
 import pickle
@@ -50,6 +52,112 @@ def test_schnorr_sign_and_verify() -> None:
         context.schnorr_verify(public_key[1:], b"\x22" * 32, signature)
         with pytest.raises(CryptoError):
             context.schnorr_verify(public_key[1:], b"\x23" * 32, signature)
+
+
+def test_nip44_shared_x_matches_official_conversation_key_vectors() -> None:
+    """Official nip44.vectors.json SHA256 269ed0f69e4c192512cc779e78c555090cebc7c785b609e338a62afc3ce25040."""  # noqa: E501
+    cases = (
+        (
+            "315e59ff51cb9209768cf7da80791ddcaae56ac9775eb25b6dee1234bc5d2268",
+            "c2f9d9948dc8c7c38321e4b85c8558872eafa0641cd269db76848a6073e69133",
+            "3dfef0ce2a4d80a25e7a328accf73448ef67096f65f79588e358d9a0eb9013f1",
+        ),
+        (
+            "a1e37752c9fdc1273be53f68c5f74be7c8905728e8de75800b94262f9497c86e",
+            "03bb7947065dde12ba991ea045132581d0954f042c84e06d8c00066e23c1a800",
+            "4d14f36e81b8452128da64fe6f1eae873baae2f444b02c950b90e43553f2178b",
+        ),
+    )
+    with Context(library_path=LIBRARY) as context:
+        for secret, peer, conversation in cases:
+            shared = context.nip44_shared_x(bytes.fromhex(secret), bytes.fromhex(peer))
+            assert len(shared) == 32
+            assert hmac.new(b"nip44-v2", shared, hashlib.sha256).hexdigest() == conversation
+        one = context.public_key(scalar(1))[1:]
+        two = context.public_key(scalar(2))[1:]
+        assert context.nip44_shared_x(scalar(1), two) == context.nip44_shared_x(scalar(2), one)
+        with pytest.raises(ValueError, match=r"secret_key.*32 bytes"):
+            context.nip44_shared_x(b"short", two)
+        with pytest.raises(ValueError, match=r"peer_xonly_public_key.*32 bytes"):
+            context.nip44_shared_x(scalar(1), b"short")
+        with pytest.raises(CryptoError, match="invalid secret key"):
+            context.nip44_shared_x(b"\x00" * 32, two)
+        with pytest.raises(CryptoError, match="invalid public key"):
+            context.nip44_shared_x(scalar(1), b"\xff" * 32)
+    with pytest.raises(RuntimeError, match="closed"):
+        context.nip44_shared_x(scalar(1), two)
+
+
+def test_optional_nip44_symbol_is_checked_only_when_requested(tmp_path: Path) -> None:
+    compiler = shutil.which("cc")
+    if compiler is None:
+        pytest.skip("C compiler is unavailable")
+    library = tmp_path / "librill_crypto_previous.so"
+    code = (
+        "#include <stdint.h>\n"
+        "uint32_t rill_crypto_abi_version(void) { return 1u; }\n"
+        "void *rill_crypto_context_create(const unsigned char *seed) { "
+        "(void)seed; return (void *)1; }\n"
+        "void rill_crypto_context_destroy(void *context) { (void)context; }\n"
+        "int rill_musig_internal_key(void) { return 0; }\n"
+    )
+    subprocess.run(  # noqa: S603 - fixed synthetic ABI fixture
+        [compiler, "-shared", "-fPIC", "-x", "c", "-o", str(library), "-"],
+        input=code,
+        text=True,
+        check=True,
+    )
+    with (
+        Context(library_path=library) as previous,
+        pytest.raises(RuntimeError, match="lacks optional NIP-44 ECDH"),
+    ):
+        previous.nip44_shared_x(scalar(1), b"\x02" * 32)
+
+
+def test_nip44_temporary_secret_and_output_cleanup_on_all_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with Context(library_path=LIBRARY) as context:
+        native = context._native  # temporary-buffer regression
+        original_input = native.input
+        original_output = native.output
+        secrets: list[Any] = []
+        outputs: list[Any] = []
+
+        def capture_input(value: bytes, size: int, name: str) -> Any:
+            result = original_input(value, size, name)
+            if name == "secret_key":
+                secrets.append(result)
+            return result
+
+        def capture_output(size: int) -> Any:
+            result = original_output(size)
+            outputs.append(result)
+            return result
+
+        monkeypatch.setattr(native, "input", capture_input)
+        monkeypatch.setattr(native, "output", capture_output)
+        peer = context.public_key(scalar(2))[1:]
+        secrets.clear()  # Ignore the separately tested public-key derivation call.
+
+        def allocation_failure(_size: int) -> Any:
+            raise MemoryError("synthetic output allocation failure")
+
+        with monkeypatch.context() as failure:
+            failure.setattr(native, "output", allocation_failure)
+            with pytest.raises(MemoryError, match="synthetic output"):
+                context.nip44_shared_x(scalar(1), peer)
+        assert not secrets  # No secret copy existed before output allocation.
+
+        shared = context.nip44_shared_x(scalar(1), peer)
+        assert shared == peer
+        assert native.bytes(secrets[-1], 32) == b"\x00" * 32
+        assert native.bytes(outputs[-1], 32) == b"\x00" * 32
+
+        with pytest.raises(CryptoError, match="invalid secret key"):
+            context.nip44_shared_x(b"\x00" * 32, peer)
+        assert native.bytes(secrets[-1], 32) == b"\x00" * 32
+        assert native.bytes(outputs[-1], 32) == b"\x00" * 32
 
 
 def test_pinned_bip340_verify_vectors_match_wasm_cases() -> None:

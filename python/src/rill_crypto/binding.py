@@ -41,6 +41,10 @@ void rill_crypto_context_destroy(rill_crypto_context *context);
 int rill_public_key_create(
     const rill_crypto_context *, const unsigned char[32], unsigned char[33]
 );
+int rill_nip44_shared_x(
+    const rill_crypto_context *, const unsigned char[32],
+    const unsigned char[32], unsigned char[32]
+);
 int rill_schnorr_sign(
     const rill_crypto_context *, const unsigned char[32],
     const unsigned char[32], const unsigned char[32], unsigned char[64]
@@ -89,6 +93,7 @@ class _Lib(Protocol):
     def rill_crypto_context_create(self, *args: Any) -> Any: ...
     def rill_crypto_context_destroy(self, *args: Any) -> None: ...
     def rill_public_key_create(self, *args: Any) -> int: ...
+    def rill_nip44_shared_x(self, *args: Any) -> int: ...
     def rill_schnorr_sign(self, *args: Any) -> int: ...
     def rill_schnorr_verify(self, *args: Any) -> int: ...
     def rill_musig_internal_key(self, *args: Any) -> int: ...
@@ -243,6 +248,35 @@ class Context:
                 return self._native.bytes(output, 33)
             finally:
                 self._native.wipe(secret, 32)
+
+    def nip44_shared_x(self, secret_key: bytes, peer_xonly_public_key: bytes) -> bytes:
+        """Compute NIP-44 v2 un-hashed ECDH x, not a NIP-44 encrypt/decrypt API.
+
+        This optional ABI-1 symbol is required only for this operation.
+        Both secret and derived key remain in Python memory after return;
+        temporary CFFI copies are wiped even if the native call fails.
+        """
+        with self._operation():
+            try:
+                shared_x = self._native.lib.rill_nip44_shared_x
+            except AttributeError:
+                raise RuntimeError(
+                    "native rill-crypto library lacks optional NIP-44 ECDH; "
+                    "install a matching native library"
+                ) from None
+            _require_size(secret_key, 32, "secret_key")
+            _require_size(peer_xonly_public_key, 32, "peer_xonly_public_key")
+            peer = self._native.input(peer_xonly_public_key, 32, "peer_xonly_public_key")
+            output = self._native.output(32)
+            secret = self._native.input(secret_key, 32, "secret_key")
+            try:
+                _check(shared_x(self._pointer, secret, peer, output))
+                return self._native.bytes(output, 32)
+            finally:
+                try:
+                    self._native.wipe(secret, 32)
+                finally:
+                    self._native.wipe(output, 32)
 
     def schnorr_sign(self, secret_key: bytes, message: bytes, auxiliary_random: bytes) -> bytes:
         """Create and internally verify a BIP340 signature."""

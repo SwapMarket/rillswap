@@ -64,6 +64,21 @@ RILL_API rill_crypto_status rill_public_key_create(
     unsigned char compressed_public_key33[33]
 );
 
+/*
+ * NIP-44 v2 ECDH primitive only, not a complete NIP-44 cipher or transport.
+ * Lift peer x-only key to even Y, multiply via constant-time secp256k1 ECDH,
+ * and return the UNHASHED 32-byte x coordinate. The three 32-byte buffers
+ * MUST NOT overlap. Non-null output is zeroed on every failure, including
+ * invalid arguments; overlapping input may be overwritten on misuse.
+ * Preserves ABI 1: older libraries simply lack this optional symbol.
+ */
+RILL_API rill_crypto_status rill_nip44_shared_x(
+    const rill_crypto_context *context,
+    const unsigned char secret_key32[32],
+    const unsigned char peer_xonly_public_key32[32],
+    unsigned char shared_x32[32]
+);
+
 RILL_API rill_crypto_status rill_schnorr_sign(
     const rill_crypto_context *context,
     const unsigned char secret_key32[32],

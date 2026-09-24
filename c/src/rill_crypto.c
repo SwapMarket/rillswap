@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "secp256k1.h"
+#include "secp256k1_ecdh.h"
 #include "secp256k1_extrakeys.h"
 #include "secp256k1_musig.h"
 #include "secp256k1_schnorrsig.h"
@@ -42,6 +43,22 @@ static void rill_wipe(void *pointer, size_t length) {
 
 static int rill_context_valid(const rill_crypto_context *context) {
     return context != NULL && context->secp != NULL;
+}
+
+static int rill_nip44_raw_x(
+    unsigned char *output, const unsigned char *x32,
+    const unsigned char *y32, void *data
+) {
+    (void)y32;
+    (void)data;
+    memcpy(output, x32, 32u);
+    return 1;
+}
+
+static int rill_overlaps32(const unsigned char *first, const unsigned char *second) {
+    uintptr_t a = (uintptr_t)first;
+    uintptr_t b = (uintptr_t)second;
+    return (a >= b && a - b < 32u) || (b >= a && b - a < 32u);
 }
 
 static rill_crypto_status rill_parse_keys(
@@ -203,6 +220,45 @@ rill_crypto_status rill_public_key_create(
             &output_length,
             &pubkey,
             SECP256K1_EC_COMPRESSED) != 1 || output_length != 33u) {
+        return RILL_CRYPTO_INTERNAL_ERROR;
+    }
+    return RILL_CRYPTO_OK;
+}
+
+rill_crypto_status rill_nip44_shared_x(
+    const rill_crypto_context *context,
+    const unsigned char secret_key32[32],
+    const unsigned char peer_xonly_public_key32[32],
+    unsigned char shared_x32[32]
+) {
+    unsigned char even_y_peer[33] = {0};
+    secp256k1_pubkey peer;
+    if (shared_x32 == NULL) {
+        return RILL_CRYPTO_INVALID_ARGUMENT;
+    }
+    if (secret_key32 == NULL || peer_xonly_public_key32 == NULL ||
+        rill_overlaps32(shared_x32, secret_key32) ||
+        rill_overlaps32(shared_x32, peer_xonly_public_key32) ||
+        rill_overlaps32(secret_key32, peer_xonly_public_key32)) {
+        rill_wipe(shared_x32, 32u);
+        return RILL_CRYPTO_INVALID_ARGUMENT;
+    }
+    rill_wipe(shared_x32, 32u);
+    if (!rill_context_valid(context)) {
+        return RILL_CRYPTO_INVALID_ARGUMENT;
+    }
+    even_y_peer[0] = 0x02u;
+    memcpy(&even_y_peer[1], peer_xonly_public_key32, 32u);
+    if (secp256k1_ec_pubkey_parse(context->secp, &peer, even_y_peer, 33u) != 1) {
+        return RILL_CRYPTO_INVALID_PUBLIC_KEY;
+    }
+    if (secp256k1_ec_seckey_verify(context->secp, secret_key32) != 1) {
+        return RILL_CRYPTO_INVALID_SECRET_KEY;
+    }
+    if (secp256k1_ecdh(
+            context->secp, shared_x32, &peer, secret_key32,
+            rill_nip44_raw_x, NULL) != 1) {
+        rill_wipe(shared_x32, 32u);
         return RILL_CRYPTO_INTERNAL_ERROR;
     }
     return RILL_CRYPTO_OK;
