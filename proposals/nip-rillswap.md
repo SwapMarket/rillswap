@@ -51,13 +51,13 @@ Subsequent messages use per-session mailbox keys. A separate per-swap recovery a
 
 ## Message wrapping
 
-The application rumor contains the canonical RillSwap envelope as its content. Apply NIP59: encrypt the rumor inside an author-signed seal, then encrypt that seal inside a one-time-key gift wrap. Use NIP44 v2 at each prescribed encryption step and durable outer kind 1059. Follow NIP59's timestamp, tag, recipient, and signature rules. [S09, S10]
+The application rumor contains the canonical RillSwap envelope as its content. For the private-regtest binding only, RS-006 fixes its kind 21417 and tags exactly `[["rillswap","nostr-experimental-1"]]`, matching the separately advertised binding version. The rumor ID uses NIP01 serialization and has **no** `sig` member. Apply NIP59: encrypt the rumor inside an author-signed, empty-tag kind-13 seal, then encrypt that seal inside a one-time-key gift wrap with one matching recipient `p` tag. Use NIP44 v2 at each prescribed encryption step and durable outer kind 1059. Follow NIP59's timestamp, recipient, and signature rules. Do not publish the private rumor directly or treat a valid wrapper as authenticated swap admission. Public kind/version allocation remains open. [S09, S10]
 
 Verify event signatures/size bounds before decrypting, then validate the seal and expected peer. App-level signed quotes are allowed inside the encrypted payload and remain explicitly transferable evidence; do not claim that such quotes are deniable merely because the enclosing rumor is unsigned.
 
 Encrypted application messages bind protocol version, profile, network, session/message ID, sender, sequence, response correlation, contract hash, type, payload, and mandatory features. Session authentication never replaces independent Bitcoin/LN observations for financial authorization.
 
-The profile caps application messages at 16 KiB and received outer events at 128 KiB. A transport-level padding container supports 4/8/16 KiB buckets before the NIP layers, with final encoded-size checks. This cap is a RillSwap policy, not a claim about NIP44's protocol maximum.
+The profile caps application envelope content at 16 KiB and received outer events at 128 KiB. NIP44's mandatory plaintext padding remains in use; the proposed additional 4/8/16 KiB transport container cannot be sent or accepted in the first private-regtest binding because its exact encoding is not yet specified. A separately versioned future binding may define it, with final encoded-size checks. This cap is a RillSwap policy, not a claim about NIP44's protocol maximum.
 
 ## Delivery and idempotency
 

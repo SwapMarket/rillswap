@@ -1,0 +1,12 @@
+{
+  "vector_version": "nostr-rumor-experimental-1",
+  "scope": "Private-regtest NIP-59 unsigned rumor binding only; no encrypted wrap, relay delivery, or session admission",
+  "source_envelope_vector": "vectors/authentication/cases-v1.json#valid[0].confirm_envelope.object",
+  "created_at": 1703021488,
+  "kind": 21417,
+  "tags": [["rillswap", "nostr-experimental-1"]],
+  "pubkey": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+  "content_utf8_sha256": "66174aea4e17f53bbd6e3d7a9d54d208b8ab7bc98fcce872892f1bed002d6311",
+  "content_utf8_length": 1277,
+  "id": "3fd9d98213ef26be968fb442db024c59ae707738f49be50aded2bfb71136efc4"
+}

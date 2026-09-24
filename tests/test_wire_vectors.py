@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,59 @@ from tests.vendor.bip340_reference import public_key, sign, tagged_hash, verify
 ROOT = Path(__file__).parents[1]
 AUTHENTICATION_PATH = ROOT / "vectors" / "authentication" / "cases-v1.json"
 ECONOMICS_PATH = ROOT / "vectors" / "economics" / "cases-v1.json"
+RUMOR_PATH = ROOT / "vectors" / "wire" / "nostr-rumor-experimental-1.json"
+
+
+def test_private_regtest_nip59_rumor_binding_preserves_canonical_envelope() -> None:
+    """Pin the experimental NIP-01 rumor ID without changing RS-001 bytes."""
+    vector = load_json(RUMOR_PATH)
+    assert vector["vector_version"] == "nostr-rumor-experimental-1"
+    assert vector["source_envelope_vector"] == (
+        "vectors/authentication/cases-v1.json#valid[0].confirm_envelope.object"
+    )
+    envelope = load_json(AUTHENTICATION_PATH)["valid"][0]["confirm_envelope"]["object"]
+    content_bytes = rfc8785.dumps(envelope)
+    assert len(content_bytes) == vector["content_utf8_length"]
+    assert hashlib.sha256(content_bytes).hexdigest() == vector["content_utf8_sha256"]
+    assert vector["pubkey"] == envelope["sender_session_key"]
+    assert envelope["protocol"] == "rillswap"
+    assert envelope["wire_version"] == "1"
+    assert vector["kind"] == 21417
+    assert vector["tags"] == [["rillswap", "nostr-experimental-1"]]
+    rumor = {
+        "id": vector["id"],
+        "pubkey": vector["pubkey"],
+        "created_at": vector["created_at"],
+        "kind": vector["kind"],
+        "tags": vector["tags"],
+        "content": content_bytes.decode("utf-8"),
+    }
+    assert set(rumor) == {"id", "pubkey", "created_at", "kind", "tags", "content"}
+    nip01_bytes = json.dumps(
+        [
+            0,
+            rumor["pubkey"],
+            rumor["created_at"],
+            rumor["kind"],
+            rumor["tags"],
+            rumor["content"],
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    assert hashlib.sha256(nip01_bytes).hexdigest() == rumor["id"]
+    altered = [
+        0,
+        rumor["pubkey"],
+        rumor["created_at"],
+        rumor["kind"],
+        [],
+        rumor["content"],
+    ]
+    assert (
+        hashlib.sha256(json.dumps(altered, separators=(",", ":")).encode()).hexdigest()
+        != (rumor["id"])
+    )
 
 
 def _artifact_is_valid(artifact: dict[str, Any]) -> bool:
