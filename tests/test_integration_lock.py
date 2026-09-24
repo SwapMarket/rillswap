@@ -84,6 +84,109 @@ def _committed_repos(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
     return tmp_path, lock
 
 
+def _v2(lock: dict[str, Any]) -> dict[str, Any]:
+    runner = _runner()
+    return {
+        **lock,
+        "schema": runner.V2,
+        "bun_version": "1.3.11",
+        "web_nip59_cases": sorted(runner.WEB_NIP59_CASES),
+    }
+
+
+def test_v2_lock_requires_exact_bun_and_web_inventory_and_preserves_v1(tmp_path: Path) -> None:
+    runner = _runner()
+    _, old = _committed_repos(tmp_path / "repos")
+    manifest = tmp_path / "integration.json"
+    manifest.write_text(json.dumps(old))
+    assert runner._lock(manifest)["schema"] == runner.V1  # noqa: SLF001
+    current = _v2(old)
+    manifest.write_text(json.dumps(current))
+    assert runner._lock(manifest)["web_nip59_cases"] == current["web_nip59_cases"]  # noqa: SLF001
+    for mutation in (
+        "old-extra",
+        "missing-web",
+        "missing-bun",
+        "bad-bun",
+        "duplicate-web",
+        "wrong-web",
+    ):
+        modified = json.loads(json.dumps(current))
+        if mutation == "old-extra":
+            modified["schema"] = runner.V1
+        elif mutation == "missing-web":
+            del modified["web_nip59_cases"]
+        elif mutation == "missing-bun":
+            del modified["bun_version"]
+        elif mutation == "bad-bun":
+            modified["bun_version"] = "latest"
+        elif mutation == "duplicate-web":
+            modified["web_nip59_cases"][0] = modified["web_nip59_cases"][1]
+        else:
+            modified["web_nip59_cases"][0] += "_impostor"
+        manifest.write_text(json.dumps(modified))
+        with pytest.raises(runner.IntegrationLockError):
+            runner._lock(manifest)  # noqa: SLF001
+
+
+def test_v2_fails_closed_before_archive_when_bun_missing_or_wrong_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _runner()
+    _, lock = _committed_repos(tmp_path / "repos")
+    lock = _v2(lock)
+
+    def no_archive(*_args: object) -> None:
+        pytest.fail("Bun preflight must precede extraction")
+
+    monkeypatch.setattr(runner, "_archive", no_archive)
+    monkeypatch.setattr(runner.shutil, "which", lambda _name: None)
+    with pytest.raises(runner.IntegrationLockError, match="Bun executable"):
+        runner._build(lock, tmp_path / "repos", tmp_path / "work")  # noqa: SLF001
+    monkeypatch.setattr(runner.shutil, "which", lambda _name: "/usr/bin/bun")
+    monkeypatch.setattr(runner, "_run", lambda _cmd, **_kwargs: b"0.0.0\n")
+    with pytest.raises(runner.IntegrationLockError, match="Bun version"):
+        runner._build(lock, tmp_path / "repos", tmp_path / "work")  # noqa: SLF001
+
+
+def test_v2_frozen_web_install_fails_before_native_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _runner()
+    _, lock = _committed_repos(tmp_path / "repos")
+    lock = _v2(lock)
+    archives: list[str] = []
+    commands: list[list[str]] = []
+
+    def fake_archive(_repo: Path, _commit: str, destination: Path) -> None:
+        archives.append(destination.name)
+        destination.mkdir(parents=True)
+        if destination.name == "rill-provider":
+            scripts = destination / "scripts"
+            scripts.mkdir()
+            shutil.copyfile(SCRIPT, scripts / "check_integration_lock.py")
+        if destination.name == "rill-web":
+            (destination / "bun.lock").write_text("locked-deps")
+
+    def fake_run(command: list[str], **_kwargs: object) -> bytes:
+        commands.append(command)
+        if command[1:2] == ["--version"]:
+            return b"1.3.11\n"
+        if command[1:2] == ["install"]:
+            raise runner.IntegrationLockError("frozen install refused")
+        pytest.fail("No CMake/build/uv action before frozen dependencies")
+
+    monkeypatch.setattr(runner.shutil, "which", lambda _name: "/usr/bin/bun")
+    monkeypatch.setattr(runner, "_archive", fake_archive)
+    monkeypatch.setattr(runner, "_run", fake_run)
+    with pytest.raises(runner.IntegrationLockError, match="frozen install refused"):
+        runner._build(lock, tmp_path / "repos", tmp_path / "work")  # noqa: SLF001
+    assert set(archives) == {"rill-crypto", "rill-core", "rill-provider", "rill-docs", "rill-web"}
+    assert commands[1][1:] == ["install", "--frozen-lockfile", "--ignore-scripts"]
+
+
 def test_pinned_sources_require_all_six_exact_commits_and_trees(tmp_path: Path) -> None:
     runner = _runner()
     root, lock = _committed_repos(tmp_path)
@@ -209,6 +312,32 @@ def test_native_inventory_requires_exact_cases_with_no_skips_or_errors(tmp_path:
         write_report(expected, marker)
         with pytest.raises(runner.IntegrationLockError, match="inventory"):
             runner._check_native_report(report, expected)  # noqa: SLF001
+
+
+def test_web_inventory_requires_two_exact_profile_cases_no_skips_or_errors(tmp_path: Path) -> None:
+    runner = _runner()
+    expected = sorted(runner.WEB_NIP59_CASES)
+    report = tmp_path / "web.xml"
+
+    def write_report(names: list[str], bad_tag: str | None = None) -> None:
+        suite = ET.Element("testsuite")
+        for item in names:
+            classname, name = item.split("::", 1)
+            case = ET.SubElement(suite, "testcase", classname=classname, name=name)
+            if bad_tag is not None and name == expected[0].split("::", 1)[1]:
+                ET.SubElement(case, bad_tag)
+        report.write_bytes(ET.tostring(suite))
+
+    write_report(expected)
+    assert runner._check_report(report, expected) == 2  # noqa: SLF001
+    for changed in (expected[:1], [expected[0], expected[0]], [expected[0], "other::case"]):
+        write_report(changed)
+        with pytest.raises(runner.IntegrationLockError, match="inventory"):
+            runner._check_report(report, expected)  # noqa: SLF001
+    for tag in ("skipped", "failure", "error"):
+        write_report(expected, tag)
+        with pytest.raises(runner.IntegrationLockError, match="inventory"):
+            runner._check_report(report, expected)  # noqa: SLF001
 
 
 def test_runner_creates_missing_ignored_scratch_directory(

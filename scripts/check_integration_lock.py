@@ -1,8 +1,8 @@
 """Build a pinned local provider baseline from committed sources, not editable siblings.
 
 This is an integration gate, NOT a release or authority to run a live swap.
-It needs explicit local Git object sources, a trusted Python/uv/CMake toolchain,
-and network access for pinned third-party build and Python dependencies.
+It needs explicit local Git object sources, trusted Python/uv/CMake/Bun tools,
+and network access for third-party build and test dependencies.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -43,6 +44,21 @@ WHEELS = frozenset(
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 MIN_NATIVE_CASES = 23
+WEB_NIP59_CASES = frozenset(
+    {
+        (
+            "tests.test_nip59_web_interop::"
+            "test_web_produced_wrap_native_provider_consumes_signed_rs001[0-btc-to-ln/v1]"
+        ),
+        (
+            "tests.test_nip59_web_interop::"
+            "test_web_produced_wrap_native_provider_consumes_signed_rs001[1-ln-to-btc/v1]"
+        ),
+    }
+)
+V1 = "rillswap-provider-integration-lock/v1"
+V2 = "rillswap-provider-integration-lock/v2"
+BUN_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\Z")
 
 
 class IntegrationLockError(Exception):
@@ -88,10 +104,14 @@ def _lock(path: Path) -> dict[str, Any]:
         return result
 
     lock: dict[str, Any] = json.loads(source, object_pairs_hook=unique_pairs)
+    if type(lock) is not dict or lock.get("schema") not in {V1, V2}:
+        raise IntegrationLockError("unsupported or incomplete integration lock")
+    v2 = lock["schema"] == V2
+    required = {"schema", "components", "python_wheels", "native_cases"}
+    if v2:
+        required.update({"web_nip59_cases", "bun_version"})
     if (
-        type(lock) is not dict
-        or set(lock) != {"schema", "components", "python_wheels", "native_cases"}
-        or lock["schema"] != "rillswap-provider-integration-lock/v1"
+        set(lock) != required
         or type(lock["components"]) is not dict
         or set(lock["components"]) != COMPONENTS
         or type(lock["python_wheels"]) is not dict
@@ -105,6 +125,15 @@ def _lock(path: Path) -> dict[str, Any]:
         or len(set(lock["native_cases"])) != MIN_NATIVE_CASES
     ):
         raise IntegrationLockError("unsupported or incomplete integration lock")
+    if v2 and (
+        type(lock["bun_version"]) is not str
+        or not BUN_VERSION.fullmatch(lock["bun_version"])
+        or type(lock["web_nip59_cases"]) is not list
+        or len(lock["web_nip59_cases"]) != len(WEB_NIP59_CASES)
+        or any(type(case) is not str for case in lock["web_nip59_cases"])
+        or set(lock["web_nip59_cases"]) != WEB_NIP59_CASES
+    ):
+        raise IntegrationLockError("unsupported or incomplete web integration inventory")
     for name in COMPONENTS:
         pin = lock["components"][name]
         if (
@@ -154,9 +183,9 @@ def _archive(repo: Path, commit: str, destination: Path) -> None:
         archive.extractall(destination, filter="data")
 
 
-def _check_native_report(report: Path, expected: list[str]) -> int:
+def _check_report(report: Path, expected: list[str]) -> int:
     if not 0 < report.stat().st_size <= MAX_JUNIT_BYTES:
-        raise IntegrationLockError("native test report missing or oversized")
+        raise IntegrationLockError("integration test report missing or oversized")
     suite = ET.fromstring(report.read_bytes())  # noqa: S314 - bounded local pytest output
     cases = list(suite.iter("testcase"))
     actual = [f"{case.get('classname')}::{case.get('name')}" for case in cases]
@@ -165,13 +194,50 @@ def _check_native_report(report: Path, expected: list[str]) -> int:
         or sorted(actual) != sorted(expected)
         or any(list(case) for case in cases)
     ):
-        raise IntegrationLockError("required real-native case inventory did not execute")
+        raise IntegrationLockError("required integration case inventory did not execute")
     return len(cases)
 
 
+def _check_native_report(report: Path, expected: list[str]) -> int:
+    """Keep the historical v1 inventory entry point."""
+    return _check_report(report, expected)
+
+
+def _bun(lock: dict[str, Any]) -> str:
+    bun = shutil.which("bun")
+    if bun is None:
+        raise IntegrationLockError("locked Bun executable unavailable")
+    if _run([bun, "--version"]).decode().strip() != lock["bun_version"]:
+        raise IntegrationLockError("locked Bun version unavailable")
+    return bun
+
+
+def _install_web(bun: str, work: Path) -> None:
+    web = work / "rill-web"
+    original_lock_hash = _sha256(web / "bun.lock")
+    bun_env = os.environ.copy()
+    bun_env["BUN_INSTALL_CACHE_DIR"] = str(work / "bun-cache")
+    _run([bun, "install", "--frozen-lockfile", "--ignore-scripts"], cwd=web, env=bun_env)
+    if _sha256(web / "bun.lock") != original_lock_hash:
+        raise IntegrationLockError("web dependency lock changed during frozen install")
+
+
 def _build(lock: dict[str, Any], source_root: Path, work: Path) -> dict[str, Any]:
-    for name in ("rill-crypto", "rill-core", "rill-provider"):
+    v2 = lock["schema"] == V2
+    bun = _bun(lock) if v2 else None  # Preflight before any archive or expensive build.
+    archived = ["rill-crypto", "rill-core", "rill-provider"]
+    if v2:
+        archived.extend(["rill-docs", "rill-web"])
+    for name in archived:
         _archive(source_root / name, lock["components"][name]["commit"], work / name)
+    if v2:
+        # The executing runner must itself be the pinned provider artifact.
+        # Updating a local script without re-pinning cannot change the gate.
+        if _sha256(work / "rill-provider/scripts/check_integration_lock.py") != _sha256(
+            Path(__file__)
+        ):
+            raise IntegrationLockError("executing integration runner differs from pinned source")
+        _install_web(bun, work)
     crypto = work / "rill-crypto"
     core = work / "rill-core"
     provider = work / "rill-provider"
@@ -254,8 +320,10 @@ def _build(lock: dict[str, Any], source_root: Path, work: Path) -> dict[str, Any
         env=env,
     )
     count = _check_native_report(report, lock["native_cases"])
-    return {
-        "kind": "local-pinned-provider-integration/v1",
+    result = {
+        "kind": "local-pinned-provider-integration/v2"
+        if v2
+        else "local-pinned-provider-integration/v1",
         "components": lock["components"],
         "artifacts_sha256": {
             **{
@@ -267,6 +335,32 @@ def _build(lock: dict[str, Any], source_root: Path, work: Path) -> dict[str, Any
         "native_cases_passed": count,
         "authority": "none (integration evidence, not production readiness)",
     }
+    if v2:
+        web_report = work / "web-nip59-tests.xml"
+        web_env = {**env, "RILLSWAP_RUN_WEB_NIP59": "1"}
+        _run(
+            [
+                str(python),
+                "-m",
+                "pytest",
+                "-q",
+                "-m",
+                "web_nip59_interop",
+                "--basetemp",
+                str(work / "pytest-web"),
+                f"--junitxml={web_report}",
+            ],
+            cwd=provider,
+            env=web_env,
+        )
+        result.update(
+            {
+                "bun_version": lock["bun_version"],
+                "archived_components": archived,
+                "web_nip59_cases_passed": _check_report(web_report, lock["web_nip59_cases"]),
+            }
+        )
+    return result
 
 
 def main() -> int:
@@ -290,6 +384,9 @@ def main() -> int:
         scratch.mkdir(mode=0o700, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="integration-", dir=scratch) as temporary:
             result = _build(lock, arguments.source_root, Path(temporary))
+        if lock.get("schema") == V2:
+            result["integration_lock_sha256"] = _sha256(arguments.lock)
+            result["executing_runner_sha256"] = _sha256(Path(__file__))
         sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n")
     except (IntegrationLockError, OSError, ValueError, KeyError, TypeError):
         sys.stderr.write("Pinned local integration unavailable or failed; no release authority\n")
