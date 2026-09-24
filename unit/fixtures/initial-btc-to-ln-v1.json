@@ -1,0 +1,170 @@
+{
+  "format": "rillswap-recovery",
+  "format_version": "1-pre.1",
+  "specification_version": "0.1.0-pre.1",
+  "created_at": 1700000100,
+  "updated_at": 1700000100,
+  "network_identity": {
+    "family": "bitcoin",
+    "name": "regtest",
+    "genesis_hash": "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206",
+    "signet_challenge": null,
+    "consensus_profile": "bitcoin-core-v30.0-regtest-default",
+    "deployment_namespace": "rillswap-e2e-v1"
+  },
+  "profile_id": "btc-to-ln/v1",
+  "contract_hash": "35fdbb89024750e8c84833e730e4395cd8745e00ee59c24b668c880f1880cb54",
+  "contract_terms": {
+    "protocol": "rillswap",
+    "contract_version": "1",
+    "profile_id": "btc-to-ln/v1",
+    "network_identity": {
+      "family": "bitcoin",
+      "name": "regtest",
+      "genesis_hash": "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206",
+      "signet_challenge": null,
+      "consensus_profile": "bitcoin-core-v30.0-regtest-default",
+      "deployment_namespace": "rillswap-e2e-v1"
+    },
+    "provider_identity_key": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+    "client_contract_compressed_key": "02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13",
+    "provider_contract_compressed_key": "022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+    "claimant": "provider",
+    "refund_party": "client",
+    "invoice_binding": {
+      "bolt11_sha256": "d53eda7a637c99cc7fb566d96e9fa109bf15c478410a3f5eb4d4c4e26cd081f6",
+      "payment_hash": "425ed4e4a36b30ea21b90e21c712c649e8214c29b7eaf68089d1039c6e55384c",
+      "amount_msat": "100000000",
+      "payee_compressed_pubkey": "025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc",
+      "created_at": 1700000000,
+      "expires_at": 1700003600,
+      "min_final_cltv_delta": 18
+    },
+    "economics": {
+      "kind": "btc-to-ln",
+      "lightning_principal_sat": "100000",
+      "success_fee_sat": "1000",
+      "contract_amount_sat": "101000"
+    },
+    "refund_lock_height": 1100,
+    "funding_confirmations": 2,
+    "settlement_confirmations": 3,
+    "refund_resolution_confirmations": 4,
+    "max_funding_fee_sat": "500",
+    "max_claim_fee_sat": "400",
+    "max_refund_fee_sat": "600",
+    "client_destination_script": "00143131313131313131313131313131313131313131",
+    "provider_destination_script": "51202f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01",
+    "recovery_authorization_xonly_key": "fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+    "terms_expiry": 1700001800,
+    "timing_policy": {
+      "kind": "btc-to-ln",
+      "max_outgoing_htlc_expiry_height": 1070,
+      "learn_and_claim_blocks": 20,
+      "client_response_blocks": 6,
+      "claim_confirmation_blocks": 6
+    },
+    "required_features": [],
+    "extensions": {}
+  },
+  "verification_context": {
+    "handshake_init": {
+      "protocol": "rillswap",
+      "wire_version": "1",
+      "profile_id": "btc-to-ln/v1",
+      "network_identity": {
+        "family": "bitcoin",
+        "name": "regtest",
+        "genesis_hash": "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206",
+        "signet_challenge": null,
+        "consensus_profile": "bitcoin-core-v30.0-regtest-default",
+        "deployment_namespace": "rillswap-e2e-v1"
+      },
+      "session_id": "1010101010101010101010101010101010101010101010101010101010101010",
+      "client_challenge": "1111111111111111111111111111111111111111111111111111111111111111",
+      "client_session_xonly_key": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+      "expected_provider_identity_xonly_key": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "requested_encryption_suites": [
+        "noise-xk-secp256k1-chachapoly-sha256/v1"
+      ],
+      "requested_capabilities": [
+        "core/v1",
+        "recovery/v1"
+      ],
+      "required_features": [],
+      "extensions": {}
+    },
+    "handshake_accept": {
+      "handshake_init_hash": "5cac6f54747b33bf968bff61048f21f56e06d0c295b999def1b37fc0b171434c",
+      "protocol": "rillswap",
+      "wire_version": "1",
+      "profile_id": "btc-to-ln/v1",
+      "network_identity": {
+        "family": "bitcoin",
+        "name": "regtest",
+        "genesis_hash": "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206",
+        "signet_challenge": null,
+        "consensus_profile": "bitcoin-core-v30.0-regtest-default",
+        "deployment_namespace": "rillswap-e2e-v1"
+      },
+      "session_id": "1010101010101010101010101010101010101010101010101010101010101010",
+      "client_challenge": "1111111111111111111111111111111111111111111111111111111111111111",
+      "provider_challenge": "1212121212121212121212121212121212121212121212121212121212121212",
+      "client_session_xonly_key": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+      "provider_session_xonly_key": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+      "provider_identity_xonly_key": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "selected_encryption_suite": "noise-xk-secp256k1-chachapoly-sha256/v1",
+      "selected_capabilities": [
+        "core/v1",
+        "recovery/v1"
+      ],
+      "transport_endpoints": [
+        "wss://provider.rillswap.invalid/v1"
+      ],
+      "required_features": [],
+      "extensions": {}
+    },
+    "provider_identity_signature": "8c172467734c4a3bd9abfd9fdd66b05c10e1bf12d96843011e191f18cd95fdd55de57287073b1ff5f6d5346ae7b8f196d3ec09e61f3fe6dde2caf69762b05e9f",
+    "handshake_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8",
+    "client_session_xonly_key": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+    "provider_session_xonly_key": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+    "expected_provider_identity_source": {
+      "kind": "manual",
+      "advertisement_digest": null
+    },
+    "provider_terms_signature": "84666843d34e78e411e4d79fd1430393feae262402ca69f8e7567942bcbbe5debe7f51ab59b5230204744b5150d55decd935548fe77115541765a133ac45fa95",
+    "client_acceptance_signature": "48784189fe96d08f9175d239058c4226ba508ba67df9ff41e014606322934c29c8d358ae491ab9cfeb2f5469a114534860cddccea2e7b9210ca4f896e4c3d246"
+  },
+  "taproot_contract": {
+    "internal_xonly_key": "44f5d5da9470c2bd7587ac59b16ec81e7777d9f5ad0599756a285c89ae690865",
+    "internal_key_parity": 1,
+    "claim_script": "82012088a820425ed4e4a36b30ea21b90e21c712c649e8214c29b7eaf68089d1039c6e55384c88202f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4ac",
+    "refund_script": "024c04b17520e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13ac",
+    "claim_leaf_hash": "7732c10d35a77b1087912b17ced2035f93b097b15d2252fe8becbc1ca2b1b5d7",
+    "refund_leaf_hash": "8a5ea062005b31f31451db4c8cc6ad11774bfee4ad871e23645262b89c66454f",
+    "merkle_root": "ef978b55c239656549525abcd34ef4cea2320acd33786ba7c001987a7cf54c79",
+    "tap_tweak": "425b21135019b8ebfbf62b247f3d0a663c0a0802d4a0094d4d8cd6ee803edc59",
+    "output_xonly_key": "92b3a00badd1c4e6474a1df8f4a858bb86342cbc1ba8b589a8e955b49458ed14",
+    "output_key_parity": 1,
+    "script_pubkey": "512092b3a00badd1c4e6474a1df8f4a858bb86342cbc1ba8b589a8e955b49458ed14",
+    "claim_control_block": "c144f5d5da9470c2bd7587ac59b16ec81e7777d9f5ad0599756a285c89ae6908658a5ea062005b31f31451db4c8cc6ad11774bfee4ad871e23645262b89c66454f",
+    "refund_control_block": "c144f5d5da9470c2bd7587ac59b16ec81e7777d9f5ad0599756a285c89ae6908657732c10d35a77b1087912b17ced2035f93b097b15d2252fe8becbc1ca2b1b5d7"
+  },
+  "user_secret": {
+    "kind": "raw-secp256k1-v1",
+    "contract_secret_key": "0000000000000000000000000000000000000000000000000000000000000004"
+  },
+  "funding_history": [],
+  "chain_scan_birthday_height": 900,
+  "fee_policy": {
+    "max_claim_fee_sat": "400",
+    "max_refund_fee_sat": "600"
+  },
+  "recovery_authorization_xonly_key": "fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+  "monotonic_knowledge": {
+    "preimage_known": false,
+    "preimage": null,
+    "dangerous_signature_issued": false
+  },
+  "extensions": {}
+}

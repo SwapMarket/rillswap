@@ -93,6 +93,24 @@ the event-object bytes. It returns a historical signed candidate, not globally
 current revision, endpoint approval, session ownership, or financial
 authority. No new state is read or written during startup or upgrade.
 
+`src/recoveryAgeContainer.ts` is a third **unused, disconnected** boundary.
+Using pinned `age-encryption`, it accepts *caller-validated* canonical RS-007
+UTF-8 plaintext bytes and exactly one independently selected age X25519
+recipient, and returns bounded binary age v1 ciphertext. It does not inspect
+full recovery schema, verify signatures/contract/secrets, prove recipient
+ownership or decryptability, persist/export a file, or offer any recovery UI.
+Never pass real recovery secrets to the development preview or test glue.
+Unit and Chromium CSP tests use synthetic public fixtures for both profiles.
+The opt-in `RILLSWAP_RUN_WEB_CLI_AGE=1 RILL_CRYPTO_LIBRARY=<local native path>
+AGE_BINARY=<Go age v1.3.1 path> bun run test -- tests/recovery-cli-interop.spec.ts`
+checks actual browser-produced bytes with independent Go age decryption and
+CLI native offline inspection; missing native/Go prerequisites fail that
+explicit opt-in. This is age-container interoperability, **not W03** browser
+recovery generation, durable verified export before funding, or authority to
+sign, send, pay, or recover. Upgrading from previous versions introduces no
+secret entry, database access, migration, rescan, export, or automatic action;
+absent, partial, older, or restored browser state proves no recovery safety.
+
 The embedded build label is disclosure, **not** authenticated release pinning.
 There is no automatic update check, but reloading a mutable hosted URL can run
 different executable code. Active-swap upgrade handling, independent recovery,

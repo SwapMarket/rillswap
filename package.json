@@ -20,6 +20,7 @@
   "dependencies": {
     "@noble/curves": "2.0.1",
     "@noble/hashes": "2.0.1",
+    "age-encryption": "0.3.1",
     "canonicalize": "5.1.0",
     "nostr-tools": "2.25.2"
   }
