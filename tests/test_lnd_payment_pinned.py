@@ -264,7 +264,7 @@ from rill_core.wire.types import NetworkIdentity
 from rill_provider._lnd_proto import lightning_pb2
 from rill_provider._lnd_proto.routerrpc import router_pb2
 from rill_provider.lnd_payment_observation import (
-    RegtestLndPaymentObserver, LndUnavailableError,
+    RegtestLndInfoObserver, RegtestLndPaymentObserver, LndUnavailableError,
 )
 import walletunlocker_pb2 as unlock
 
@@ -318,6 +318,11 @@ baked = bake(lightning_pb2.BakeMacaroonRequest(
     root_key_id=0, allow_external_permissions=False), metadata=metadata(admin), timeout=3)
 restricted = bytes.fromhex(baked.macaroon)
 assert 0 < len(restricted) <= 4096
+info_baked = bake(lightning_pb2.BakeMacaroonRequest(
+    permissions=[lightning_pb2.MacaroonPermission(entity='info', action='read')],
+    root_key_id=0, allow_external_permissions=False), metadata=metadata(admin), timeout=3)
+info_restricted = bytes.fromhex(info_baked.macaroon)
+assert 0 < len(info_restricted) <= 4096
 admin = b''
 print('PHASE: restricted_info', file=sys.stderr)
 try:
@@ -333,6 +338,31 @@ raw_track = channel.unary_stream('/routerrpc.Router/TrackPaymentV2',
     request_serializer=router_pb2.TrackPaymentRequest.SerializeToString,
     response_deserializer=lightning_pb2.Payment.FromString)
 payment_hash = bytes.fromhex('00' * 31 + '01')
+print('PHASE: info_only', file=sys.stderr)
+reported = info(lightning_pb2.GetInfoRequest(), metadata=metadata(info_restricted), timeout=3)
+assert reported.identity_pubkey == identity.identity_pubkey
+try:
+    next(iter(raw_track(router_pb2.TrackPaymentRequest(payment_hash=payment_hash),
+        metadata=metadata(info_restricted), timeout=3)))
+except grpc.RpcError as error:
+    assert error.code() == grpc.StatusCode.UNKNOWN
+    assert 'permission denied' in (error.details() or '').lower()
+else:
+    raise AssertionError('info:read must not authorize payment tracking')
+info_private = Path('/tmp/rill-info-only.macaroon')
+fd = os.open(info_private, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+with os.fdopen(fd, 'wb') as output:
+    output.write(info_restricted)
+info_observer = RegtestLndInfoObserver(host='127.0.0.1', port=10009,
+    tls_certificate_path='/work/public/tls.cert', info_macaroon_path=info_private,
+    network=NetworkIdentity.model_validate(json.loads(
+        Path('/work/provider/tests/fixtures/initial-btc-to-ln-v1.json').read_text()
+    )['contract_terms']['network_identity']), expected_node_pubkey=identity.identity_pubkey)
+snapshot = info_observer.get_info(deadline_seconds=3)
+assert snapshot.node_pubkey == identity.identity_pubkey
+assert snapshot.block_height == 0
+assert isinstance(snapshot.synced_to_chain, bool) and isinstance(snapshot.synced_to_graph, bool)
+info_private.unlink()
 print('PHASE: raw_track', file=sys.stderr)
 try:
     next(iter(raw_track(router_pb2.TrackPaymentRequest(payment_hash=payment_hash),

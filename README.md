@@ -308,8 +308,22 @@ does not mean `IN_FLIGHT`, and LND's numeric HTLC attempt ID is **not** the
 Rill journal's local attempt ID. No protobuf response, preimage, route, or
 credential is returned or persisted. Missing history, not-found, timeout,
 auth rejection, and interrupted tracking remain unknown, not proof of failure
-or absence. The observer does not query backend identity or network consensus;
-configured regtest identity is **not independently attested** by this method.
+or absence. The payment observer does not query backend identity or network
+consensus; configured regtest identity is **not independently attested** by
+this method. A separate, explicitly invoked
+`RegtestLndInfoObserver.get_info()` uses a different, operator-provisioned
+`info:read` macaroon and an independently configured expected compressed node
+key. It performs one bounded TLS `Lightning/GetInfo` call and refuses a
+mismatched reported key or a chain list other than exactly `bitcoin/regtest`.
+It returns the reported block height and individual chain/graph sync flags,
+including false flags and height zero, never a readiness or payment token.
+This is a TLS-authenticated endpoint's **claim**, not independent proof of
+possession of the Lightning key or the full Rill network identity (genesis,
+consensus profile, namespace); it is not atomic with payment tracking. The
+restricted `info:read` credential must be provisioned and protected separately
+from the `offchain:read` credential. In the pinned empty-wallet LND check,
+the former can call GetInfo but not TrackPaymentV2, while the latter retains
+its existing GetInfo-denial check. Neither observer writes a trust marker.
 There is no startup call, journal mutation, submit, cancel, retry, invoice
 lookup, payment reconciliation, or payment permission. Previous-release v1
 journals remain untouched, including missing, partial, and restored states;
