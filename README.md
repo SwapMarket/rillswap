@@ -73,6 +73,28 @@ a committed response, no acceptance may be sent. Upgrading from the previous
 provider release does not create, migrate, or scan any session state; absent,
 partial, old, or restored state grants no key allocation or action authority.
 
+`handshake_store.PreparedHandshakeStore` is a separate **offline-only**,
+explicitly bootstrapped SQLite PREPARED registry. It can record a canonical
+RS-001 initiation and acceptance pair, a validated provider identity signature
+on the inner acceptance, and a **public** custody reference in one committed
+transaction. Both outer handshake envelopes are unsigned. It neither receives
+or authenticates a live client, provisions a secret, signs, publishes, admits a
+session, nor enables retry/send/payment. It requires a trusted local directory
+and native signature verifier chosen by the caller. A result retrieved from
+the local store is not freshly authenticated: its versioned checksum detects
+accidental changes, not database writers who can recompute it, missing rows in
+a restored snapshot, or changes on other replicas. A PREPARED row proves only
+that this copy recorded those bytes, not key availability or delivery. An
+UNKNOWN lookup is **not** proof of an unused session. Previous-release
+installations have no such store and remain unchanged: creation requires an
+explicit call, and opening absent, partial, older, newer, foreign, or corrupt
+state fails closed without migration or replacement. A locally valid restored
+copy can omit later prepared entries; no local marker can fence rollback or
+establish globally exclusive acceptance. Any future sender requires durable
+production custody, authoritative non-rollback writer fencing, inbox/outbox
+ordering, transport authentication, and independent recovery handling for
+already-funded or inflight sessions. No code calls this registry at startup.
+
 The separate `core_tx_bytes.RegtestCoreTransactionReader` is an explicit,
 read-only **regtest-only** Bitcoin Core v30 RPC probe. It takes a numeric
 loopback address, port, owner-private Core cookie file, and a complete trusted
