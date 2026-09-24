@@ -32,6 +32,21 @@ no swap database, encrypted-record format, per-swap lock, or auto-migration to
 claim. A future release must establish those together before any commitment.
 Absence of a database proves nothing about prior browser use or safe funding.
 
+`src/nip59Transport.ts` is an **unused, disconnected private-regtest producer**,
+not a browser feature or relay publisher. Given an already application-validated
+canonical RS-001 envelope, a caller-owned ephemeral session secret, and an
+independently selected recipient mailbox key, it constructs a NIP-59 gift wrap
+using pinned `nostr-tools`. It checks the canonical JSON bytes, envelope sender
+key, experimental binding, outer signature/recipient, and size cap. It does
+**not** validate the complete RS-001 schema/signature/transcript, choose or
+persist any key, contact a relay, establish session authority, or enable funds.
+The browser preview does not import or call it. Additional transport padding
+requires a future binding; this one uses NIP-44's mandatory padding only.
+An installation upgrading from the prior version receives no listener, key,
+database read/migration, reprocessing, or swap action, regardless of absent,
+partial, old, or restored browser state. `bun test unit/nip59Transport.test.ts`
+checks the isolated producer with disposable synthetic keys.
+
 The embedded build label is disclosure, **not** authenticated release pinning.
 There is no automatic update check, but reloading a mutable hosted URL can run
 different executable code. Active-swap upgrade handling, independent recovery,
