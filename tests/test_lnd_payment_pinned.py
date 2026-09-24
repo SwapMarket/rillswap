@@ -1,7 +1,9 @@
-"""Opt-in pinned LND regtest NOT_FOUND check with a disposable empty wallet.
+"""Two opt-in, isolated pinned LND regtest empty-wallet diagnostics.
 
-No mining, funding, channels, invoices, payments, or host wallet mounts. The
-fresh wallet is initialized in memory only to make the read-only RPC available.
+The original NOT_FOUND/permission diagnostic mines no blocks and creates no
+invoices. Its separate OPEN/CANCELED invoice counterpart mines one unspendable
+OP_RETURN block and creates one unfunded hold, with no channel or payment.
+Both keep wallet credentials in container tmpfs, never in host wallet mounts.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ LND_IMAGE = (
 PYTHON_IMAGE = "python@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4"
 GENESIS = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
 WALLET_PROTO_SHA256 = "2b1810df963e3b50858f9306207a1edf97ff5588ce6dd9afad5ca5e677d5dea6"
+STATE_PROTO_SHA256 = "e7c9e1083804c5510874a4e549e3a26864e91892c830921e82d555e469f97242"
 ROOT = Path(__file__).parents[1]
 CORE = ROOT.parent / "rill-core"
 DOCKER = shutil.which("docker")
@@ -129,6 +132,27 @@ def _wallet_messages(destination: Path) -> None:
         content.replace(
             original, "from rill_provider._lnd_proto import lightning_pb2 as lightning__pb2"
         )
+    )
+
+
+def _state_messages(destination: Path) -> None:
+    """Generate pinned, test-only LND server-readiness messages."""
+    proto = ROOT / "tests/fixtures/lnd-v0.21.0-beta/stateservice.proto"
+    if hashlib.sha256(proto.read_bytes()).hexdigest() != STATE_PROTO_SHA256:
+        raise AssertionError("test-only LND state protobuf differs from pinned tag")
+    subprocess.run(  # noqa: S603 - fixed interpreter and pinned local proto file
+        [
+            str(ROOT / ".venv/bin/python"),
+            "-m",
+            "grpc_tools.protoc",
+            "-I",
+            str(proto.parent),
+            f"--python_out={destination}",
+            str(proto),
+        ],
+        capture_output=True,
+        check=True,
+        timeout=15,
     )
 
 
@@ -570,5 +594,233 @@ def test_pinned_lnd_restricted_read_diagnostic(tmp_path: Path) -> None:
             timeout=100,
         )
         assert result == "Pinned LND read-only NOT_FOUND and restricted macaroon checks passed"
+    finally:
+        _cleanup_containers((sidecar, lnd, core), run_id, cert)
+
+
+# Separate from the empty-wallet/no-invoice diagnostic above. A GetInfo reply
+# can precede invoice-registry startup; this script waits for SERVER_ACTIVE
+# before its one create attempt. It never retries an ambiguous create result.
+OPEN_INVOICE = """
+import json, os, secrets, sys, time
+from pathlib import Path
+import grpc
+from rill_core.wire.types import NetworkIdentity
+from rill_provider._lnd_proto import lightning_pb2
+from rill_provider._lnd_proto.invoicesrpc import invoices_pb2
+from rill_provider.lnd_invoice_observation import RegtestLndInvoiceObserver
+import walletunlocker_pb2 as unlock
+import stateservice_pb2 as state
+
+cert = Path('/work/public/tls.cert').read_bytes()
+def unary(channel, method, request, response):
+    return channel.unary_unary(method, request_serializer=request.SerializeToString,
+                               response_deserializer=response.FromString)
+def metadata(mac):
+    return (('macaroon', mac.hex()),)
+channel = grpc.secure_channel('127.0.0.1:10009',
+    grpc.ssl_channel_credentials(root_certificates=cert))
+print('PHASE: open_seed', file=sys.stderr)
+seed = unary(channel, '/lnrpc.WalletUnlocker/GenSeed',
+    unlock.GenSeedRequest, unlock.GenSeedResponse)(unlock.GenSeedRequest(), timeout=10)
+admin = unary(channel, '/lnrpc.WalletUnlocker/InitWallet',
+    unlock.InitWalletRequest, unlock.InitWalletResponse)(unlock.InitWalletRequest(
+    wallet_password=secrets.token_bytes(24), cipher_seed_mnemonic=seed.cipher_seed_mnemonic,
+    recovery_window=0, stateless_init=True), timeout=20).admin_macaroon
+assert admin
+channel.close()
+channel = grpc.secure_channel('127.0.0.1:10009',
+    grpc.ssl_channel_credentials(root_certificates=cert))
+info = unary(channel, '/lnrpc.Lightning/GetInfo',
+    lightning_pb2.GetInfoRequest, lightning_pb2.GetInfoResponse)
+readiness = unary(channel, '/lnrpc.State/GetState',
+    state.GetStateRequest, state.GetStateResponse)
+print('PHASE: open_ready', file=sys.stderr)
+for _ in range(100):
+    try:
+        status = readiness(state.GetStateRequest(), metadata=metadata(admin), timeout=1)
+        if status.state == state.SERVER_ACTIVE:
+            break
+    except grpc.RpcError:
+        pass
+    time.sleep(0.2)
+else:
+    raise AssertionError('LND invoice registry readiness not established')
+reported = info(lightning_pb2.GetInfoRequest(), metadata=metadata(admin), timeout=3)
+assert len(reported.chains) == 1
+assert reported.chains[0].chain == 'bitcoin' and reported.chains[0].network == 'regtest'
+assert reported.block_height == 1
+assert reported.synced_to_chain
+print('PHASE: open_bake', file=sys.stderr)
+bake = unary(channel, '/lnrpc.Lightning/BakeMacaroon',
+    lightning_pb2.BakeMacaroonRequest, lightning_pb2.BakeMacaroonResponse)
+read = bytes.fromhex(bake(lightning_pb2.BakeMacaroonRequest(
+    permissions=[lightning_pb2.MacaroonPermission(entity='invoices', action='read')],
+    root_key_id=0, allow_external_permissions=False),
+    metadata=metadata(admin), timeout=3).macaroon)
+assert 0 < len(read) <= 4096
+private = Path('/tmp/rill-positive-invoice.macaroon')
+fd = os.open(private, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+with os.fdopen(fd, 'wb') as output:
+    output.write(read)
+network = NetworkIdentity.model_validate(json.loads(
+    Path('/work/provider/tests/fixtures/initial-btc-to-ln-v1.json').read_text()
+)['contract_terms']['network_identity'])
+observer = RegtestLndInvoiceObserver(host='127.0.0.1', port=10009,
+    tls_certificate_path='/work/public/tls.cert', invoice_macaroon_path=private,
+    network=network)
+selected = secrets.token_bytes(32)
+print('PHASE: open_add_once', file=sys.stderr)
+add = unary(channel, '/invoicesrpc.Invoices/AddHoldInvoice',
+    invoices_pb2.AddHoldInvoiceRequest, invoices_pb2.AddHoldInvoiceResp)
+result = add(invoices_pb2.AddHoldInvoiceRequest(hash=selected, value_msat=1000),
+    metadata=metadata(admin), timeout=20)
+assert result.payment_request
+cancel = unary(channel, '/invoicesrpc.Invoices/CancelInvoice',
+    invoices_pb2.CancelInvoiceMsg, invoices_pb2.CancelInvoiceResp)
+try:
+    print('PHASE: open_read', file=sys.stderr)
+    opened = observer.lookup(selected, deadline_seconds=5)
+    assert opened.payment_hash == selected.hex()
+    assert opened.state == 'OPEN' and opened.htlcs == ()
+    assert opened.value_msat == 1000 and opened.amount_paid_msat == 0
+finally:
+    print('PHASE: open_cancel', file=sys.stderr)
+    cancel(invoices_pb2.CancelInvoiceMsg(payment_hash=selected),
+        metadata=metadata(admin), timeout=5)
+closed = observer.lookup(selected, deadline_seconds=5)
+assert closed.state == 'CANCELED' and closed.htlcs == ()
+assert closed.payment_hash == selected.hex()
+private.unlink()
+channel.close()
+print('Pinned LND unfunded invoice OPEN and CANCELED observations passed')
+"""
+
+
+@pytest.mark.lnd
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_LND") != "1",
+    reason="set RILLSWAP_RUN_LND=1 for pinned disposable LND",
+)
+def test_pinned_lnd_unfunded_invoice_observation(tmp_path: Path) -> None:
+    """Real OPEN/CANCELED serialization with no funding, channel, or HTLC."""
+    assert DOCKER is not None
+    public = tmp_path / "public"
+    public.mkdir(mode=0o700)
+    generated = tmp_path / "generated"
+    _wallet_messages(generated)
+    _state_messages(generated)
+    run_id = secrets.token_hex(16)
+    label = f"org.rillswap.test-run={run_id}"
+    core = f"rillswap-invoice-core-{secrets.token_hex(6)}"
+    lnd = f"rillswap-invoice-lnd-{secrets.token_hex(6)}"
+    sidecar = f"rillswap-invoice-client-{secrets.token_hex(6)}"
+    cert = public / "tls.cert"
+    try:
+        _docker(
+            "run",
+            "--detach",
+            "--name",
+            core,
+            "--label",
+            label,
+            "--platform",
+            "linux/amd64",
+            "--network",
+            "none",
+            "--tmpfs",
+            "/home/bitcoin/.bitcoin:rw,uid=101,gid=101,mode=0700",
+            CORE_IMAGE,
+            "-regtest=1",
+            "-server=1",
+            "-listen=0",
+            "-discover=0",
+            "-dnsseed=0",
+            "-rpcuser=rill-disposable",
+            "-rpcpassword=disposable-regtest-only",
+            "-rpcbind=127.0.0.1",
+            "-rpcallowip=127.0.0.1",
+            "-zmqpubrawblock=tcp://127.0.0.1:28332",
+            "-zmqpubrawtx=tcp://127.0.0.1:28333",
+            "-printtoconsole=1",
+        )
+        _wait_for_core(core)
+        before = json.loads(_core_cli(core, "getblockchaininfo"))
+        assert before["chain"] == "regtest"
+        assert before["blocks"] == before["headers"] == 0
+        mined = json.loads(_core_cli(core, "generatetodescriptor", "1", "raw(6a)"))
+        assert len(mined) == 1
+        after = json.loads(_core_cli(core, "getblockchaininfo"))
+        assert after["chain"] == "regtest"
+        assert after["blocks"] == after["headers"] == 1
+        assert after["initialblockdownload"] is False
+        tip = json.loads(_core_cli(core, "getblockheader", mined[0]))
+        assert tip["height"] == 1
+        assert abs(time.time() - tip["time"]) < 60
+        _docker(
+            "run",
+            "--detach",
+            "--name",
+            lnd,
+            "--label",
+            label,
+            "--platform",
+            "linux/amd64",
+            "--network",
+            f"container:{core}",
+            "--tmpfs",
+            "/root/.lnd:rw,mode=0700",
+            LND_IMAGE,
+            "--bitcoin.active",
+            "--bitcoin.regtest",
+            "--bitcoin.node=bitcoind",
+            "--bitcoind.rpchost=127.0.0.1:18443",
+            "--bitcoind.rpcuser=rill-disposable",
+            "--bitcoind.rpcpass=disposable-regtest-only",
+            "--bitcoind.zmqpubrawblock=tcp://127.0.0.1:28332",
+            "--bitcoind.zmqpubrawtx=tcp://127.0.0.1:28333",
+            "--rpclisten=127.0.0.1:10009",
+            "--nolisten",
+            "--nobootstrap",
+        )
+        for container, path in ((core, "/home/bitcoin/.bitcoin"), (lnd, "/root/.lnd")):
+            tmpfs = json.loads(
+                _docker("inspect", container, "--format", "{{json .HostConfig.Tmpfs}}")
+            )
+            assert path in tmpfs
+            mounts = json.loads(_docker("inspect", container, "--format", "{{json .Mounts}}"))
+            assert all(entry["Type"] != "volume" for entry in mounts)
+        _wait_for_public_certificate(lnd, cert)
+        result = _docker(
+            "run",
+            "--rm",
+            "--name",
+            sidecar,
+            "--label",
+            label,
+            "--platform",
+            "linux/amd64",
+            "--network",
+            f"container:{core}",
+            "--tmpfs",
+            "/tmp:rw,mode=0700,noexec,nosuid,nodev",  # noqa: S108 - test tmpfs
+            "--mount",
+            f"type=bind,src={ROOT},dst=/work/provider,readonly",
+            "--mount",
+            f"type=bind,src={CORE},dst=/work/core,readonly",
+            "--mount",
+            f"type=bind,src={public},dst=/work/public,readonly",
+            "--mount",
+            f"type=bind,src={generated},dst=/work/generated,readonly",
+            "--env",
+            "PYTHONPATH=/work/provider/.venv/lib/python3.14/site-packages:"
+            "/work/provider/src:/work/core/packages/core/src:/work/generated",
+            PYTHON_IMAGE,
+            "python",
+            "-c",
+            OPEN_INVOICE,
+            timeout=105,
+        )
+        assert result == "Pinned LND unfunded invoice OPEN and CANCELED observations passed"
     finally:
         _cleanup_containers((sidecar, lnd, core), run_id, cert)

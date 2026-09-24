@@ -350,12 +350,15 @@ metadata and must not be logged or broadcast. Partial
 amounts, zero expiries, empty HTLC lists, and canceled history are reported,
 not called safely accepted; no preimage, custom records, raw protobuf, or
 backend credential is returned. `NOT_FOUND`, timeout, malformed or rejected
-responses prove no invoice absence or funding safety. There is no invoice
-creation, settlement, cancellation, funded hold trial, or policy caller; the
+responses prove no invoice absence or funding safety. There is no provider
+runtime invoice creation, settlement, cancellation, funded hold trial, or policy caller; the
 operator must independently reconcile actual HTLC state and earliest expiry
 under RS-004 before *any* funding action. The pinned empty-wallet test only
 proves that the restricted `invoices:read` macaroon can look up a missing hash
-and cannot call AddHoldInvoice. It does not test an accepted invoice. A
+and cannot call AddHoldInvoice. A separate opt-in disposable LND test creates
+and cancels an **unfunded** hold invoice to verify real OPEN and CANCELED
+read-only decoding, with no accepted HTLC. Neither test proves an accepted
+invoice or a safe funding deadline. A
 previous installation does not invoke, read, or migrate invoice records at
 startup; missing, partial, older, or restored state gives no absence proof.
 
@@ -366,7 +369,7 @@ and exact generation-tool versions are checked. The focused fake transport
 and real synthetic loopback gRPC TLS tests run in the normal pytest suite;
 the synthetic tests alone are **not** a real LND regtest integration check.
 
-To run the opt-in pinned **empty-wallet** check, keep `rill-core` and
+To run the two opt-in pinned **empty-wallet** diagnostics, keep `rill-core` and
 `rill-provider` as sibling source checkouts. Install `requirements-dev.txt`
 in this repository's local Python 3.14 `.venv` (including pinned
 `grpcio-tools`), and have Docker capable of running the pinned `linux/amd64`
@@ -376,16 +379,23 @@ Core, LND, and Python images. From this repository:
 RILLSWAP_RUN_LND=1 .venv/bin/pytest -q -m lnd --basetemp=tmp/pytest
 ```
 
-The test creates uniquely named, run-labeled containers; Core has no network,
+Each test creates uniquely named, run-labeled containers; Core has no network,
 and LND and the test client share Core's loopback namespace without published
 ports. It mounts the sibling source and local environment **read-only**, and
 uses tmpfs for Core data, LND wallet/credentials, and the client credential.
 The test-only wallet seed and admin macaroon are handled within the isolated
 sidecar and are not printed. Tmpfs is not a guarantee against host swap or
-crash dumps. No funds, blocks, channels, invoices, or payments are created.
+crash dumps. The original restricted-read diagnostic mines no blocks and
+creates no invoice or payment. The separate invoice diagnostic mines exactly
+one OP_RETURN regtest block (no spendable output or wallet), waits for LND
+`SERVER_ACTIVE`, then creates one unfunded hold invoice with a fresh hash,
+observes OPEN and CANCELED through an `invoices:read` macaroon, and makes no
+channel or payment. An ambiguous creation result is never retried; the owned
+tmpfs containers are removed. Neither is a funded LN-to-BTC trial.
 Cleanup verifies each container's run label before removal and attempts every
 container even if one cleanup step fails. If the runner is interrupted, check
-for leftover `rillswap-lnd-*` containers with `docker ps -a`, then verify the
+for leftover `rillswap-lnd-*` or `rillswap-invoice-*` containers with
+`docker ps -a`, then verify the
 `org.rillswap.test-run` label and mounts using `docker inspect` on each exact
 container. After confirming the associated runner is no longer active, use
 `docker rm --force --volumes` only on those verified containers; do not delete

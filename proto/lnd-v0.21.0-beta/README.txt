@@ -17,4 +17,9 @@ The upstream LICENSE is also copied into the generated package and wheel.
 An additional walletunlocker.proto, Git blob
 f1375d45073a6405ed269edf4fc41dec9a21ed4e, is vendored only under
 tests/fixtures/lnd-v0.21.0-beta for disposable-wallet interoperability.
-It is never packaged with the provider runtime or invoked by the observer.
+The same directory includes test-only lnrpc/stateservice.proto, Git blob
+97a78d31ad6cd486ad24f148661fa9292b029b34, SHA-256
+e7c9e1083804c5510874a4e549e3a26864e91892c830921e82d555e469f97242,
+from the pinned v0.21.0-beta commit. It distinguishes RPC_ACTIVE from
+SERVER_ACTIVE before the test attempts invoice creation. Neither test-only
+source is packaged with the provider runtime or invoked by the observer.
