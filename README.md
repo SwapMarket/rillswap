@@ -44,6 +44,24 @@ is opt-in with `RILLSWAP_RUN_BITCOIN_CORE=1 .venv/bin/pytest -q -m bitcoin_core`
 and requires the locally built sibling native library plus pinned Docker
 images. Neither test uses funds outside disposable regtest.
 
+`rill recover observe-claim` accepts the same exact selection, trusted regtest
+network, age identity, native library, and read-only Core cookie as
+`observe-funding`, but only for an LN-to-BTC **client claimant**. It validates
+the complete signed recovery snapshot before Core RPC, checks the selected
+transaction and output bytes without txindex, requires the signed minimum
+funding confirmations and the strict pre-disclosure timing window
+`tip_height + claim_confirmation_blocks < refund_lock_height + 1`, and samples
+`gettxout` both chain-only and including known mempool spends. An unknown or
+mempool-spent outpoint fails closed. Validation necessarily parses the encrypted
+snapshot, including its preimage; the command never signs a claim, prints or
+sends the preimage, calls a mutating Core RPC, writes an artifact, or authorizes
+preimage disclosure. The observation is staleable; it does not establish fee
+viability, a durable claim plan, absence of earlier disclosure or competing
+funding history, complete LN state, or permission to pay or broadcast. A
+valid restored recovery file may lack later signed bindings. The disposable
+pinned Core test verifies refusal before required confirmations and after an
+independently created synthetic claim enters the mempool.
+
 `rill recover sign-refund` constructs a **BTC-to-LN client refund only** for
 one explicitly selected signed funding binding, on disposable regtest. It
 accepts the same network, identity, native library, exact attempt/revision,

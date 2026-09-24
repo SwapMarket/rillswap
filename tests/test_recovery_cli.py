@@ -329,6 +329,95 @@ def test_sign_refund_rejects_provider_refund_profile_before_rpc(
     assert not output.exists()
 
 
+@NATIVE_ONLY
+@pytest.mark.native_crypto
+@pytest.mark.parametrize("profile", ["btc-to-ln", "ln-to-btc"])
+def test_claim_observation_checks_profile_and_signed_record_before_rpc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    profile: str,
+) -> None:
+    import pyrage  # noqa: PLC0415
+    from rill_core.settlement import FundingBindingTransactionMatch  # noqa: PLC0415
+    from rill_core.wire.types import NetworkIdentity  # noqa: PLC0415
+
+    from rill_cli import main as cli_main  # noqa: PLC0415
+    from rill_cli.recovery_core_observation import RecoveryOutpointCandidate  # noqa: PLC0415
+
+    package, _ = _fixture(profile)
+    package["funding_history"].append(_signed_binding(package, 0, str(NATIVE_LIBRARY)))
+    common, _, _ = _inputs(tmp_path, profile)
+    identity = x25519.Identity.from_str(Path(common[-1]).read_text().strip())
+    encrypted = tmp_path / "claim-observation.age"
+    encrypted.write_bytes(pyrage.encrypt(canonicalize(package), [identity.to_public()]))
+    binding = FundingBinding.model_validate(package["funding_history"][0]["binding"])
+    seen: list[str] = []
+
+    class Reader:
+        def __init__(self, **_kwargs: object) -> None:
+            seen.append("connect")
+
+        def observe_claim(
+            self,
+            selected: FundingBinding,
+            _terms: object,
+            *,
+            keys: object,
+        ) -> RecoveryOutpointCandidate:
+            assert selected == binding
+            assert isinstance(keys, Context)
+            seen.append("claim-read-only")
+            return RecoveryOutpointCandidate(
+                NetworkIdentity.model_validate(package["network_identity"]),
+                FundingBindingTransactionMatch(
+                    binding.funding_txid,
+                    binding.contract_vout,
+                    binding.lineage_anchor_txid,
+                    binding.lineage_anchor_vout,
+                ),
+                "ab" * 32,
+                103,
+                "bc" * 32,
+                102,
+                2,
+                1101,
+            )
+
+    monkeypatch.setattr(cli_main, "RegtestRecoveryCoreReader", Reader)
+    arguments = [
+        "recover",
+        "observe-claim",
+        *common,
+        "--funding-attempt-id",
+        "11" * 32,
+        "--binding-revision",
+        "0",
+        "--rpc-cookie",
+        str(tmp_path / "never-open-cookie"),
+        "--rpc-port",
+        "18443",
+        str(encrypted),
+    ]
+    if profile == "btc-to-ln":
+        assert cli_main.main(arguments) == 2
+        assert not seen
+        return
+    report = json.loads(cli_main._run(cli_main._parser().parse_args(arguments)))  # noqa: SLF001
+    assert report["kind"] == "selected-claim-candidate-observation/v1"
+    assert report["mempool_aware_unspent_sampled"] is True
+    assert report["chain_only_confirmations"] == 2
+    assert report["authority"].startswith("none")
+    assert package["monotonic_knowledge"]["preimage"] not in json.dumps(report)
+    assert package["user_secret"]["contract_secret_key"] not in json.dumps(report)
+    assert seen == ["connect", "claim-read-only"]
+    seen.clear()
+    damaged = json.loads(json.dumps(package))
+    damaged["funding_history"][0]["funder_session_signature"] = "00" * 64
+    encrypted.write_bytes(pyrage.encrypt(canonicalize(damaged), [identity.to_public()]))
+    assert cli_main.main(arguments) == 2
+    assert not seen
+
+
 def _export_snapshot(
     common: list[str],
     recipient: str,

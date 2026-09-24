@@ -13,7 +13,7 @@ import stat
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 from rill_core.settlement import FundingBindingTransactionMatch, check_funding_binding_transaction
@@ -188,9 +188,36 @@ class RegtestRecoveryCoreReader:
         RPC read timeouts are inactivity limits, not a total deadline against a
         trickling configured listener. Do not use this for settlement deadlines.
         """
+        if type(for_refund) is not bool:
+            raise RecoveryCoreProtocolError("invalid recovery observation mode")
+        return self._sample(
+            binding, terms, keys=keys, purpose="refund" if for_refund else "candidate"
+        )
+
+    def observe_claim(
+        self,
+        binding: FundingBinding,
+        terms: ContractTerms,
+        *,
+        keys: TaprootKeyOperations,
+    ) -> RecoveryOutpointCandidate:
+        """Sample LN-to-BTC client claim outpoint without signing or disclosing.
+
+        The Core result is staleable and insufficient for a preimage release.
+        """
+        return self._sample(binding, terms, keys=keys, purpose="claim")
+
+    def _sample(
+        self,
+        binding: FundingBinding,
+        terms: ContractTerms,
+        *,
+        keys: TaprootKeyOperations,
+        purpose: Literal["candidate", "refund", "claim"],
+    ) -> RecoveryOutpointCandidate:
         category: type[RecoveryCoreReadError]
         try:
-            result = self._observe(binding, terms, keys=keys, for_refund=for_refund)
+            result = self._observe(binding, terms, keys=keys, purpose=purpose)
         except RecoveryCoreUnavailableError:
             category = RecoveryCoreUnavailableError
         except Exception:  # noqa: BLE001 - native and transport details can retain credentials
@@ -207,12 +234,20 @@ class RegtestRecoveryCoreReader:
         terms: ContractTerms,
         *,
         keys: TaprootKeyOperations,
-        for_refund: bool,
+        purpose: Literal["candidate", "refund", "claim"],
     ) -> RecoveryOutpointCandidate:
         if (
             not isinstance(binding, FundingBinding)
             or terms.network_identity != self._network
-            or type(for_refund) is not bool
+            or purpose not in {"candidate", "refund", "claim"}
+            or (
+                purpose == "claim"
+                and (
+                    terms.profile_id != "ln-to-btc/v1"
+                    or terms.claimant != "client"
+                    or terms.timing_policy.kind != "ln-to-btc"
+                )
+            )
         ):
             raise RecoveryCoreProtocolError(
                 "selected funding context differs from configured network"
@@ -253,9 +288,15 @@ class RegtestRecoveryCoreReader:
                     match = check_funding_binding_transaction(raw, binding, terms, keys=keys)
                 except Exception:  # noqa: BLE001 - no native/transaction diagnostics escape
                     raise RecoveryCoreProtocolError("selected transaction bytes differ") from None
-                if for_refund:
-                    if height <= terms.refund_lock_height:
+                if purpose != "candidate":
+                    if purpose == "refund" and height <= terms.refund_lock_height:
                         raise RecoveryCoreUnavailableError("refund height not yet sampled")
+                    if purpose == "claim" and (
+                        confirmations < terms.funding_confirmations
+                        or height + terms.timing_policy.claim_confirmation_blocks
+                        >= terms.refund_lock_height + 1
+                    ):
+                        raise RecoveryCoreUnavailableError("claim window not established")
                     # Mempool-aware gettxout excludes a confirmed output spent
                     # by a known unconfirmed transaction; this is a sample, not
                     # a future-unspent guarantee.

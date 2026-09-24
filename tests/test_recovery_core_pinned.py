@@ -235,6 +235,66 @@ with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.St
 print(json.dumps({'txid': report['refund_txid'], 'raw_hex': persisted['signed_refund_hex']}))
 """
 
+PYTHON_CLAIM_OBSERVE = """
+import contextlib, io, json, os
+from pathlib import Path
+from rill_cli.main import main
+work = Path('/work/cookie')
+args = ['recover', 'observe-claim', '--network', str(work / 'network.json'),
+        '--crypto-library', os.environ['RILL_CRYPTO_LIBRARY'],
+        '--identity', str(work / 'identity'),
+        '--funding-attempt-id', 'cc' * 32, '--binding-revision', '0',
+        '--rpc-cookie', str(work / 'core.cookie'), '--rpc-port', '18443',
+        str(work / 'selected.age')]
+stdout, stderr = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+    status = main(args)
+if os.environ['RILL_TEST_CLAIM_MODE'] in ('insufficient', 'mempool-spent'):
+    assert status == 2
+    assert stdout.getvalue() == ''
+    assert stderr.getvalue()
+    print('claim observation refused without preimage')
+else:
+    assert status == 0, stderr.getvalue()
+    report = json.loads(stdout.getvalue())
+    assert report['kind'] == 'selected-claim-candidate-observation/v1'
+    assert report['mempool_aware_unspent_sampled'] is True
+    assert report['chain_only_confirmations'] >= 2
+    assert report['authority'].startswith('none')
+    assert '5252525252525252' not in stdout.getvalue()
+    print('confirmed read-only claim candidate without preimage')
+"""
+
+PYTHON_TEST_CLAIM_SPEND = """
+import json, os
+from pathlib import Path
+import pyrage
+from pyrage import x25519
+from rill_core.recovery import construct_selected_recovery_claim
+from rill_core.settlement import FundingOutput
+from rill_core.wire.canonical import canonicalize
+from rill_core.wire.messages import FundingBinding
+from rill_core.wire.types import NetworkIdentity
+from rill_crypto import Context
+work = Path('/work/cookie')
+identity = x25519.Identity.from_str((work / 'identity').read_text().strip())
+plaintext = pyrage.decrypt((work / 'selected.age').read_bytes(), [identity])
+source = json.loads(plaintext)
+binding = FundingBinding.model_validate(source['funding_history'][0]['binding'])
+funding = FundingOutput(bytes.fromhex(binding.funding_txid), binding.contract_vout,
+                        int(binding.contract_value_sat),
+                        bytes.fromhex(binding.contract_script_pubkey))
+network = NetworkIdentity.model_validate(source['network_identity'])
+with Context(library_path=os.environ['RILL_CRYPTO_LIBRARY']) as crypto:
+    raw = construct_selected_recovery_claim(
+        canonicalize(source), network, funding_attempt_id='cc' * 32,
+        binding_revision=0, live_funding=funding, sampled_tip_height=103,
+        sampled_confirmations=2, fee_sat=300,
+        auxiliary_random=b'\\x55' * 32, crypto=crypto)
+assert bytes.fromhex(source['monotonic_knowledge']['preimage']) in raw
+print(raw.hex())  # Public synthetic fixture preimage, test-only setup, never observation output.
+"""
+
 
 @pytest.mark.bitcoin_core
 @pytest.mark.skipif(
@@ -318,6 +378,14 @@ def test_pinned_core_v30_observes_and_refunds_without_txindex(  # noqa: PLR0915 
         _cli(container, "generatetoaddress", "1", mining)
         inclusion = _cli(container, "getbestblockhash")
         transaction = _cli(container, "getrawtransaction", txid, "true", inclusion)
+        funding_txid = txid
+        selected_outputs = [
+            item["n"]
+            for item in json.loads(transaction)["vout"]
+            if item["scriptPubKey"]["hex"] == fixture["taproot_contract"]["script_pubkey"]
+        ]
+        assert len(selected_outputs) == 1
+        fixture_vout = selected_outputs[0]
         cookie = tmp_path / "core.cookie"
         _docker("cp", f"{container}:/home/bitcoin/.bitcoin/regtest/.cookie", str(cookie))
         cookie.chmod(0o600)
@@ -396,6 +464,49 @@ def test_pinned_core_v30_observes_and_refunds_without_txindex(  # noqa: PLR0915 
             assert confirmed["hex"] == submitted["raw_hex"]
             assert confirmed["confirmations"] >= 1
             assert not json.loads(_cli(container, "getmempoolinfo"))["size"]
+        else:
+            assert (
+                _python_check(
+                    container,
+                    tmp_path,
+                    PYTHON_CLAIM_OBSERVE,
+                    "--env",
+                    "RILL_TEST_CLAIM_MODE=insufficient",
+                )
+                == "claim observation refused without preimage"
+            )
+            _cli(container, "generatetoaddress", "1", mining)
+            assert (
+                _python_check(
+                    container,
+                    tmp_path,
+                    PYTHON_CLAIM_OBSERVE,
+                    "--env",
+                    "RILL_TEST_CLAIM_MODE=eligible",
+                )
+                == "confirmed read-only claim candidate without preimage"
+            )
+            raw_claim = _python_check(container, tmp_path, PYTHON_TEST_CLAIM_SPEND)
+            accepted = json.loads(_cli(container, "testmempoolaccept", json.dumps([raw_claim])))
+            assert accepted[0]["allowed"] is True
+            txid = _cli(container, "sendrawtransaction", raw_claim, "0")
+            assert len(txid) == 64
+            chain_only = _cli(container, "gettxout", funding_txid, str(fixture_vout), "false")
+            assert json.loads(chain_only)["confirmations"] >= 2
+            assert _cli(container, "gettxout", funding_txid, str(fixture_vout), "true") in {
+                "",
+                "null",
+            }
+            assert (
+                _python_check(
+                    container,
+                    tmp_path,
+                    PYTHON_CLAIM_OBSERVE,
+                    "--env",
+                    "RILL_TEST_CLAIM_MODE=mempool-spent",
+                )
+                == "claim observation refused without preimage"
+            )
     finally:
         subprocess.run(  # noqa: S603 - best-effort isolated container cleanup
             [DOCKER, "rm", "--force", "--volumes", container],

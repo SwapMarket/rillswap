@@ -20,8 +20,15 @@ if TYPE_CHECKING:
 FIXTURE = Path(__file__).parent / "fixtures" / "initial-btc-to-ln-v1.json"
 
 
-def _context() -> tuple[ContractTerms, FundingBinding, NetworkIdentity]:
-    package = json.loads(FIXTURE.read_text())
+def _context(
+    profile: str = "btc-to-ln",
+) -> tuple[ContractTerms, FundingBinding, NetworkIdentity]:
+    path = (
+        FIXTURE
+        if profile == "btc-to-ln"
+        else FIXTURE.with_name("initial-ln-to-btc-no-prepayment-v1.json")
+    )
+    package = json.loads(path.read_text())
     terms = ContractTerms.model_validate_json(json.dumps(package["contract_terms"]))
     binding = FundingBinding.model_validate_json(
         json.dumps(
@@ -29,7 +36,7 @@ def _context() -> tuple[ContractTerms, FundingBinding, NetworkIdentity]:
                 "contract_hash": package["contract_hash"],
                 "funding_attempt_id": "cc" * 32,
                 "binding_revision": 0,
-                "funder_role": "client",
+                "funder_role": "client" if profile == "btc-to-ln" else "provider",
                 "lineage_anchor_txid": "dd" * 32,
                 "lineage_anchor_vout": 1,
                 "funding_txid": "aa" * 32,
@@ -59,7 +66,7 @@ def _replies(
     change: str = "none",
 ) -> httpx.MockTransport:
     tip = "11" * 32
-    inclusion = tip if change == "at-tip" else "22" * 32
+    inclusion = tip if change in {"at-tip", "one-confirmation"} else "22" * 32
 
     def handle(request: httpx.Request) -> httpx.Response:  # noqa: PLR0911, PLR0912 - adversarial RPC replies
         assert request.method == "POST"
@@ -102,7 +109,7 @@ def _replies(
             ),
             "gettxout": {
                 "bestblock": tip,
-                "confirmations": 1 if change in {"at-tip", "block"} else 2,
+                "confirmations": 1 if change in {"at-tip", "block", "one-confirmation"} else 2,
                 "coinbase": False,
                 "value": Decimal(binding.contract_value_sat) / Decimal(100_000_000),
                 "scriptPubKey": {"hex": binding.contract_script_pubkey},
@@ -301,6 +308,56 @@ def test_refund_specific_mempool_and_height_samples_are_conservative(
         [binding.funding_txid, binding.contract_vout, False],
         [binding.funding_txid, binding.contract_vout, True],
     ]
+
+
+@pytest.mark.parametrize("change", ["none", "mempool-spent", "one-confirmation"])
+def test_claim_observation_requires_profile_window_confirmations_and_mempool_sample(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    terms, binding, network = _context("ln-to-btc")
+    requests: list[dict[str, Any]] = []
+    reader = _reader(tmp_path, monkeypatch, binding, network, requests, change=change)
+    monkeypatch.setattr(
+        observation,
+        "check_funding_binding_transaction",
+        lambda *_a, **_k: object(),
+    )
+    if change == "none":
+        candidate = reader.observe_claim(binding, terms, keys=object())  # type: ignore[arg-type]
+        assert candidate.chain_only_confirmations == 2
+        assert candidate.tip_height + terms.timing_policy.claim_confirmation_blocks < 1101
+    else:
+        with pytest.raises(observation.RecoveryCoreUnavailableError) as error:
+            reader.observe_claim(binding, terms, keys=object())  # type: ignore[arg-type]
+        assert error.value.__context__ is None
+        assert error.value.__cause__ is None
+    assert [request["params"] for request in requests if request["method"] == "gettxout"] == (
+        [[binding.funding_txid, binding.contract_vout, False]]
+        + (
+            []
+            if change == "one-confirmation"
+            else [[binding.funding_txid, binding.contract_vout, True]]
+        )
+    )
+    assert {request["method"] for request in requests} <= {
+        "getblockchaininfo",
+        "getblockhash",
+        "gettxout",
+        "getrawtransaction",
+    }
+    assert all("preimage" not in json.dumps(request) for request in requests)
+    requests.clear()
+    late = terms.model_copy(update={"refund_lock_height": 105})
+    with pytest.raises(observation.RecoveryCoreUnavailableError):
+        reader.observe_claim(binding, late, keys=object())  # type: ignore[arg-type]
+    assert all(request["id"] != 8 for request in requests)
+    requests.clear()
+    wrong_terms, _, _ = _context()
+    with pytest.raises(observation.RecoveryCoreProtocolError):
+        reader.observe_claim(binding, wrong_terms, keys=object())  # type: ignore[arg-type]
+    assert not requests
 
 
 def test_cookie_and_loopback_preflight_fail_before_rpc(

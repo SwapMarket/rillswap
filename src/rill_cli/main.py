@@ -96,6 +96,7 @@ def _parser() -> argparse.ArgumentParser:
     inspect.add_argument("file", help="encrypted age v1 binary recovery file")
     for command, description in (
         ("observe-funding", "explicit regtest candidate (never signing authority)"),
+        ("observe-claim", "read-only LN-to-BTC claim candidate (no preimage)"),
         ("sign-refund", "explicit BTC-to-LN refund artifact (never broadcasts)"),
         ("broadcast-refund", "explicit regtest refund submit (never retries)"),
     ):
@@ -194,7 +195,7 @@ def _report(report: OfflineRecoveryInspection) -> str:
     )
 
 
-def _run(args: argparse.Namespace) -> str:  # noqa: PLR0915 - explicit ordered recovery boundaries
+def _run(args: argparse.Namespace) -> str:  # noqa: PLR0912, PLR0915 - ordered recovery boundaries
     network = _network(args.network)
     with Context(library_path=args.crypto_library) as crypto:
         if args.command in ("export", "export-update"):
@@ -234,7 +235,13 @@ def _run(args: argparse.Namespace) -> str:  # noqa: PLR0915 - explicit ordered r
                 else "Created encrypted recovery file. "
             )
             return prefix + "No funding authority. " + _report(report)
-        if args.command in {"inspect", "observe-funding", "sign-refund", "broadcast-refund"}:
+        if args.command in {
+            "inspect",
+            "observe-funding",
+            "observe-claim",
+            "sign-refund",
+            "broadcast-refund",
+        }:
             inspection_credentials = (
                 PassphraseCredentials(_prompt())
                 if args.passphrase_prompt
@@ -261,18 +268,25 @@ def _run(args: argparse.Namespace) -> str:  # noqa: PLR0915 - explicit ordered r
                 or selected.terms.refund_party != "client"
             ):
                 raise RecoveryCLIError("selected recovery is not a client refund")
+            if args.command == "observe-claim" and (
+                selected.terms.profile_id != "ln-to-btc/v1" or selected.terms.claimant != "client"
+            ):
+                raise RecoveryCLIError("selected recovery is not a client claim")
             reader = RegtestRecoveryCoreReader(
                 port=args.rpc_port,
                 host=args.rpc_host,
                 cookie_path=Path(args.rpc_cookie),
                 network=network,
             )
-            candidate = reader.observe(
-                selected.binding,
-                selected.terms,
-                keys=crypto,
-                for_refund=args.command in {"sign-refund", "broadcast-refund"},
-            )
+            if args.command == "observe-claim":
+                candidate = reader.observe_claim(selected.binding, selected.terms, keys=crypto)
+            else:
+                candidate = reader.observe(
+                    selected.binding,
+                    selected.terms,
+                    keys=crypto,
+                    for_refund=args.command in {"sign-refund", "broadcast-refund"},
+                )
             if args.command in {"sign-refund", "broadcast-refund"}:
                 funding = FundingOutput(
                     bytes.fromhex(selected.binding.funding_txid),
@@ -374,6 +388,32 @@ def _run(args: argparse.Namespace) -> str:  # noqa: PLR0915 - explicit ordered r
                         "sampled_tip_height": candidate.tip_height,
                         "broadcast": False,
                         "authority": "none (manual chain recheck required before broadcast)",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            if args.command == "observe-claim":
+                return json.dumps(
+                    {
+                        "kind": "selected-claim-candidate-observation/v1",
+                        "network_identity": network.model_dump(mode="json"),
+                        "funding_attempt_id": selected.binding.funding_attempt_id,
+                        "binding_revision": selected.binding.binding_revision,
+                        "funding_txid": candidate.static_match.funding_txid,
+                        "contract_vout": candidate.static_match.contract_vout,
+                        "static_transaction_bytes_match": True,
+                        "tip_hash": candidate.tip_hash,
+                        "tip_height": candidate.tip_height,
+                        "chain_only_confirmations": candidate.chain_only_confirmations,
+                        "mempool_aware_unspent_sampled": True,
+                        "refund_first_eligible_height": candidate.refund_first_eligible_height,
+                        "required_funding_confirmations": selected.terms.funding_confirmations,
+                        "claim_confirmation_blocks": (
+                            selected.terms.timing_policy.claim_confirmation_blocks
+                        ),
+                        "authority": (
+                            "none (staleable sample; no preimage release or claim permission)"
+                        ),
                     },
                     sort_keys=True,
                     separators=(",", ":"),
