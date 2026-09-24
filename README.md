@@ -334,7 +334,16 @@ result. It does not exercise an initiated, failed, or settled real payment.
 Actual payment-flow interoperability, multi-instance fencing, persisted
 intent/backend correlation, and the L03/D01-D09 release gates remain open.
 
-For developers, regenerate pinned messages (no generated payment-sending stub)
+The pinned LND source now also includes exact `invoicesrpc/invoices.proto`
+and generated **message classes only** for an eventual separately reviewed
+held-invoice observation/trial. Although their descriptors list mutating
+`AddHoldInvoice`, `CancelInvoice`, and `SettleInvoice` RPCs, no callable
+`InvoicesStub` or provider invoice adapter is generated. No hold-invoice
+creation, acceptance evidence, settlement, cancellation, or funded channel
+trial exists from this addition. A previous installation does not read or
+migrate any invoice record; missing or restored state gives no absence proof.
+
+For developers, regenerate pinned messages (no generated payment-sending or invoice stub)
 after installing `requirements-dev.txt` with
 `.venv/bin/python scripts/generate_lnd_protos.py`. The pinned-source hashes
 and exact generation-tool versions are checked. The focused fake transport
