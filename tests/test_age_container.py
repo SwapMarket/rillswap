@@ -9,6 +9,7 @@ from pathlib import Path
 import pyrage
 import pytest
 from pyrage import x25519
+from rill_core.settlement import FundingOutput
 from rill_core.wire.canonical import canonicalize
 from rill_core.wire.hashes import funding_binding_hash
 from rill_core.wire.messages import FundingBinding
@@ -253,6 +254,39 @@ def test_native_age_selected_binding_is_a_public_candidate_not_live_funding() ->
         assert context_selected.binding == selected
         assert context_selected.terms.network_identity == network
         assert package["user_secret"]["contract_secret_key"] not in repr(context_selected)
+        funding = FundingOutput(
+            bytes.fromhex(binding.funding_txid),
+            binding.contract_vout,
+            int(binding.contract_value_sat),
+            bytes.fromhex(binding.contract_script_pubkey),
+        )
+        raw_refund = age_container.construct_container_selected_refund(
+            ciphertext,
+            network,
+            credentials=credentials,
+            funding_attempt_id="cc" * 32,
+            binding_revision=0,
+            live_funding=funding,
+            sampled_tip_height=1101,
+            fee_sat=200,
+            auxiliary_random=b"\x55" * 32,
+            crypto=crypto,
+        )
+        assert raw_refund.startswith(b"\x02\x00\x00\x00")
+        assert package["user_secret"]["contract_secret_key"].encode() not in raw_refund
+        with pytest.raises(RecoveryContainerError, match="recovery refund construction failed"):
+            age_container.construct_container_selected_refund(
+                ciphertext,
+                network,
+                credentials=credentials,
+                funding_attempt_id="cc" * 32,
+                binding_revision=0,
+                live_funding=funding,
+                sampled_tip_height=1100,
+                fee_sat=200,
+                auxiliary_random=b"\x55" * 32,
+                crypto=crypto,
+            )
         with pytest.raises(
             RecoveryContainerError, match="recovery decryption or static inspection failed"
         ):

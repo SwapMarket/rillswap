@@ -111,6 +111,8 @@ def _replies(
         }[method]
         if change == "null" and method == "gettxout":
             result = None
+        if change == "mempool-spent" and method == "gettxout" and payload["params"][2] is True:
+            result = None
         if change == "amount" and method == "gettxout":
             result["value"] = Decimal("0.00101001")  # type: ignore[index]
         if change == "script" and method == "gettxout":
@@ -268,6 +270,37 @@ def test_native_match_failure_does_not_retain_secret_exception_context(
     assert "private-key" not in repr(error.value)
     assert error.value.__cause__ is None
     assert error.value.__context__ is None
+
+
+@pytest.mark.parametrize("change", ["none", "mempool-spent"])
+def test_refund_specific_mempool_and_height_samples_are_conservative(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    terms, binding, network = _context()
+    requests: list[dict[str, Any]] = []
+    reader = _reader(tmp_path, monkeypatch, binding, network, requests, change=change)
+    monkeypatch.setattr(
+        observation, "check_funding_binding_transaction", lambda *_a, **_k: object()
+    )
+    with pytest.raises(observation.RecoveryCoreUnavailableError):
+        reader.observe(binding, terms, keys=object(), for_refund=True)  # type: ignore[arg-type]
+    assert all(request["id"] != 8 for request in requests)  # Not mature at tip 100.
+    requests.clear()
+    mature = terms.model_copy(update={"refund_lock_height": 99})
+    if change == "mempool-spent":
+        with pytest.raises(observation.RecoveryCoreUnavailableError) as error:
+            reader.observe(binding, mature, keys=object(), for_refund=True)  # type: ignore[arg-type]
+        assert error.value.__cause__ is None
+        assert error.value.__context__ is None
+    else:
+        result = reader.observe(binding, mature, keys=object(), for_refund=True)  # type: ignore[arg-type]
+        assert result.tip_height == 100
+    assert [request["params"] for request in requests if request["id"] in (3, 8)] == [
+        [binding.funding_txid, binding.contract_vout, False],
+        [binding.funding_txid, binding.contract_vout, True],
+    ]
 
 
 def test_cookie_and_loopback_preflight_fail_before_rpc(

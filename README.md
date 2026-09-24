@@ -44,6 +44,47 @@ is opt-in with `RILLSWAP_RUN_BITCOIN_CORE=1 .venv/bin/pytest -q -m bitcoin_core`
 and requires the locally built sibling native library plus pinned Docker
 images. Neither test uses funds outside disposable regtest.
 
+`rill recover sign-refund` constructs a **BTC-to-LN client refund only** for
+one explicitly selected signed funding binding, on disposable regtest. It
+accepts the same network, identity, native library, exact attempt/revision,
+cookie, RPC port, and encrypted file arguments as `observe-funding`, plus
+`--fee-sat` (an exact integer constrained by signed refund terms) and
+`--output` (a new file in a **trusted local directory**). For example:
+
+```sh
+rill recover sign-refund \
+  --network trusted-regtest-network.json \
+  --crypto-library /absolute/path/to/pinned/librill_crypto.so \
+  --identity /protected/age-identity \
+  --funding-attempt-id EXACT_64_LOWERCASE_HEX \
+  --binding-revision 0 \
+  --rpc-cookie /protected/regtest/.cookie \
+  --rpc-port 18443 --fee-sat 500 \
+  --output /trusted/private/new-refund.raw \
+  /path/to/selected-recovery.age
+```
+
+The complete selected encrypted record is validated before Core RPC, then
+revalidated inside the secret-confined signer. The selected output is sampled
+both chain-only and with mempool spends included, matched against the funding
+transaction bytes, and checked at a sampled tip strictly after the signed
+refund lock height. The signed refund is verified from the private, fsynced
+temporary file before create-only publication, with no overwrite, wallet RPC,
+network broadcast, or state update. **The output is not proof of complete or
+current funding, payment failure, absence of competing bindings, safe
+broadcast, or ongoing spendability.** A rapid reorganization, unobserved
+mempool activity, restored/older snapshots, and later spending can invalidate
+the sampled evidence. Recheck independently and reconcile every relevant
+outpoint before contemplating manual broadcast. An LN-to-BTC user does not own
+the refund key and must use a separate claim flow (not implemented). The local
+directory must not be writable by untrusted actors; this tool is not a
+hostile-directory or ancestor-symlink defense. An interrupted publication may
+leave an artifact without a success report (exit 3 if detected), which requires
+manual inspection and **no automatic retry**. Python does not guarantee
+erasure of private key material from memory. The opt-in pinned Core test mines
+to height T+1, checks `testmempoolaccept` without broadcasting, and never
+uses funds outside disposable regtest.
+
 The export, export-update, and inspect commands are **offline only**. `rill recover
 export` explicitly creates a new binary age v1 X25519 file from canonical
 RS-007 plaintext supplied on standard input. It requires one public age
@@ -71,8 +112,8 @@ only a relationship between the two selected snapshots, not freshness,
 authoritative client reconciliation,
 or a safe RBF workflow.** Interrupted publication is still uncertain (exit 3)
 and requires manual reconciliation. Client-state durability, atomic update
-of active recovery records, and independent unilateral recovery remain release
-gates.
+of active recovery records, and production-safe independent unilateral
+recovery remain release gates.
 
 `rill recover inspect` decrypts an explicitly selected X25519 or age scrypt
 file and prints only redacted offline metadata and what remains unproved.
@@ -83,11 +124,13 @@ encryption work factor cannot be bounded before performing its scrypt KDF.
 Scrypt inspection rejects `logN > 19` before invoking the KDF. A logN of 19
 uses roughly 512 MiB plus implementation overhead. These resource limits may
 exclude otherwise valid age files. No automatically initiated scans, provider
-contact, signing, payment, funding, migration, or broadcasts are implemented.
+contact, payment, funding, migration, or broadcasts are implemented by these
+offline commands. The separate `sign-refund` command signs only after its
+explicitly requested regtest checks.
 
-The package declares dependencies on `rill-core`, `rill-crypto` and
-`pyrage==1.4.0`, but release wheels do **not** bundle the native cryptographic
-library; a missing or wrong library fails closed. Test-only keys and fixtures
+The package declares dependencies on `rill-core`, `rill-crypto`,
+`pyrage==1.4.0`, and `httpx==0.28.1`, but release wheels do **not** bundle the
+native cryptographic library; a missing or wrong library fails closed. Test-only keys and fixtures
 in `tests/fixtures` are public. To develop alongside the sibling repositories:
 
 ```sh

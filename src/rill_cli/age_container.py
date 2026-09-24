@@ -18,13 +18,15 @@ from pyrage import passphrase, x25519
 from rill_core.recovery import (
     OfflineRecoveryInspection,
     SelectedRecoveryFundingContext,
+    construct_selected_recovery_refund,
     inspect_recovery_plaintext,
     inspect_recovery_selected_funding_binding,
     inspect_recovery_selected_funding_context,
 )
 
 if TYPE_CHECKING:
-    from rill_core.recovery.inspection import RecoveryCrypto
+    from rill_core.recovery.inspection import RecoveryCrypto, RecoveryRefundCrypto
+    from rill_core.settlement import FundingOutput
     from rill_core.wire.messages import FundingBinding
     from rill_core.wire.types import NetworkIdentity
 
@@ -282,6 +284,44 @@ def inspect_container_selected_funding_context(  # noqa: PLR0913 - explicit sele
     else:
         return result
     raise RecoveryContainerError("recovery decryption or static inspection failed")
+
+
+def construct_container_selected_refund(  # noqa: PLR0913 - explicit signing inputs
+    ciphertext: bytes,
+    expected_network: NetworkIdentity,
+    *,
+    credentials: RecoveryCredentials,
+    funding_attempt_id: str,
+    binding_revision: int,
+    live_funding: FundingOutput,
+    sampled_tip_height: int,
+    fee_sat: int,
+    auxiliary_random: bytes,
+    crypto: RecoveryRefundCrypto,
+) -> bytes:
+    """Decrypt and sign within this boundary; return verified refund bytes only.
+
+    No secret or preimage leaves this function. The caller supplies a sampled
+    exact funding outpoint and must never infer broadcast safety from it.
+    """
+    try:
+        plaintext = _bounded_plaintext(ciphertext, credentials)
+        result = construct_selected_recovery_refund(
+            plaintext,
+            expected_network,
+            funding_attempt_id=funding_attempt_id,
+            binding_revision=binding_revision,
+            live_funding=live_funding,
+            sampled_tip_height=sampled_tip_height,
+            fee_sat=fee_sat,
+            auxiliary_random=auxiliary_random,
+            crypto=crypto,
+        )
+    except Exception:  # noqa: BLE001, S110 - decrypt/native errors can contain secrets
+        pass
+    else:
+        return result
+    raise RecoveryContainerError("recovery refund construction failed")
 
 
 def decrypt_verified_plaintext(

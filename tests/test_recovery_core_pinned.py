@@ -29,7 +29,7 @@ def _docker(*args: str) -> str:
         [DOCKER, *args],
         capture_output=True,
         text=True,
-        timeout=90,
+        timeout=180,
         check=False,
     )
     if result.returncode:
@@ -47,6 +47,35 @@ def _cli(container: str, *args: str) -> str:
         "-regtest",
         "-datadir=/home/bitcoin/.bitcoin",
         *args,
+    )
+
+
+def _python_check(container: str, work: Path, script: str, *environment: str) -> str:
+    return _docker(
+        "run",
+        "--rm",
+        "--platform",
+        "linux/amd64",
+        "--network",
+        f"container:{container}",
+        "--mount",
+        f"type=bind,src={ROOT},dst=/work/cli,readonly",
+        "--mount",
+        f"type=bind,src={CORE},dst=/work/core,readonly",
+        "--mount",
+        f"type=bind,src={CRYPTO},dst=/work/crypto,readonly",
+        "--mount",
+        f"type=bind,src={work},dst=/work/cookie",
+        "--env",
+        "PYTHONPATH=/work/cli/.venv/lib/python3.14/site-packages:/work/cli/src:"
+        "/work/core/packages/core/src:/work/crypto/python/src",
+        "--env",
+        "RILL_CRYPTO_LIBRARY=/work/crypto/tmp/build/librill_crypto.so",
+        *environment,
+        PYTHON_IMAGE,
+        "python",
+        "-c",
+        script,
     )
 
 
@@ -142,6 +171,40 @@ assert report['first_refund_eligible_height'] == 1101
 print('pinned Core v30 byte-matched selected read-only recovery candidate; no txindex')
 """
 
+PYTHON_REFUND_CHECK = """
+import contextlib, io, json, os
+from pathlib import Path
+from rill_cli.main import main
+work = Path('/work/cookie')
+destination = work / 'signed-refund.raw'
+args = ['recover', 'sign-refund', '--network', str(work / 'network.json'),
+        '--crypto-library', os.environ['RILL_CRYPTO_LIBRARY'],
+        '--identity', str(work / 'identity'),
+        '--funding-attempt-id', 'cc' * 32, '--binding-revision', '0',
+        '--rpc-cookie', str(work / 'core.cookie'), '--rpc-port', '18443',
+        '--fee-sat', '500', '--output', str(destination), str(work / 'selected.age')]
+stdout, stderr = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+    status = main(args)
+if os.environ['RILL_TEST_REFUND_MODE'] == 'immature':
+    assert status == 2
+    assert not destination.exists()
+    assert stderr.getvalue()
+    print('refund refused at lock height without output')
+else:
+    assert status == 0, stderr.getvalue()
+    report = json.loads(stdout.getvalue())
+    assert report['kind'] == 'offline-signed-btc-to-ln-refund/v1'
+    assert report['fee_sat'] == 500
+    assert report['broadcast'] is False
+    assert report['sampled_tip_height'] == 1101
+    assert destination.stat().st_mode & 0o777 == 0o600
+    assert destination.is_file()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        assert main(args) == 2  # Same output may never be overwritten.
+    print(json.dumps({'raw_hex': destination.read_bytes().hex(), 'txid': report['refund_txid']}))
+"""
+
 
 @pytest.mark.bitcoin_core
 @pytest.mark.skipif(
@@ -228,26 +291,10 @@ def test_pinned_core_v30_observes_signed_age_binding_without_txindex(
         cookie = tmp_path / "core.cookie"
         _docker("cp", f"{container}:/home/bitcoin/.bitcoin/regtest/.cookie", str(cookie))
         cookie.chmod(0o600)
-        result = _docker(
-            "run",
-            "--rm",
-            "--platform",
-            "linux/amd64",
-            "--network",
-            f"container:{container}",
-            "--mount",
-            f"type=bind,src={ROOT},dst=/work/cli,readonly",
-            "--mount",
-            f"type=bind,src={CORE},dst=/work/core,readonly",
-            "--mount",
-            f"type=bind,src={CRYPTO},dst=/work/crypto,readonly",
-            "--mount",
-            f"type=bind,src={tmp_path},dst=/work/cookie",
-            "--env",
-            "PYTHONPATH=/work/cli/.venv/lib/python3.14/site-packages:/work/cli/src:"
-            "/work/core/packages/core/src:/work/crypto/python/src",
-            "--env",
-            "RILL_CRYPTO_LIBRARY=/work/crypto/tmp/build/librill_crypto.so",
+        result = _python_check(
+            container,
+            tmp_path,
+            PYTHON_CHECK,
             "--env",
             f"RILL_TEST_TXID={txid}",
             "--env",
@@ -256,15 +303,53 @@ def test_pinned_core_v30_observes_signed_age_binding_without_txindex(
             f"RILL_TEST_INCLUSION_BLOCK={inclusion}",
             "--env",
             f"RILL_TEST_FIXTURE={fixture_name}",
-            PYTHON_IMAGE,
-            "python",
-            "-c",
-            PYTHON_CHECK,
         )
         assert (
             result
             == "pinned Core v30 byte-matched selected read-only recovery candidate; no txindex"
         )
+        if fixture_name == "initial-btc-to-ln-v1.json":
+            assert (
+                _python_check(
+                    container,
+                    tmp_path,
+                    PYTHON_REFUND_CHECK,
+                    "--env",
+                    "RILL_TEST_REFUND_MODE=immature",
+                )
+                == "refund refused at lock height without output"
+            )
+            height = int(_cli(container, "getblockcount"))
+            assert height == 102
+            _cli(container, "generatetoaddress", str(1100 - height), mining)
+            assert (
+                _python_check(
+                    container,
+                    tmp_path,
+                    PYTHON_REFUND_CHECK,
+                    "--env",
+                    "RILL_TEST_REFUND_MODE=immature",
+                )
+                == "refund refused at lock height without output"
+            )
+            _cli(container, "generatetoaddress", "1", mining)
+            signed = json.loads(
+                _python_check(
+                    container,
+                    tmp_path,
+                    PYTHON_REFUND_CHECK,
+                    "--env",
+                    "RILL_TEST_REFUND_MODE=mature",
+                )
+            )
+            assert len(signed["raw_hex"]) <= 200_000
+            acceptance = json.loads(
+                _cli(container, "testmempoolaccept", json.dumps([signed["raw_hex"]]))
+            )
+            assert len(acceptance) == 1
+            assert acceptance[0]["allowed"] is True
+            assert acceptance[0]["txid"] == signed["txid"]
+            assert not json.loads(_cli(container, "getmempoolinfo"))["size"]
     finally:
         subprocess.run(  # noqa: S603 - best-effort isolated container cleanup
             [DOCKER, "rm", "--force", "--volumes", container],

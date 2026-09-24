@@ -176,7 +176,12 @@ class RegtestRecoveryCoreReader:
         self._network = network
 
     def observe(
-        self, binding: FundingBinding, terms: ContractTerms, *, keys: TaprootKeyOperations
+        self,
+        binding: FundingBinding,
+        terms: ContractTerms,
+        *,
+        keys: TaprootKeyOperations,
+        for_refund: bool = False,
     ) -> RecoveryOutpointCandidate:
         """Sample one exact selected binding; a successful result is staleable.
 
@@ -185,7 +190,7 @@ class RegtestRecoveryCoreReader:
         """
         category: type[RecoveryCoreReadError]
         try:
-            result = self._observe(binding, terms, keys=keys)
+            result = self._observe(binding, terms, keys=keys, for_refund=for_refund)
         except RecoveryCoreUnavailableError:
             category = RecoveryCoreUnavailableError
         except Exception:  # noqa: BLE001 - native and transport details can retain credentials
@@ -197,9 +202,18 @@ class RegtestRecoveryCoreReader:
         raise category("selected Core evidence unavailable; no absence or authority proof")
 
     def _observe(
-        self, binding: FundingBinding, terms: ContractTerms, *, keys: TaprootKeyOperations
+        self,
+        binding: FundingBinding,
+        terms: ContractTerms,
+        *,
+        keys: TaprootKeyOperations,
+        for_refund: bool,
     ) -> RecoveryOutpointCandidate:
-        if not isinstance(binding, FundingBinding) or terms.network_identity != self._network:
+        if (
+            not isinstance(binding, FundingBinding)
+            or terms.network_identity != self._network
+            or type(for_refund) is not bool
+        ):
             raise RecoveryCoreProtocolError(
                 "selected funding context differs from configured network"
             )
@@ -239,6 +253,25 @@ class RegtestRecoveryCoreReader:
                     match = check_funding_binding_transaction(raw, binding, terms, keys=keys)
                 except Exception:  # noqa: BLE001 - no native/transaction diagnostics escape
                     raise RecoveryCoreProtocolError("selected transaction bytes differ") from None
+                if for_refund:
+                    if height <= terms.refund_lock_height:
+                        raise RecoveryCoreUnavailableError("refund height not yet sampled")
+                    # Mempool-aware gettxout excludes a confirmed output spent
+                    # by a known unconfirmed transaction; this is a sample, not
+                    # a future-unspent guarantee.
+                    mempool_out = self._rpc(
+                        client,
+                        "gettxout",
+                        [
+                            binding.funding_txid,
+                            binding.contract_vout,
+                            True,
+                        ],
+                        8,
+                    )
+                    mempool_tip, mempool_confirms = _outpoint(mempool_out, binding, height)
+                    if mempool_tip != tip_hash or mempool_confirms != confirmations:
+                        raise RecoveryCoreUnavailableError("mempool-aware outpoint sample changed")
                 last_hash, last_height = _tip(self._rpc(client, "getblockchaininfo", [], 6))
                 # Resample the lookup height to reject observable inconsistency.
                 # Matching samples prove neither ancestry to the named tip nor

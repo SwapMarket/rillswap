@@ -1,4 +1,4 @@
-"""Explicit age recovery export, offline inspection, and read-only Core sampling."""
+"""Explicit age recovery, Core sampling, and create-only refund construction."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from pyrage import x25519
 from rill_core.recovery import inspect_recovery_successor
+from rill_core.settlement import FundingOutput, UnilateralAuthorization, validate_unilateral_spend
 from rill_core.wire.types import NetworkIdentity
 from rill_crypto import Context
 
@@ -22,6 +23,7 @@ from rill_cli.age_container import (
     MAX_PLAINTEXT_BYTES,
     PassphraseCredentials,
     X25519Credentials,
+    construct_container_selected_refund,
     decrypt_verified_plaintext,
     encrypt_verified_plaintext,
     inspect_container,
@@ -33,6 +35,10 @@ from rill_cli.publication import (
     publish_new_ciphertext,
 )
 from rill_cli.recovery_core_observation import RegtestRecoveryCoreReader
+from rill_cli.refund_publication import (
+    RefundPublicationUncertainError,
+    publish_new_signed_refund,
+)
 
 if TYPE_CHECKING:
     from rill_core.recovery import OfflineRecoveryInspection
@@ -80,22 +86,35 @@ def _parser() -> argparse.ArgumentParser:
         "--passphrase-prompt", action="store_true", help="prompt via terminal"
     )
     inspect.add_argument("file", help="encrypted age v1 binary recovery file")
-    observe = commands.add_parser(
-        "observe-funding", help="explicit regtest chain-only candidate (never signing authority)"
-    )
-    observe.add_argument("--network", required=True, help="complete trusted regtest network JSON")
-    observe.add_argument("--crypto-library", required=True, help="verified native library path")
-    observe.add_argument("--funding-attempt-id", required=True, help="exact recorded attempt hex")
-    observe.add_argument("--binding-revision", required=True, type=int, help="exact revision")
-    observe.add_argument("--rpc-cookie", required=True, help="protected local Core cookie path")
-    observe.add_argument("--rpc-port", required=True, type=int, help="local Core RPC port")
-    observe.add_argument("--rpc-host", default="127.0.0.1", help="numeric loopback only")
-    observe_mode = observe.add_mutually_exclusive_group(required=True)
-    observe_mode.add_argument("--identity", help="protected age X25519 secret-key file")
-    observe_mode.add_argument(
-        "--passphrase-prompt", action="store_true", help="prompt via terminal"
-    )
-    observe.add_argument("file", help="explicit encrypted age recovery file")
+    for command, description in (
+        ("observe-funding", "explicit regtest candidate (never signing authority)"),
+        ("sign-refund", "explicit BTC-to-LN refund artifact (never broadcasts)"),
+    ):
+        operation = commands.add_parser(command, help=description)
+        operation.add_argument(
+            "--network", required=True, help="complete trusted regtest network JSON"
+        )
+        operation.add_argument(
+            "--crypto-library", required=True, help="verified native library path"
+        )
+        operation.add_argument(
+            "--funding-attempt-id", required=True, help="exact recorded attempt hex"
+        )
+        operation.add_argument("--binding-revision", required=True, type=int, help="exact revision")
+        operation.add_argument(
+            "--rpc-cookie", required=True, help="protected local Core cookie path"
+        )
+        operation.add_argument("--rpc-port", required=True, type=int, help="local Core RPC port")
+        operation.add_argument("--rpc-host", default="127.0.0.1", help="numeric loopback only")
+        mode = operation.add_mutually_exclusive_group(required=True)
+        mode.add_argument("--identity", help="protected age X25519 secret-key file")
+        mode.add_argument("--passphrase-prompt", action="store_true", help="prompt via terminal")
+        if command == "sign-refund":
+            operation.add_argument("--fee-sat", required=True, type=int, help="exact refund fee")
+            operation.add_argument(
+                "--output", required=True, help="create-only raw transaction file"
+            )
+        operation.add_argument("file", help="explicit encrypted age recovery file")
     return parser
 
 
@@ -199,7 +218,7 @@ def _run(args: argparse.Namespace) -> str:
                 else "Created encrypted recovery file. "
             )
             return prefix + "No funding authority. " + _report(report)
-        if args.command in {"inspect", "observe-funding"}:
+        if args.command in {"inspect", "observe-funding", "sign-refund"}:
             inspection_credentials = (
                 PassphraseCredentials(_prompt())
                 if args.passphrase_prompt
@@ -221,12 +240,73 @@ def _run(args: argparse.Namespace) -> str:
                 binding_revision=args.binding_revision,
                 crypto=crypto,
             )
+            if args.command == "sign-refund" and (
+                selected.terms.profile_id != "btc-to-ln/v1"
+                or selected.terms.refund_party != "client"
+            ):
+                raise RecoveryCLIError("selected recovery is not a client refund")
             candidate = RegtestRecoveryCoreReader(
                 port=args.rpc_port,
                 host=args.rpc_host,
                 cookie_path=Path(args.rpc_cookie),
                 network=network,
-            ).observe(selected.binding, selected.terms, keys=crypto)
+            ).observe(
+                selected.binding,
+                selected.terms,
+                keys=crypto,
+                for_refund=args.command == "sign-refund",
+            )
+            if args.command == "sign-refund":
+                funding = FundingOutput(
+                    bytes.fromhex(selected.binding.funding_txid),
+                    selected.binding.contract_vout,
+                    int(selected.binding.contract_value_sat),
+                    bytes.fromhex(selected.binding.contract_script_pubkey),
+                )
+                signed = construct_container_selected_refund(
+                    ciphertext,
+                    network,
+                    credentials=inspection_credentials,
+                    funding_attempt_id=args.funding_attempt_id,
+                    binding_revision=args.binding_revision,
+                    live_funding=funding,
+                    sampled_tip_height=candidate.tip_height,
+                    fee_sat=args.fee_sat,
+                    auxiliary_random=os.urandom(32),
+                    crypto=crypto,
+                )
+                authorization = UnilateralAuthorization.from_terms(
+                    selected.terms,
+                    funding,
+                    "refund",
+                    keys=crypto,
+                )
+                checked = None
+
+                def verify_from_disk(stored: bytes) -> None:
+                    nonlocal checked
+                    checked = validate_unilateral_spend(stored, authorization, verifier=crypto)
+                    if checked.fee_sat != args.fee_sat:
+                        raise RecoveryCLIError("signed refund fee differs from requested fee")
+
+                publish_new_signed_refund(args.output, signed, verify_from_disk=verify_from_disk)
+                if checked is None:
+                    raise RecoveryCLIError("signed refund readback was not verified")
+                return json.dumps(
+                    {
+                        "kind": "offline-signed-btc-to-ln-refund/v1",
+                        "funding_txid": selected.binding.funding_txid,
+                        "contract_vout": selected.binding.contract_vout,
+                        "refund_txid": checked.txid,
+                        "fee_sat": checked.fee_sat,
+                        "sampled_tip_hash": candidate.tip_hash,
+                        "sampled_tip_height": candidate.tip_height,
+                        "broadcast": False,
+                        "authority": "none (manual chain recheck required before broadcast)",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
             return json.dumps(
                 {
                     "kind": "selected-funding-candidate-observation/v1",
@@ -265,6 +345,12 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(
             "Recovery destination may be published, durability unconfirmed; "
             "verify manually, do not fund or pay.\n"
+        )
+        return 3
+    except RefundPublicationUncertainError:
+        sys.stderr.write(
+            "Signed refund output may exist, durability unconfirmed; verify manually; "
+            "do not automatically retry or broadcast.\n"
         )
         return 3
     except Exception:  # noqa: BLE001 - must not print secret native/library errors

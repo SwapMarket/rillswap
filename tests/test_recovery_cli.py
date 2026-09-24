@@ -120,11 +120,16 @@ def test_observe_funding_checks_selected_encrypted_record_before_any_core_rpc(
             seen.append(("connect", 0))
 
         def observe(
-            self, selected: FundingBinding, _terms: object, *, keys: object
+            self,
+            selected: FundingBinding,
+            _terms: object,
+            *,
+            keys: object,
+            for_refund: bool = False,
         ) -> RecoveryOutpointCandidate:
             assert selected == binding
             assert isinstance(keys, Context)
-            seen.append(("observe", selected.binding_revision))
+            seen.append(("refund" if for_refund else "observe", selected.binding_revision))
             return RecoveryOutpointCandidate(
                 package["network_identity"],  # type: ignore[arg-type]
                 FundingBindingTransactionMatch(
@@ -134,7 +139,7 @@ def test_observe_funding_checks_selected_encrypted_record_before_any_core_rpc(
                     binding.lineage_anchor_vout,
                 ),
                 "ab" * 32,
-                100,
+                1101 if for_refund else 100,
                 "bc" * 32,
                 99,
                 2,
@@ -169,6 +174,76 @@ def test_observe_funding_checks_selected_encrypted_record_before_any_core_rpc(
         encrypted.write_bytes(pyrage.encrypt(canonicalize(changed), [identity.to_public()]))
         assert cli_main.main(["recover", *selected_args]) == 2
         assert seen == []
+    encrypted.write_bytes(pyrage.encrypt(canonicalize(package), [identity.to_public()]))
+    output = tmp_path / "refund.raw"
+    signing_args = [
+        "recover",
+        "sign-refund",
+        *selected_args[1:-1],
+        "--fee-sat",
+        "200",
+        "--output",
+        str(output),
+        str(encrypted),
+    ]
+    report = json.loads(cli_main._run(cli_main._parser().parse_args(signing_args)))  # noqa: SLF001
+    assert report["kind"] == "offline-signed-btc-to-ln-refund/v1"
+    assert report["broadcast"] is False
+    assert report["sampled_tip_height"] == 1101
+    assert output.read_bytes().startswith(b"\x02\x00\x00\x00")
+    assert output.stat().st_mode & 0o777 == 0o600
+    assert seen == [("connect", 0), ("refund", 0)]
+    seen.clear()
+    assert cli_main.main(signing_args) == 2  # Never overwrite the signed output.
+    assert seen == [("connect", 0), ("refund", 0)]
+
+
+@NATIVE_ONLY
+@pytest.mark.native_crypto
+def test_sign_refund_rejects_provider_refund_profile_before_rpc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pyrage  # noqa: PLC0415
+
+    from rill_cli import main as cli_main  # noqa: PLC0415
+
+    package, _ = _fixture("ln-to-btc")
+    package["funding_history"].append(_signed_binding(package, 0, str(NATIVE_LIBRARY)))
+    common, _, _ = _inputs(tmp_path, "ln-to-btc")
+    identity = x25519.Identity.from_str(Path(common[-1]).read_text().strip())
+    encrypted = tmp_path / "provider-refund.age"
+    encrypted.write_bytes(pyrage.encrypt(canonicalize(package), [identity.to_public()]))
+    output = tmp_path / "no-output.raw"
+
+    def should_not_connect(**_kwargs: object) -> None:
+        pytest.fail("wrong profile must not connect to Core")
+
+    monkeypatch.setattr(cli_main, "RegtestRecoveryCoreReader", should_not_connect)
+    assert (
+        cli_main.main(
+            [
+                "recover",
+                "sign-refund",
+                *common,
+                "--funding-attempt-id",
+                "11" * 32,
+                "--binding-revision",
+                "0",
+                "--rpc-cookie",
+                str(tmp_path / "no-cookie"),
+                "--rpc-port",
+                "18443",
+                "--fee-sat",
+                "200",
+                "--output",
+                str(output),
+                str(encrypted),
+            ]
+        )
+        == 2
+    )
+    assert not output.exists()
 
 
 def _export_snapshot(
