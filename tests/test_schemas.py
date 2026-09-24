@@ -92,3 +92,51 @@ def test_disposable_manual_advertisement_is_schema_valid_and_signed() -> None:
         bytes.fromhex(ad["provider_identity_xonly_key"]),
         bytes.fromhex(fixture["signature"]),
     )
+
+
+def test_private_regtest_announcement_binds_application_signature_and_address() -> None:
+    """Pin NIP-01 event bytes independently of RS-001's application digest."""
+    from tests.vendor.bip340_reference import verify
+
+    fixture = load_json(ROOT / "vectors/discovery/manual-advertisement-regtest-v1.json")
+    vector = load_json(ROOT / "vectors/discovery/nostr-announcement-regtest-v1.json")
+    ad = fixture["advertisement"]
+    content = rfc8785.dumps(fixture)
+    assert len(content) == vector["content_utf8_length"]
+    assert hashlib.sha256(content).hexdigest() == vector["content_sha256"]
+    assert vector["kind"] == 39417
+    assert vector["pubkey"] == ad["provider_identity_xonly_key"]
+    assert vector["created_at"] == ad["created_at"]
+    assert ad["network_identities"][0]["name"] == "regtest"
+    assert len(ad["network_identities"]) == 1
+    assert ad["extensions"] == {}
+    d = hashlib.sha256(
+        rfc8785.dumps(
+            [
+                "rillswap",
+                ad["binding_version"],
+                ad["network_identities"][0],
+                ad["slot"],
+            ]
+        )
+    ).hexdigest()
+    assert vector["tags"] == [
+        ["rillswap", "nostr-experimental-1"],
+        ["network", "regtest"],
+        ["d", d],
+    ]
+    message = json.dumps(
+        [
+            0,
+            vector["pubkey"],
+            vector["created_at"],
+            vector["kind"],
+            vector["tags"],
+            content.decode("utf-8"),
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest = hashlib.sha256(message).digest()
+    assert digest.hex() == vector["id"]
+    assert verify(digest, bytes.fromhex(vector["pubkey"]), bytes.fromhex(vector["sig"]))

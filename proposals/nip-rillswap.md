@@ -20,6 +20,7 @@ Do not use NIP78 kind 30078 as a generic public provider directory: its current 
 ## Provider announcements
 
 An announcement is signed by the stable provider identity. Its addressable `d` tag identifies a protocol/network/advertisement slot. Public tags are restricted to application/network routing and other explicitly specified discovery metadata.
+For the private-regtest Nostr adapter only, RS-005 fixes kind 39417, the ordered namespace/network/`d` tags, canonical application-signed content, and a single complete regtest network identity per event. The coarse public `regtest` tag cannot authenticate the full network. Manual application-signed import remains a separate path and does not require a Nostr event.
 
 Content is a bounded, versioned object containing:
 
