@@ -130,9 +130,26 @@ a clone on another host. Admission grants no funding, payment, or claim
 authority. Upgrading does not create this store. The diagnostic
 `PreparedHandshakeStore` and `IssuanceReservationStore` are never read,
 migrated, or promoted, and there is still no relay listener or publisher
-wired to the store. Session-envelope signing and mailbox decryption with the
-custody key, and owner-built accepts (identity signing inside the store),
-are the next boundaries. None is exposed yet.
+wired to the store. Two transport operations keep the session secret inside
+the store:
+
+- `wrap_pending(message_id, transport=Context)` returns a fresh RS-006 NIP-59
+  gift wrap of a committed, still-PENDING outbox message. The wrap is sealed
+  by the custody session key and addressed to the client session mailbox from
+  the committed transcript. Each call uses a new seal, a new one-time wrapper
+  key, and randomized past timestamps.
+- `open_mailbox_frame(event, transport=Context)` routes by the single `p` tag
+  to one of our session mailboxes and decodes with that session's custody
+  secret. It returns the exact canonical envelope bytes, but only if the seal
+  author and envelope sender are that session's client key. This is not
+  admission: pass the bytes to `admit_confirm`. Every refusal is uniform and
+  redacted.
+
+The internal `_nip59_send` wrapper and NIP-44 v2 encryption are the exact
+inverse of the receive decoder. They are checked against the official NIP-44
+vector and by native round trips. Epoch-inbox custody (to receive the init),
+owner-built accepts, the relay client, and the service loop are still
+missing.
 
 `handshake_custody_offline.OfflineHandshakeCustody` is an optional, **offline
 key-availability primitive**, deliberately not an implementation of the live

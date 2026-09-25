@@ -44,6 +44,7 @@ class _UntrustedFrameCandidate:
     rumor_id: str
     seal_author_xonly_key: str
     envelope: Envelope
+    envelope_bytes: bytes  # exact canonical rumor content, for durable admission
 
 
 def _require(condition: bool) -> None:  # noqa: FBT001 - local guard
@@ -51,7 +52,7 @@ def _require(condition: bool) -> None:  # noqa: FBT001 - local guard
         raise Nip59ReceiveRefusedError("NIP-59 frame candidate refused")
 
 
-def _rumor(raw: bytes) -> tuple[str, str, Envelope]:
+def _rumor(raw: bytes) -> tuple[str, str, Envelope, bytes]:
     _require(0 < len(raw) <= nip01.MAX_EVENT_BYTES)
     parsed_document = parse_json_strict(raw, max_bytes=nip01.MAX_EVENT_BYTES)
     _require(type(parsed_document) is dict and parsed_document.keys() == RUMOR_MEMBERS)
@@ -81,7 +82,7 @@ def _rumor(raw: bytes) -> tuple[str, str, Envelope]:
     _require(canonicalize(parsed) == content)
     envelope = Envelope.model_validate_json(content, strict=True)
     _require(envelope.sender_session_key == document["pubkey"])
-    return document["id"], document["pubkey"], envelope
+    return document["id"], document["pubkey"], envelope, content
 
 
 def _decode(  # noqa: PLR0913 - independent local trust roots explicit
@@ -124,7 +125,7 @@ def _decode(  # noqa: PLR0913 - independent local trust roots explicit
         sender_public_key=bytes.fromhex(seal.pubkey),
         crypto=crypto,
     ).encode("utf-8")
-    rumor_id, rumor_author, envelope = _rumor(rumor_raw)
+    rumor_id, rumor_author, envelope, content = _rumor(rumor_raw)
     _require(rumor_author == seal.pubkey)
     _require(envelope.network_identity == expected_network)
     _require(envelope.profile_id == expected_profile_id)
@@ -133,6 +134,7 @@ def _decode(  # noqa: PLR0913 - independent local trust roots explicit
         rumor_id=rumor_id,
         seal_author_xonly_key=seal.pubkey,
         envelope=envelope,
+        envelope_bytes=content,
     )
 
 

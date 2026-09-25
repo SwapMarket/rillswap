@@ -182,13 +182,9 @@ class Harness:
         self.identity = init["expected_provider_identity_xonly_key"]
         self.path = tmp_path / "live.sqlite"
         challenge = self.source["verification_context"]["handshake_accept"]["provider_challenge"]
-        monkeypatch.setattr(
-            "rill_provider.live_session_store.secrets.token_hex", lambda _n: challenge
-        )
+        monkeypatch.setattr(live, "_new_challenge", lambda: challenge)
         self.scalar = SESSION_SECRET
-        monkeypatch.setattr(
-            "rill_provider.live_session_store.secrets.token_bytes", lambda _n: self.scalar
-        )
+        monkeypatch.setattr(live, "_new_session_scalar", lambda: self.scalar)
         self.custody = x25519.Identity.generate()
         self.init, self.accept, self.confirm = (_bytes(e) for e in self.envelopes)
 
@@ -703,3 +699,70 @@ def test_native_crypto_full_handshake_with_real_custody_derivation(harness: Harn
         resigned["signature"] = "00" * 64
         with pytest.raises(LiveSessionStoreError):
             store.admit_confirm(_bytes(resigned))  # real verification refuses
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
+)
+def test_native_handshake_over_nip59_session_mailboxes(harness: Harness) -> None:
+    from rill_crypto import Context  # noqa: PLC0415
+
+    from rill_provider._nip59_receive import _decode_gift_wrap_candidate  # noqa: PLC0415
+    from rill_provider._nip59_send import _wrap_envelope  # noqa: PLC0415
+
+    client_secret = (2).to_bytes(32, "big")  # Fixture-only public scalar of the client key.
+    stranger_secret = (9).to_bytes(32, "big")
+    harness.provision()
+    with (
+        Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
+        harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store,
+    ):
+        reserved = store.reserve(harness.init)
+        committed = store.commit_accept(harness.accept)
+        client_key = crypto.public_key(client_secret)[1:].hex()
+        wraps = [store.wrap_pending(committed.message_id, transport=crypto) for _ in range(2)]
+        assert wraps[0] != wraps[1]  # fresh seal and wrapper per retransmission
+        for wrap in wraps:
+            received = _decode_gift_wrap_candidate(
+                wrap,
+                recipient_mailbox_secret=client_secret,
+                expected_recipient_xonly_key=client_key,
+                expected_network=harness.network,
+                expected_profile_id="btc-to-ln/v1",
+                crypto=crypto,
+            )
+            assert received.envelope_bytes == harness.accept
+            assert received.seal_author_xonly_key == reserved.provider_session_key
+        frame = _wrap_envelope(
+            harness.confirm,
+            sender_session_secret=client_secret,
+            recipient_xonly_key=reserved.provider_session_key,
+            crypto=crypto,
+        )
+        opened = store.open_mailbox_frame(frame, transport=crypto)
+        assert opened == harness.confirm
+        assert not store.admit_confirm(opened).replay
+        with pytest.raises(LiveSessionStoreError, match="no pending outbox"):
+            store.wrap_pending(committed.message_id, transport=crypto)
+        stranger = copy.deepcopy(harness.envelopes[2])
+        stranger["sender_session_key"] = crypto.public_key(stranger_secret)[1:].hex()
+        forged = _wrap_envelope(
+            _bytes(stranger),
+            sender_session_secret=stranger_secret,
+            recipient_xonly_key=reserved.provider_session_key,
+            crypto=crypto,
+        )
+        with pytest.raises(LiveSessionStoreError, match="not bound to session"):
+            store.open_mailbox_frame(forged, transport=crypto)
+        elsewhere = _wrap_envelope(
+            harness.confirm,
+            sender_session_secret=client_secret,
+            recipient_xonly_key=crypto.public_key(stranger_secret)[1:].hex(),
+            crypto=crypto,
+        )
+        with pytest.raises(LiveSessionStoreError, match="unknown session"):
+            store.open_mailbox_frame(elsewhere, transport=crypto)
+        with pytest.raises(LiveSessionStoreError, match="refused"):
+            store.open_mailbox_frame(frame[:-5] + b"0000}", transport=crypto)

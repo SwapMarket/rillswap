@@ -33,7 +33,7 @@ import uuid
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Any, Self
 
 import pyrage  # type: ignore[import-untyped]
 from pyrage import x25519
@@ -43,6 +43,8 @@ from rill_core.wire.hashes import handshake_init_hash, unsigned_envelope_hash
 from rill_core.wire.messages import Envelope, HandshakeAcceptPayload, HandshakeInit
 from rill_core.wire.types import NetworkIdentity
 
+from rill_provider._nip59_receive import _decode_gift_wrap_candidate
+from rill_provider._nip59_send import _wrap_envelope
 from rill_provider.handshake_store import HandshakePolicy, _expected, _features, _require_policy
 from rill_provider.issuance_reservation import _policy_bytes
 
@@ -51,6 +53,7 @@ if TYPE_CHECKING:
     from os import PathLike
 
     from rill_core.wire.envelope_authentication import EnvelopeSchnorrVerifier
+    from rill_crypto import Context
 
     from rill_provider.handshake_custody_offline import CustodyPublicKeys
 
@@ -61,6 +64,7 @@ MAX_CHALLENGE_TRIES = 4
 MAX_LABEL_CHARS = 256
 HEX32 = re.compile(r"[0-9a-f]{64}\Z")
 LOCK_SUFFIX = ".owner-lock"
+MAX_OUTER_EVENT_BYTES = 128 * 1024
 COMPRESSED_KEY_BYTES = 33
 KEY_RECORD_KIND = "rill-provider/live-session-key/v1"
 SCHEMA = (
@@ -538,7 +542,7 @@ class LiveSessionStore:
         )
 
     def _new_session_key(self, init: HandshakeInit, challenge: str) -> tuple[str, bytes]:
-        scalar = secrets.token_bytes(32)
+        scalar = _new_session_scalar()
         xonly = _xonly(self._public_keys, scalar)
         record = self._key_record(
             init.session_id, handshake_init_hash(init).hex(), challenge, scalar, xonly
@@ -550,6 +554,10 @@ class LiveSessionStore:
 
     def _require_custody(self, connection: sqlite3.Connection, session_id: str) -> str:
         """Return the bound public key only if its sealed secret is intact and usable."""
+        _, xonly = self._unseal(connection, session_id)
+        return xonly
+
+    def _unseal(self, connection: sqlite3.Connection, session_id: str) -> tuple[bytes, str]:
         row = connection.execute(
             "SELECT init_bytes, provider_challenge, provider_session_key, session_secret_age, "
             "key_state FROM sessions WHERE session_id=?",
@@ -573,7 +581,92 @@ class LiveSessionStore:
             valid = False
         if not valid:
             raise LiveSessionStoreError("session key custody unavailable")
-        return str(xonly)
+        return scalar, str(xonly)
+
+    def wrap_pending(self, message_id: str, *, transport: Context) -> bytes:
+        """Return a fresh NIP-59 wrap of one committed, still-owed outbox message.
+
+        Each call re-randomizes seal and wrapper around the unchanged logical
+        message. The recipient is the peer's session mailbox from the
+        committed transcript, never a caller-chosen key.
+        """
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT o.session_id, o.canonical_bytes, s.client_key FROM outbox o "
+                    "JOIN sessions s ON s.session_id = o.session_id "
+                    "WHERE o.message_id=? AND o.delivery_state='PENDING'",
+                    (message_id,),
+                ).fetchone()
+                if row is None:
+                    raise LiveSessionStoreError("no pending outbox message")  # noqa: TRY301
+                session_id, document, recipient = row
+                scalar, _ = self._unseal(connection, session_id)
+                try:
+                    return _wrap_envelope(
+                        document,
+                        sender_session_secret=scalar,
+                        recipient_xonly_key=recipient,
+                        crypto=transport,
+                    )
+                finally:
+                    del scalar
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo secret material or library errors
+            raise LiveSessionStoreError("outbox wrap refused") from None
+
+    def open_mailbox_frame(self, outer_event: bytes, *, transport: Context) -> bytes:
+        """Decode a gift wrap sent to one of our session mailboxes.
+
+        Returns the exact canonical envelope bytes only if the seal author is
+        that session's client key and the envelope names that session. This is
+        NOT admission: the caller must still pass the bytes to the matching
+        admission method (for example ``admit_confirm``).
+        """
+        try:
+            if type(outer_event) is not bytes or len(outer_event) > MAX_OUTER_EVENT_BYTES:
+                raise LiveSessionStoreError("mailbox frame size unsupported")  # noqa: TRY301
+            # Routing hint only; the decoder re-verifies the signed recipient tag.
+            tags: list[Any] = json.loads(outer_event)["tags"]
+            recipients = [
+                tag[1]
+                for tag in tags
+                if type(tag) is list and len(tag) >= 2 and tag[0] == "p"  # noqa: PLR2004
+            ]
+            if len(recipients) != 1 or type(recipients[0]) is not str:
+                raise LiveSessionStoreError("mailbox frame recipient unsupported")  # noqa: TRY301
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT session_id, client_key FROM sessions WHERE provider_session_key=?",
+                    (recipients[0],),
+                ).fetchone()
+                if row is None:
+                    raise LiveSessionStoreError("mailbox frame for unknown session")  # noqa: TRY301
+                session_id, client = row
+                scalar, mailbox = self._unseal(connection, session_id)
+                try:
+                    candidate = _decode_gift_wrap_candidate(
+                        outer_event,
+                        recipient_mailbox_secret=scalar,
+                        expected_recipient_xonly_key=mailbox,
+                        expected_network=self._network,
+                        expected_profile_id=self._policy.profile,
+                        crypto=transport,
+                    )
+                finally:
+                    del scalar
+            if not (
+                candidate.seal_author_xonly_key == client
+                and candidate.envelope.sender_session_key == client
+                and candidate.envelope.session_id == session_id
+            ):
+                raise LiveSessionStoreError("mailbox frame sender not bound to session")  # noqa: TRY301
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - uniform, redacted refusal (RS-006)
+            raise LiveSessionStoreError("mailbox frame refused") from None
+        return candidate.envelope_bytes
 
     def commit_accept(self, accept_document: bytes) -> AcceptCommit:
         """Durably commit exact accept bytes BEFORE any publication.
@@ -773,6 +866,14 @@ def _check_schema(connection: sqlite3.Connection) -> None:
         raise LiveSessionStoreError("live session store integrity unavailable")
 
 
+def _new_session_scalar() -> bytes:
+    return secrets.token_bytes(32)
+
+
+def _new_challenge() -> str:
+    return secrets.token_hex(32)
+
+
 def _recipient(value: str) -> str:
     try:
         parsed = x25519.Recipient.from_str(value)
@@ -816,7 +917,7 @@ def _discard(connection: sqlite3.Connection | None, lock_fd: int) -> None:
 
 def _fresh_challenge(connection: sqlite3.Connection, init: HandshakeInit) -> str:
     for _ in range(MAX_CHALLENGE_TRIES):
-        challenge = secrets.token_hex(32)
+        challenge = _new_challenge()
         if (
             HEX32.fullmatch(challenge) is not None
             and challenge not in (init.session_id, init.client_challenge)
