@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import os
 from typing import TYPE_CHECKING, Any
@@ -397,10 +398,16 @@ def test_native_sequence_reuse_conflicts_whatever_the_label(
 
 @pytest.mark.native_crypto
 @NATIVE
-def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(
+def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: PLR0915
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from rill_core.wire.hashes import provider_terms_hash  # noqa: PLC0415
+    from rill_core.settlement.taproot import reconstruct_taproot_contract  # noqa: PLC0415
+    from rill_core.wire.hashes import (  # noqa: PLC0415
+        client_acceptance_hash,
+        funding_binding_hash,
+        provider_terms_hash,
+    )
+    from rill_core.wire.messages import ClientAcceptance, FundingBinding  # noqa: PLC0415
     from rill_core.wire.quotes import (  # noqa: PLC0415
         FirmQuoteRequest,
         TermsOfferPayload,
@@ -500,8 +507,96 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(
             provider_terms_hash(offer.terms),
             bytes.fromhex(offer.provider_terms_signature),
         )
-        assert store.expire_idle(now=BINDING.created_at + 10**6, idle_timeout=1) == 1
-        reserved = store._connection.execute(  # noqa: SLF001 - durable history survives expiry
+
+        def signed(envelope: dict[str, Any], aux: int) -> dict[str, Any]:
+            envelope["signature"] = None
+            digest = unsigned_envelope_hash(Envelope.model_validate_json(json.dumps(envelope)))
+            envelope["signature"] = crypto.schnorr_sign(
+                CLIENT_SECRET, digest, bytes([aux]) * 32
+            ).hex()
+            return envelope
+
+        acceptance = ClientAcceptance(
+            contract_hash=offer.terms.contract_hash,
+            handshake_hash=offer.terms.handshake_hash,
+            session_id=response.session_id,
+            client_session_xonly_key=request["sender_session_key"],
+            provider_session_xonly_key=response.sender_session_key,
+        )
+        accept = copy.deepcopy(request)
+        accept.update(
+            message_id="22" * 32,
+            sequence=3,
+            in_reply_to=response.message_id,
+            contract_hash=offer.terms.contract_hash,
+            message_type="terms_accept",
+            payload={
+                "acceptance": acceptance.model_dump(mode="json"),
+                "client_acceptance_signature": crypto.schnorr_sign(
+                    CLIENT_SECRET, client_acceptance_hash(acceptance), b"\x70" * 32
+                ).hex(),
+            },
+        )
+        bad = copy.deepcopy(accept)
+        bad["payload"]["client_acceptance_signature"] = "11" * 64
+        assert deliver(signed(bad, 0x71)) == "request-answered"  # refused, stream advances
+        assert store.pending_outbox()[-1].canonical_bytes.count(b"request_unacceptable") == 1
+        accept["message_id"], accept["sequence"] = "23" * 32, 4
+        assert deliver(signed(accept, 0x72)) == "request-answered"
+        ack = Envelope.model_validate_json(store.pending_outbox()[-1].canonical_bytes)
+        assert (ack.message_type, ack.contract_hash) == ("ack", offer.terms.contract_hash)
+
+        terms = offer.terms.contract_terms
+        script = reconstruct_taproot_contract(terms, keys=crypto).script_pubkey
+        value = int(terms.economics.contract_amount_sat)
+        raw = (
+            (2).to_bytes(4, "little")
+            + b"\x01"
+            + bytes.fromhex("41" * 32)
+            + b"\x00\x00\x00\x00\x00\xff\xff\xff\xff\x01"
+            + value.to_bytes(8, "little")
+            + bytes([len(script)])
+            + script
+            + b"\x00\x00\x00\x00"
+        )
+        binding = FundingBinding(
+            contract_hash=offer.terms.contract_hash,
+            funding_attempt_id="31" * 32,
+            binding_revision=0,
+            funder_role="client",
+            lineage_anchor_txid="41" * 32,
+            lineage_anchor_vout=0,
+            funding_txid=hashlib.sha256(hashlib.sha256(raw).digest()).digest()[::-1].hex(),
+            contract_vout=0,
+            contract_value_sat=str(value),
+            contract_script_pubkey=script.hex(),
+            replaces_txid=None,
+            created_at=BINDING.created_at,
+        )
+        funding = copy.deepcopy(accept)
+        funding.update(
+            message_id="24" * 32,
+            sequence=5,
+            in_reply_to=None,
+            message_type="funding_binding",
+            payload={
+                "binding": binding.model_dump(mode="json"),
+                "funding_binding_signature": crypto.schnorr_sign(
+                    CLIENT_SECRET, funding_binding_hash(binding), b"\x73" * 32
+                ).hex(),
+                "funding_transaction": raw.hex(),
+            },
+        )
+        assert deliver(signed(funding, 0x74)) == "request-answered"
+        ack = Envelope.model_validate_json(store.pending_outbox()[-1].canonical_bytes)
+        assert ack.message_type == "ack", ack.payload
+        swap = store._connection.execute(  # noqa: SLF001 - durable swap state
+            "SELECT state, contract_hash FROM swaps"
+        ).fetchall()
+        assert swap == [("FUNDING_SEEN", offer.terms.contract_hash)]
+        # An accepted contract is never idle-expired; its hash stays reserved.
+        assert store.expire_idle(now=BINDING.created_at + 10**6, idle_timeout=1) == 0
+        reserved = store._connection.execute(  # noqa: SLF001 - durable history
             "SELECT payment_hash FROM payment_hashes"
         ).fetchall()
         assert reserved == [(BINDING.payment_hash,)]

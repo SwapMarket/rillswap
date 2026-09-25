@@ -30,9 +30,9 @@ from rill_provider.quote_policy import (
     InvoiceOutcome,
     QuoteSchedule,
     QuoteTerms,
-    answer_quote,
 )
 from rill_provider.relay_client import RelayConnection, RelayError
+from rill_provider.settlement_policy import answer_client_request
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -363,7 +363,9 @@ class HandshakeService:
         )
         answer = self._store.answer_request(
             document,
-            responder=lambda request, prior, context: answer_quote(request, prior, context, terms),
+            responder=lambda request, prior, context: answer_client_request(
+                request, prior, context, terms, self._transport
+            ),
             signer=self._transport,
             now=now,
         )

@@ -69,6 +69,12 @@ if TYPE_CHECKING:
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
 SCHEMA_VERSION = 5  # v1-v4 (unreleased development formats) are refused unchanged.
 CONTRACT_KEY_RECORD_KIND = "rillswap-provider-contract-key"
+OPEN_PHASES = ("CONFIRMED", "ACCEPTED")  # sessions that may still send requests
+CLIENT_REQUEST_TYPES = ("quote_request", "terms_accept", "funding_binding")
+SWAP_COLUMNS = (
+    "session_id, contract_hash, terms_offer, terms_accept, state, funding_binding, "
+    "preimage, claim_txid"
+)
 FIRST_REQUEST_SEQUENCE = 2  # RS-001: first client message after the confirm
 MAX_REQUESTS_PER_SESSION = 16  # further requests are refused unanswered
 DEFAULT_MAX_SESSIONS = 1000  # live (unexpired) sessions
@@ -99,7 +105,7 @@ SCHEMA = (
         "session_secret_age BLOB NOT NULL, key_state TEXT NOT NULL CHECK "
         "(key_state IN ('LIVE', 'RETIRED')), accept_bytes BLOB, accept_message_id TEXT, "
         "transcript_digest TEXT, phase TEXT NOT NULL CHECK "
-        "(phase IN ('RESERVED', 'ACCEPT_COMMITTED', 'CONFIRMED')), "
+        "(phase IN ('RESERVED', 'ACCEPT_COMMITTED', 'CONFIRMED', 'ACCEPTED')), "
         "blocked INTEGER NOT NULL CHECK (blocked IN (0, 1)), revision INTEGER NOT NULL, "
         "next_client_seq INTEGER NOT NULL, next_provider_seq INTEGER NOT NULL, "
         "active_at INTEGER NOT NULL)"
@@ -134,6 +140,13 @@ SCHEMA = (
     (
         "CREATE TABLE contract_keys (session_id TEXT PRIMARY KEY, "
         "compressed_key TEXT NOT NULL UNIQUE, secret_age BLOB NOT NULL)"
+    ),
+    # Accepted contracts are never idle-expired (RS-003 acceptance).
+    (
+        "CREATE TABLE swaps (session_id TEXT PRIMARY KEY, contract_hash TEXT NOT NULL UNIQUE, "
+        "terms_offer BLOB NOT NULL, terms_accept BLOB NOT NULL, state TEXT NOT NULL CHECK "
+        "(state IN ('ACCEPTED', 'FUNDING_SEEN', 'PAYING', 'PAID', 'FAILED', 'CLAIMED')), "
+        "funding_binding BLOB, preimage TEXT, claim_txid TEXT, updated_at INTEGER NOT NULL)"
     ),
     # Never deleted: a payment hash is offered at most once, forever (RS-003).
     (
@@ -248,6 +261,34 @@ class RequestContext:
     handshake_hash: str
     provider_contract_key: str  # compressed; fresh per session, sealed like the session key
     is_payment_hash_reserved: Callable[[str], bool]
+    replied_to: Envelope | None = None  # our outbox message named by in_reply_to
+    swap: SwapRecord | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SwapRecord:
+    """Durable accepted-swap state; byte fields are exact canonical envelopes."""
+
+    session_id: str
+    contract_hash: str
+    terms_offer: bytes
+    terms_accept: bytes
+    state: str
+    funding_binding: bytes | None
+    preimage: str | None
+    claim_txid: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptSwap:
+    """Effect: record acceptance of the replied-to terms offer."""
+
+    contract_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class BindFunding:
+    """Effect: record the client's funding binding for the accepted swap."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,6 +299,7 @@ class Answer:
     payload: dict[str, Any]
     payment_hash: str | None = None
     contract_hash: str | None = None  # envelope binding, e.g. for terms_offer
+    effect: AcceptSwap | BindFunding | None = None
 
 
 if TYPE_CHECKING:
@@ -970,7 +1012,7 @@ class LiveSessionStore:
                     raise LiveSessionStoreError("no committed accept for session")  # noqa: TRY301
                 init_bytes, accept_bytes, accept_id, digest, client, phase, blocked, revision = row
                 admitted = None
-                if phase == "CONFIRMED":
+                if phase in OPEN_PHASES:
                     admitted = connection.execute(
                         "SELECT message_id, canonical_bytes, admitted_revision, unsigned_digest "
                         "FROM inbox WHERE session_id=? AND sender_key=? AND seq=1",
@@ -997,7 +1039,7 @@ class LiveSessionStore:
                     return ConfirmAdmission(
                         outer.session_id, admitted[0], digest, admitted[2], replay=True
                     )
-                equivocation = phase == "CONFIRMED"
+                equivocation = phase in OPEN_PHASES
                 if equivocation:
                     _record_conflict(connection, outer.session_id, "confirm", confirm_document)
                 else:
@@ -1226,7 +1268,7 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - never echo storage details
             raise LiveSessionStoreError("announcement ordering refused") from None
 
-    def answer_request(
+    def answer_request(  # noqa: PLR0912, PLR0915 - one admission transaction
         self,
         request_document: bytes,
         *,
@@ -1263,7 +1305,7 @@ class LiveSessionStore:
                     ).fetchone()
                 ):
                     raise SessionExpiredError("session expired")  # noqa: TRY301
-                if row is None or row[2] != "CONFIRMED":
+                if row is None or row[2] not in OPEN_PHASES:
                     raise LiveSessionStoreError("no confirmed session")  # noqa: TRY301
                 client, key, _, blocked, revision, client_seq, provider_seq, transcript = row
                 if blocked:
@@ -1298,11 +1340,17 @@ class LiveSessionStore:
                     )
                     conflict = True
                 else:
+                    replied = None
+                    if outer.in_reply_to is not None:
+                        replied = connection.execute(
+                            "SELECT canonical_bytes FROM outbox "
+                            "WHERE session_id=? AND message_id=?",
+                            (outer.session_id, outer.in_reply_to),
+                        ).fetchone()
                     if not (
                         outer.sequence == client_seq
-                        and outer.message_type == "quote_request"
-                        and outer.in_reply_to is None
-                        and outer.contract_hash is None
+                        and outer.message_type in CLIENT_REQUEST_TYPES
+                        and (outer.in_reply_to is None or replied is not None)
                         and client_seq - FIRST_REQUEST_SEQUENCE < MAX_REQUESTS_PER_SESSION
                     ):
                         raise LiveSessionStoreError("request not admissible")  # noqa: TRY301
@@ -1317,6 +1365,8 @@ class LiveSessionStore:
                     context = RequestContext(
                         handshake_hash=transcript,
                         provider_contract_key=self._contract_key(connection, outer.session_id),
+                        replied_to=None if replied is None else _canonical_envelope(replied[0]),
+                        swap=_swap(connection, outer.session_id),
                         is_payment_hash_reserved=lambda digest: (
                             connection.execute(
                                 "SELECT 1 FROM payment_hashes WHERE payment_hash=?", (digest,)
@@ -1325,6 +1375,8 @@ class LiveSessionStore:
                         ),
                     )
                     reply = responder(outer, prior, context)
+                    if reply.effect is not None:
+                        _apply_effect(connection, outer, reply.effect, replied, now)
                     if reply.payment_hash is not None:
                         connection.execute(
                             "INSERT INTO payment_hashes VALUES (?, ?, ?)",
@@ -1452,7 +1504,7 @@ class LiveSessionStore:
                     "WHERE session_id=?",
                     (outer.session_id,),
                 ).fetchone()
-                if row is None or row[1] != "CONFIRMED" or row[2]:
+                if row is None or row[1] not in OPEN_PHASES or row[2]:
                     raise LiveSessionStoreError("no open confirmed session")  # noqa: TRY301
                 client, _, _, client_seq = row
                 digest = verify_static_signed_envelope(
@@ -1485,7 +1537,7 @@ class LiveSessionStore:
             with self._write() as connection:
                 rows = connection.execute(
                     "SELECT provider_session_key FROM sessions WHERE blocked=0 "
-                    "AND phase IN ('ACCEPT_COMMITTED', 'CONFIRMED') ORDER BY revision"
+                    "AND phase IN ('ACCEPT_COMMITTED', 'CONFIRMED', 'ACCEPTED') ORDER BY revision"
                 ).fetchall()
         except LiveSessionStoreError:
             raise
@@ -1677,3 +1729,40 @@ def _accept_revision(connection: sqlite3.Connection, message_id: str) -> int:
     if row is None:
         raise LiveSessionStoreError("committed accept missing from outbox")
     return int(row[0])
+
+
+def _swap(connection: sqlite3.Connection, session_id: str) -> SwapRecord | None:
+    row = connection.execute(
+        f"SELECT {SWAP_COLUMNS} FROM swaps WHERE session_id=?",  # noqa: S608 - fixed columns
+        (session_id,),
+    ).fetchone()
+    return None if row is None else SwapRecord(*row)
+
+
+def _apply_effect(
+    connection: sqlite3.Connection,
+    request: Envelope,
+    effect: AcceptSwap | BindFunding,
+    replied: tuple[bytes] | None,
+    now: int,
+) -> None:
+    """Apply one responder effect inside the admitting transaction."""
+    document = canonicalize(request.model_dump(mode="json"))
+    if isinstance(effect, AcceptSwap):
+        if replied is None or request.contract_hash != effect.contract_hash:
+            raise LiveSessionStoreError("acceptance not bound to an offer")
+        connection.execute(
+            "INSERT INTO swaps VALUES (?, ?, ?, ?, 'ACCEPTED', NULL, NULL, NULL, ?)",
+            (request.session_id, effect.contract_hash, replied[0], document, now),
+        )
+        connection.execute(
+            "UPDATE sessions SET phase='ACCEPTED' WHERE session_id=?", (request.session_id,)
+        )
+        return
+    updated = connection.execute(
+        "UPDATE swaps SET funding_binding=?, state='FUNDING_SEEN', updated_at=? "
+        "WHERE session_id=? AND contract_hash=? AND state='ACCEPTED'",
+        (document, now, request.session_id, request.contract_hash),
+    ).rowcount
+    if updated != 1:
+        raise LiveSessionStoreError("funding binding not bound to an accepted swap")
