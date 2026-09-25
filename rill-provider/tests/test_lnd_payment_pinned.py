@@ -1071,6 +1071,28 @@ def observe_invoice(observer, selected_hash, expected_state):
             return result
         time.sleep(0.2)
     raise AssertionError('held-invoice state not observed within bound')
+def decode_tlv_stream(data):
+    # Test-local strict BOLT BigSize TLV decoder; diagnostic evidence only.
+    def bigsize(offset):
+        assert offset < len(data), 'truncated BigSize'
+        first = data[offset]
+        width = {0xfd: 2, 0xfe: 4, 0xff: 8}.get(first, 0)
+        if not width:
+            return first, offset + 1
+        end = offset + 1 + width
+        assert end <= len(data), 'truncated BigSize'
+        value = int.from_bytes(data[offset + 1:end], 'big')
+        assert value >= {2: 0xfd, 4: 0x10000, 8: 0x100000000}[width], 'noncanonical BigSize'
+        return value, end
+    records, offset, previous = {}, 0, -1
+    while offset < len(data):
+        record_type, offset = bigsize(offset)
+        length, offset = bigsize(offset)
+        assert record_type > previous, 'TLV types not strictly increasing'
+        assert offset + length <= len(data), 'truncated TLV value'
+        records[record_type] = bytes(data[offset:offset + length])
+        previous, offset = record_type, offset + length
+    return records
 def next_status(stream, selected_hash, expected):
     for _ in range(16):
         try:
@@ -1183,6 +1205,14 @@ with tempfile.TemporaryDirectory(prefix='rill-hold-reads-', dir='/tmp') as crede
         assert part.accept_height >= 102
         assert part.expiry_height == hop_expiry == route_expiry
         assert part.custom_channel_data  # pinned LND serializes ordinary custom records here
+        decoded_custom = decode_tlv_stream(part.custom_channel_data)
+        reported_custom = {key: bytes(value) for key, value in part.custom_records.items()}
+        custom_matches = decoded_custom == reported_custom
+        custom_shape = sorted([key, len(value)] for key, value in decoded_custom.items())
+        print('DIAGNOSTIC: custom_channel_data types/lengths ' + json.dumps(custom_shape)
+              + ' reported ' + json.dumps(sorted(
+                  [key, len(value)] for key, value in reported_custom.items())),
+              file=sys.stderr)
         try:
             invoice_observer.lookup(selected_hash, deadline_seconds=3)
         except LndProtocolError as error:
@@ -1221,7 +1251,9 @@ with tempfile.TemporaryDirectory(prefix='rill-hold-reads-', dir='/tmp') as crede
         print(json.dumps({'funding_txid': txid, 'vout': point.output_index,
             'capacity_sat': views[0][0].capacity, 'confirmations': output['confirmations'],
             'backend_hold_observed': True, 'observer_refused_custom': True,
-            'payment_failed': True, 'history_returned': bool(history)}))
+            'payment_failed': True, 'history_returned': bool(history),
+            'custom_data_matches_records': custom_matches,
+            'custom_record_shape': custom_shape}))
     finally:
         if not cancel_started:
             try:
@@ -1421,3 +1453,10 @@ def test_pinned_single_part_hold_accepted_then_canceled(tmp_path: Path) -> None:
     assert evidence["backend_hold_observed"] is True
     assert evidence["observer_refused_custom"] is True
     assert evidence["payment_failed"] is True
+    # Characterization only: the ordinary hold's custom_channel_data is the
+    # canonical TLV encoding of custom_records. The production observer still
+    # refuses it (asserted above); this does not authorize accepting it.
+    assert evidence["custom_data_matches_records"] is True
+    shape = evidence["custom_record_shape"]
+    assert shape
+    assert all(key >= 65536 and length <= 1024 for key, length in shape)

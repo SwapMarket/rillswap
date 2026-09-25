@@ -486,7 +486,12 @@ never transmitted or settled. The production read-only invoice observer
 **refuses** this ordinary pinned-LND record because it contains nonempty
 `custom_channel_data`. This fourth test records that incompatibility, rather
 than overriding the existing refusal test or claiming that the provider can
-observe accepted holds for funding admission. LND may prune failed HTLC
+observe accepted holds for funding admission. It also decodes that
+`custom_channel_data` with a strict, test-local BigSize TLV parser and asserts
+that it equals the HTLC's reported `custom_records` (types in the custom range
+of 65536 and above, only types and lengths recorded). This is characterization
+evidence for a future, separately approved observer change. It does not relax
+the refusal. LND may prune failed HTLC
 attempt history by default: terminal FAILED with an empty history is not proof
 that no attempt occurred or permission to retry. This fixture proves neither
 unsafe-MPP earliest-expiry refusal (L01), partial or mismatched hold refusal (L02), nor
