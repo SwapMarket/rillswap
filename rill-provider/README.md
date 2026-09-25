@@ -229,6 +229,34 @@ production custody, authoritative non-rollback writer fencing, inbox/outbox
 ordering, transport authentication, and independent recovery handling for
 already-funded or inflight sessions. No code calls this registry at startup.
 
+`issuance_reservation.IssuanceReservationStore` is a **separate, explicitly
+created reservation-only** SQLite store for a canonical RS-001 initiation. It
+binds the full network, provider identity, and local supported negotiation
+policy; on an explicit `reserve_init(canonical_init_bytes)` call it durably
+records the unsigned initiation's bytes/digests, stream sequence zero, and a
+locally generated independent provider challenge before returning it. An
+identical retry returns the same challenge. Different valid canonical bytes
+under the same session ID mark that session permanently `CONFLICT` in this
+copy, even if the self-declared sender key changes. This conservatively blocks
+ambiguous reservations at the cost of availability. **The initiation is
+unsigned**: a stranger able to submit such a collision can poison a session.
+Conflict is not proof that the client
+equivocated. The record checksum detects accidental logical edits, not
+malicious writers or backup rollback. Missing records are **unknown**, never
+freshness evidence. The store signs nothing, sends nothing, owns no received
+relay event, does not authenticate a client or admit a session, and grants no
+financial authority. Neither this store nor the offline PREPARED v1 store may
+be inferred to certify the other's rows. An older valid restored copy may omit
+already used challenges; no live acceptance can depend on either copy until
+independent rollback-safe ownership and external effect fencing exist.
+Previous-release installations are unchanged: no automatic creation,
+migration, import of prepared rows, issuance, rescan, key rotation, or startup
+operation. Opening absent, partial, unsupported-version, or foreign files
+refuses them without repair; only explicit operator-controlled creation of a
+new file can reserve a challenge. Do not expose the challenge through a
+handshake accept until separately durable signed-result and outbox ownership
+exist.
+
 The separate `core_tx_bytes.RegtestCoreTransactionReader` is an explicit,
 read-only **regtest-only** Bitcoin Core v30 RPC probe. It takes a numeric
 loopback address, port, owner-private Core cookie file, and a complete trusted
