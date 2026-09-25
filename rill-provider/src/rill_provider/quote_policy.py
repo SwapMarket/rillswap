@@ -169,9 +169,7 @@ def answer_quote(  # noqa: PLR0911 - one closed answer per rule
     return Answer("quote_offer", offer)
 
 
-def _invoice_problem(
-    binding: InvoiceBinding, principal: int, context: RequestContext, terms: QuoteTerms
-) -> str | None:
+def _invoice_problem(binding: InvoiceBinding, principal: int, terms: QuoteTerms) -> str | None:
     schedule = terms.schedule
     if binding.amount_msat != str(principal * 1000):
         return "invoice amount differs from the principal"
@@ -181,8 +179,6 @@ def _invoice_problem(
         return "invoice created in the future"
     if binding.min_final_cltv_delta >= schedule.outgoing_cltv_budget_blocks:
         return "invoice final CLTV exceeds the routing budget"
-    if context.is_payment_hash_reserved(binding.payment_hash):
-        return "payment hash already offered"
     return None
 
 
@@ -200,7 +196,9 @@ def _firm(  # noqa: PLR0911 - one closed answer per rule
         return _error("capacity_unavailable", "firm quotes temporarily unavailable")
     if binding == "rejected":
         return _error("invoice_unacceptable", "invoice could not be decoded")
-    problem = _invoice_problem(binding, principal, context, terms)
+    if context.is_payment_hash_reserved(binding.payment_hash):  # RS-003: no ownership oracle
+        return _error("request_unacceptable", "request cannot be offered")
+    problem = _invoice_problem(binding, principal, terms)
     if problem is not None:
         return _error("invoice_unacceptable", problem)
     fee = success_fee(terms, principal)
@@ -242,7 +240,11 @@ def _firm(  # noqa: PLR0911 - one closed answer per rule
         "client_destination_script": request.client_destination_script,
         "provider_destination_script": firm.provider_destination_script,
         "recovery_authorization_xonly_key": request.recovery_authorization_xonly_key,
-        "terms_expiry": terms.now + schedule.terms_lifetime,
+        # Never outlive the invoice time the payment still needs.
+        "terms_expiry": min(
+            terms.now + schedule.terms_lifetime,
+            binding.expires_at - schedule.minimum_invoice_remaining_seconds,
+        ),
         "timing_policy": {
             "kind": "btc-to-ln",
             "max_outgoing_htlc_expiry_height": htlc_expiry,
@@ -266,4 +268,6 @@ def _firm(  # noqa: PLR0911 - one closed answer per rule
         "terms": offer.model_dump(mode="json"),
         "provider_terms_signature": firm.sign(offer),
     }
-    return Answer("terms_offer", payload, payment_hash=binding.payment_hash)
+    return Answer(
+        "terms_offer", payload, payment_hash=binding.payment_hash, contract_hash=offer.contract_hash
+    )

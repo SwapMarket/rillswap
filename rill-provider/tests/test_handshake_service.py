@@ -486,6 +486,7 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(
         response = Envelope.model_validate_json(pending.canonical_bytes)
         assert response.message_type == "terms_offer", response.payload
         offer = TermsOfferPayload.model_validate_json(json.dumps(response.payload))
+        assert response.contract_hash == offer.terms.contract_hash  # RS-003 envelope binding
         parsed = parse_quote_request(json.dumps(FIRM | {"extensions": {}}).encode())
         assert isinstance(parsed, FirmQuoteRequest)
         check_terms_offer(

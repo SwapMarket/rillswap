@@ -178,6 +178,10 @@ def test_firm_request_gets_terms_that_honor_it_and_reserve_the_hash() -> None:
     assert terms.refund_lock_height == 1100  # capped by the client limit
     assert terms.timing_policy.model_dump()["max_outgoing_htlc_expiry_height"] == 850 + 144
     assert terms.terms_expiry == BINDING.created_at + 120
+    assert answer.contract_hash == offer.terms.contract_hash
+    late = _firm(now=BINDING.expires_at - 1850)  # terms never outlive the needed invoice time
+    late_terms = parse_model_json(TermsOfferPayload, canonicalize(late.payload)).terms
+    assert late_terms.contract_terms.terms_expiry == BINDING.expires_at - 1800
     assert terms.provider_contract_compressed_key == CONTRACT["provider_contract_compressed_key"]
     assert offer.provider_terms_signature == "11" * 64
 
@@ -193,7 +197,7 @@ def _limits(**changes: Any) -> dict[str, Any]:  # noqa: ANN401
     [
         (FIRM | {"lightning_principal_sat": "100001"}, (), {}, "amount_out_of_range"),
         (FIRM | {"lightning_principal_sat": "99999"}, (), {}, "invoice_unacceptable"),
-        (FIRM, (BINDING.payment_hash,), {}, "invoice_unacceptable"),
+        (FIRM, (BINDING.payment_hash,), {}, "request_unacceptable"),  # no ownership oracle
         (FIRM, (), {"invoice": "rejected"}, "invoice_unacceptable"),
         (FIRM, (), {"invoice": "unavailable"}, "capacity_unavailable"),
         (FIRM, (), {"invoice": None}, "capacity_unavailable"),

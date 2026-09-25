@@ -13,7 +13,11 @@ from rill_core.wire.types import NetworkIdentity
 
 from rill_provider import lnd_invoice_decode as decode
 from rill_provider._lnd_proto import lightning_pb2
-from rill_provider.lnd_payment_observation import LndAuthError, LndUnavailableError
+from rill_provider.lnd_payment_observation import (
+    LndAuthError,
+    LndProtocolError,
+    LndUnavailableError,
+)
 
 NETWORK = NetworkIdentity.model_validate(
     json.loads((Path(__file__).parent / "fixtures/initial-btc-to-ln-v1.json").read_text())[
@@ -127,6 +131,8 @@ def test_unbindable_invoices_are_rejected(
         (grpc.StatusCode.UNAVAILABLE, LndUnavailableError),
         (grpc.StatusCode.DEADLINE_EXCEEDED, LndUnavailableError),
         (grpc.StatusCode.PERMISSION_DENIED, LndAuthError),
+        (grpc.StatusCode.INTERNAL, LndProtocolError),
+        (grpc.StatusCode.UNIMPLEMENTED, LndProtocolError),
     ],
 )
 def test_rpc_failures_distinguish_rejection_from_unavailability(
@@ -155,3 +161,13 @@ def test_only_loopback_regtest_is_configurable(tmp_path: Path) -> None:
             macaroon_path=tmp_path,
             network=NETWORK.model_copy(update={"name": "mainnet"}),
         )
+
+
+@pytest.mark.parametrize("invoice", ["lnbc500u1pexample", "lntb500u1pexample", "lnbcrt", ""])
+def test_invoices_for_other_networks_never_reach_lnd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invoice: str
+) -> None:
+    channel = _decoder(tmp_path, monkeypatch, _payreq())
+    with pytest.raises(decode.InvoiceRejectedError):
+        channel.decoder.decode(invoice)  # type: ignore[attr-defined]
+    assert channel.requests == []

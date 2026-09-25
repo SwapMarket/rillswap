@@ -37,6 +37,8 @@ if TYPE_CHECKING:
 DECODE_METHOD = "/lnrpc.Lightning/DecodePayReq"
 MAX_INVOICE_CHARS = 2048
 HASH_HEX = 64
+REJECTED = (grpc.StatusCode.UNKNOWN, grpc.StatusCode.INVALID_ARGUMENT)  # LND decode errors
+REGTEST_PREFIX = "lnbcrt"
 TRANSIENT = (
     grpc.StatusCode.UNAVAILABLE,
     grpc.StatusCode.DEADLINE_EXCEEDED,
@@ -101,6 +103,14 @@ class RegtestLndInvoiceDecoder:
         """Return the verified binding, or raise ``InvoiceRejectedError``/unavailable."""
         if type(bolt11) is not str or not 0 < len(bolt11) <= MAX_INVOICE_CHARS:
             raise InvoiceRejectedError("invoice string unsupported")
+        # The backend decodes for its own chain; bind the invoice to ours too.
+        prefix = len(REGTEST_PREFIX)
+        if (
+            len(bolt11) <= prefix
+            or not bolt11.startswith(REGTEST_PREFIX)
+            or bolt11[prefix].isalpha()
+        ):
+            raise InvoiceRejectedError("invoice is not for the configured network")
         certificate = _read_file(self._certificate, MAX_CERT_BYTES, private=False)
         macaroon = _read_file(self._macaroon, MAX_MACAROON_BYTES, private=True)
         channel: grpc.Channel | None = None
@@ -134,10 +144,12 @@ class RegtestLndInvoiceDecoder:
                 code = grpc.StatusCode.UNAVAILABLE
             if code in (grpc.StatusCode.UNAUTHENTICATED, grpc.StatusCode.PERMISSION_DENIED):
                 failure = LndAuthError("LND rejected invoice decoding credentials")
+            elif code in REJECTED:
+                failure = InvoiceRejectedError("LND refused to decode the invoice")
             elif code in TRANSIENT:
                 failure = LndUnavailableError("LND invoice decoding unavailable")
             else:
-                failure = InvoiceRejectedError("LND refused to decode the invoice")
+                failure = LndProtocolError("LND invoice decoding failed unexpectedly")
         except LndObservationError:
             raise
         except Exception:  # noqa: BLE001 - never retain invoice or credential-bearing errors

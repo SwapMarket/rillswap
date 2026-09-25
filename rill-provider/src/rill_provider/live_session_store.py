@@ -257,6 +257,7 @@ class Answer:
     message_type: str
     payload: dict[str, Any]
     payment_hash: str | None = None
+    contract_hash: str | None = None  # envelope binding, e.g. for terms_offer
 
 
 if TYPE_CHECKING:
@@ -1324,7 +1325,6 @@ class LiveSessionStore:
                         ),
                     )
                     reply = responder(outer, prior, context)
-                    answer_type, payload = reply.message_type, reply.payload
                     if reply.payment_hash is not None:
                         connection.execute(
                             "INSERT INTO payment_hashes VALUES (?, ?, ?)",
@@ -1333,7 +1333,7 @@ class LiveSessionStore:
                     scalar, _ = self._unseal(connection, outer.session_id)
                     try:
                         response = self._signed_envelope(
-                            outer, key, provider_seq, answer_type, payload, scalar, signer
+                            outer, key, provider_seq, reply, scalar, signer
                         )
                     finally:
                         del scalar
@@ -1379,8 +1379,7 @@ class LiveSessionStore:
         request: Envelope,
         key: str,
         sequence: int,
-        message_type: str,
-        payload: dict[str, Any],
+        reply: Answer,
         scalar: bytes,
         signer: EnvelopeSigner,
     ) -> Envelope:
@@ -1396,9 +1395,9 @@ class LiveSessionStore:
                     "sender_session_key": key,
                     "sequence": sequence,
                     "in_reply_to": request.message_id,
-                    "contract_hash": None,
-                    "message_type": message_type,
-                    "payload": payload,
+                    "contract_hash": reply.contract_hash,
+                    "message_type": reply.message_type,
+                    "payload": reply.payload,
                     "required_features": [],
                     "extensions": {},
                     "signature": None,
