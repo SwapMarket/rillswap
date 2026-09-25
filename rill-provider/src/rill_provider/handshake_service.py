@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from rill_provider.live_session_store import (
     LiveSessionStoreError,
     SessionBlockedError,
+    SessionExpiredError,
     StaleOwnerError,
 )
 from rill_provider.provider_identity import AnnouncementTerms
@@ -125,7 +126,10 @@ class HandshakeService:
         )
         return any(result is True for result in results)
 
-    def _filters(self, epochs: tuple[str, ...]) -> list[dict[str, Any]]:
+    def _filters(self) -> list[dict[str, Any]]:
+        # Every still-decodable epoch, not only advertised ones: clients may
+        # hold an older, still-valid announcement.
+        epochs = self._store.receiving_epochs(now=self._now())
         keys = sorted({*epochs, *self._store.awaiting_confirm_mailboxes()})
         return [
             {
@@ -137,7 +141,7 @@ class HandshakeService:
 
     async def subscribe(self, relay: Relay) -> None:
         """Install the current filter on one (re)connected relay."""
-        await relay.subscribe(self._filters(self._state.announced_keys))
+        await relay.subscribe(self._filters())
 
     async def tick(self, relays: Sequence[Relay]) -> None:
         """Rotate epochs, refresh the announcement, resubscribe, retry the outbox."""
@@ -148,7 +152,7 @@ class HandshakeService:
             retention=2 * policy.announcement_lifetime,
             advertise_for=2 * policy.announcement_lifetime - 1,
         )
-        self._store.expire_unconfirmed(now=now, max_age=policy.handshake_timeout)
+        self._store.expire_idle(now=now, idle_timeout=policy.handshake_timeout)
         if epochs != state.announced_keys or now >= state.announced_at + (
             policy.announcement_refresh
         ):
@@ -158,15 +162,21 @@ class HandshakeService:
             if state.republish:
                 LOG.warning("announcement not accepted by any relay; will retry")
         await self._resubscribe(relays)
-        due = [
-            entry.message_id
-            for entry in self._store.pending_outbox()
-            if now >= state.attempts.get(entry.message_id, 0) + policy.outbox_retry
-        ][: policy.max_sends_per_tick]  # bounded work per tick; the rest wait
-        await asyncio.gather(
+        due = sorted(  # least recently attempted first (never attempted = 0)
+            (
+                entry.message_id
+                for entry in self._store.pending_outbox()
+                if now >= state.attempts.get(entry.message_id, 0) + policy.outbox_retry
+            ),
+            key=lambda message_id: state.attempts.get(message_id, 0),
+        )[: policy.max_sends_per_tick]  # bounded work per tick; the rest wait
+        results = await asyncio.gather(
             *(self._send_pending(message_id, relays) for message_id in due),
             return_exceptions=True,
         )
+        for result in results:
+            if isinstance(result, StaleOwnerError):
+                raise result
         for message_id in list(state.attempts):
             if message_id not in {entry.message_id for entry in self._store.pending_outbox()}:
                 del state.attempts[message_id]
@@ -175,6 +185,8 @@ class HandshakeService:
         policy, state = self._policy, self._state
         try:
             self._store.record_announcement(now)  # durable ordering before publication
+        except StaleOwnerError:
+            raise
         except LiveSessionStoreError:
             LOG.warning("announcement skipped: revision would not increase")
             return
@@ -197,7 +209,7 @@ class HandshakeService:
         state.republish = True
 
     async def _resubscribe(self, relays: Sequence[Relay]) -> None:
-        wanted = tuple(self._filters(self._state.announced_keys)[0]["#p"])
+        wanted = tuple(self._filters()[0]["#p"])
         if wanted != self._state.subscribed:
             await asyncio.gather(
                 *(self.subscribe(relay) for relay in relays), return_exceptions=True
@@ -223,7 +235,7 @@ class HandshakeService:
             seen.popitem(last=False)
         return True
 
-    async def handle(self, event: bytes, relays: Sequence[Relay]) -> str:
+    async def handle(self, event: bytes, relays: Sequence[Relay]) -> str:  # noqa: PLR0911 - one disposition per outcome
         """Route one untrusted relay event; return a content-free disposition."""
         if not self._first_sight(event):
             return "duplicate"
@@ -231,14 +243,17 @@ class HandshakeService:
         try:
             try:
                 document = store.open_mailbox_frame(event, transport=self._transport)
+            except StaleOwnerError:
+                raise
             except LiveSessionStoreError:
                 document = None
+            now = self._now()
             if document is not None:
-                admitted = store.admit_confirm(document)
+                admitted = store.admit_confirm(document, now=now)
                 await self._resubscribe(relays)
                 return "confirm-replay" if admitted.replay else "confirm-admitted"
-            init = store.open_epoch_frame(event, now=self._now(), transport=self._transport)
-            reserved = store.reserve(init)
+            frame = store.open_epoch_frame(event, now=now, transport=self._transport)
+            reserved = store.reserve(frame.init_document, now=now, via_epoch=frame.epoch_key)
             if reserved.revision != 0:
                 return "init-replay"  # outbox retries own any re-send
             committed = store.create_accept(
@@ -248,8 +263,12 @@ class HandshakeService:
             )
             await self._send_pending(committed.message_id, relays)
             await self._resubscribe(relays)
+        except StaleOwnerError:
+            raise  # ownership lost: never keep acting on this store
         except SessionBlockedError:
             return "blocked"
+        except SessionExpiredError:
+            return "expired"
         except LiveSessionStoreError:
             return "refused"
         return "init-accepted"

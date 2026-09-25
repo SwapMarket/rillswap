@@ -16,7 +16,11 @@ from rill_core.wire.messages import Envelope, HandshakeAccept, HandshakeInit
 from test_live_session_store import Harness, _bytes
 
 from rill_provider.handshake_service import HandshakeService, ServicePolicy
-from rill_provider.live_session_store import LiveSessionStoreError
+from rill_provider.live_session_store import (
+    LiveSessionStoreError,
+    SessionExpiredError,
+    StaleOwnerError,
+)
 from rill_provider.relay_client import RelayConnection
 
 if TYPE_CHECKING:
@@ -193,13 +197,14 @@ class _Relay:
         self.url = "ws://fake/"
         self.accept = accept
         self.published: list[bytes] = []
+        self.filters: list[dict[str, Any]] = []
 
     async def publish(self, event: bytes) -> bool:
         self.published.append(event)
         return self.accept
 
     async def subscribe(self, filters: list[dict[str, Any]]) -> None:
-        del filters
+        self.filters = filters
 
 
 class _Identity:
@@ -233,7 +238,8 @@ def test_announcements_are_durably_ordered_cached_and_sessions_expire(
         service = HandshakeService(store, identity, object(), policy, clock=lambda: clock[0])  # type: ignore[arg-type]
         down = _Relay(accept=False)
         asyncio.run(service.tick([down]))
-        assert store.reserve(harness.init).revision == 0  # expired, so reserved afresh
+        with pytest.raises(SessionExpiredError):  # recorded answer, never a new accept
+            store.reserve(harness.init)
         clock[0] += 1
         asyncio.run(service.tick([down]))
         assert identity.built == 1
@@ -242,12 +248,39 @@ def test_announcements_are_durably_ordered_cached_and_sessions_expire(
         asyncio.run(service.tick([up]))
         asyncio.run(service.tick([up]))
         assert len(up.published) == 1
+        clock[0] += policy.epoch_period  # rotation: old key no longer advertised
+        asyncio.run(service.tick([up]))
+        receiving = store.receiving_epochs(now=int(clock[0]))
+        assert len(receiving) == 2
+        assert up.filters[0]["#p"] == sorted(receiving)  # still listening on the old key
+        rotated, published = clock[0], len(up.published)
     with harness.acquire() as store:  # restart with the clock rolled back
-        clock[0] = 9_999.0
+        clock[0] = rotated - 1
         restarted = HandshakeService(store, identity, object(), policy, clock=lambda: clock[0])  # type: ignore[arg-type]
         with pytest.raises(LiveSessionStoreError, match="clock is behind"):
             asyncio.run(restarted.tick([up]))
-        clock[0] = 10_000.0  # same second as the durable revision
+        clock[0] = rotated  # same second as the durable revision
+        built = identity.built
         asyncio.run(restarted.tick([up]))
-        assert identity.built == 1
-        assert len(up.published) == 1
+        assert identity.built == built
+        assert len(up.published) == published
+
+
+def test_ownership_loss_is_never_swallowed_as_a_refusal() -> None:
+    class Fenced:
+        def open_mailbox_frame(self, *_args: object, **_kwargs: object) -> bytes:
+            raise StaleOwnerError("fenced")
+
+    policy = ServicePolicy(
+        network=None,  # type: ignore[arg-type]
+        profiles=("btc-to-ln/v1",),
+        amount_bands=((1000, 2000),),
+        base_fee_sat=1,
+        proportional_millionths=1,
+        slot="s",
+        relay_urls=("ws://r/",),
+    )
+    service = HandshakeService(Fenced(), object(), object(), policy)  # type: ignore[arg-type]
+    event = json.dumps({"id": "ab" * 32}).encode()
+    with pytest.raises(StaleOwnerError):
+        asyncio.run(service.handle(event, []))
