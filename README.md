@@ -21,6 +21,20 @@ README. The pinned provider integration lock is a **historical** snapshot, not
 conformance evidence for later components. The default tests do not exercise
 the opt-in funded regtest channel diagnostic or complete either swap profile.
 
+To replay that historical provider v2 baseline without nested repositories,
+use Python 3.14 with the provider's pinned development dependencies, Bun
+1.3.11, uv, CMake, and the documented network access:
+
+```sh
+rill-provider/.venv/bin/python scripts/replay_provider_v2.py --source-root . --verify-only
+rill-provider/.venv/bin/python scripts/replay_provider_v2.py --source-root .
+```
+
+The wrapper verifies the unchanged v2 lock and its original runner, then uses
+disposable Git views of the pinned component commits. This tests the historical
+baseline only, not the current source tree or a production authority. It does
+not fetch unavailable history, restore a journal, or trigger any swap action.
+
 Work within a component's directory to run its documented checks. Docker
 diagnostics use disposable regtest wallets and must never be pointed at a real
 installation. Git history for each former component repository is retained as

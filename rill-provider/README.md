@@ -164,8 +164,12 @@ replay disposition are **not exercised**. This is neither relay delivery nor
 authorization. The v2 local integration lock executes these two exact cases
 from pinned clean archives, but it does not establish a release set.
 
-An explicit local cross-repository baseline gate lives at
-`scripts/check_integration_lock.py`. Run from this repository with a trusted
+An explicit historical baseline gate lives at
+`scripts/check_integration_lock.py`. In the monorepo, run the **root wrapper**
+`../scripts/replay_provider_v2.py --source-root ..` instead. It verifies the
+original v2 lock and runner and creates disposable Git views of the six pinned
+commits before calling this unchanged historical gate. The commands below are
+for older separate checkouts with six nested `.git` directories. Use a trusted
 Python 3.14 environment, `uv`, CMake, a C compiler, Bun **1.3.11**, and network
 access to the pinned upstream native source and Python/Bun dependency indexes:
 
