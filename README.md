@@ -24,13 +24,14 @@ either swap profile. The held-payment fixture also demonstrates that the
 read-only provider invoice observer currently refuses ordinary pinned LND
 custom-record evidence; it is not a funding-eligibility test.
 
-The root `.github/workflows/` directory defines source-only specification,
-Core, crypto, and web checks. The crypto job downloads checksum-pinned native
-source and uses a digest-pinned Emscripten container; it is not an independent
-audit. The web job builds and runs unit tests but does not run Playwright or
-exercise recovery durability. These jobs do not run funded backend trials or
-establish release provenance; their hosted execution has not been verified in
-this workspace.
+The root `.github/workflows/` directory defines source-only specification and
+component checks. The crypto job downloads checksum-pinned native source and
+uses a digest-pinned Emscripten container; it is not an independent audit.
+Provider and CLI jobs use version-pinned but **not hash-locked** Python
+development dependencies and exclude opt-in backend cases. The web job builds
+and runs unit tests but does not run Playwright or exercise recovery durability.
+These jobs do not run funded backend trials or establish release provenance;
+their hosted execution has not been verified in this workspace.
 
 To replay that historical provider v2 baseline without nested repositories,
 use Python 3.14 with the provider's pinned development dependencies, Bun
