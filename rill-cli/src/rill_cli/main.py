@@ -18,6 +18,7 @@ from rill_core.settlement import FundingOutput, UnilateralAuthorization, validat
 from rill_core.wire.types import NetworkIdentity
 from rill_crypto import Context
 
+from rill_cli import swap_command
 from rill_cli.age_container import (
     MAX_CIPHERTEXT_BYTES,
     MAX_PLAINTEXT_BYTES,
@@ -37,6 +38,7 @@ from rill_cli.claim_disclosure import (
     disclose_claim_on_regtest,
 )
 from rill_cli.claim_plan import prepare_encrypted_claim_plan, verify_encrypted_claim_plan
+from rill_cli.live_swap import SwapError
 from rill_cli.publication import (
     RecoveryPublicationUncertainError,
     publish_new_ciphertext,
@@ -68,8 +70,11 @@ MAX_IDENTITY_FILE_BYTES = 1024
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="rill", description="Offline, pre-release recovery tools")
+    parser = argparse.ArgumentParser(
+        prog="rill", description="Pre-release RillSwap client and recovery tools"
+    )
     recover = parser.add_subparsers(dest="category", required=True)
+    swap_command.add_parser(recover)
     recovery = recover.add_parser("recover", help="encrypted recovery files (no chain or payments)")
     commands = recovery.add_subparsers(dest="command", required=True)
     for name, help_text in (
@@ -557,9 +562,27 @@ def _inspect_identity_credentials(path: str) -> X25519Credentials:
     return X25519Credentials(str(recipient), identity)
 
 
+def _swap(args: argparse.Namespace) -> int:
+    try:
+        result = swap_command.run(args, _network(args.network), _identity(args.identity))
+    except SwapError as error:
+        sys.stderr.write(f"Swap stopped: {error}\n")
+        return 5
+    except Exception:  # noqa: BLE001 - must not print secret native/library errors
+        sys.stderr.write(
+            "Swap failed. If a funded recovery snapshot ('.funded') exists, funds may be "
+            "committed: keep it and refund after its lock height with `rill recover`.\n"
+        )
+        return 2
+    sys.stdout.write(result + "\n")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911 - distinct failure exit codes
     """Run explicit recovery commands only; sanitize errors and private input."""
     args = _parser().parse_args(argv)
+    if args.category == "swap":
+        return _swap(args)
     try:
         result = _run(args)
     except RecoveryPublicationUncertainError:

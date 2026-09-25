@@ -12,6 +12,7 @@ license = "MIT"
 dependencies = [
   "rill-core==0.1.0.dev0",
   "rill-crypto==0.1.0.dev0",
+  "rill-provider==0.1.0.dev0",
   "pyrage==1.4.0",
   "httpx==0.28.1",
 ]

@@ -185,10 +185,22 @@ jobs:
       - name: Check recovery CLI source without opt-in backends
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
-          PYTHONPATH: src:../rill-core/packages/core/src:../rill-crypto/python/src
+          PYTHONPATH: src:../rill-core/packages/core/src:../rill-crypto/python/src:../rill-provider/src
         run: |
           tmp/ci-venv/bin/ruff check src tests
           tmp/ci-venv/bin/mypy src
           tmp/ci-venv/bin/python -m pytest -q \
             -m 'not native_crypto and not bitcoin_core and not age_interop' \
             --basetemp=tmp/pytest-ci
+      - name: Build checksum-pinned native crypto dependency
+        run: |
+          cmake -S ../rill-crypto -B tmp/native -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+          cmake --build tmp/native --parallel 2
+      - name: Check native live swap against the provider service
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONPATH: src:../rill-core/packages/core/src:../rill-crypto/python/src:../rill-provider/src
+          RILLSWAP_RUN_NATIVE_CRYPTO: '1'
+        run: |
+          RILL_CRYPTO_LIBRARY="$PWD/tmp/native/librill_crypto.so" \
+            tmp/ci-venv/bin/python -m pytest -q -m native_crypto --basetemp=tmp/pytest-ci-native

@@ -5,6 +5,46 @@ independent recovery executable.
 
 Status: pre-release and not suitable for real funds.
 
+## Live swap: `rill swap btc-to-ln` (regtest only)
+
+This command pays a Lightning invoice from your Bitcoin Core wallet through
+one provider, reached over a Nostr relay. It runs these steps in order:
+1. Verify the provider's signed announcement.
+2. Complete the handshake on a fresh session key.
+3. Request firm terms for the invoice. The invoice is decoded by your own LND
+   (`DecodePayReq`, loopback only). The terms are checked against your
+   limits, and the provider's identity signature is verified.
+4. Write the encrypted recovery file (`--recovery-output`), then accept.
+5. Fund from `--wallet`. Before binding, the exact transaction is authorized
+   against the signed terms. The funded snapshot (`<output>.funded`, with the
+   signed binding) is written, and only then is the transaction bound and
+   broadcast.
+6. Wait for the provider's `payment_settled` observation and check that the
+   preimage hashes to the invoice's payment hash.
+
+```sh
+rill swap btc-to-ln \
+  --network trusted-regtest-network.json \
+  --crypto-library /absolute/path/to/librill_crypto.so \
+  --relay ws://127.0.0.1:7777 --provider PROVIDER_XONLY_HEX \
+  --invoice lnbcrt... --max-success-fee-sat 1000 \
+  --core-port 18443 --core-cookie ~/.bitcoin/regtest/.cookie --wallet swap \
+  --lnd-port 10009 --lnd-tls-cert tls.cert --lnd-macaroon invoice.macaroon \
+  --recipient age1... --identity /protected/age-identity \
+  --recovery-output swap-recovery.age
+```
+
+If the provider never pays, the funds stay in the contract. After the
+printed refund lock height, refund with `rill recover sign-refund` and
+`broadcast-refund` on the `.funded` snapshot.
+
+Exit codes:
+- `5`: the swap stopped with a stated reason.
+- `2`: any other failure. Check whether a `.funded` file exists before
+  assuming nothing was committed.
+
+The client currently reuses `rill-provider`'s Nostr transport modules.
+
 `rill recover observe-funding` is a **read-only, explicitly requested regtest
 diagnostic**, not a refund transaction or an automatic watcher. It requires a
 complete independently trusted network JSON file, protected age X25519

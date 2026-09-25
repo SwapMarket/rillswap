@@ -1,0 +1,688 @@
+"""Regtest BTC to LN swap client over Nostr relays (RS-001, RS-003, RS-005).
+
+One swap, one fresh session: discover and verify the provider announcement,
+handshake, request firm terms for the user's invoice, verify them, write the
+encrypted recovery file, accept, fund from the local Core wallet, write the
+funded recovery snapshot, bind the funding, broadcast, then wait for the
+provider's ``payment_settled`` observation and check the preimage.
+
+Every irreversible step is preceded by a durable recovery record: the terms
+recovery file exists before acceptance, and the snapshot with the signed
+binding exists before the funding transaction is broadcast. If the provider
+never pays, the user refunds after ``refund_lock_height`` with
+``rill recover sign-refund``/``broadcast-refund``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import secrets
+import time
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal, Protocol
+
+from rill_core.settlement import (
+    FundingPlan,
+    authorize_funding_transaction,
+    reconstruct_taproot_contract,
+)
+from rill_core.wire.canonical import canonicalize, parse_model_json
+from rill_core.wire.hashes import (
+    client_acceptance_hash,
+    contract_hash,
+    funding_binding_hash,
+    handshake_accept_hash,
+    handshake_hash,
+    provider_terms_hash,
+    tagged_hash,
+    unsigned_envelope_hash,
+)
+from rill_core.wire.messages import (
+    ClientAcceptance,
+    Envelope,
+    FundingBinding,
+    HandshakeAccept,
+    HandshakeInit,
+)
+from rill_core.wire.quotes import (
+    FirmQuoteRequest,
+    QuoteLimits,
+    TermsOfferPayload,
+    check_terms_offer,
+)
+from rill_core.wire.settlement_messages import PaymentSettled, parse_observation
+from rill_provider import _nip01_event as nip01
+from rill_provider._nip59_receive import _decode_gift_wrap_candidate
+from rill_provider._nip59_send import _wrap_envelope
+from rill_provider.provider_identity import ADVERTISEMENT_TAG, ANNOUNCEMENT_KIND
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from rill_core.wire.messages import ContractTerms, InvoiceBinding
+    from rill_core.wire.types import NetworkIdentity
+    from rill_crypto import Context
+    from rill_provider.relay_client import RelayConnection
+
+    from rill_cli.wallet_rpc import WalletFunding
+
+PROFILE: Literal["btc-to-ln/v1"] = "btc-to-ln/v1"
+ENCRYPTION_SUITES = ("noise-xk-secp256k1-chachapoly-sha256/v1",)
+CAPABILITIES = ("core/v1", "recovery/v1")
+NIP59_BACKDATE_SECONDS = 2 * 24 * 60 * 60
+GIFT_WRAP_KIND = 1059
+
+
+class SwapError(RuntimeError):
+    """The swap stopped; the message says whether funds were committed."""
+
+
+class Wallet(Protocol):
+    """The user's own Core wallet (``RegtestWalletRpc``)."""
+
+    def tip_height(self) -> int:
+        """Return the best height."""
+        ...
+
+    def new_destination_script(self) -> bytes:
+        """Return a fresh refund destination scriptPubKey."""
+        ...
+
+    def fund(self, script_pubkey: bytes, amount_sat: int, *, fee_rate_sat_vb: int) -> WalletFunding:
+        """Return a signed, unbroadcast funding transaction."""
+        ...
+
+    def broadcast(self, raw: bytes) -> str:
+        """Submit exact bytes."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class SwapLimits:
+    """The user's ceilings for the firm offer."""
+
+    max_success_fee_sat: int
+    max_funding_fee_sat: int = 5_000
+    max_claim_fee_sat: int = 5_000
+    max_refund_fee_sat: int = 5_000
+    max_refund_delay_blocks: int = 288
+    funding_fee_rate_sat_vb: int = 2
+
+
+@dataclass(frozen=True, slots=True)
+class SwapOutcome:
+    """A settled swap: the preimage proves the invoice was paid."""
+
+    session_id: str
+    contract_hash: str
+    funding_txid: str
+    payment_preimage: str
+    refund_lock_height: int
+
+
+def _scalar(crypto: Context) -> tuple[bytes, bytes]:
+    """Return a fresh valid secret scalar and its compressed public key."""
+    while True:
+        secret = secrets.token_bytes(32)
+        try:
+            return secret, bytes(crypto.public_key(secret))
+        except Exception:  # noqa: BLE001, S112 - out of range, draw again
+            continue
+
+
+def verify_announcement(
+    raw: bytes, *, identity: str, network: NetworkIdentity, crypto: Context, now: int
+) -> dict[str, Any]:
+    """Return the advertisement of a valid, unexpired announcement or raise."""
+    event = nip01._verify_signed_event(raw, verifier=crypto)  # noqa: SLF001
+    if event.pubkey != identity or event.kind != ANNOUNCEMENT_KIND:
+        raise SwapError("announcement from another key or kind")
+    wrapper = json.loads(event.content)
+    advertisement = wrapper["advertisement"]
+    crypto.schnorr_verify(
+        bytes.fromhex(identity),
+        tagged_hash(ADVERTISEMENT_TAG, canonicalize(advertisement)),
+        bytes.fromhex(wrapper["signature"]),
+    )
+    if (
+        advertisement["provider_identity_xonly_key"] != identity
+        or network.model_dump(mode="json") not in advertisement["network_identities"]
+        or PROFILE not in advertisement["profiles"]
+        or not advertisement["created_at"] <= now < advertisement["expires_at"]
+        or not advertisement["epoch_inbox_xonly_keys"]
+    ):
+        raise SwapError("announcement does not offer this swap now")
+    return dict(advertisement)
+
+
+async def discover(  # noqa: PLR0913 - explicit trust inputs
+    connection: RelayConnection,
+    *,
+    identity: str,
+    network: NetworkIdentity,
+    crypto: Context,
+    now: int,
+    timeout: float = 10.0,  # noqa: ASYNC109
+) -> dict[str, Any]:
+    """Return the newest valid announcement of ``identity`` on the relay."""
+    await connection.subscribe([{"kinds": [ANNOUNCEMENT_KIND], "authors": [identity]}])
+    best: dict[str, Any] | None = None
+    try:
+        async with asyncio.timeout(timeout):
+            async for raw in connection.events():
+                try:
+                    found = verify_announcement(
+                        raw, identity=identity, network=network, crypto=crypto, now=now
+                    )
+                except Exception:  # noqa: BLE001, S112 - ignore invalid events
+                    continue
+                if best is None or found["revision"] > best["revision"]:
+                    best = found
+                    break
+    except TimeoutError:
+        pass
+    if best is None:
+        raise SwapError("no valid provider announcement found; nothing was committed")
+    return best
+
+
+class _Session:
+    """One client session's keys, sequence, and authenticated inbox."""
+
+    def __init__(
+        self,
+        connection: RelayConnection,
+        crypto: Context,
+        network: NetworkIdentity,
+        *,
+        timeout: float,
+    ) -> None:
+        self.connection = connection
+        self.crypto = crypto
+        self.network = network
+        self.timeout = timeout
+        self.secret, public = _scalar(crypto)
+        self.key = public[1:].hex()
+        self.session_id = secrets.token_hex(32)
+        self.sequence = 0
+        self.provider_key: str | None = None
+        self.seen: set[str] = set()
+        self.inbox: list[Envelope] = []
+
+    def envelope(
+        self,
+        message_type: str,
+        payload: dict[str, Any],
+        *,
+        in_reply_to: str | None = None,
+        contract: str | None = None,
+        signed: bool = True,
+    ) -> Envelope:
+        unsigned = Envelope.model_validate_json(
+            canonicalize(
+                {
+                    "protocol": "rillswap",
+                    "wire_version": "1",
+                    "profile_id": PROFILE,
+                    "network_identity": self.network.model_dump(mode="json"),
+                    "session_id": self.session_id,
+                    "message_id": secrets.token_hex(32),
+                    "sender_session_key": self.key,
+                    "sequence": self.sequence,
+                    "in_reply_to": in_reply_to,
+                    "contract_hash": contract,
+                    "message_type": message_type,
+                    "payload": payload,
+                    "required_features": [],
+                    "extensions": {},
+                    "signature": None,
+                }
+            ),
+            strict=True,
+        )
+        self.sequence += 1
+        if not signed:
+            return unsigned
+        signature = self.crypto.schnorr_sign(
+            self.secret, unsigned_envelope_hash(unsigned), secrets.token_bytes(32)
+        )
+        return unsigned.model_copy(update={"signature": bytes(signature).hex()})
+
+    async def send(self, envelope: Envelope, recipient: str) -> None:
+        event = _wrap_envelope(
+            canonicalize(envelope.model_dump(mode="json")),
+            sender_session_secret=self.secret,
+            recipient_xonly_key=recipient,
+            crypto=self.crypto,
+        )
+        for _ in range(3):
+            if await self.connection.publish(event):
+                return
+        raise SwapError(f"relay did not accept {envelope.message_type}")
+
+    async def listen(self) -> None:
+        await self.connection.subscribe(
+            [
+                {
+                    "kinds": [GIFT_WRAP_KIND],
+                    "#p": [self.key],
+                    "since": int(time.time()) - NIP59_BACKDATE_SECONDS,
+                }
+            ]
+        )
+
+    def _admit(self, raw: bytes) -> Envelope | None:
+        try:
+            frame = _decode_gift_wrap_candidate(
+                raw,
+                recipient_mailbox_secret=self.secret,
+                expected_recipient_xonly_key=self.key,
+                expected_network=self.network,
+                expected_profile_id=PROFILE,
+                crypto=self.crypto,
+            )
+        except Exception:  # noqa: BLE001 - not for us or malformed
+            return None
+        envelope = frame.envelope
+        if (
+            envelope.session_id != self.session_id
+            or envelope.message_id in self.seen
+            or frame.seal_author_xonly_key != envelope.sender_session_key
+            or (self.provider_key is not None and envelope.sender_session_key != self.provider_key)
+        ):
+            return None
+        if envelope.message_type != "handshake_accept":
+            try:
+                self.crypto.schnorr_verify(
+                    bytes.fromhex(envelope.sender_session_key),
+                    unsigned_envelope_hash(envelope),
+                    bytes.fromhex(envelope.signature or ""),
+                )
+            except Exception:  # noqa: BLE001 - unsigned or forged
+                return None
+        self.seen.add(envelope.message_id)
+        return envelope
+
+    async def receive(
+        self,
+        wanted: Callable[[Envelope], bool],
+        *,
+        timeout: float | None = None,  # noqa: ASYNC109
+    ) -> Envelope:
+        for index, envelope in enumerate(self.inbox):
+            if wanted(envelope):
+                return self.inbox.pop(index)
+        try:
+            async with asyncio.timeout(timeout or self.timeout):
+                async for raw in self.connection.events():
+                    admitted = self._admit(raw)
+                    if admitted is None:
+                        continue
+                    if wanted(admitted):
+                        return admitted
+                    self.inbox.append(admitted)
+        except TimeoutError:
+            pass
+        raise TimeoutError
+
+    async def reply_to(self, request: Envelope, expected: str) -> Envelope:
+        try:
+            answer = await self.receive(lambda item: item.in_reply_to == request.message_id)
+        except TimeoutError:
+            raise SwapError(f"no answer to {request.message_type}") from None
+        if answer.message_type == "error":
+            raise SwapError(
+                f"provider refused {request.message_type}: {answer.payload.get('code')}"
+            )
+        if answer.message_type != expected:
+            raise SwapError(f"unexpected answer {answer.message_type}")
+        return answer
+
+
+def _recovery_document(  # noqa: PLR0913 - one record's explicit parts
+    *,
+    session: _Session,
+    init: HandshakeInit,
+    accept: HandshakeAccept,
+    accept_signature: str,
+    offer: TermsOfferPayload,
+    acceptance_signature: str,
+    contract_secret: bytes,
+    birthday: int,
+    created_at: int,
+    funding: tuple[tuple[FundingBinding, str], ...] = (),
+) -> bytes:
+    terms = offer.terms.contract_terms
+    artifacts = reconstruct_taproot_contract(terms, keys=session.crypto)
+    return canonicalize(
+        {
+            "format": "rillswap-recovery",
+            "format_version": "1-pre.1",
+            "specification_version": "0.1.0-pre.1",
+            "created_at": created_at,
+            "updated_at": int(time.time()) if funding else created_at,
+            "network_identity": session.network.model_dump(mode="json"),
+            "profile_id": PROFILE,
+            "contract_hash": offer.terms.contract_hash,
+            "contract_terms": terms.model_dump(mode="json"),
+            "verification_context": {
+                "handshake_init": init.model_dump(mode="json"),
+                "handshake_accept": accept.model_dump(mode="json"),
+                "provider_identity_signature": accept_signature,
+                "handshake_hash": offer.terms.handshake_hash,
+                "client_session_xonly_key": session.key,
+                "provider_session_xonly_key": accept.provider_session_xonly_key,
+                "expected_provider_identity_source": {
+                    "kind": "manual",
+                    "advertisement_digest": None,
+                },
+                "provider_terms_signature": offer.provider_terms_signature,
+                "client_acceptance_signature": acceptance_signature,
+            },
+            "taproot_contract": {
+                "internal_xonly_key": artifacts.internal_key.hex(),
+                "internal_key_parity": artifacts.internal_parity,
+                "claim_script": artifacts.claim_script.hex(),
+                "refund_script": artifacts.refund_script.hex(),
+                "claim_leaf_hash": artifacts.claim_leaf_hash.hex(),
+                "refund_leaf_hash": artifacts.refund_leaf_hash.hex(),
+                "merkle_root": artifacts.merkle_root.hex(),
+                "tap_tweak": artifacts.tap_tweak.hex(),
+                "output_xonly_key": artifacts.output_key.hex(),
+                "output_key_parity": artifacts.output_parity,
+                "script_pubkey": artifacts.script_pubkey.hex(),
+                "claim_control_block": artifacts.claim_control_block.hex(),
+                "refund_control_block": artifacts.refund_control_block.hex(),
+            },
+            "user_secret": {
+                "kind": "raw-secp256k1-v1",
+                "contract_secret_key": contract_secret.hex(),
+            },
+            "funding_history": [
+                {"binding": binding.model_dump(mode="json"), "funder_session_signature": sig}
+                for binding, sig in funding
+            ],
+            "chain_scan_birthday_height": birthday,
+            "fee_policy": {
+                "max_claim_fee_sat": terms.max_claim_fee_sat,
+                "max_refund_fee_sat": terms.max_refund_fee_sat,
+            },
+            "recovery_authorization_xonly_key": terms.recovery_authorization_xonly_key,
+            "monotonic_knowledge": {
+                "preimage_known": False,
+                "preimage": None,
+                "dangerous_signature_issued": False,
+            },
+            "extensions": {},
+        }
+    )
+
+
+async def _handshake(
+    session: _Session, advertisement: dict[str, Any], identity: str
+) -> tuple[HandshakeInit, HandshakeAccept, str, str]:
+    """Return init, accept, identity signature, and handshake hash."""
+    init = HandshakeInit(
+        protocol="rillswap",
+        wire_version="1",
+        profile_id=PROFILE,
+        network_identity=session.network,
+        session_id=session.session_id,
+        client_challenge=secrets.token_hex(32),
+        client_session_xonly_key=session.key,
+        expected_provider_identity_xonly_key=identity,
+        requested_encryption_suites=ENCRYPTION_SUITES,
+        requested_capabilities=CAPABILITIES,
+        required_features=(),
+        extensions={},
+    )
+    request = session.envelope("handshake_init", init.model_dump(mode="json"), signed=False)
+    await session.listen()
+    await session.send(request, advertisement["epoch_inbox_xonly_keys"][0])
+    answer = await session.reply_to(request, "handshake_accept")
+    accept = parse_model_json(HandshakeAccept, canonicalize(answer.payload["accept"]))
+    signature = str(answer.payload["provider_identity_signature"])
+    accept.validate_against(init, supported_features=frozenset())
+    session.crypto.schnorr_verify(
+        bytes.fromhex(identity), handshake_accept_hash(accept), bytes.fromhex(signature)
+    )
+    if accept.provider_session_xonly_key != answer.sender_session_key:
+        raise SwapError("handshake accept names another provider session key")
+    session.provider_key = answer.sender_session_key
+    transcript = handshake_hash(init, accept).hex()
+    confirm = session.envelope(
+        "handshake_confirm",
+        {
+            "handshake_hash": transcript,
+            "session_id": session.session_id,
+            "client_session_xonly_key": session.key,
+            "provider_session_xonly_key": session.provider_key,
+        },
+        in_reply_to=answer.message_id,
+    )
+    await session.send(confirm, session.provider_key)
+    return init, accept, signature, transcript
+
+
+def _check_offer(  # noqa: PLR0913 - every binding checked explicitly
+    offer: TermsOfferPayload,
+    request: FirmQuoteRequest,
+    *,
+    envelope: Envelope,
+    transcript: str,
+    invoice: InvoiceBinding,
+    identity: str,
+    network: NetworkIdentity,
+    crypto: Context,
+    now: int,
+) -> ContractTerms:
+    check_terms_offer(request, offer, handshake_hash=transcript, invoice_binding=invoice)
+    terms = offer.terms.contract_terms
+    crypto.schnorr_verify(
+        bytes.fromhex(identity),
+        provider_terms_hash(offer.terms),
+        bytes.fromhex(offer.provider_terms_signature),
+    )
+    if not (
+        contract_hash(terms).hex() == offer.terms.contract_hash == envelope.contract_hash
+        and terms.provider_identity_key == identity
+        and terms.network_identity == network
+        and now < terms.terms_expiry
+    ):
+        raise SwapError("terms offer is not bound to this provider, network, or time")
+    return terms
+
+
+async def run_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
+    connection: RelayConnection,
+    *,
+    identity: str,
+    network: NetworkIdentity,
+    invoice: str,
+    decode_invoice: Callable[[str], InvoiceBinding],
+    wallet: Wallet,
+    write_recovery: Callable[[bytes, bytes | None], None],
+    limits: SwapLimits,
+    crypto: Context,
+    timeout: float = 60.0,  # noqa: ASYNC109
+    settle_timeout: float = 600.0,
+    report: Callable[[str], None] = lambda _line: None,
+) -> SwapOutcome:
+    """Run one BTC to LN swap; see the module docstring for the order."""
+    now = int(time.time())
+    binding_invoice = decode_invoice(invoice)
+    if binding_invoice.bolt11_sha256 != hashlib.sha256(invoice.encode("ascii")).hexdigest():
+        raise SwapError("invoice decoder returned another invoice")
+    principal = int(binding_invoice.amount_msat) // 1000
+    advertisement = await discover(
+        connection, identity=identity, network=network, crypto=crypto, now=now
+    )
+    session = _Session(connection, crypto, network, timeout=timeout)
+    init, accept, accept_signature, transcript = await _handshake(session, advertisement, identity)
+    report(f"session {session.session_id[:16]} confirmed")
+    provider_key = session.provider_key or ""
+
+    contract_secret, contract_public = _scalar(crypto)
+    _, recovery_public = _scalar(crypto)  # authorization key; its secret is not needed
+    tip = await asyncio.to_thread(wallet.tip_height)
+    destination = await asyncio.to_thread(wallet.new_destination_script)
+    request_model = FirmQuoteRequest(
+        kind="btc-to-ln",
+        mode="firm",
+        lightning_principal_sat=str(principal),
+        invoice=invoice,
+        client_contract_compressed_key=contract_public.hex(),
+        recovery_authorization_xonly_key=recovery_public[1:].hex(),
+        client_destination_script=destination.hex(),
+        limits=QuoteLimits(
+            max_success_fee_sat=str(limits.max_success_fee_sat),
+            max_funding_fee_sat=str(limits.max_funding_fee_sat),
+            max_claim_fee_sat=str(limits.max_claim_fee_sat),
+            max_refund_fee_sat=str(limits.max_refund_fee_sat),
+            max_refund_lock_height=tip + limits.max_refund_delay_blocks,
+        ),
+        extensions={},
+    )
+    request = session.envelope("quote_request", request_model.model_dump(mode="json"))
+    await session.send(request, provider_key)
+    answer = await session.reply_to(request, "terms_offer")
+    offer = parse_model_json(TermsOfferPayload, canonicalize(answer.payload))
+    terms = _check_offer(
+        offer,
+        request_model,
+        envelope=answer,
+        transcript=transcript,
+        invoice=binding_invoice,
+        identity=identity,
+        network=network,
+        crypto=crypto,
+        now=int(time.time()),
+    )
+    economics = terms.economics
+    report(
+        f"terms: fund {economics.contract_amount_sat} sat, refund after block "
+        f"{terms.refund_lock_height}"
+    )
+
+    acceptance = ClientAcceptance(
+        contract_hash=offer.terms.contract_hash,
+        handshake_hash=transcript,
+        session_id=session.session_id,
+        client_session_xonly_key=session.key,
+        provider_session_xonly_key=provider_key,
+    )
+    acceptance_signature = bytes(
+        crypto.schnorr_sign(
+            session.secret, client_acceptance_hash(acceptance), secrets.token_bytes(32)
+        )
+    ).hex()
+    record = {
+        "session": session,
+        "init": init,
+        "accept": accept,
+        "accept_signature": accept_signature,
+        "offer": offer,
+        "acceptance_signature": acceptance_signature,
+        "contract_secret": contract_secret,
+        "birthday": tip,
+        "created_at": int(time.time()),
+    }
+    document = _recovery_document(**record)  # type: ignore[arg-type]
+    await asyncio.to_thread(write_recovery, document, None)
+    report("recovery file written (terms, no funding yet)")
+    accepted = session.envelope(
+        "terms_accept",
+        {
+            "acceptance": acceptance.model_dump(mode="json"),
+            "client_acceptance_signature": acceptance_signature,
+        },
+        in_reply_to=answer.message_id,
+        contract=offer.terms.contract_hash,
+    )
+    await session.send(accepted, provider_key)
+    await session.reply_to(accepted, "ack")
+
+    script = reconstruct_taproot_contract(terms, keys=crypto).script_pubkey
+    amount = int(economics.contract_amount_sat)
+    funded = await asyncio.to_thread(
+        lambda: wallet.fund(script, amount, fee_rate_sat_vb=limits.funding_fee_rate_sat_vb)
+    )
+    plan = FundingPlan(
+        approved_inputs=funded.inputs,
+        lineage_anchor=funded.inputs[0],
+        approved_noncontract_outputs=funded.other_outputs,
+    )
+    authorized = authorize_funding_transaction(funded.raw_transaction, terms, plan, keys=crypto)
+    binding = FundingBinding(
+        contract_hash=offer.terms.contract_hash,
+        funding_attempt_id=secrets.token_hex(32),
+        binding_revision=0,
+        funder_role="client",
+        lineage_anchor_txid=funded.inputs[0].txid.hex(),
+        lineage_anchor_vout=funded.inputs[0].output_index,
+        funding_txid=authorized.txid,
+        contract_vout=authorized.contract_vout,
+        contract_value_sat=str(authorized.contract_value_sat),
+        contract_script_pubkey=script.hex(),
+        replaces_txid=None,
+        created_at=int(time.time()),
+    )
+    binding_signature = bytes(
+        crypto.schnorr_sign(session.secret, funding_binding_hash(binding), secrets.token_bytes(32))
+    ).hex()
+    successor = _recovery_document(
+        **record,  # type: ignore[arg-type]
+        funding=((binding, binding_signature),),
+    )
+    await asyncio.to_thread(write_recovery, successor, document)
+    report(f"funded recovery snapshot written (funding {authorized.txid})")
+    bound = session.envelope(
+        "funding_binding",
+        {
+            "binding": binding.model_dump(mode="json"),
+            "funding_binding_signature": binding_signature,
+            "funding_transaction": funded.raw_transaction.hex(),
+        },
+        contract=offer.terms.contract_hash,
+    )
+    await session.send(bound, provider_key)
+    await session.reply_to(bound, "ack")
+    txid = await asyncio.to_thread(wallet.broadcast, funded.raw_transaction)
+    if txid != authorized.txid:
+        raise SwapError("Core broadcast another transaction; check the wallet")
+    report(f"funding broadcast {txid}; waiting for the provider to pay")
+
+    refund_hint = (
+        f"funds are committed; refund after block {terms.refund_lock_height} with "
+        "`rill recover sign-refund` and `broadcast-refund` on the funded recovery file"
+    )
+    while True:
+        try:
+            observation = await session.receive(
+                lambda item: (
+                    item.message_type == "observation"
+                    and item.in_reply_to is None
+                    and item.contract_hash == offer.terms.contract_hash
+                ),
+                timeout=settle_timeout,
+            )
+        except TimeoutError:
+            raise SwapError("provider did not pay in time; " + refund_hint) from None
+        seen = parse_observation(canonicalize(observation.payload))
+        if isinstance(seen, PaymentSettled):
+            preimage = seen.payment_preimage
+            if hashlib.sha256(bytes.fromhex(preimage)).hexdigest() != (
+                terms.invoice_binding.payment_hash
+            ):
+                raise SwapError("provider sent a wrong preimage; " + refund_hint)
+            return SwapOutcome(
+                session.session_id,
+                offer.terms.contract_hash,
+                txid,
+                preimage,
+                terms.refund_lock_height,
+            )
+        if seen.kind == "payment_failed":
+            raise SwapError("provider reports the payment failed; " + refund_hint)
