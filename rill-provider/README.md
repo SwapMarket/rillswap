@@ -177,6 +177,21 @@ announcement `revision` equals `created_at`. The real web verifier accepts
 these announcements (opt-in interop test). Back up the identity file
 separately. It is small, long-lived, and not in the live store's volume.
 
+`relay_client.RelayConnection` is a minimal NIP-01 WebSocket client (aiohttp).
+It returns True from `publish` only on an explicit relay `OK`, keeps one
+replaceable subscription, and yields raw, unverified event JSON. Publication
+means one relay stored the event, never that the peer received it.
+
+`handshake_service.HandshakeService` connects relays to the live store. On
+each tick it rotates epoch keys, republishes the RS-005 announcement when the
+keys change or the refresh interval elapses, resubscribes to the epoch keys
+and to session mailboxes awaiting a confirm, and retries the pending outbox.
+Each inbound event is either a confirm on a session mailbox (`admit_confirm`)
+or an init on an epoch inbox (`reserve`, then `create_accept`, then wrap and
+publish). Dispositions are content-free. The service adds scheduling and
+retries, never authority. A confirmed session grants no quote, funding, or
+payment action, because none is wired yet.
+
 `handshake_custody_offline.OfflineHandshakeCustody` is an optional, **offline
 key-availability primitive**, deliberately not an implementation of the live
 signing interface. Its protected age X25519 identity is an external operator

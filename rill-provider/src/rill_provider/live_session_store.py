@@ -1023,6 +1023,20 @@ class LiveSessionStore:
             raise LiveSessionStoreError("epoch frame refused") from None
         return candidate.envelope_bytes
 
+    def awaiting_confirm_mailboxes(self) -> tuple[str, ...]:
+        """Return our session mailbox keys that still expect a client confirm."""
+        try:
+            with self._write() as connection:
+                rows = connection.execute(
+                    "SELECT provider_session_key FROM sessions "
+                    "WHERE phase='ACCEPT_COMMITTED' AND blocked=0 ORDER BY revision"
+                ).fetchall()
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("session mailboxes unavailable") from None
+        return tuple(row[0] for row in rows)
+
     def pending_outbox(self) -> tuple[OutboxEntry, ...]:
         """Return committed bytes still owed to peers; current owner only."""
         try:
