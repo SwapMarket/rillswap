@@ -35,9 +35,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Self
 
+import pyrage  # type: ignore[import-untyped]
+from pyrage import x25519
 from rill_core.wire import verify_static_handshake_accept, verify_static_handshake_transcript
 from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_model_json
-from rill_core.wire.hashes import unsigned_envelope_hash
+from rill_core.wire.hashes import handshake_init_hash, unsigned_envelope_hash
 from rill_core.wire.messages import Envelope, HandshakeAcceptPayload, HandshakeInit
 from rill_core.wire.types import NetworkIdentity
 
@@ -50,24 +52,31 @@ if TYPE_CHECKING:
 
     from rill_core.wire.envelope_authentication import EnvelopeSchnorrVerifier
 
+    from rill_provider.handshake_custody_offline import CustodyPublicKeys
+
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # v1 (no session-key custody) is refused unchanged.
 MAX_DOCUMENT_BYTES = 65_536
 MAX_CHALLENGE_TRIES = 4
 MAX_LABEL_CHARS = 256
 HEX32 = re.compile(r"[0-9a-f]{64}\Z")
 LOCK_SUFFIX = ".owner-lock"
+COMPRESSED_KEY_BYTES = 33
+KEY_RECORD_KIND = "rill-provider/live-session-key/v1"
 SCHEMA = (
     (
         "CREATE TABLE meta (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
         "schema_version INTEGER NOT NULL, store_uuid TEXT NOT NULL, network_jcs BLOB NOT NULL, "
         "provider_identity TEXT NOT NULL, policy_jcs BLOB NOT NULL, authority_jcs BLOB NOT NULL, "
-        "db_inode INTEGER NOT NULL, lock_inode INTEGER NOT NULL, generation INTEGER NOT NULL)"
+        "db_inode INTEGER NOT NULL, lock_inode INTEGER NOT NULL, generation INTEGER NOT NULL, "
+        "custody_recipient TEXT NOT NULL)"
     ),
     (
         "CREATE TABLE sessions (session_id TEXT PRIMARY KEY, init_bytes BLOB NOT NULL, "
         "init_message_id TEXT NOT NULL, client_key TEXT NOT NULL, "
-        "provider_challenge TEXT NOT NULL UNIQUE, accept_bytes BLOB, accept_message_id TEXT, "
+        "provider_challenge TEXT NOT NULL UNIQUE, provider_session_key TEXT NOT NULL UNIQUE, "
+        "session_secret_age BLOB NOT NULL, key_state TEXT NOT NULL CHECK "
+        "(key_state IN ('LIVE', 'RETIRED')), accept_bytes BLOB, accept_message_id TEXT, "
         "transcript_digest TEXT, phase TEXT NOT NULL CHECK "
         "(phase IN ('RESERVED', 'ACCEPT_COMMITTED', 'CONFIRMED')), "
         "blocked INTEGER NOT NULL CHECK (blocked IN (0, 1)), revision INTEGER NOT NULL, "
@@ -140,6 +149,7 @@ class SessionReservation:
     session_id: str
     init_message_id: str
     provider_challenge: str
+    provider_session_key: str
     revision: int
 
 
@@ -207,6 +217,9 @@ class LiveSessionStore:
         identity: str,
         policy: HandshakePolicy,
         crypto: EnvelopeSchnorrVerifier,
+        store_uuid: str,
+        custody_identity: x25519.Identity,
+        public_keys: CustodyPublicKeys,
     ) -> None:
         """Use provision() or acquire(); never construct directly."""
         self.path = path
@@ -217,18 +230,28 @@ class LiveSessionStore:
         self._identity = identity
         self._policy = policy
         self._crypto = crypto
+        self._store_uuid = store_uuid
+        self._custody_identity = custody_identity
+        self._public_keys = public_keys
         self._pid = os.getpid()
 
     @staticmethod
-    def provision(
+    def provision(  # noqa: PLR0913 - independent provisioning facts explicit
         path: str | PathLike[str],
         network: NetworkIdentity,
         provider_identity: str,
         policy: HandshakePolicy,
         authority: AuthorityDeclaration,
+        *,
+        custody_recipient: str,
     ) -> None:
-        """Explicitly create a new empty store and owner lock; never overwrite."""
+        """Explicitly create a new empty store and owner lock; never overwrite.
+
+        Session secrets are age-encrypted to ``custody_recipient``. Its identity
+        must be kept outside this volume's images, or encryption adds nothing.
+        """
         network_jcs, identity = _expected(network, provider_identity)
+        recipient = _recipient(custody_recipient)
         policy_jcs = _policy_bytes(policy)
         authority_jcs = authority.jcs()
         location = Path(path).absolute()
@@ -252,7 +275,7 @@ class LiveSessionStore:
                 for statement in SCHEMA:
                     connection.execute(statement)
                 connection.execute(
-                    "INSERT INTO meta VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                    "INSERT INTO meta VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
                     (
                         SCHEMA_VERSION,
                         str(uuid.uuid4()),
@@ -262,6 +285,7 @@ class LiveSessionStore:
                         authority_jcs,
                         db_inode,
                         lock_inode,
+                        recipient,
                     ),
                 )
                 connection.execute(f"PRAGMA application_id={APPLICATION_ID}")
@@ -278,7 +302,7 @@ class LiveSessionStore:
             os.close(directory)
 
     @classmethod
-    def acquire(
+    def acquire(  # noqa: PLR0913 - independent expectations explicit
         cls,
         path: str | PathLike[str],
         network: NetworkIdentity,
@@ -286,9 +310,15 @@ class LiveSessionStore:
         policy: HandshakePolicy,
         *,
         crypto: EnvelopeSchnorrVerifier,
+        custody_identity: str,
+        public_keys: CustodyPublicKeys,
     ) -> Self:
         """Take lifetime exclusive ownership; refuse any unknown or copied state."""
         network_jcs, identity = _expected(network, provider_identity)
+        try:
+            unlocking = x25519.Identity.from_str(custody_identity)
+        except Exception:  # noqa: BLE001 - never echo credential material
+            raise LiveSessionStoreError("custody identity malformed") from None
         _require_policy(policy)
         policy_jcs = _policy_bytes(policy)
         location = Path(path).absolute()
@@ -316,11 +346,14 @@ class LiveSessionStore:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT schema_version, network_jcs, provider_identity, policy_jcs, "
-                "db_inode, lock_inode, generation, store_uuid, authority_jcs FROM meta"
+                "db_inode, lock_inode, generation, store_uuid, authority_jcs, custody_recipient "
+                "FROM meta"
             ).fetchall()
             if len(row) != 1 or row[0][:4] != (SCHEMA_VERSION, network_jcs, identity, policy_jcs):
                 raise LiveSessionStoreError("store namespace or policy mismatch")  # noqa: TRY301
             _check_provisioning(row[0][7], row[0][8])
+            if row[0][9] != str(unlocking.to_public()):
+                raise LiveSessionStoreError("custody identity does not match store")  # noqa: TRY301
             if row[0][4:6] != (db_inode, os.fstat(lock_fd).st_ino):
                 raise LiveSessionStoreError(  # noqa: TRY301 - copied or restored file
                     "store files are not the provisioned authoritative copy"
@@ -337,6 +370,9 @@ class LiveSessionStore:
                 identity=identity,
                 policy=policy,
                 crypto=crypto,
+                store_uuid=row[0][7],
+                custody_identity=unlocking,
+                public_keys=public_keys,
             )
         except LiveSessionStoreError:
             _discard(connection, lock_fd)
@@ -451,22 +487,29 @@ class LiveSessionStore:
                 ).fetchone()
                 if row is not None:
                     if row[0] == init_document and not row[2]:
-                        return SessionReservation(init.session_id, outer.message_id, row[1], row[3])
+                        # Replay reuses the key; broken custody is never replaced.
+                        key = self._require_custody(connection, init.session_id)
+                        return SessionReservation(
+                            init.session_id, outer.message_id, row[1], key, row[3]
+                        )
                     if row[0] != init_document:
                         _record_conflict(connection, init.session_id, "init", init_document)
                     blocked = True
                 else:
                     blocked = False
                     challenge = _fresh_challenge(connection, init)
+                    key, sealed = self._new_session_key(init, challenge)
                     connection.execute(
-                        "INSERT INTO sessions VALUES "
-                        "(?, ?, ?, ?, ?, NULL, NULL, NULL, 'RESERVED', 0, 0, 1, 0)",
+                        "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, 'LIVE', "
+                        "NULL, NULL, NULL, 'RESERVED', 0, 0, 1, 0)",
                         (
                             init.session_id,
                             init_document,
                             outer.message_id,
                             init.client_session_xonly_key,
                             challenge,
+                            key,
+                            sealed,
                         ),
                     )
         except LiveSessionStoreError:
@@ -475,7 +518,62 @@ class LiveSessionStore:
             raise LiveSessionStoreError("session reservation refused") from None
         if blocked:
             raise SessionBlockedError("session initiation conflict is durable")
-        return SessionReservation(init.session_id, outer.message_id, challenge, 0)
+        return SessionReservation(init.session_id, outer.message_id, challenge, key, 0)
+
+    def _key_record(
+        self, session_id: str, init_digest: str, challenge: str, scalar: bytes, xonly: str
+    ) -> bytes:
+        return canonicalize(
+            {
+                "kind": KEY_RECORD_KIND,
+                "secret_scalar": scalar.hex(),
+                "xonly_public_key": xonly,
+                "store_uuid": self._store_uuid,
+                "network_identity": self._network.model_dump(mode="json"),
+                "provider_identity": self._identity,
+                "session_id": session_id,
+                "handshake_init_digest": init_digest,
+                "provider_challenge": challenge,
+            }
+        )
+
+    def _new_session_key(self, init: HandshakeInit, challenge: str) -> tuple[str, bytes]:
+        scalar = secrets.token_bytes(32)
+        xonly = _xonly(self._public_keys, scalar)
+        record = self._key_record(
+            init.session_id, handshake_init_hash(init).hex(), challenge, scalar, xonly
+        )
+        sealed = pyrage.encrypt(record, [self._custody_identity.to_public()])
+        if type(sealed) is not bytes or pyrage.decrypt(sealed, [self._custody_identity]) != record:
+            raise LiveSessionStoreError("session key custody not verifiable")
+        return xonly, sealed
+
+    def _require_custody(self, connection: sqlite3.Connection, session_id: str) -> str:
+        """Return the bound public key only if its sealed secret is intact and usable."""
+        row = connection.execute(
+            "SELECT init_bytes, provider_challenge, provider_session_key, session_secret_age, "
+            "key_state FROM sessions WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        try:
+            init_bytes, challenge, xonly, sealed, state = row
+            _, init = self._init(init_bytes)
+            plaintext = pyrage.decrypt(sealed, [self._custody_identity])
+            record = json.loads(plaintext)
+            scalar = bytes.fromhex(record["secret_scalar"])
+            valid = (
+                state == "LIVE"
+                and plaintext
+                == self._key_record(
+                    session_id, handshake_init_hash(init).hex(), challenge, scalar, xonly
+                )
+                and _xonly(self._public_keys, scalar) == xonly
+            )
+        except Exception:  # noqa: BLE001 - never echo secret material or library errors
+            valid = False
+        if not valid:
+            raise LiveSessionStoreError("session key custody unavailable")
+        return str(xonly)
 
     def commit_accept(self, accept_document: bytes) -> AcceptCommit:
         """Durably commit exact accept bytes BEFORE any publication.
@@ -519,6 +617,11 @@ class LiveSessionStore:
                 ).hex()
                 if accepted.accept.provider_challenge != challenge:
                     raise LiveSessionStoreError("accept challenge not reserved")  # noqa: TRY301
+                custody_key = self._require_custody(connection, outer.session_id)
+                if accepted.accept.provider_session_xonly_key != custody_key:
+                    raise LiveSessionStoreError(  # noqa: TRY301
+                        "accept session key is not the reserved custody key"
+                    )
                 committed = revision + 1
                 connection.execute(
                     "INSERT INTO outbox VALUES (?, ?, 0, ?, ?, ?, 'PENDING')",
@@ -668,6 +771,23 @@ def _check_schema(connection: sqlite3.Connection) -> None:
         raise LiveSessionStoreError("live session store schema incompatible")
     if connection.execute("PRAGMA quick_check").fetchone() != ("ok",):
         raise LiveSessionStoreError("live session store integrity unavailable")
+
+
+def _recipient(value: str) -> str:
+    try:
+        parsed = x25519.Recipient.from_str(value)
+    except Exception:  # noqa: BLE001 - never echo caller input
+        raise LiveSessionStoreError("custody recipient malformed") from None
+    if str(parsed) != value:
+        raise LiveSessionStoreError("custody recipient malformed")
+    return value
+
+
+def _xonly(public_keys: CustodyPublicKeys, scalar: bytes) -> str:
+    key = public_keys.public_key(scalar)
+    if type(key) is not bytes or len(key) != COMPRESSED_KEY_BYTES or key[0] not in (2, 3):
+        raise LiveSessionStoreError("session public key derivation failed")
+    return key[1:].hex()
 
 
 def _check_provisioning(store_uuid: object, authority_jcs: object) -> None:

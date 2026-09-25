@@ -75,7 +75,7 @@ absent, partial, old, or restored state grants no key allocation or action
 authority.
 
 `live_session_store.LiveSessionStore` is the **authoritative** handshake
-session store (SQLite `RLS1` v1), and the only provider store whose rows may
+session store (SQLite `RLS1` v2; v1 files are refused unchanged), and the only provider store whose rows may
 permit exposing an accept or admitting a confirm. It must be created
 explicitly with `LiveSessionStore.provision(...)` and an
 `AuthorityDeclaration`, in which the operator attests that the volume is
@@ -98,9 +98,20 @@ host. The store cannot verify that attestation. Behavior:
   a single deployment boundary that is excluded from restores. Filesystems with
   unstable inode numbers cause the store to refuse (a false refusal, never
   exposure).
-- `reserve(init)` reserves one fresh provider challenge per session.
+- `reserve(init)` reserves one fresh provider challenge per session and
+  generates a fresh random provider session key in the same transaction. The
+  secret goes into the reservation row as an age ciphertext, encrypted to the
+  `custody_recipient` chosen at provisioning. The ciphertext binds the store
+  UUID, network, provider identity, session, init digest, and challenge, and
+  is verified by decryption before commit. `acquire` requires the matching
+  age identity (`custody_identity`) plus a public-key deriver (the native
+  `Context`). Keep that identity outside this volume's images; otherwise the
+  encryption adds nothing. If custody is missing, corrupt, or substituted,
+  the store refuses and never regenerates a key. Keys are retained, because
+  there is no closure policy yet, and SQLite deletion would not guarantee
+  erasure anyway.
   `commit_accept(accept)` verifies the identity-signed accept against the
-  stored init and the reserved challenge. It then commits the exact bytes to
+  stored init, the reserved challenge, and the reserved custody session key. It then commits the exact bytes to
   the outbox, and only after it returns may those bytes be published. A
   second, different accept for the same session is refused.
 - `admit_confirm(confirm)` verifies the full static transcript over the
@@ -119,11 +130,9 @@ a clone on another host. Admission grants no funding, payment, or claim
 authority. Upgrading does not create this store. The diagnostic
 `PreparedHandshakeStore` and `IssuanceReservationStore` are never read,
 migrated, or promoted, and there is still no relay listener or publisher
-wired to the store. Before any publication is wired, the reserved session
-must also be bound to a durably recoverable local session-key handle, and the
-accept's `provider_session_xonly_key` must match that handle. The identity
-signature proves who selected the key. It does not prove local mailbox
-custody.
+wired to the store. Session-envelope signing and mailbox decryption with the
+custody key, and owner-built accepts (identity signing inside the store),
+are the next boundaries. None is exposed yet.
 
 `handshake_custody_offline.OfflineHandshakeCustody` is an optional, **offline
 key-availability primitive**, deliberately not an implementation of the live

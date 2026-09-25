@@ -5,12 +5,15 @@ from __future__ import annotations
 import copy
 import json
 import multiprocessing
+import os
 import shutil
 import sqlite3
 from pathlib import Path
 from typing import Any
 
+import pyrage  # type: ignore[import-untyped]
 import pytest
+from pyrage import x25519
 from rill_core.wire.canonical import canonicalize
 from rill_core.wire.hashes import handshake_accept_hash, unsigned_envelope_hash
 from rill_core.wire.messages import Envelope, HandshakeAccept
@@ -38,6 +41,46 @@ POLICY = HandshakePolicy(
     capabilities=frozenset({"core/v1", "recovery/v1"}),
 )
 AUTHORITY = AuthorityDeclaration("test-volume", outside_restore_domain=True, single_host=True)
+SESSION_SECRET = (3).to_bytes(32, "big")  # Fixture-only public scalar of the fixture session key.
+P = 2**256 - 2**32 - 977
+N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+G = (
+    0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
+    0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8,
+)
+
+
+class PurePublicKeys:
+    """Test-only affine secp256k1 derivation (not constant time, never deploy)."""
+
+    def public_key(self, secret_key: bytes) -> bytes:
+        scalar = int.from_bytes(secret_key, "big")
+        if not 0 < scalar < N:
+            raise ValueError("invalid scalar")
+        result: tuple[int, int] | None = None
+        addend: tuple[int, int] | None = G
+        while scalar:
+            if scalar & 1:
+                result = _add(result, addend)
+            addend = _add(addend, addend)
+            scalar >>= 1
+        assert result is not None
+        return bytes([2 + (result[1] & 1)]) + result[0].to_bytes(32, "big")
+
+
+def _add(a: tuple[int, int] | None, b: tuple[int, int] | None) -> tuple[int, int] | None:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    if a[0] == b[0] and (a[1] + b[1]) % P == 0:
+        return None
+    if a == b:
+        slope = 3 * a[0] * a[0] * pow(2 * a[1], -1, P) % P
+    else:
+        slope = (b[1] - a[1]) * pow(b[0] - a[0], -1, P) % P
+    x = (slope * slope - a[0] - b[0]) % P
+    return x, (slope * (a[0] - x) - a[1]) % P
 
 
 def _envelopes() -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -142,15 +185,34 @@ class Harness:
         monkeypatch.setattr(
             "rill_provider.live_session_store.secrets.token_hex", lambda _n: challenge
         )
+        self.scalar = SESSION_SECRET
+        monkeypatch.setattr(
+            "rill_provider.live_session_store.secrets.token_bytes", lambda _n: self.scalar
+        )
+        self.custody = x25519.Identity.generate()
         self.init, self.accept, self.confirm = (_bytes(e) for e in self.envelopes)
 
     def provision(self) -> None:
-        LiveSessionStore.provision(self.path, self.network, self.identity, POLICY, AUTHORITY)
+        LiveSessionStore.provision(
+            self.path,
+            self.network,
+            self.identity,
+            POLICY,
+            AUTHORITY,
+            custody_recipient=str(self.custody.to_public()),
+        )
 
     def acquire(self) -> LiveSessionStore:
-        return LiveSessionStore.acquire(
-            self.path, self.network, self.identity, POLICY, crypto=self.crypto
-        )
+        return self.acquire_at(self.path)
+
+    def acquire_at(self, path: Path, **changed: Any) -> LiveSessionStore:  # noqa: ANN401
+        arguments: dict[str, Any] = {
+            "crypto": self.crypto,
+            "custody_identity": str(self.custody),
+            "public_keys": PurePublicKeys(),
+        }
+        arguments.update(changed)
+        return LiveSessionStore.acquire(path, self.network, self.identity, POLICY, **arguments)
 
 
 @pytest.fixture
@@ -168,7 +230,14 @@ def test_absent_store_and_failed_attestation_never_create_state(harness: Harness
         AuthorityDeclaration("", outside_restore_domain=True, single_host=True),
     ):
         with pytest.raises(LiveSessionStoreError, match="attestation"):
-            LiveSessionStore.provision(harness.path, harness.network, harness.identity, POLICY, bad)
+            LiveSessionStore.provision(
+                harness.path,
+                harness.network,
+                harness.identity,
+                POLICY,
+                bad,
+                custody_recipient=str(harness.custody.to_public()),
+            )
     assert list(harness.path.parent.iterdir()) == []
 
 
@@ -179,12 +248,17 @@ def test_provision_is_exclusive_and_partial_files_refuse(harness: Harness) -> No
     other = harness.path.parent / "partial.sqlite"
     (harness.path.parent / ("partial.sqlite" + live.LOCK_SUFFIX)).write_bytes(b"")
     with pytest.raises(LiveSessionStoreError):
-        LiveSessionStore.provision(other, harness.network, harness.identity, POLICY, AUTHORITY)
+        LiveSessionStore.provision(
+            other,
+            harness.network,
+            harness.identity,
+            POLICY,
+            AUTHORITY,
+            custody_recipient=str(harness.custody.to_public()),
+        )
     other.write_bytes(b"")
     with pytest.raises(LiveSessionStoreError):
-        LiveSessionStore.acquire(
-            other, harness.network, harness.identity, POLICY, crypto=harness.crypto
-        )
+        harness.acquire_at(other)
 
 
 def test_full_handshake_commits_accept_before_exposure_and_admits_confirm(
@@ -294,7 +368,13 @@ def test_untrusted_init_is_refused_without_state(harness: Harness) -> None:
         store.reserve(harness.init)
 
 
-def _child_acquire(path: str, network_json: str, identity: str, queue: Any) -> None:  # noqa: ANN401
+def _child_acquire(
+    path: str,
+    network_json: str,
+    identity: str,
+    custody: str,
+    queue: Any,  # noqa: ANN401
+) -> None:
     try:
         LiveSessionStore.acquire(
             path,
@@ -302,6 +382,8 @@ def _child_acquire(path: str, network_json: str, identity: str, queue: Any) -> N
             identity,
             POLICY,
             crypto=object(),  # type: ignore[arg-type]
+            custody_identity=custody,
+            public_keys=PurePublicKeys(),
         ).close()
     except LiveSessionStoreError as error:
         queue.put(str(error))
@@ -313,7 +395,13 @@ def test_single_owner_across_processes_and_no_takeover(harness: Harness) -> None
     harness.provision()
     context = multiprocessing.get_context("spawn")
     queue = context.Queue()
-    arguments = (str(harness.path), harness.network.model_dump_json(), harness.identity, queue)
+    arguments = (
+        str(harness.path),
+        harness.network.model_dump_json(),
+        harness.identity,
+        str(harness.custody),
+        queue,
+    )
     with harness.acquire():
         child = context.Process(target=_child_acquire, args=arguments)
         child.start()
@@ -360,13 +448,7 @@ def test_copied_or_file_restored_store_is_not_authoritative(harness: Harness) ->
         copy_dir / (harness.path.name + live.LOCK_SUFFIX),
     )
     with pytest.raises(LiveSessionStoreError, match="not the provisioned authoritative copy"):
-        LiveSessionStore.acquire(
-            copy_dir / harness.path.name,
-            harness.network,
-            harness.identity,
-            POLICY,
-            crypto=harness.crypto,
-        )
+        harness.acquire_at(copy_dir / harness.path.name)
     restored = harness.path.read_bytes()
     harness.path.rename(harness.path.with_name("original-kept-allocated"))
     harness.path.write_bytes(restored)  # distinct inode, as a file-level restore produces
@@ -384,11 +466,23 @@ def test_namespace_or_policy_mismatch_refuses(harness: Harness) -> None:
     )
     with pytest.raises(LiveSessionStoreError, match="mismatch"):
         LiveSessionStore.acquire(
-            harness.path, harness.network, harness.identity, other_policy, crypto=harness.crypto
+            harness.path,
+            harness.network,
+            harness.identity,
+            other_policy,
+            crypto=harness.crypto,
+            custody_identity=str(harness.custody),
+            public_keys=PurePublicKeys(),
         )
     with pytest.raises(LiveSessionStoreError, match="mismatch"):
         LiveSessionStore.acquire(
-            harness.path, harness.network, "02" * 32, POLICY, crypto=harness.crypto
+            harness.path,
+            harness.network,
+            "02" * 32,
+            POLICY,
+            crypto=harness.crypto,
+            custody_identity=str(harness.custody),
+            public_keys=PurePublicKeys(),
         )
 
 
@@ -493,3 +587,119 @@ def test_foreign_sqlite_file_is_not_modified(harness: Harness) -> None:
         harness.acquire()
     assert harness.path.read_bytes() == before
     assert not harness.path.with_name(harness.path.name + "-wal").exists()
+
+
+def test_reservation_binds_encrypted_session_key_and_accept_must_use_it(
+    harness: Harness,
+) -> None:
+    harness.provision()
+    fixture_key = harness.source["verification_context"]["handshake_accept"][
+        "provider_session_xonly_key"
+    ]
+    with harness.acquire() as store:
+        reserved = store.reserve(harness.init)
+        assert reserved.provider_session_key == fixture_key
+        assert store.reserve(harness.init) == reserved
+    stored = (
+        harness.path.read_bytes() + harness.path.with_name(harness.path.name + "-wal").read_bytes()
+        if harness.path.with_name(harness.path.name + "-wal").exists()
+        else (harness.path.read_bytes())
+    )
+    assert SESSION_SECRET.hex().encode() not in stored
+    with sqlite3.connect(harness.path) as connection:
+        sealed = connection.execute("SELECT session_secret_age FROM sessions").fetchone()[0]
+    record = json.loads(pyrage.decrypt(sealed, [harness.custody]))
+    assert record["secret_scalar"] == SESSION_SECRET.hex()
+    assert record["session_id"] == reserved.session_id
+    assert record["provider_challenge"] == reserved.provider_challenge
+
+
+def test_accept_for_a_different_session_key_is_refused(harness: Harness) -> None:
+    harness.provision()
+    harness.scalar = (5).to_bytes(32, "big")
+    with harness.acquire() as store:
+        reserved = store.reserve(harness.init)
+        assert (
+            reserved.provider_session_key
+            != (
+                harness.source["verification_context"]["handshake_accept"][
+                    "provider_session_xonly_key"
+                ]
+            )
+        )
+        with pytest.raises(LiveSessionStoreError, match="not the reserved custody key"):
+            store.commit_accept(harness.accept)
+        assert store.pending_outbox() == ()
+
+
+def test_wrong_custody_credential_refuses_ownership(harness: Harness) -> None:
+    harness.provision()
+    with pytest.raises(LiveSessionStoreError, match="custody identity does not match"):
+        harness.acquire_at(harness.path, custody_identity=str(x25519.Identity.generate()))
+    with pytest.raises(LiveSessionStoreError, match="custody identity malformed"):
+        harness.acquire_at(harness.path, custody_identity="AGE-SECRET-KEY-NOPE")
+    with harness.acquire():
+        pass  # the refused attempts did not leave the lock held
+
+
+def test_substituted_or_corrupt_custody_is_never_replaced(harness: Harness) -> None:
+    harness.provision()
+    with harness.acquire() as store:
+        store.reserve(harness.init)
+    with sqlite3.connect(harness.path) as connection:
+        sealed = connection.execute("SELECT session_secret_age FROM sessions").fetchone()[0]
+        record = json.loads(pyrage.decrypt(sealed, [harness.custody]))
+        record["provider_challenge"] = "ab" * 32  # authentic age, wrong placement
+        forged = pyrage.encrypt(canonicalize(record), [harness.custody.to_public()])
+        connection.execute("UPDATE sessions SET session_secret_age=?", (forged,))
+    with harness.acquire() as store:
+        with pytest.raises(LiveSessionStoreError, match="custody unavailable"):
+            store.reserve(harness.init)
+        with pytest.raises(LiveSessionStoreError, match="custody unavailable"):
+            store.commit_accept(harness.accept)
+        assert store.pending_outbox() == ()
+    with sqlite3.connect(harness.path) as connection:
+        assert connection.execute("SELECT session_secret_age FROM sessions").fetchone() == (forged,)
+        connection.execute("UPDATE sessions SET session_secret_age=?", (b"garbage",))
+    with harness.acquire() as store, pytest.raises(LiveSessionStoreError, match="custody"):
+        store.commit_accept(harness.accept)
+
+
+def test_schema_v1_store_is_refused_unchanged(harness: Harness) -> None:
+    harness.provision()
+    harness.path.rename(harness.path.with_name("provisioned-aside"))
+    with sqlite3.connect(harness.path) as connection:
+        connection.execute(f"PRAGMA application_id={live.APPLICATION_ID}")
+        connection.execute("PRAGMA user_version=1")
+        connection.execute("CREATE TABLE meta (x)")
+    connection.close()
+    before = harness.path.read_bytes()
+    with pytest.raises(LiveSessionStoreError, match="version unsupported"):
+        harness.acquire()
+    assert harness.path.read_bytes() == before
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
+)
+def test_native_crypto_full_handshake_with_real_custody_derivation(harness: Harness) -> None:
+    from rill_crypto import Context  # noqa: PLC0415
+
+    harness.provision()
+    with (
+        Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
+        harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store,
+    ):
+        reserved = store.reserve(harness.init)
+        assert (
+            reserved.provider_session_key == PurePublicKeys().public_key(SESSION_SECRET)[1:].hex()
+        )
+        committed = store.commit_accept(harness.accept)
+        admitted = store.admit_confirm(harness.confirm)
+        assert admitted.transcript_digest == committed.transcript_digest
+        resigned = copy.deepcopy(harness.envelopes[2])
+        resigned["signature"] = "00" * 64
+        with pytest.raises(LiveSessionStoreError):
+            store.admit_confirm(_bytes(resigned))  # real verification refuses
