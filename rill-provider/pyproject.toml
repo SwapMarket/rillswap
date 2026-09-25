@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rill-provider"
+version = "0.1.0.dev0"
+description = "Pre-release RillSwap provider services"
+readme = "README.md"
+requires-python = ">=3.13"
+license = "MIT"
+dependencies = [
+    "rill-core==0.1.0.dev0",
+    "rill-crypto==0.1.0.dev0",
+    "httpx==0.28.1",
+    "grpcio==1.84.0",
+    "protobuf==7.36.2",
+    "pyrage==1.4.0",
+    "pycryptodomex==3.23.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rill_provider"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-config --strict-markers"
+markers = [
+    "bitcoin_core: opt-in pinned regtest RPC adapter interoperability",
+    "lnd: opt-in isolated Core and LND diagnostics including a funded regtest channel",
+    "native_crypto: opt-in real native signature check against pinned rill-crypto",
+    "web_nip59_interop: opt-in disposable web-producer to native-provider interoperability",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+extend-exclude = ["src/rill_provider/_lnd_proto"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["C901", "COM812", "CPY001", "D105", "D203", "D213", "EM101", "EM102", "TRY003"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D", "INP001", "PLR2004", "S101"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unused_ignores = true
+exclude = "src/rill_provider/_lnd_proto/"
+
+[[tool.mypy.overrides]]
+module = "rill_provider._lnd_proto.*"
+ignore_errors = true
