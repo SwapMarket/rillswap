@@ -74,6 +74,57 @@ previous provider release does not create, migrate, or scan any session state;
 absent, partial, old, or restored state grants no key allocation or action
 authority.
 
+`live_session_store.LiveSessionStore` is the **authoritative** handshake
+session store (SQLite `RLS1` v1), and the only provider store whose rows may
+permit exposing an accept or admitting a confirm. It must be created
+explicitly with `LiveSessionStore.provision(...)` and an
+`AuthorityDeclaration`, in which the operator attests that the volume is
+outside the application's backup and restore domain and is used by a single
+host. The store cannot verify that attestation. Behavior:
+
+- `acquire` takes a lifetime exclusive `flock` on the provisioned
+  `<db>.owner-lock` inode, with no lease expiry or takeover. It bumps a
+  generation counter, and every write checks that generation. A closed or
+  superseded handle raises `StaleOwnerError`, and so does a handle inherited
+  across `fork` (reacquire in the child instead). If a `COMMIT` fails, the
+  outcome is uncertain, so the handle releases ownership and the new owner
+  re-reads the stored state.
+- Absent, partial, foreign, or newer files are refused before any pragma can
+  modify them. Malformed provisioning metadata (UUID or attestation) is also
+  refused. The inode numbers of the database and the lock file are recorded
+  when the store is provisioned. This catches a copy, or a restore that
+  creates a new file. It cannot catch an in-place restore, a lost `-wal` file,
+  or inode reuse. Treat the database, its WAL, the lock, and custody state as
+  a single deployment boundary that is excluded from restores. Filesystems with
+  unstable inode numbers cause the store to refuse (a false refusal, never
+  exposure).
+- `reserve(init)` reserves one fresh provider challenge per session.
+  `commit_accept(accept)` verifies the identity-signed accept against the
+  stored init and the reserved challenge. It then commits the exact bytes to
+  the outbox, and only after it returns may those bytes be published. A
+  second, different accept for the same session is refused.
+- `admit_confirm(confirm)` verifies the full static transcript over the
+  committed bytes and admits it atomically. Admission also acknowledges the
+  accept in the outbox. An exact replay returns the recorded admission.
+  Unverifiable confirms leave no record. Following RS-001, conflicts are
+  judged on unsigned canonical bytes, so a different valid signature over the
+  same confirm counts as a replay.
+- Conflicting unsigned init bytes, or a second validly signed but different
+  confirm, are kept as bounded evidence (one row per session and kind) and
+  block the session. For init, a stranger can trigger this, and the cost is
+  loss of availability, not exposure.
+
+The store does not detect an in-place rollback of the authoritative volume or
+a clone on another host. Admission grants no funding, payment, or claim
+authority. Upgrading does not create this store. The diagnostic
+`PreparedHandshakeStore` and `IssuanceReservationStore` are never read,
+migrated, or promoted, and there is still no relay listener or publisher
+wired to the store. Before any publication is wired, the reserved session
+must also be bound to a durably recoverable local session-key handle, and the
+accept's `provider_session_xonly_key` must match that handle. The identity
+signature proves who selected the key. It does not prove local mailbox
+custody.
+
 `handshake_custody_offline.OfflineHandshakeCustody` is an optional, **offline
 key-availability primitive**, deliberately not an implementation of the live
 signing interface. Its protected age X25519 identity is an external operator
