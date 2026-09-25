@@ -75,7 +75,7 @@ absent, partial, old, or restored state grants no key allocation or action
 authority.
 
 `live_session_store.LiveSessionStore` is the **authoritative** handshake
-session store (SQLite `RLS1` v2; v1 files are refused unchanged), and the only provider store whose rows may
+session store (SQLite `RLS1` v3; v1 and v2 files are refused unchanged), and the only provider store whose rows may
 permit exposing an accept or admitting a confirm. It must be created
 explicitly with `LiveSessionStore.provision(...)` and an
 `AuthorityDeclaration`, in which the operator attests that the volume is
@@ -147,7 +147,20 @@ the store:
 
 The internal `_nip59_send` wrapper and NIP-44 v2 encryption are the exact
 inverse of the receive decoder. They are checked against the official NIP-44
-vector and by native round trips. `create_accept(session_id, identity=ProviderIdentity, transport_endpoints=...)`
+vector and by native round trips. `rotate_epochs(now=, period=, retention=)` keeps a current RS-006 epoch inbox
+key and returns the keys to advertise, newest first. At most 4 are returned,
+the RS-005 maximum. A new epoch starts once the newest key is `period` seconds
+old. Each key keeps decoding until `created_at + period + retention`, so set
+`retention` to at least the announcement lifetime. If the clock moves behind
+the newest epoch, rotation is refused. Epoch secrets are age-sealed in the
+store and bound to its UUID. `open_epoch_frame(event, now=, transport=)`
+decodes a gift-wrapped `handshake_init` sent to an unretired epoch key. It
+returns the exact init bytes only if the envelope sender is the seal author.
+That sender is still a stranger, so the init must still go through `reserve`.
+The epoch-inbox schedule is a local availability policy, because RS-005 and
+RS-006 do not specify one.
+
+`create_accept(session_id, identity=ProviderIdentity, transport_endpoints=...)`
 builds the accept inside the store. It selects the client's most-preferred
 supported suite and the supported requested capabilities, in client order.
 It binds the reserved challenge and custody session key, gets the signature

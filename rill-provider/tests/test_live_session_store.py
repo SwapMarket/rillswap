@@ -844,3 +844,81 @@ def test_native_owner_built_accept_and_fresh_client_confirm(
         admitted = store.admit_confirm(_bytes(confirm))
         assert admitted.transcript_digest == committed.transcript_digest
         assert store.pending_outbox() == ()
+
+
+def test_epoch_rotation_schedule_retention_and_cap(harness: Harness) -> None:
+    harness.provision()
+    with harness.acquire() as store:
+        with pytest.raises(LiveSessionStoreError, match="schedule"):
+            store.rotate_epochs(now=100, period=0, retention=0)
+        first = store.rotate_epochs(now=1000, period=100, retention=250)
+        assert len(first) == 1
+        assert store.rotate_epochs(now=1099, period=100, retention=250) == first
+        second = store.rotate_epochs(now=1100, period=100, retention=250)
+        assert second[1:] == first
+        assert len(second) == 2
+        with pytest.raises(LiveSessionStoreError, match="clock is behind"):
+            store.rotate_epochs(now=1050, period=100, retention=250)
+        advertised = store.rotate_epochs(now=1349, period=100, retention=250)
+        assert first[0] in advertised  # retire_after = 1000 + 100 + 250
+        later = store.rotate_epochs(now=1350, period=100, retention=250)
+        assert first[0] not in later
+        for step in range(6):
+            capped = store.rotate_epochs(now=1400 + 100 * step, period=100, retention=10_000)
+        assert len(capped) == live.MAX_ADVERTISED_EPOCHS
+        assert harness.identity not in capped
+    for file in harness.path.parent.iterdir():
+        assert b"secret_scalar" not in file.read_bytes()
+
+
+def test_schema_v2_store_is_refused_unchanged(harness: Harness) -> None:
+    harness.provision()
+    harness.path.rename(harness.path.with_name("provisioned-aside"))
+    with sqlite3.connect(harness.path) as connection:
+        connection.execute(f"PRAGMA application_id={live.APPLICATION_ID}")
+        connection.execute("PRAGMA user_version=2")
+    connection.close()
+    before = harness.path.read_bytes()
+    with pytest.raises(LiveSessionStoreError, match="version unsupported"):
+        harness.acquire()
+    assert harness.path.read_bytes() == before
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
+)
+def test_native_init_received_on_epoch_inbox(harness: Harness) -> None:
+    from rill_crypto import Context  # noqa: PLC0415
+
+    from rill_provider._nip59_send import _wrap_envelope  # noqa: PLC0415
+
+    client_secret = (2).to_bytes(32, "big")  # Fixture-only public scalar of the client key.
+    harness.provision()
+    with (
+        Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
+        harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store,
+    ):
+        (epoch,) = store.rotate_epochs(now=1000, period=100, retention=100)
+        frame = _wrap_envelope(
+            harness.init,
+            sender_session_secret=client_secret,
+            recipient_xonly_key=epoch,
+            crypto=crypto,
+        )
+        opened = store.open_epoch_frame(frame, now=1150, transport=crypto)
+        assert opened == harness.init
+        assert store.reserve(opened).session_id == harness.envelopes[0]["session_id"]
+        with pytest.raises(LiveSessionStoreError, match="retired epoch"):
+            store.open_epoch_frame(frame, now=1200, transport=crypto)
+        not_init = _wrap_envelope(
+            harness.confirm,
+            sender_session_secret=client_secret,
+            recipient_xonly_key=epoch,
+            crypto=crypto,
+        )
+        with pytest.raises(LiveSessionStoreError, match="not a sender-bound init"):
+            store.open_epoch_frame(not_init, now=1150, transport=crypto)
+        with pytest.raises(LiveSessionStoreError, match="refused"):
+            store.open_epoch_frame(frame[:-5] + b"0000}", now=1150, transport=crypto)

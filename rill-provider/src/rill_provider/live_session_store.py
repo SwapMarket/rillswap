@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     from rill_provider.provider_identity import ProviderIdentity
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
-SCHEMA_VERSION = 2  # v1 (no session-key custody) is refused unchanged.
+SCHEMA_VERSION = 3  # v1 (no custody) and v2 (no epoch inbox) are refused unchanged.
 MAX_DOCUMENT_BYTES = 65_536
 MAX_CHALLENGE_TRIES = 4
 MAX_LABEL_CHARS = 256
@@ -73,6 +73,8 @@ LOCK_SUFFIX = ".owner-lock"
 MAX_OUTER_EVENT_BYTES = 128 * 1024
 COMPRESSED_KEY_BYTES = 33
 KEY_RECORD_KIND = "rill-provider/live-session-key/v1"
+EPOCH_RECORD_KIND = "rill-provider/epoch-inbox-key/v1"
+MAX_ADVERTISED_EPOCHS = 4  # RS-005 epoch_inbox_xonly_keys maximum
 SCHEMA = (
     (
         "CREATE TABLE meta (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
@@ -109,6 +111,10 @@ SCHEMA = (
         "CREATE TABLE conflicts (session_id TEXT NOT NULL, kind TEXT NOT NULL CHECK "
         "(kind IN ('init', 'confirm')), evidence_bytes BLOB NOT NULL, "
         "PRIMARY KEY (session_id, kind))"
+    ),
+    (
+        "CREATE TABLE epochs (epoch_key TEXT PRIMARY KEY, secret_age BLOB NOT NULL, "
+        "created_at INTEGER NOT NULL, retire_after INTEGER NOT NULL)"
     ),
 )
 
@@ -631,21 +637,11 @@ class LiveSessionStore:
         admission method (for example ``admit_confirm``).
         """
         try:
-            if type(outer_event) is not bytes or len(outer_event) > MAX_OUTER_EVENT_BYTES:
-                raise LiveSessionStoreError("mailbox frame size unsupported")  # noqa: TRY301
-            # Routing hint only; the decoder re-verifies the signed recipient tag.
-            tags: list[Any] = json.loads(outer_event)["tags"]
-            recipients = [
-                tag[1]
-                for tag in tags
-                if type(tag) is list and len(tag) >= 2 and tag[0] == "p"  # noqa: PLR2004
-            ]
-            if len(recipients) != 1 or type(recipients[0]) is not str:
-                raise LiveSessionStoreError("mailbox frame recipient unsupported")  # noqa: TRY301
+            recipient = _routing_recipient(outer_event)
             with self._write() as connection:
                 row = connection.execute(
                     "SELECT session_id, client_key FROM sessions WHERE provider_session_key=?",
-                    (recipients[0],),
+                    (recipient,),
                 ).fetchone()
                 if row is None:
                     raise LiveSessionStoreError("mailbox frame for unknown session")  # noqa: TRY301
@@ -919,6 +915,114 @@ class LiveSessionStore:
             outer.session_id, outer.message_id, digest, admitted_revision, replay=False
         )
 
+    def rotate_epochs(self, *, now: int, period: int, retention: int) -> tuple[str, ...]:
+        """Ensure a current epoch inbox key; return keys to advertise, newest first.
+
+        A new epoch starts when the newest is ``period`` seconds old. Each key
+        keeps decoding until ``created_at + period + retention``; set
+        ``retention`` to at least the announcement lifetime so late inits
+        still decode. Epoch keys only receive public inits (availability, not
+        authority), and their sealed secrets bind this store.
+        """
+        if not (
+            type(now) is int
+            and type(period) is int
+            and type(retention) is int
+            and now > 0
+            and period > 0
+            and retention >= 0
+        ):
+            raise LiveSessionStoreError("epoch schedule unsupported")
+        try:
+            with self._write() as connection:
+                newest = connection.execute("SELECT MAX(created_at) FROM epochs").fetchone()[0]
+                if newest is not None and now < newest:
+                    raise LiveSessionStoreError("clock is behind the newest epoch")  # noqa: TRY301
+                if newest is None or now >= newest + period:
+                    xonly, sealed = self._new_epoch_key(now)
+                    connection.execute(
+                        "INSERT INTO epochs VALUES (?, ?, ?, ?)",
+                        (xonly, sealed, now, now + period + retention),
+                    )
+                rows = connection.execute(
+                    "SELECT epoch_key FROM epochs WHERE retire_after > ? "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (now, MAX_ADVERTISED_EPOCHS),
+                ).fetchall()
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo secret material or library errors
+            raise LiveSessionStoreError("epoch rotation refused") from None
+        return tuple(row[0] for row in rows)
+
+    def _epoch_record(self, scalar: bytes, xonly: str, created_at: int) -> bytes:
+        return canonicalize(
+            {
+                "kind": EPOCH_RECORD_KIND,
+                "secret_scalar": scalar.hex(),
+                "xonly_public_key": xonly,
+                "store_uuid": self._store_uuid,
+                "created_at": created_at,
+            }
+        )
+
+    def _new_epoch_key(self, created_at: int) -> tuple[str, bytes]:
+        scalar = _new_epoch_scalar()
+        xonly = _xonly(self._public_keys, scalar)
+        if xonly == self._identity:
+            raise LiveSessionStoreError("epoch key collides with identity")
+        record = self._epoch_record(scalar, xonly, created_at)
+        sealed = pyrage.encrypt(record, [self._custody_identity.to_public()])
+        if type(sealed) is not bytes or pyrage.decrypt(sealed, [self._custody_identity]) != record:
+            raise LiveSessionStoreError("epoch key custody not verifiable")
+        return xonly, sealed
+
+    def open_epoch_frame(self, outer_event: bytes, *, now: int, transport: Context) -> bytes:
+        """Decode a gift-wrapped handshake_init sent to an unretired epoch inbox.
+
+        Returns exact canonical init bytes whose envelope sender is the seal
+        author. The sender is still a stranger: pass the bytes to ``reserve``,
+        which applies every init rule. Refusals are uniform and redacted.
+        """
+        try:
+            recipient = _routing_recipient(outer_event)
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT secret_age, created_at FROM epochs "
+                    "WHERE epoch_key=? AND retire_after > ?",
+                    (recipient, now),
+                ).fetchone()
+            if row is None:
+                raise LiveSessionStoreError("frame for unknown or retired epoch")  # noqa: TRY301
+            plaintext = pyrage.decrypt(row[0], [self._custody_identity])
+            scalar = bytes.fromhex(json.loads(plaintext)["secret_scalar"])
+            try:
+                if not (
+                    plaintext == self._epoch_record(scalar, recipient, row[1])
+                    and _xonly(self._public_keys, scalar) == recipient
+                ):
+                    raise LiveSessionStoreError("epoch key custody unavailable")
+                candidate = _decode_gift_wrap_candidate(
+                    outer_event,
+                    recipient_mailbox_secret=scalar,
+                    expected_recipient_xonly_key=recipient,
+                    expected_network=self._network,
+                    expected_profile_id=self._policy.profile,
+                    crypto=transport,
+                )
+            finally:
+                del scalar
+            if not (
+                candidate.envelope.message_type == "handshake_init"
+                and candidate.envelope.sender_session_key == candidate.seal_author_xonly_key
+            ):
+                raise LiveSessionStoreError("epoch frame is not a sender-bound init")  # noqa: TRY301
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - uniform, redacted refusal (RS-006)
+            raise LiveSessionStoreError("epoch frame refused") from None
+        return candidate.envelope_bytes
+
     def pending_outbox(self) -> tuple[OutboxEntry, ...]:
         """Return committed bytes still owed to peers; current owner only."""
         try:
@@ -964,6 +1068,25 @@ def _check_schema(connection: sqlite3.Connection) -> None:
 
 def _new_session_scalar() -> bytes:
     return secrets.token_bytes(32)
+
+
+def _new_epoch_scalar() -> bytes:
+    return secrets.token_bytes(32)
+
+
+def _routing_recipient(outer_event: bytes) -> str:
+    """Return the single ``p`` tag as a routing hint; the decoder re-verifies it."""
+    if type(outer_event) is not bytes or len(outer_event) > MAX_OUTER_EVENT_BYTES:
+        raise LiveSessionStoreError("frame size unsupported")
+    tags: list[Any] = json.loads(outer_event)["tags"]
+    recipients = [
+        tag[1]
+        for tag in tags
+        if type(tag) is list and len(tag) >= 2 and tag[0] == "p"  # noqa: PLR2004
+    ]
+    if len(recipients) != 1 or type(recipients[0]) is not str:
+        raise LiveSessionStoreError("frame recipient unsupported")
+    return recipients[0]
 
 
 def _new_challenge() -> str:
