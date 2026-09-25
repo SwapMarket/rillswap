@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from rill_core.errors import ValidationError
-from rill_core.wire import verify_static_handshake_transcript
+from rill_core.wire import verify_static_handshake_accept, verify_static_handshake_transcript
 from rill_core.wire.hashes import handshake_accept_hash, unsigned_envelope_hash
 from rill_core.wire.messages import Envelope, HandshakeAccept
 from rill_core.wire.types import NetworkIdentity
@@ -272,3 +272,32 @@ def test_boolean_verifier_and_noncanonical_duplicate_key_are_rejected() -> None:
             supported_capabilities=frozenset({"core/v1", "recovery/v1"}),
             crypto=crypto,
         )
+
+
+def test_static_accept_pair_returns_transcript_digest_only_for_signed_accept() -> None:
+    source, envelopes = _data()
+    crypto = PinnedCrypto(source, envelopes)
+    init = source["verification_context"]["handshake_init"]
+    expected: dict[str, Any] = {
+        "expected_provider_identity": init["expected_provider_identity_xonly_key"],
+        "expected_profile": "btc-to-ln/v1",
+        "expected_network": NetworkIdentity.model_validate_json(
+            json.dumps(init["network_identity"])
+        ),
+        "supported_features": frozenset(),
+        "supported_encryption_suites": frozenset({"noise-xk-secp256k1-chachapoly-sha256/v1"}),
+        "supported_capabilities": frozenset({"core/v1", "recovery/v1"}),
+        "crypto": crypto,
+    }
+    pair = [json.dumps(envelope).encode() for envelope in envelopes[:2]]
+    assert verify_static_handshake_accept(*pair, **expected) == TRANSCRIPT_DIGEST
+    assert len(crypto.calls) == 1
+    tampered = copy.deepcopy(envelopes[1])
+    tampered["payload"]["provider_identity_signature"] = "00" * 64
+    with pytest.raises(ValidationError, match=r"\Ainvalid static handshake accept\Z") as caught:
+        verify_static_handshake_accept(pair[0], json.dumps(tampered).encode(), **expected)
+    assert caught.value.__cause__ is None
+    with pytest.raises(ValidationError, match=r"\Ainvalid static handshake accept\Z"):
+        verify_static_handshake_accept(pair[1], pair[0], **expected)
+    with pytest.raises(ValidationError, match=r"\Ainvalid static handshake accept\Z"):
+        verify_static_handshake_accept(*pair, **{**expected, "expected_profile": "ln-to-btc/v1"})
