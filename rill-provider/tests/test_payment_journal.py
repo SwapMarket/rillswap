@@ -133,6 +133,50 @@ def _run_exit(path: Path, phase: str) -> None:
     assert process.exitcode == 0
 
 
+def test_observed_track_is_atomic_correlated_and_replay_safe(tmp_path: Path) -> None:
+    journal = OutgoingPaymentJournal.create(tmp_path / "payments.sqlite3", _network(), "node-alpha")
+    intent = journal.record_intent(_intent())
+    first = _observation(backend_attempt_id=None, reported_status="UNKNOWN")
+    second = _observation(
+        observation_id="21" * 32,
+        backend_attempt_id=None,
+        reported_status="FAILED",
+    )
+    assert journal.record_observed_track(intent, (first, second)) == (first, second)
+    assert journal.record_observed_track(intent, (first, second)) == (first, second)
+    assert journal.list_observations(intent.idempotency_key) == (first, second)
+    with pytest.raises(PaymentJournalConflictError, match="observation ID"):
+        journal.record_observed_track(
+            intent,
+            (
+                _observation(observation_id="22" * 32, backend_attempt_id=None),
+                replace(second, evidence_sha256="ff" * 32),
+            ),
+        )
+    assert journal.list_observations(intent.idempotency_key) == (first, second)
+
+
+def test_observed_track_refuses_restored_or_foreign_intent(tmp_path: Path) -> None:
+    path = tmp_path / "payments.sqlite3"
+    journal = OutgoingPaymentJournal.create(path, _network(), "node-alpha")
+    expected = journal.record_intent(_intent())
+    observation = _observation(backend_attempt_id=None)
+    with pytest.raises(PaymentJournalConflictError, match="intent differs"):
+        journal.record_observed_track(replace(expected, route=b"different route"), (observation,))
+    with pytest.raises(PaymentJournalError, match="another intent"):
+        journal.record_observed_track(expected, (replace(observation, idempotency_key="33" * 32),))
+    with pytest.raises(PaymentJournalError, match="backend-reported identity"):
+        journal.record_observed_track(
+            expected, (replace(observation, backend_identity="node-beta"),)
+        )
+    with pytest.raises(PaymentJournalError, match="nonempty tuple"):
+        journal.record_observed_track(expected, ())
+    assert journal.list_observations(expected.idempotency_key) == ()
+    path.unlink()
+    with pytest.raises(PaymentJournalError, match="existing regular file"):
+        journal.record_observed_track(expected, (observation,))
+
+
 def test_explicit_creation_network_backend_binding_and_reopen(tmp_path: Path) -> None:
     path = tmp_path / "payments.sqlite3"
     with pytest.raises(PaymentJournalError, match="existing regular file"):

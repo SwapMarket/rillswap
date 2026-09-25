@@ -379,6 +379,65 @@ class OutgoingPaymentJournal:
                 raise
         return observed
 
+    def record_observed_track(
+        self,
+        expected_intent: OutgoingPaymentIntent,
+        observations: tuple[PaymentObservation, ...],
+    ) -> tuple[PaymentObservation, ...]:
+        """Atomically append read-only reports against the *same* immutable intent.
+
+        This is not payment reconciliation or permission to act. The journal
+        may have been restored or replaced during the observer's network call;
+        checking only an intent key outside this transaction would be unsafe.
+        """
+        if not isinstance(expected_intent, OutgoingPaymentIntent):
+            raise PaymentJournalError("expected a complete existing payment intent")
+        if not isinstance(observations, tuple) or not observations:
+            raise PaymentJournalError("expected a nonempty tuple of backend observations")
+        for observed in observations:
+            if not isinstance(observed, PaymentObservation):
+                raise PaymentJournalError("expected complete backend observations")
+            if observed.idempotency_key != expected_intent.idempotency_key:
+                raise PaymentJournalError("observed payment belongs to another intent")
+            if observed.backend_identity != self._backend_identity:
+                raise PaymentJournalError("backend-reported identity differs from this journal")
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                if self._intent(connection, expected_intent.idempotency_key) != expected_intent:
+                    raise PaymentJournalConflictError(  # noqa: TRY301 - rollback below
+                        "recorded payment intent differs from observed immutable intent"
+                    )
+                for observed in observations:
+                    prior = self._observation(connection, observed.observation_id)
+                    if prior is not None:
+                        if prior != observed:
+                            raise PaymentJournalConflictError(  # noqa: TRY301 - rollback below
+                                "observation ID has different immutable content"
+                            )
+                        continue
+                    connection.execute(
+                        "INSERT INTO observations(observation_id, idempotency_key, "
+                        "backend_identity, backend_attempt_id, reported_status, evidence_sha256) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            observed.observation_id,
+                            observed.idempotency_key,
+                            observed.backend_identity,
+                            observed.backend_attempt_id,
+                            observed.reported_status,
+                            observed.evidence_sha256,
+                        ),
+                    )
+                connection.commit()
+            except sqlite3.IntegrityError as exc:
+                connection.rollback()
+                raise PaymentJournalConflictError("observation identity is already used") from exc
+            except BaseException:
+                connection.rollback()
+                raise
+        return observations
+
     def list_observations(self, idempotency_key: str) -> tuple[PaymentObservation, ...]:
         """List every report, including contradictory and inconclusive ones."""
         _hash(idempotency_key, "idempotency_key")

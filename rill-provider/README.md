@@ -291,8 +291,9 @@ journal does not verify the digest's provenance. Keep any secret-bearing
 backend data in a separately specified encrypted store.
 Separate journals cannot coordinate submissions to one shared backend; no
 multi-instance fencing or backend attempt correlation has been implemented.
-There is no RPC or automated reconciliation in this increment, so crash and
-restart storage tests do not complete the D01, D02, or D09 release gates.
+An operator-invoked, read-only RPC report recorder is described below. There
+is no automated reconciliation, so crash and restart storage tests do not
+complete the D01, D02, or D09 release gates.
 
 An **explicit outgoing-only LND observation diagnostic** is available as
 `RegtestLndPaymentObserver.track(payment_hash)` in
@@ -337,6 +338,41 @@ raw `NOT_FOUND` for an unknown hash, and the observer's sanitized unknown
 result. It does not exercise an initiated, failed, or settled real payment.
 Actual payment-flow interoperability, multi-instance fencing, persisted
 intent/backend correlation, and the L03/D01-D09 release gates remain open.
+
+To durably attach a bounded **diagnostic report** to an already recorded
+outgoing intent, run this only with an explicitly initialized v1 journal and an
+operator-owned `0700` evidence directory. The network file must contain the
+complete journal-bound `NetworkIdentity` JSON; use the same explicit regtest
+identity for the read-only observer. Protect both the evidence file and journal
+backups, as payment hashes, swap IDs, amounts, and HTLC attempts are sensitive.
+
+```sh
+.venv/bin/python scripts/record_lnd_payment_track.py \
+  --journal /private/payments.sqlite3 --network-identity /private/regtest-network.json \
+  --backend-identity node-alpha --idempotency-key <existing-64-character-hex-key> \
+  --lnd-host 127.0.0.1 --lnd-port 10009 \
+  --tls-cert /private/lnd-tls.cert --read-macaroon /private/offchain-read.macaroon \
+  --evidence-out /private/evidence/new-report.json
+```
+
+The command refuses a missing intent or mismatched journal before making an
+RPC. It reserves a **new** `0600` evidence file before reading backend
+credentials, then writes and syncs a canonical report before atomically
+appending its payment-level facts to the unchanged v1 journal. `INITIATED` is
+recorded as `UNKNOWN`; incomplete tracking, absent history, and reported
+failure are never retry or risk-release permission. HTLC attempt IDs are kept
+in the evidence, not conflated with the journal's Rill attempt ID. The route
+is represented by its digest and byte length, never raw route bytes. The
+configured backend name and TLS endpoint are not independently or atomically
+bound to LND's actual node identity or to execution of the journaled amount,
+route, or absolute expiry. This is **not** payment reconciliation or claim
+authority. Errors may leave an empty/partial evidence file or a complete
+orphan with no database row: inspect it and the backend manually; never
+overwrite, delete, or automatically replay it. The digest is only useful
+alongside the protected evidence bytes, and a restored journal may lack prior
+reports. Older, partial, or foreign journals are refused without upgrade or
+backfill. Previous installations do no startup polling, reindexing, migration,
+submission, or retry.
 
 The pinned LND source also includes exact `invoicesrpc/invoices.proto`
 and generated **message classes only**. Although their descriptors list mutating
