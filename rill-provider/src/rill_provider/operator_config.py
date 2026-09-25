@@ -89,6 +89,8 @@ class Lnd(_Strict):
     port: int = Field(ge=1, le=65535)
     tls_certificate: Path
     macaroon: Path
+    # offchain:read+write; when set (with bitcoin_core) funded swaps are paid and claimed.
+    payment_macaroon: Path | None = None
 
 
 class PublicTerms(_Strict):
@@ -202,6 +204,9 @@ def load_config(path: Path) -> OperatorConfig:
             update={
                 "tls_certificate": _resolve(base, config.lnd.tls_certificate),
                 "macaroon": _resolve(base, config.lnd.macaroon),
+                "payment_macaroon": None
+                if config.lnd.payment_macaroon is None
+                else _resolve(base, config.lnd.payment_macaroon),
             }
         )
     if config.bitcoin_core is not None:

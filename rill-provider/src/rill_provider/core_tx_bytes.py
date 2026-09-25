@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from rill_core.settlement import TaprootKeyOperations
     from rill_core.wire.messages import ContractTerms
 
+RPC_VERIFY_ALREADY_IN_CHAIN = -27
 MAX_COOKIE_BYTES = 512
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_TRANSACTION_HEX_BYTES = 200_000
@@ -297,6 +298,51 @@ class RegtestCoreTransactionReader:
             inclusion_hash,
         )
 
+    def _client(self) -> httpx.Client:
+        username, password = _cookie(self._cookie_path)
+        return httpx.Client(
+            base_url=self._url,
+            auth=httpx.BasicAuth(username, password),
+            trust_env=False,
+            follow_redirects=False,
+            timeout=httpx.Timeout(READ_SECONDS, connect=CONNECT_SECONDS),
+        )
+
+    def broadcast(self, raw: bytes, txid: str) -> str:
+        """Submit exact transaction bytes (the only mutating call); return the txid.
+
+        ``txid`` comes from the caller's validated build. Idempotent: a
+        transaction already in the chain counts as broadcast.
+        The caller records the exact bytes durably before calling.
+        """
+        try:
+            with self._client() as client:
+                result = self._rpc(client, "sendrawtransaction", [raw.hex()], 1)
+        except CoreRpcError as error:
+            if error.code != RPC_VERIFY_ALREADY_IN_CHAIN:
+                raise
+            return txid
+        except httpx.HTTPError:
+            raise CoreUnavailableError("Core RPC transport unavailable") from None
+        if result != txid:
+            raise CoreProtocolError("Core reported another transaction ID")
+        return txid
+
+    def confirmations(self, txid: str) -> int:
+        """Return best-chain confirmations of a transaction (0 in mempool).
+
+        Needs ``txindex=1`` for confirmed transactions; raises if unknown.
+        """
+        try:
+            with self._client() as client:
+                result = self._rpc(client, "getrawtransaction", [txid, True], 1)
+        except httpx.HTTPError:
+            raise CoreUnavailableError("Core RPC transport unavailable") from None
+        count = result.get("confirmations", 0) if isinstance(result, dict) else None
+        if not isinstance(result, dict) or result.get("txid") != txid or type(count) is not int:
+            raise CoreProtocolError("Core transaction status is inconsistent")
+        return count
+
     def _rpc(
         self,
         client: httpx.Client,
@@ -304,8 +350,14 @@ class RegtestCoreTransactionReader:
         params: list[object],
         request_id: int,
     ) -> Any:  # noqa: ANN401
-        if method not in ("getblockchaininfo", "getblockhash", "getrawtransaction", "gettxout"):
-            raise CoreProtocolError("unsupported read-only Core RPC method")
+        if method not in (
+            "getblockchaininfo",
+            "getblockhash",
+            "getrawtransaction",
+            "gettxout",
+            "sendrawtransaction",
+        ):
+            raise CoreProtocolError("unsupported Core RPC method")
         try:
             with client.stream(
                 "POST",
@@ -353,8 +405,17 @@ class RegtestCoreTransactionReader:
                 or not isinstance(error.get("message"), str)
             ):
                 raise CoreProtocolError("Core RPC error envelope is malformed")
-            raise CoreUnavailableError("Core RPC result unavailable; no absence claim")
+            raise CoreRpcError(error["code"])
         return envelope["result"]
+
+
+class CoreRpcError(CoreUnavailableError):
+    """Core answered with a JSON-RPC error; only the numeric code is kept."""
+
+    def __init__(self, code: int) -> None:
+        """Keep the code, never the (possibly data-bearing) message."""
+        super().__init__("Core RPC result unavailable; no absence claim")
+        self.code = code
 
 
 def _transaction_bytes(raw_hex: object) -> bytes:

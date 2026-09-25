@@ -19,6 +19,7 @@ from rill_provider.core_tx_bytes import RegtestCoreTransactionReader
 from rill_provider.handshake_service import HandshakeService
 from rill_provider.live_session_store import LiveSessionStore, LiveSessionStoreError
 from rill_provider.lnd_invoice_decode import RegtestLndInvoiceDecoder
+from rill_provider.lnd_payment_send import RegtestLndPaymentSender
 from rill_provider.operator_config import (
     OperatorConfig,
     OperatorConfigError,
@@ -26,6 +27,7 @@ from rill_provider.operator_config import (
     read_custody_identity,
 )
 from rill_provider.provider_identity import ProviderIdentity, ProviderIdentityError
+from rill_provider.settlement_engine import SettlementEngine
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -72,6 +74,28 @@ def _chain_tip(config: OperatorConfig) -> Callable[[], int] | None:
     except ValueError:
         raise OperatorConfigError("bitcoin_core requires a regtest network") from None
     return reader.tip_height
+
+
+def _settlement(
+    config: OperatorConfig, store: LiveSessionStore, crypto: Context
+) -> SettlementEngine | None:
+    lnd, core = config.lnd, config.bitcoin_core
+    if lnd is None or core is None or lnd.payment_macaroon is None:
+        return None
+    try:
+        chain = RegtestCoreTransactionReader(
+            port=core.port, cookie_path=core.cookie_file, network=config.network
+        )
+        lightning = RegtestLndPaymentSender(
+            host="127.0.0.1",
+            port=lnd.port,
+            tls_certificate_path=lnd.tls_certificate,
+            macaroon_path=lnd.payment_macaroon,
+            network=config.network,
+        )
+    except ValueError:
+        raise OperatorConfigError("settlement requires a regtest network") from None
+    return SettlementEngine(store, chain, lightning, crypto)
 
 
 def _invoice_decoder(config: OperatorConfig) -> Callable[[str], InvoiceBinding] | None:
@@ -121,6 +145,7 @@ async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
             config.service_policy(),
             chain_tip=_chain_tip(config),
             invoice_decoder=_invoice_decoder(config),
+            settlement=_settlement(config, store, crypto),
         )
         await service.run(stop)
 

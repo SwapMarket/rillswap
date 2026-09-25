@@ -70,6 +70,16 @@ APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
 SCHEMA_VERSION = 5  # v1-v4 (unreleased development formats) are refused unchanged.
 CONTRACT_KEY_RECORD_KIND = "rillswap-provider-contract-key"
 OPEN_PHASES = ("CONFIRMED", "ACCEPTED")  # sessions that may still send requests
+SWAP_TRANSITIONS = frozenset(
+    {
+        ("FUNDING_SEEN", "PAYING"),
+        ("FUNDING_SEEN", "FAILED"),
+        ("PAYING", "PAID"),
+        ("PAYING", "FAILED"),
+        ("PAID", "CLAIMING"),
+        ("CLAIMING", "CLAIMED"),
+    }
+)
 CLIENT_REQUEST_TYPES = ("quote_request", "terms_accept", "funding_binding")
 SWAP_COLUMNS = (
     "session_id, contract_hash, terms_offer, terms_accept, state, funding_binding, "
@@ -145,8 +155,9 @@ SCHEMA = (
     (
         "CREATE TABLE swaps (session_id TEXT PRIMARY KEY, contract_hash TEXT NOT NULL UNIQUE, "
         "terms_offer BLOB NOT NULL, terms_accept BLOB NOT NULL, state TEXT NOT NULL CHECK "
-        "(state IN ('ACCEPTED', 'FUNDING_SEEN', 'PAYING', 'PAID', 'FAILED', 'CLAIMED')), "
-        "funding_binding BLOB, preimage TEXT, claim_txid TEXT, updated_at INTEGER NOT NULL)"
+        "(state IN ('ACCEPTED', 'FUNDING_SEEN', 'PAYING', 'PAID', 'FAILED', 'CLAIMING', "
+        "'CLAIMED')), funding_binding BLOB, preimage TEXT, claim_txid TEXT, claim_tx BLOB, "
+        "updated_at INTEGER NOT NULL)"
     ),
     # Never deleted: a payment hash is offered at most once, forever (RS-003).
     (
@@ -277,6 +288,25 @@ class SwapRecord:
     funding_binding: bytes | None
     preimage: str | None
     claim_txid: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SettlementItem:
+    """One funded swap the settlement engine still has to move forward."""
+
+    session_id: str
+    state: str
+    blocked: bool
+    terms_offer: bytes
+    funding_binding: bytes
+    invoice: str
+    preimage: str | None
+    claim_tx: bytes | None
+    claim_txid: str | None
+
+
+class StaleSwapError(LiveSessionStoreError):
+    """The swap is no longer in the state the caller observed."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1385,7 +1415,7 @@ class LiveSessionStore:
                     scalar, _ = self._unseal(connection, outer.session_id)
                     try:
                         response = self._signed_envelope(
-                            outer, key, provider_seq, reply, scalar, signer
+                            outer, key, provider_seq, reply, scalar, signer, outer.message_id
                         )
                     finally:
                         del scalar
@@ -1434,6 +1464,7 @@ class LiveSessionStore:
         reply: Answer,
         scalar: bytes,
         signer: EnvelopeSigner,
+        in_reply_to: str | None,
     ) -> Envelope:
         unsigned = Envelope.model_validate_json(
             canonicalize(
@@ -1446,7 +1477,7 @@ class LiveSessionStore:
                     "message_id": _new_message_id(),
                     "sender_session_key": key,
                     "sequence": sequence,
-                    "in_reply_to": request.message_id,
+                    "in_reply_to": in_reply_to,
                     "contract_hash": reply.contract_hash,
                     "message_type": reply.message_type,
                     "payload": reply.payload,
@@ -1530,6 +1561,163 @@ class LiveSessionStore:
         if outer.sequence != client_seq:
             raise LiveSessionStoreError("request not admissible")
         return "new"
+
+    def settlement_work(self) -> tuple[SettlementItem, ...]:
+        """Return funded swaps not yet claimed or failed, oldest first."""
+        try:
+            with self._write() as connection:
+                rows = connection.execute(
+                    "SELECT w.session_id, w.state, s.blocked, w.terms_offer, w.funding_binding, "
+                    "i.canonical_bytes, w.preimage, w.claim_tx, w.claim_txid FROM swaps w "
+                    "JOIN sessions s ON s.session_id = w.session_id "
+                    "JOIN inbox i ON i.session_id = w.session_id AND i.sender_key = s.client_key "
+                    "AND i.seq = ? WHERE w.state IN ('FUNDING_SEEN', 'PAYING', 'PAID', 'CLAIMING') "
+                    "ORDER BY w.updated_at, w.session_id",
+                    (FIRST_REQUEST_SEQUENCE,),
+                ).fetchall()
+                items = tuple(
+                    SettlementItem(
+                        session_id,
+                        state,
+                        bool(blocked),
+                        offer,
+                        binding,
+                        str(_canonical_envelope(request).payload["invoice"]),
+                        preimage,
+                        claim_tx,
+                        claim_txid,
+                    )
+                    for (
+                        session_id,
+                        state,
+                        blocked,
+                        offer,
+                        binding,
+                        request,
+                        preimage,
+                        claim_tx,
+                        claim_txid,
+                    ) in rows
+                )
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("settlement work unavailable") from None
+        return items
+
+    def advance_swap(  # noqa: PLR0913 - one atomic transition's explicit parts
+        self,
+        session_id: str,
+        *,
+        from_state: str,
+        to_state: str,
+        signer: EnvelopeSigner,
+        now: int,
+        preimage: str | None = None,
+        claim_tx: bytes | None = None,
+        claim_txid: str | None = None,
+        observation: dict[str, Any] | None = None,
+    ) -> None:
+        """Move one swap forward and record its observation in one transaction.
+
+        Raises ``StaleSwapError`` unless the swap is still in ``from_state``,
+        so a crash or a concurrent tick can never apply a transition twice.
+        The observation is committed to the outbox before anything sends it.
+        """
+        if (from_state, to_state) not in SWAP_TRANSITIONS:
+            raise LiveSessionStoreError("swap transition unsupported")
+        try:
+            with self._write() as connection:
+                updated = connection.execute(
+                    "UPDATE swaps SET state=?, preimage=COALESCE(?, preimage), "
+                    "claim_tx=COALESCE(?, claim_tx), claim_txid=COALESCE(?, claim_txid), "
+                    "updated_at=? WHERE session_id=? AND state=?",
+                    (to_state, preimage, claim_tx, claim_txid, now, session_id, from_state),
+                ).rowcount
+                if updated != 1:
+                    raise StaleSwapError("swap state changed")  # noqa: TRY301
+                if observation is not None:
+                    self._record_observation(connection, session_id, observation, signer, now)
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage or crypto details
+            raise LiveSessionStoreError("swap transition refused") from None
+
+    def _record_observation(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+        payload: dict[str, Any],
+        signer: EnvelopeSigner,
+        now: int,
+    ) -> None:
+        offer_bytes, contract, key, revision, provider_seq = connection.execute(
+            "SELECT w.terms_offer, w.contract_hash, s.provider_session_key, s.revision, "
+            "s.next_provider_seq FROM swaps w JOIN sessions s ON s.session_id = w.session_id "
+            "WHERE w.session_id=?",
+            (session_id,),
+        ).fetchone()
+        reply = Answer("observation", payload, contract_hash=contract)
+        scalar, _ = self._unseal(connection, session_id)
+        try:
+            envelope = self._signed_envelope(
+                _canonical_envelope(offer_bytes), key, provider_seq, reply, scalar, signer, None
+            )
+        finally:
+            del scalar
+        connection.execute(
+            "INSERT INTO outbox VALUES (?, ?, ?, NULL, ?, ?, 'PENDING')",
+            (
+                envelope.message_id,
+                session_id,
+                provider_seq,
+                canonicalize(envelope.model_dump(mode="json")),
+                revision + 1,
+            ),
+        )
+        connection.execute(
+            "UPDATE sessions SET revision=?, next_provider_seq=?, active_at=? WHERE session_id=?",
+            (revision + 1, provider_seq + 1, now, session_id),
+        )
+
+    def sign_with_contract_key(
+        self, session_id: str, digest: bytes, signer: EnvelopeSigner
+    ) -> bytes:
+        """BIP340-sign one digest with this swap's sealed provider contract key.
+
+        Only for a swap that reached ``PAID`` or ``CLAIMING`` (the claim leaf);
+        the scalar never leaves the store.
+        """
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT k.compressed_key, k.secret_age FROM contract_keys k "
+                    "JOIN swaps w ON w.session_id = k.session_id "
+                    "WHERE k.session_id=? AND w.state IN ('PAID', 'CLAIMING')",
+                    (session_id,),
+                ).fetchone()
+                if row is None or type(digest) is not bytes or len(digest) != 32:  # noqa: PLR2004
+                    raise LiveSessionStoreError("no claimable swap")  # noqa: TRY301
+                compressed, sealed = row
+                plaintext = pyrage.decrypt(sealed, [self._custody_identity])
+                record = json.loads(plaintext)
+                scalar = bytes.fromhex(record["secret_scalar"])
+                try:
+                    if (
+                        record["session_id"] != session_id
+                        or record["store_uuid"] != self._store_uuid
+                        or bytes(self._public_keys.public_key(scalar)).hex() != compressed
+                    ):
+                        raise LiveSessionStoreError("contract key custody differs")
+                    signature = signer.schnorr_sign(scalar, digest, secrets.token_bytes(32))
+                finally:
+                    del scalar
+                self._crypto.schnorr_verify(bytes.fromhex(compressed)[1:], digest, signature)
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo secret material
+            raise LiveSessionStoreError("contract key signing refused") from None
+        return bytes(signature)
 
     def session_mailboxes(self) -> tuple[str, ...]:
         """Return our mailbox keys for sessions that may still send to us."""
@@ -1752,7 +1940,7 @@ def _apply_effect(
         if replied is None or request.contract_hash != effect.contract_hash:
             raise LiveSessionStoreError("acceptance not bound to an offer")
         connection.execute(
-            "INSERT INTO swaps VALUES (?, ?, ?, ?, 'ACCEPTED', NULL, NULL, NULL, ?)",
+            "INSERT INTO swaps VALUES (?, ?, ?, ?, 'ACCEPTED', NULL, NULL, NULL, NULL, ?)",
             (request.session_id, effect.contract_hash, replied[0], document, now),
         )
         connection.execute(

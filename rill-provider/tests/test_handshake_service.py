@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import os
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -402,6 +403,11 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: P
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from rill_core.settlement.taproot import reconstruct_taproot_contract  # noqa: PLC0415
+    from rill_core.settlement.unilateral import (  # noqa: PLC0415
+        FundingOutput,
+        UnilateralAuthorization,
+        validate_unilateral_spend,
+    )
     from rill_core.wire.hashes import (  # noqa: PLC0415
         client_acceptance_hash,
         funding_binding_hash,
@@ -418,7 +424,9 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: P
     from test_quote_policy import BINDING, CONTRACT, FIRM, FIRM_SCHEDULE  # noqa: PLC0415
 
     from rill_provider._nip59_send import _wrap_envelope  # noqa: PLC0415
+    from rill_provider.lnd_payment_send import PaymentOutcome  # noqa: PLC0415
     from rill_provider.provider_identity import ProviderIdentity  # noqa: PLC0415
+    from rill_provider.settlement_engine import SettlementEngine  # noqa: PLC0415
 
     harness = Harness(tmp_path, monkeypatch)
     harness.provision()
@@ -436,9 +444,13 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: P
     )
     decoded: list[str] = []
 
+    exact = BINDING.model_copy(  # the engine re-checks the invoice string it pays
+        update={"bolt11_sha256": hashlib.sha256(FIRM["invoice"].encode()).hexdigest()}
+    )
+
     def decoder(invoice: str) -> Any:  # noqa: ANN401
         decoded.append(invoice)
-        return BINDING
+        return exact
 
     with (
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
@@ -500,7 +512,7 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: P
             parsed,
             offer,
             handshake_hash=harness.envelopes[2]["payload"]["handshake_hash"],
-            invoice_binding=BINDING,
+            invoice_binding=exact,
         )
         crypto.schnorr_verify(
             bytes.fromhex(harness.identity),
@@ -594,6 +606,70 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: P
             "SELECT state, contract_hash FROM swaps"
         ).fetchall()
         assert swap == [("FUNDING_SEEN", offer.terms.contract_hash)]
+
+        preimage = "42" * 32  # sha256 is the fixture payment hash
+        chain = SimpleNamespace(depth=1, claim_depth=0, broadcasts=[])
+        chain.tip_height = lambda: 850
+        chain.observe_candidate_outpoint = lambda _b, _t, *, keys: SimpleNamespace(  # noqa: ARG005
+            chain_only_confirmations=chain.depth, tip_height=850
+        )
+        chain.broadcast = lambda raw, txid: chain.broadcasts.append((raw, txid)) or txid
+        chain.confirmations = lambda _txid: chain.claim_depth
+        sent: list[dict[str, Any]] = []
+
+        def track(_payment_hash: str) -> PaymentOutcome:
+            return PaymentOutcome("SUCCEEDED", preimage) if sent else PaymentOutcome("UNKNOWN")
+
+        def send(bolt11: str, **bounds: Any) -> PaymentOutcome:  # noqa: ANN401
+            sent.append({"invoice": bolt11, **bounds})
+            return PaymentOutcome("SUCCEEDED", preimage)
+
+        lightning = SimpleNamespace(track=track, send=send)
+        engine = SettlementEngine(store, chain, lightning, crypto)
+        later = BINDING.created_at + 10
+        assert asyncio.run(engine.tick(later)) == {}  # one confirmation is not enough
+        chain.depth = 2
+        progressed = asyncio.run(engine.tick(later))
+        (session_id,) = progressed
+        assert progressed == {session_id: "CLAIMING"}, (progressed, sent)
+        assert store.settlement_work()[0].state == "CLAIMING"
+        assert sent == [
+            {
+                "invoice": FIRM["invoice"],
+                "payment_hash": BINDING.payment_hash,
+                "fee_limit_sat": int(terms.economics.success_fee_sat),
+                "cltv_limit": 144,  # signed E_out 994 minus tip 850
+            }
+        ]
+        ((raw_claim, claim_txid),) = chain.broadcasts
+        observations = [
+            Envelope.model_validate_json(entry.canonical_bytes)
+            for entry in store.pending_outbox()
+            if b'"observation"' in entry.canonical_bytes
+        ]
+        assert [item.payload for item in observations] == [
+            {"kind": "payment_settled", "payment_preimage": preimage},
+            {"kind": "claim_broadcast", "claim_txid": claim_txid},
+        ]
+        for item in observations:
+            assert (item.in_reply_to, item.contract_hash) == (None, offer.terms.contract_hash)
+            crypto.schnorr_verify(
+                bytes.fromhex(response.sender_session_key),
+                unsigned_envelope_hash(item),
+                bytes.fromhex(item.signature or ""),
+            )
+        claim = UnilateralAuthorization.from_terms(
+            terms,
+            FundingOutput(bytes.fromhex(binding.funding_txid), 0, value, script),
+            "claim",
+            keys=crypto,
+        )
+        assert validate_unilateral_spend(raw_claim, claim, verifier=crypto).txid == claim_txid
+        chain.claim_depth = 3
+        assert asyncio.run(engine.tick(later)) == {session_id: "CLAIMED"}
+        assert store.settlement_work() == ()
+        assert len(sent) == 1  # never paid twice
+
         # An accepted contract is never idle-expired; its hash stays reserved.
         assert store.expire_idle(now=BINDING.created_at + 10**6, idle_timeout=1) == 0
         reserved = store._connection.execute(  # noqa: SLF001 - durable history

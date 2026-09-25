@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 
     from rill_provider.live_session_store import LiveSessionStore
     from rill_provider.provider_identity import ProviderIdentity
+    from rill_provider.settlement_engine import SettlementEngine
 
 LOG = logging.getLogger(__name__)
 NIP59_BACKDATE_SECONDS = 2 * 24 * 60 * 60
@@ -123,6 +124,7 @@ class HandshakeService:
         clock: Callable[[], float] = time.time,
         chain_tip: Callable[[], int] | None = None,
         invoice_decoder: Callable[[str], InvoiceBinding] | None = None,
+        settlement: SettlementEngine | None = None,
     ) -> None:
         """Bind already-acquired, already-verified resources.
 
@@ -130,7 +132,8 @@ class HandshakeService:
         per request) supplies an indicative quote's reference height. Without
         it, or when it fails, quotes are answered ``capacity_unavailable``.
         ``invoice_decoder`` (blocking, e.g. LND ``DecodePayReq``) plus a
-        ``provider_destination_script`` enable firm offers.
+        ``provider_destination_script`` enable firm offers. ``settlement``
+        moves funded swaps to payment and claim once per tick.
         """
         self._store = store
         self._identity = identity
@@ -139,6 +142,7 @@ class HandshakeService:
         self._clock = clock
         self._chain_tip = chain_tip
         self._invoice_decoder = invoice_decoder
+        self._settlement = settlement
         self._state = _State()
 
     def _now(self) -> int:
@@ -187,6 +191,9 @@ class HandshakeService:
             if state.republish:
                 LOG.warning("announcement not accepted by any relay; will retry")
         await self._resubscribe(relays)
+        if self._settlement is not None:
+            for session_id, moved in (await self._settlement.tick(now)).items():
+                LOG.info("swap %s moved to %s", session_id[:16], moved)
         due = sorted(  # least recently attempted first (never attempted = 0)
             (
                 entry.message_id

@@ -775,3 +775,60 @@ def test_tip_height_checks_chain_and_genesis(tmp_path: Path) -> None:
         reader = RegtestCoreTransactionReader(port=port, cookie_path=cookie, network=network)
         with pytest.raises(core_tx_bytes.CoreProtocolError, match="genesis"):
             reader.tip_height()
+
+
+def _rpc_reply(
+    result: object = None, error: dict[str, Any] | None = None
+) -> Callable[[dict[str, Any]], tuple[int, bytes]]:
+    def respond(payload: dict[str, Any]) -> tuple[int, bytes]:
+        body: dict[str, Any] = {"jsonrpc": "2.0", "id": payload["id"]}
+        body |= {"error": error} if error is not None else {"result": result}
+        return 200, json.dumps(body).encode()
+
+    return respond
+
+
+def test_broadcast_is_exact_and_idempotent(tmp_path: Path) -> None:
+    _, _, network = _context()
+    requests: list[dict[str, Any]] = []
+    txid = "ab" * 32
+    with _server(_rpc_reply(txid), requests) as port:
+        reader = RegtestCoreTransactionReader(
+            port=port, cookie_path=_cookie(tmp_path), network=network
+        )
+        assert reader.broadcast(b"\x02\x00", txid) == txid
+    assert (requests[0]["method"], requests[0]["params"]) == ("sendrawtransaction", ["0200"])
+    with _server(_rpc_reply(error={"code": -27, "message": "already"}), []) as port:
+        reader = RegtestCoreTransactionReader(
+            port=port, cookie_path=_cookie(tmp_path), network=network
+        )
+        assert reader.broadcast(b"\x02\x00", txid) == txid  # already in the chain
+    with _server(_rpc_reply(error={"code": -26, "message": "rejected"}), []) as port:
+        reader = RegtestCoreTransactionReader(
+            port=port, cookie_path=_cookie(tmp_path), network=network
+        )
+        with pytest.raises(CoreUnavailableError):
+            reader.broadcast(b"\x02\x00", txid)
+    with _server(_rpc_reply("cd" * 32), []) as port:
+        reader = RegtestCoreTransactionReader(
+            port=port, cookie_path=_cookie(tmp_path), network=network
+        )
+        with pytest.raises(CoreProtocolError):
+            reader.broadcast(b"\x02\x00", txid)
+
+
+def test_confirmations_counts_mempool_as_zero(tmp_path: Path) -> None:
+    _, _, network = _context()
+    txid = "ab" * 32
+    for result, expected in (({"txid": txid}, 0), ({"txid": txid, "confirmations": 4}, 4)):
+        with _server(_rpc_reply(result), []) as port:
+            reader = RegtestCoreTransactionReader(
+                port=port, cookie_path=_cookie(tmp_path), network=network
+            )
+            assert reader.confirmations(txid) == expected
+    with _server(_rpc_reply({"txid": "cd" * 32}), []) as port:
+        reader = RegtestCoreTransactionReader(
+            port=port, cookie_path=_cookie(tmp_path), network=network
+        )
+        with pytest.raises(CoreProtocolError):
+            reader.confirmations(txid)

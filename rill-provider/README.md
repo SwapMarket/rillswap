@@ -275,6 +275,33 @@ hash is written to `payment_hashes` in the same transaction as the offer.
 That table is never deleted, not even when the session expires. A terms
 offer grants no funding or payment action by itself.
 
+**Acceptance and settlement.** A signed `terms_accept` that replies to the
+recorded offer, before `terms_expiry`, moves the session to `ACCEPTED`
+atomically (a `swaps` row). Idle expiry never deletes accepted sessions. The
+client's first signed `funding_binding` (revision 0 only) is checked
+statically against the terms and recorded as `FUNDING_SEEN`. Both are
+answered with `ack`.
+
+With `lnd.payment_macaroon` (offchain read and write) and `bitcoin_core`
+configured, the service runs `SettlementEngine` once per tick. Every step is
+recorded before its external effect:
+- **Funding.** The exact bound output needs `funding_confirmations` on our
+  own node (`txindex=1`). The signed `max_outgoing_htlc_expiry_height` must
+  still leave the invoice's final CLTV. The swap is then recorded as `PAYING`,
+  or as `FAILED` with a `payment_failed` observation.
+- **Payment.** LND `TrackPaymentV2` runs first, so a restart never sends
+  twice. `SendPaymentV2` runs only when LND has no payment for the hash, with
+  `cltv_limit = E_out - tip` and a routing fee capped by the success fee.
+  Blocked (conflicting) sessions never start a payment.
+- **Claim.** A verified preimage records `PAID` and sends a `payment_settled`
+  observation. The engine then builds the unilateral claim-leaf spend, signed
+  inside the store by the sealed contract key. Its exact bytes are recorded
+  as `CLAIMING` with a `claim_broadcast` observation, then broadcast. The
+  engine rebroadcasts until `settlement_confirmations`, then records
+  `CLAIMED`.
+
+Cooperative MuSig2 claims are not negotiated yet.
+
 ### Operator entrypoint (private regtest only)
 
 ```sh
