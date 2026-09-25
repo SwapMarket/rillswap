@@ -197,3 +197,19 @@ def test_bitcoin_core_cookie_resolves_and_quote_settings_reach_the_service(
         load_config(_config(tmp_path, quote={"lifetime": 0}))
     with pytest.raises(OperatorConfigError):  # not a representable wire integer
         load_config(_config(tmp_path, quote={"funding_confirmations": 2**53}))
+
+
+def test_lnd_paths_resolve_and_destination_script_is_checked(tmp_path: Path) -> None:
+    script = "0014" + "31" * 20
+    config = load_config(
+        _config(
+            tmp_path,
+            lnd={"port": 10009, "tls_certificate": "tls.cert", "macaroon": "read.macaroon"},
+            provider_destination_script=script,
+        )
+    )
+    assert config.lnd is not None
+    assert config.lnd.macaroon == tmp_path / "read.macaroon"
+    assert config.service_policy().provider_destination_script == script
+    with pytest.raises(OperatorConfigError):
+        load_config(_config(tmp_path, provider_destination_script="76a914" + "00" * 20))

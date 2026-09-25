@@ -393,3 +393,114 @@ def test_native_sequence_reuse_conflicts_whatever_the_label(
         assert deliver(request) == "blocked"
         assert store.session_mailboxes() == ()
         assert tips == [500]  # requests never trigger chain RPC
+
+
+@pytest.mark.native_crypto
+@NATIVE
+def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rill_core.wire.hashes import provider_terms_hash  # noqa: PLC0415
+    from rill_core.wire.quotes import (  # noqa: PLC0415
+        FirmQuoteRequest,
+        TermsOfferPayload,
+        check_terms_offer,
+        parse_quote_request,
+    )
+    from rill_crypto import Context  # noqa: PLC0415
+    from test_quote_policy import BINDING, CONTRACT, FIRM, FIRM_SCHEDULE  # noqa: PLC0415
+
+    from rill_provider._nip59_send import _wrap_envelope  # noqa: PLC0415
+    from rill_provider.provider_identity import ProviderIdentity  # noqa: PLC0415
+
+    harness = Harness(tmp_path, monkeypatch)
+    harness.provision()
+    unlock = x25519.Identity.generate()
+    policy = ServicePolicy(
+        network=harness.network,
+        profiles=("btc-to-ln/v1",),
+        amount_bands=((1000, 100_000),),
+        base_fee_sat=50,
+        proportional_millionths=1000,
+        slot="s",
+        relay_urls=("ws://r/",),
+        provider_destination_script=CONTRACT["provider_destination_script"],
+        quote=FIRM_SCHEDULE,
+    )
+    decoded: list[str] = []
+
+    def decoder(invoice: str) -> Any:  # noqa: ANN401
+        decoded.append(invoice)
+        return BINDING
+
+    with (
+        Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
+        harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store,
+    ):
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                "rill_provider.provider_identity.secrets.token_bytes",
+                lambda _n: (1).to_bytes(32, "big"),
+            )
+            ProviderIdentity.provision(
+                tmp_path / "id.age", recipient=str(unlock.to_public()), crypto=crypto
+            )
+        signer = ProviderIdentity.load(
+            tmp_path / "id.age",
+            custody_identity=str(unlock),
+            expected_xonly_public_key=harness.identity,
+            crypto=crypto,
+        )
+        store.reserve(harness.init)
+        store.commit_accept(harness.accept)
+        store.admit_confirm(harness.confirm)
+        mailbox = harness.envelopes[1]["sender_session_key"]
+        service = HandshakeService(
+            store,
+            signer,
+            crypto,
+            policy,
+            clock=lambda: BINDING.created_at,
+            chain_tip=lambda: 850,
+            invoice_decoder=decoder,
+        )
+        asyncio.run(service._refresh_tip())  # noqa: SLF001 - the per-tick step alone
+
+        def deliver(envelope: dict[str, Any]) -> str:
+            wrap = _wrap_envelope(
+                _bytes(envelope),
+                sender_session_secret=CLIENT_SECRET,
+                recipient_xonly_key=mailbox,
+                crypto=crypto,
+            )
+            return asyncio.run(service.handle(wrap, []))
+
+        request = _signed_quote_request(harness, crypto)
+        request.update(payload=FIRM | {"extensions": {}}, signature=None)
+        unsigned = unsigned_envelope_hash(Envelope.model_validate_json(json.dumps(request)))
+        request["signature"] = crypto.schnorr_sign(CLIENT_SECRET, unsigned, b"\x69" * 32).hex()
+        assert deliver(request) == "request-answered"
+        assert deliver(request) == "request-replay"
+        assert decoded == [FIRM["invoice"]]  # replays never reach the backend
+        (pending,) = store.pending_outbox()
+        response = Envelope.model_validate_json(pending.canonical_bytes)
+        assert response.message_type == "terms_offer", response.payload
+        offer = TermsOfferPayload.model_validate_json(json.dumps(response.payload))
+        parsed = parse_quote_request(json.dumps(FIRM | {"extensions": {}}).encode())
+        assert isinstance(parsed, FirmQuoteRequest)
+        check_terms_offer(
+            parsed,
+            offer,
+            handshake_hash=harness.envelopes[2]["payload"]["handshake_hash"],
+            invoice_binding=BINDING,
+        )
+        crypto.schnorr_verify(
+            bytes.fromhex(harness.identity),
+            provider_terms_hash(offer.terms),
+            bytes.fromhex(offer.provider_terms_signature),
+        )
+        assert store.expire_idle(now=BINDING.created_at + 10**6, idle_timeout=1) == 1
+        reserved = store._connection.execute(  # noqa: SLF001 - durable history survives expiry
+            "SELECT payment_hash FROM payment_hashes"
+        ).fetchall()
+        assert reserved == [(BINDING.payment_hash,)]

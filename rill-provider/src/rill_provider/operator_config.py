@@ -11,9 +11,12 @@ import os
 import stat
 from pathlib import Path  # noqa: TC003 - pydantic resolves field types at runtime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from rill_core.domain.amounts import MAX_SATS
-from rill_core.wire.types import NetworkIdentity  # noqa: TC002 - pydantic runtime type
+from rill_core.wire.types import (
+    NetworkIdentity,
+    require_v1_destination_script,
+)
 
 from rill_provider.handshake_service import ServicePolicy
 from rill_provider.handshake_store import HandshakePolicy
@@ -73,6 +76,19 @@ class QuoteSettings(_Strict):
     max_refund_fee_sat: int = Field(default=5_000, ge=0, le=MAX_SATS)
     minimum_invoice_remaining_seconds: int = Field(default=1_800, ge=1, le=MAX_WIRE_INTEGER)
     lifetime: int = Field(default=60, ge=1, le=MAX_WIRE_INTEGER)
+    outgoing_cltv_budget_blocks: int = Field(default=144, ge=1, le=MAX_WIRE_INTEGER)
+    learn_and_claim_blocks: int = Field(default=72, ge=1, le=MAX_WIRE_INTEGER)
+    client_response_blocks: int = Field(default=36, ge=1, le=MAX_WIRE_INTEGER)
+    claim_confirmation_blocks: int = Field(default=6, ge=1, le=MAX_WIRE_INTEGER)
+    terms_lifetime: int = Field(default=120, ge=1, le=MAX_WIRE_INTEGER)
+
+
+class Lnd(_Strict):
+    """Loopback regtest LND gRPC; a read macaroon suffices for invoice decoding."""
+
+    port: int = Field(ge=1, le=65535)
+    tls_certificate: Path
+    macaroon: Path
 
 
 class PublicTerms(_Strict):
@@ -96,6 +112,8 @@ class OperatorConfig(_Strict):
     custody_identity_file: Path
     native_crypto_library: Path
     bitcoin_core: BitcoinCore | None = None
+    lnd: Lnd | None = None
+    provider_destination_script: str | None = None  # P2WPKH/P2TR; enables firm offers
     quote: QuoteSettings = QuoteSettings()
     authority: Attestation
     handshake: HandshakeSelection
@@ -110,6 +128,13 @@ class OperatorConfig(_Strict):
     max_sessions: int = Field(default=DEFAULT_MAX_SESSIONS, ge=1)
     max_tombstones: int = Field(default=DEFAULT_MAX_TOMBSTONES, ge=1)
     new_sessions_per_minute: int = Field(default=DEFAULT_NEW_SESSIONS_PER_MINUTE, ge=1)
+
+    @field_validator("provider_destination_script")
+    @classmethod
+    def _destination(cls, value: str | None) -> str | None:
+        if value is not None:
+            require_v1_destination_script(value, field="provider_destination_script")
+        return value
 
     def handshake_policy(self) -> HandshakePolicy:
         """Return the store-bound negotiation policy."""
@@ -143,6 +168,7 @@ class OperatorConfig(_Strict):
             handshake_timeout=self.handshake_timeout,
             max_sends_per_tick=self.max_sends_per_tick,
             quote=QuoteSchedule(**self.quote.model_dump()),
+            provider_destination_script=self.provider_destination_script,
         )
 
 
@@ -171,6 +197,13 @@ def load_config(path: Path) -> OperatorConfig:
             "native_crypto_library",
         )
     }
+    if config.lnd is not None:
+        update["lnd"] = config.lnd.model_copy(
+            update={
+                "tls_certificate": _resolve(base, config.lnd.tls_certificate),
+                "macaroon": _resolve(base, config.lnd.macaroon),
+            }
+        )
     if config.bitcoin_core is not None:
         update["bitcoin_core"] = config.bitcoin_core.model_copy(
             update={"cookie_file": _resolve(base, config.bitcoin_core.cookie_file)}

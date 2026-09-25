@@ -17,18 +17,27 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
 from rill_provider.live_session_store import (
+    FIRST_REQUEST_SEQUENCE,
     LiveSessionStoreError,
     SessionBlockedError,
     SessionExpiredError,
     StaleOwnerError,
 )
+from rill_provider.lnd_invoice_decode import InvoiceRejectedError
 from rill_provider.provider_identity import AnnouncementTerms
-from rill_provider.quote_policy import QuoteSchedule, QuoteTerms, answer_quote
+from rill_provider.quote_policy import (
+    FirmSigner,
+    InvoiceOutcome,
+    QuoteSchedule,
+    QuoteTerms,
+    answer_quote,
+)
 from rill_provider.relay_client import RelayConnection, RelayError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from rill_core.wire.messages import InvoiceBinding
     from rill_core.wire.types import NetworkIdentity
     from rill_crypto import Context
 
@@ -73,6 +82,7 @@ class ServicePolicy:
     handshake_timeout: int = 10 * 60
     max_sends_per_tick: int = 16
     quote: QuoteSchedule = field(default_factory=QuoteSchedule)
+    provider_destination_script: str | None = None  # required for firm offers
 
     def __post_init__(self) -> None:
         """Refuse schedules that would leave advertised epochs undecodable."""
@@ -112,12 +122,15 @@ class HandshakeService:
         *,
         clock: Callable[[], float] = time.time,
         chain_tip: Callable[[], int] | None = None,
+        invoice_decoder: Callable[[str], InvoiceBinding] | None = None,
     ) -> None:
         """Bind already-acquired, already-verified resources.
 
         ``chain_tip`` (blocking; run off the event loop once per tick, never
         per request) supplies an indicative quote's reference height. Without
         it, or when it fails, quotes are answered ``capacity_unavailable``.
+        ``invoice_decoder`` (blocking, e.g. LND ``DecodePayReq``) plus a
+        ``provider_destination_script`` enable firm offers.
         """
         self._store = store
         self._identity = identity
@@ -125,6 +138,7 @@ class HandshakeService:
         self._policy = policy
         self._clock = clock
         self._chain_tip = chain_tip
+        self._invoice_decoder = invoice_decoder
         self._state = _State()
 
     def _now(self) -> int:
@@ -302,8 +316,41 @@ class HandshakeService:
             return "refused"
         return "init-accepted"
 
+    def _firm_signer(self) -> FirmSigner | None:
+        script = self._policy.provider_destination_script
+        if self._invoice_decoder is None or script is None:
+            return None
+        return FirmSigner(
+            network=self._policy.network,
+            provider_identity_key=self._identity.xonly_public_key,
+            provider_destination_script=script,
+            sign=self._identity.sign_provider_terms,
+        )
+
+    async def _decode_invoice(self, document: bytes) -> InvoiceOutcome:
+        """Decode a firm request's invoice, only for a new first request."""
+        envelope = json.loads(document)
+        payload = envelope.get("payload")
+        if (
+            self._invoice_decoder is None
+            or envelope.get("sequence") != FIRST_REQUEST_SEQUENCE
+            or not isinstance(payload, dict)
+            or payload.get("mode") != "firm"
+            or not isinstance(payload.get("invoice"), str)
+            or self._store.classify_request(document) != "new"
+        ):
+            return None
+        try:
+            return await asyncio.to_thread(self._invoice_decoder, payload["invoice"])
+        except InvoiceRejectedError:
+            return "rejected"
+        except Exception:  # noqa: BLE001 - an unavailable backend only defers firm quotes
+            LOG.warning("invoice decoding unavailable; firm quote answered capacity_unavailable")
+            return "unavailable"
+
     async def _answer(self, document: bytes, relays: Sequence[Relay], now: int) -> str:
         policy = self._policy
+        invoice = await self._decode_invoice(document)
         terms = QuoteTerms(
             amount_bands=policy.amount_bands,
             base_fee_sat=policy.base_fee_sat,
@@ -311,10 +358,12 @@ class HandshakeService:
             schedule=policy.quote,
             tip_height=self._state.tip,
             now=now,
+            firm=self._firm_signer(),
+            invoice=invoice,
         )
         answer = self._store.answer_request(
             document,
-            responder=lambda request, prior: answer_quote(request, prior, terms),
+            responder=lambda request, prior, context: answer_quote(request, prior, context, terms),
             signer=self._transport,
             now=now,
         )

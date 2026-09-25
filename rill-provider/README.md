@@ -75,7 +75,7 @@ absent, partial, old, or restored state grants no key allocation or action
 authority.
 
 `live_session_store.LiveSessionStore` is the **authoritative** handshake
-session store (SQLite `RLS1` v4; unreleased v1-v3 files are refused unchanged), and the only provider store whose rows may
+session store (SQLite `RLS1` v5; unreleased v1-v4 files are refused unchanged), and the only provider store whose rows may
 permit exposing an accept or admitting a confirm. It must be created
 explicitly with `LiveSessionStore.provision(...)` and an
 `AuthorityDeclaration`, in which the operator attests that the volume is
@@ -249,10 +249,31 @@ sequence.
 reference height from Bitcoin Core (`tip_height`, from the optional
 `bitcoin_core` config). The service reads it once per tick, never per request,
 and answers `capacity_unavailable` when no tip is available or when an offer
-would not be representable on the wire. **Firm requests are refused with `unsupported_request`.** RS-003
-forbids signed terms until a complete payment-hash reservation history
-exists, and it does not exist yet. An indicative quote grants no funding or
-payment action.
+would not be representable on the wire. **Firm requests** get identity-signed `ProviderTermsV1`
+(`terms_offer`), but only as the first request of a session and only when the
+service has both an invoice decoder (optional `lnd` config, via LND
+`DecodePayReq`) and a `provider_destination_script`. Otherwise they get
+`unsupported_request`. Before decoding, the service runs `classify_request`,
+a read-only preflight, so replays and unadmissible messages never reach LND.
+
+The policy refuses an invoice (`invoice_unacceptable`) in these cases:
+- the amount is not exactly L;
+- it expires within `minimum_invoice_remaining_seconds`;
+- it was created in the future;
+- its final CLTV does not fit the outgoing budget;
+- its payment hash was ever offered before.
+
+The refund lock is `min(tip + max_refund_delay_blocks - 1,
+max_refund_lock_height)`. The outgoing HTLC expiry is `tip +
+outgoing_cltv_budget_blocks`, which must leave `learn_and_claim_blocks`
+before the refund. The policy refuses fees or timing outside the client's
+limits (`limits_unsatisfiable`).
+
+Each session's first request creates one provider contract key, sealed to
+the custody recipient like the session key (`contract_keys`). The payment
+hash is written to `payment_hashes` in the same transaction as the offer.
+That table is never deleted, not even when the session expires. A terms
+offer grants no funding or payment action by itself.
 
 ### Operator entrypoint (private regtest only)
 

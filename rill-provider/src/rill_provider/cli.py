@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from rill_provider.core_tx_bytes import RegtestCoreTransactionReader
 from rill_provider.handshake_service import HandshakeService
 from rill_provider.live_session_store import LiveSessionStore, LiveSessionStoreError
+from rill_provider.lnd_invoice_decode import RegtestLndInvoiceDecoder
 from rill_provider.operator_config import (
     OperatorConfig,
     OperatorConfigError,
@@ -29,6 +30,7 @@ from rill_provider.provider_identity import ProviderIdentity, ProviderIdentityEr
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from rill_core.wire.messages import InvoiceBinding
     from rill_crypto import Context
 
 REFUSED = 2
@@ -72,6 +74,23 @@ def _chain_tip(config: OperatorConfig) -> Callable[[], int] | None:
     return reader.tip_height
 
 
+def _invoice_decoder(config: OperatorConfig) -> Callable[[str], InvoiceBinding] | None:
+    lnd = config.lnd
+    if lnd is None:
+        return None
+    try:
+        decoder = RegtestLndInvoiceDecoder(
+            host="127.0.0.1",
+            port=lnd.port,
+            tls_certificate_path=lnd.tls_certificate,
+            macaroon_path=lnd.macaroon,
+            network=config.network,
+        )
+    except ValueError:
+        raise OperatorConfigError("lnd requires a regtest network") from None
+    return decoder.decode
+
+
 async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
     identity = ProviderIdentity.load(
         config.identity_file,
@@ -96,7 +115,12 @@ async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
         new_sessions_per_minute=config.new_sessions_per_minute,
     ) as store:
         service = HandshakeService(
-            store, identity, crypto, config.service_policy(), chain_tip=_chain_tip(config)
+            store,
+            identity,
+            crypto,
+            config.service_policy(),
+            chain_tip=_chain_tip(config),
+            invoice_decoder=_invoice_decoder(config),
         )
         await service.run(stop)
 

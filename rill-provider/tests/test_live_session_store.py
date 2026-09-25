@@ -1056,9 +1056,21 @@ def test_native_signed_requests_get_one_durable_signed_answer(harness: Harness) 
 
     seen: list[int] = []
 
-    def responder(request: Envelope, prior: tuple[Envelope, ...]) -> tuple[str, dict[str, Any]]:
+    contexts: list[tuple[str, str, bool]] = []
+
+    def responder(
+        request: Envelope, prior: tuple[Envelope, ...], context: live.RequestContext
+    ) -> live.Answer:
         seen.append(len(prior))
-        return "error", {"code": "capacity_unavailable", "message": str(request.sequence)}
+        contexts.append(
+            (
+                context.handshake_hash,
+                context.provider_contract_key,
+                context.is_payment_hash_reserved("ab" * 32),
+            )
+        )
+        payload = {"code": "capacity_unavailable", "message": str(request.sequence)}
+        return live.Answer("error", payload, payment_hash=None if prior else "ab" * 32)
 
     harness.provision()
     with (
@@ -1100,6 +1112,11 @@ def test_native_signed_requests_get_one_durable_signed_answer(harness: Harness) 
             _signed_request(harness, crypto, 3, "22" * 32), responder=responder, signer=crypto
         )
         assert seen == [0, 1]
+        (digest, key, reserved_before), (digest2, key2, reserved_after) = contexts
+        assert digest == digest2 == harness.envelopes[2]["payload"]["handshake_hash"]
+        assert key == key2
+        assert key[:2] in {"02", "03"}
+        assert (reserved_before, reserved_after) == (False, True)
         assert not second.replay
         forged = json.loads(first)
         forged["signature"] = "00" * 64

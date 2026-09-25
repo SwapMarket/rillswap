@@ -31,6 +31,7 @@ import sqlite3
 import stat
 import time
 import uuid
+from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,7 +67,8 @@ if TYPE_CHECKING:
     from rill_provider.provider_identity import ProviderIdentity
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
-SCHEMA_VERSION = 4  # v1-v3 (unreleased development formats) are refused unchanged.
+SCHEMA_VERSION = 5  # v1-v4 (unreleased development formats) are refused unchanged.
+CONTRACT_KEY_RECORD_KIND = "rillswap-provider-contract-key"
 FIRST_REQUEST_SEQUENCE = 2  # RS-001: first client message after the confirm
 MAX_REQUESTS_PER_SESSION = 16  # further requests are refused unanswered
 DEFAULT_MAX_SESSIONS = 1000  # live (unexpired) sessions
@@ -128,6 +130,15 @@ SCHEMA = (
     (
         "CREATE TABLE announcements (slot INTEGER PRIMARY KEY CHECK (slot = 1), "
         "created_at INTEGER NOT NULL)"
+    ),
+    (
+        "CREATE TABLE contract_keys (session_id TEXT PRIMARY KEY, "
+        "compressed_key TEXT NOT NULL UNIQUE, secret_age BLOB NOT NULL)"
+    ),
+    # Never deleted: a payment hash is offered at most once, forever (RS-003).
+    (
+        "CREATE TABLE payment_hashes (payment_hash TEXT PRIMARY KEY, "
+        "session_id TEXT NOT NULL, reserved_at INTEGER NOT NULL)"
     ),
 )
 
@@ -230,11 +241,29 @@ class EnvelopeSigner(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class RequestContext:
+    """Session facts a responder may bind into its answer."""
+
+    handshake_hash: str
+    provider_contract_key: str  # compressed; fresh per session, sealed like the session key
+    is_payment_hash_reserved: Callable[[str], bool]
+
+
+@dataclass(frozen=True, slots=True)
+class Answer:
+    """A responder's answer; ``payment_hash`` is reserved forever with it."""
+
+    message_type: str
+    payload: dict[str, Any]
+    payment_hash: str | None = None
+
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    # Pure, deterministic policy: (request, earlier admitted requests) -> answer.
-    Responder = Callable[[Envelope, tuple[Envelope, ...]], tuple[str, dict[str, Any]]]
+    # Policy: (request, earlier admitted requests, session context) -> answer.
+    Responder = Callable[[Envelope, tuple[Envelope, ...], RequestContext], Answer]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1148,7 +1177,7 @@ class LiveSessionStore:
                 connection.executemany(
                     "INSERT INTO expired VALUES (?, ?)", [(sid, now) for (sid,) in idle]
                 )
-                for table in ("inbox", "outbox", "conflicts", "sessions"):
+                for table in ("inbox", "outbox", "conflicts", "contract_keys", "sessions"):
                     connection.executemany(
                         f"DELETE FROM {table} WHERE session_id=?",  # noqa: S608 - fixed names
                         idle,
@@ -1222,7 +1251,8 @@ class LiveSessionStore:
             with self._write() as connection:
                 row = connection.execute(
                     "SELECT client_key, provider_session_key, phase, blocked, revision, "
-                    "next_client_seq, next_provider_seq FROM sessions WHERE session_id=?",
+                    "next_client_seq, next_provider_seq, transcript_digest "
+                    "FROM sessions WHERE session_id=?",
                     (outer.session_id,),
                 ).fetchone()
                 if (
@@ -1234,7 +1264,7 @@ class LiveSessionStore:
                     raise SessionExpiredError("session expired")  # noqa: TRY301
                 if row is None or row[2] != "CONFIRMED":
                     raise LiveSessionStoreError("no confirmed session")  # noqa: TRY301
-                client, key, _, blocked, revision, client_seq, provider_seq = row
+                client, key, _, blocked, revision, client_seq, provider_seq, transcript = row
                 if blocked:
                     raise SessionBlockedError("session blocked by conflict evidence")  # noqa: TRY301
                 digest = verify_static_signed_envelope(
@@ -1283,7 +1313,23 @@ class LiveSessionStore:
                             (outer.session_id, client, FIRST_REQUEST_SEQUENCE),
                         )
                     )
-                    answer_type, payload = responder(outer, prior)
+                    context = RequestContext(
+                        handshake_hash=transcript,
+                        provider_contract_key=self._contract_key(connection, outer.session_id),
+                        is_payment_hash_reserved=lambda digest: (
+                            connection.execute(
+                                "SELECT 1 FROM payment_hashes WHERE payment_hash=?", (digest,)
+                            ).fetchone()
+                            is not None
+                        ),
+                    )
+                    reply = responder(outer, prior, context)
+                    answer_type, payload = reply.message_type, reply.payload
+                    if reply.payment_hash is not None:
+                        connection.execute(
+                            "INSERT INTO payment_hashes VALUES (?, ?, ?)",
+                            (reply.payment_hash, outer.session_id, now),
+                        )
                     scalar, _ = self._unseal(connection, outer.session_id)
                     try:
                         response = self._signed_envelope(
@@ -1364,6 +1410,75 @@ class LiveSessionStore:
         signature = signer.schnorr_sign(scalar, digest, secrets.token_bytes(32))
         self._crypto.schnorr_verify(bytes.fromhex(key), digest, signature)
         return unsigned.model_copy(update={"signature": signature.hex()})
+
+    def _contract_key(self, connection: sqlite3.Connection, session_id: str) -> str:
+        """Return this session's provider contract key, creating it once."""
+        row = connection.execute(
+            "SELECT compressed_key FROM contract_keys WHERE session_id=?", (session_id,)
+        ).fetchone()
+        if row is not None:
+            return str(row[0])
+        scalar = _new_session_scalar()
+        compressed = bytes(self._public_keys.public_key(scalar)).hex()
+        record = canonicalize(
+            {
+                "kind": CONTRACT_KEY_RECORD_KIND,
+                "secret_scalar": scalar.hex(),
+                "compressed_public_key": compressed,
+                "session_id": session_id,
+                "store_uuid": self._store_uuid,
+            }
+        )
+        del scalar
+        sealed = pyrage.encrypt(record, [self._custody_identity.to_public()])
+        if type(sealed) is not bytes or pyrage.decrypt(sealed, [self._custody_identity]) != record:
+            raise LiveSessionStoreError("contract key custody not verifiable")
+        connection.execute(
+            "INSERT INTO contract_keys VALUES (?, ?, ?)", (session_id, compressed, sealed)
+        )
+        return compressed
+
+    def classify_request(self, request_document: bytes) -> str:
+        """Read-only preflight: ``"new"``, ``"replay"``, or ``"conflict"``.
+
+        Lets the caller skip expensive work (e.g. invoice decoding) for
+        replays and unadmissible messages. ``answer_request`` rechecks
+        everything; this grants nothing and records nothing.
+        """
+        try:
+            outer = _canonical_envelope(request_document)
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT client_key, phase, blocked, next_client_seq FROM sessions "
+                    "WHERE session_id=?",
+                    (outer.session_id,),
+                ).fetchone()
+                if row is None or row[1] != "CONFIRMED" or row[2]:
+                    raise LiveSessionStoreError("no open confirmed session")  # noqa: TRY301
+                client, _, _, client_seq = row
+                digest = verify_static_signed_envelope(
+                    request_document,
+                    expected_session_id=outer.session_id,
+                    expected_profile=self._policy.profile,
+                    expected_network=self._network,
+                    expected_sender_key=client,
+                    supported_features=self._policy.features,
+                    crypto=self._crypto,
+                ).hex()
+                seen = connection.execute(
+                    "SELECT message_id, seq, unsigned_digest FROM inbox "
+                    "WHERE session_id=? AND sender_key=? AND (message_id=? OR seq=?)",
+                    (outer.session_id, client, outer.message_id, outer.sequence),
+                ).fetchall()
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo caller documents or crypto details
+            raise LiveSessionStoreError("request refused") from None
+        if seen:
+            return "replay" if seen == [(outer.message_id, outer.sequence, digest)] else "conflict"
+        if outer.sequence != client_seq:
+            raise LiveSessionStoreError("request not admissible")
+        return "new"
 
     def session_mailboxes(self) -> tuple[str, ...]:
         """Return our mailbox keys for sessions that may still send to us."""
