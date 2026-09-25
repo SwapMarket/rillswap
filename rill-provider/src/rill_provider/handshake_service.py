@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 LOG = logging.getLogger(__name__)
 NIP59_BACKDATE_SECONDS = 2 * 24 * 60 * 60
 MAX_SEEN_EVENTS = 4096
+_RELAY_CONNECTED = b""  # in-band wake: tick now and re-announce
 
 
 class Relay(Protocol):
@@ -230,6 +231,7 @@ class HandshakeService:
                         connected[url] = connection
                         delay = 1.0
                         await self.subscribe(connection)
+                        await inbound.put(_RELAY_CONNECTED)
                         async for event in connection.events():
                             await inbound.put(event)
                 except RelayError:
@@ -245,9 +247,18 @@ class HandshakeService:
                 await self.tick(list(connected.values()))
                 deadline = time.monotonic() + tick_seconds
                 while not stop.is_set() and (remaining := deadline - time.monotonic()) > 0:
-                    try:
-                        event = await asyncio.wait_for(inbound.get(), remaining)
-                    except TimeoutError:
+                    getter = asyncio.ensure_future(inbound.get())
+                    stopper = asyncio.ensure_future(stop.wait())
+                    await asyncio.wait(
+                        {getter, stopper}, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    stopper.cancel()
+                    if not getter.done():
+                        getter.cancel()
+                        break
+                    event = getter.result()
+                    if event == _RELAY_CONNECTED:
+                        self._state.announced_at = 0  # a new relay lacks our announcement
                         break
                     disposition = await self.handle(event, list(connected.values()))
                     LOG.info("relay event: %s", disposition)

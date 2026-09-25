@@ -18,7 +18,11 @@ dependencies = [
     "pyrage==1.4.0",
     "pycryptodomex==3.23.0",
     "aiohttp==3.14.3",
+    "pydantic==2.13.5",
 ]
+
+[project.scripts]
+rill-provider = "rill_provider.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rill_provider"]

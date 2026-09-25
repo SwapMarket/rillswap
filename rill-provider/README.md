@@ -192,6 +192,27 @@ publish). Dispositions are content-free. The service adds scheduling and
 retries, never authority. A confirmed session grants no quote, funding, or
 payment action, because none is wired yet.
 
+### Operator entrypoint (private regtest only)
+
+```sh
+rill-provider provision-identity --out id.age --recipient age1... \
+    --native-crypto-library /path/librill_crypto.so   # prints the identity key
+rill-provider provision-store --config provider.json
+rill-provider serve --config provider.json           # until SIGINT/SIGTERM
+```
+
+`provider.json` is strict JSON (`operator_config.OperatorConfig`, unknown
+fields refused). It sets the network identity, the identity key printed
+above, the identity and store paths, the age `custody_recipient`, the
+`custody_identity_file`, the native crypto library, the `authority`
+attestation, the negotiated `handshake` selection, the public `terms`,
+`relay_urls`, and optional schedules. Relative paths resolve from the
+config's directory. The config holds no secrets. The custody identity file
+must be a regular, owner-owned `0600` file with exactly one
+`AGE-SECRET-KEY-` line. Keep it out of the store volume's images. Both
+provisioning commands refuse to overwrite anything. Refusals print one
+redacted line and exit with status 2.
+
 `handshake_custody_offline.OfflineHandshakeCustody` is an optional, **offline
 key-availability primitive**, deliberately not an implementation of the live
 signing interface. Its protected age X25519 identity is an external operator
