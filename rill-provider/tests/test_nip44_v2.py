@@ -285,3 +285,20 @@ def test_official_nip44_full_decrypt_with_native_shared_x() -> None:
         )
         shared = crypto.nip44_shared_x(bytes.fromhex(sample["sec1"]), sender_key)
         assert hmac.digest(b"nip44-v2", shared, "sha256").hex() == sample["conversation_key"]
+
+
+def test_official_nip44_encrypt_vector_and_round_trip_without_native() -> None:
+    vector = _fixture()["valid_encrypt_decrypt_0"]
+    key = bytes.fromhex(vector["conversation_key"])
+    nonce = bytes.fromhex(vector["nonce"])
+    payload = codec._encrypt_with_conversation_key(  # noqa: SLF001 - internal vector seam
+        vector["plaintext"], key, nonce
+    )
+    assert payload == vector["payload"]
+    for text in ("a", "x" * 32, "y" * 33, "é" * 5000, "z" * 70_000):
+        encoded = codec._encrypt_with_conversation_key(text, key, nonce)  # noqa: SLF001
+        assert _decode_with_key(encoded, key) == text
+    with pytest.raises(codec.Nip44InvalidPayloadError):
+        codec._encrypt_with_conversation_key("", key, nonce)  # noqa: SLF001
+    with pytest.raises(codec.Nip44InvalidPayloadError):
+        codec._encrypt_with_conversation_key("q" * 200_000, key, nonce)  # noqa: SLF001

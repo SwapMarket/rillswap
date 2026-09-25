@@ -1,4 +1,4 @@
-"""Internal, bounded NIP-44 v2 decoder, not a NIP-59 receive boundary.
+"""Internal, bounded NIP-44 v2 codec, not a NIP-59 send or receive boundary.
 
 NIP-44 requires the enclosing NIP-01 event's signature and author to be
 validated BEFORE calling this decoder. There is intentionally no relay caller
@@ -12,6 +12,7 @@ import asyncio
 import base64
 import binascii
 import hmac
+import secrets
 from typing import TYPE_CHECKING
 
 from Cryptodome.Cipher import ChaCha20
@@ -176,3 +177,42 @@ def _decrypt_payload(
     if result is None:
         raise Nip44InvalidPayloadError("NIP-44 v2 payload refused")
     return result
+
+
+def _pad(plaintext: str) -> bytes:
+    raw = plaintext.encode("utf-8") if type(plaintext) is str else b""
+    _invalid(0 < len(raw) <= MAX_ENCODED_PAYLOAD)
+    if len(raw) < EXTENDED_PREFIX:
+        prefix = len(raw).to_bytes(2, "big")
+    else:  # Same bounded extension the decoder accepts, never above its limit.
+        prefix = b"\x00\x00" + len(raw).to_bytes(4, "big")
+    return prefix + raw + bytes(_padded_length(len(raw)) - len(raw))
+
+
+def _encrypt_with_conversation_key(plaintext: str, conversation_key: bytes, nonce: bytes) -> str:
+    chacha_key, chacha_nonce, hmac_key = _message_keys(conversation_key, nonce)
+    ciphertext = ChaCha20.new(key=chacha_key, nonce=chacha_nonce).encrypt(_pad(plaintext))
+    mac = hmac.digest(hmac_key, nonce + ciphertext, "sha256")
+    encoded = base64.b64encode(bytes([VERSION]) + nonce + ciphertext + mac).decode("ascii")
+    _invalid(len(encoded) <= MAX_ENCODED_PAYLOAD)
+    return encoded
+
+
+def _encrypt_payload(
+    plaintext: str,
+    *,
+    sender_secret: bytes,
+    recipient_public_key: bytes,
+    crypto: Context,
+) -> str:
+    """Encrypt with a fresh random nonce; the caller signs the enclosing event."""
+    _invalid(type(sender_secret) is bytes and len(sender_secret) == SHA256_SIZE)
+    _invalid(type(recipient_public_key) is bytes and len(recipient_public_key) == SHA256_SIZE)
+    try:
+        shared_x = crypto.nip44_shared_x(sender_secret, recipient_public_key)
+    except (AttributeError, RuntimeError):
+        raise Nip44UnavailableError("NIP-44 v2 ECDH unavailable") from None
+    finally:
+        del sender_secret
+    conversation_key = hmac.digest(b"nip44-v2", shared_x, "sha256")
+    return _encrypt_with_conversation_key(plaintext, conversation_key, secrets.token_bytes(32))
