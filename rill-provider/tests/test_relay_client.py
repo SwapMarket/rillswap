@@ -95,3 +95,27 @@ def test_unreachable_or_non_websocket_url_is_refused() -> None:
                 pass
 
     asyncio.run(scenario())
+
+
+def test_hostile_encoding_is_dropped_and_cancelled_reads_leave_no_tasks() -> None:
+    async def scenario() -> None:
+        relay = FakeRelay()
+        url = await relay.start()
+        try:
+            async with RelayConnection(url) as connection:
+                connection._dispatch(  # noqa: SLF001 - frame parser seam
+                    '["EVENT","' + SUBSCRIPTION_ID + '",{"content":"\\ud800"}]'
+                )
+                assert connection._events.empty()  # noqa: SLF001
+                assert not connection.closed
+                before = len(asyncio.all_tasks())
+                reader = asyncio.ensure_future(_next(connection))
+                await asyncio.sleep(0.05)
+                reader.cancel()
+                await asyncio.gather(reader, return_exceptions=True)
+                await asyncio.sleep(0)
+                assert len(asyncio.all_tasks()) == before
+        finally:
+            await relay.stop()
+
+    asyncio.run(scenario())

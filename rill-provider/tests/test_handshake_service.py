@@ -16,6 +16,7 @@ from rill_core.wire.messages import Envelope, HandshakeAccept, HandshakeInit
 from test_live_session_store import Harness, _bytes
 
 from rill_provider.handshake_service import HandshakeService, ServicePolicy
+from rill_provider.live_session_store import LiveSessionStoreError
 from rill_provider.relay_client import RelayConnection
 
 if TYPE_CHECKING:
@@ -185,3 +186,68 @@ def test_untrusted_events_are_refused_or_deduplicated_without_effects(
         assert asyncio.run(service.handle(b"not json", [])) == "duplicate"
         assert store.pending_outbox() == ()
         assert store.awaiting_confirm_mailboxes() == ()
+
+
+class _Relay:
+    def __init__(self, *, accept: bool) -> None:
+        self.url = "ws://fake/"
+        self.accept = accept
+        self.published: list[bytes] = []
+
+    async def publish(self, event: bytes) -> bool:
+        self.published.append(event)
+        return self.accept
+
+    async def subscribe(self, filters: list[dict[str, Any]]) -> None:
+        del filters
+
+
+class _Identity:
+    def __init__(self) -> None:
+        self.built = 0
+
+    def build_announcement(self, terms: Any) -> bytes:  # noqa: ANN401
+        self.built += 1
+        return json.dumps({"n": self.built, "created_at": terms.created_at}).encode()
+
+
+def test_announcements_are_durably_ordered_cached_and_sessions_expire(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, monkeypatch)
+    harness.provision()
+    policy = ServicePolicy(
+        network=harness.network,
+        profiles=("btc-to-ln/v1",),
+        amount_bands=((1000, 2000),),
+        base_fee_sat=1,
+        proportional_millionths=1,
+        slot="s",
+        relay_urls=("ws://fake/",),
+        handshake_timeout=100,
+    )
+    clock = [10_000.0]
+    identity = _Identity()
+    with harness.acquire() as store:
+        store.reserve(harness.init, now=9_000)
+        service = HandshakeService(store, identity, object(), policy, clock=lambda: clock[0])  # type: ignore[arg-type]
+        down = _Relay(accept=False)
+        asyncio.run(service.tick([down]))
+        assert store.reserve(harness.init).revision == 0  # expired, so reserved afresh
+        clock[0] += 1
+        asyncio.run(service.tick([down]))
+        assert identity.built == 1
+        assert down.published[0] == down.published[1]  # exact retransmission
+        up = _Relay(accept=True)
+        asyncio.run(service.tick([up]))
+        asyncio.run(service.tick([up]))
+        assert len(up.published) == 1
+    with harness.acquire() as store:  # restart with the clock rolled back
+        clock[0] = 9_999.0
+        restarted = HandshakeService(store, identity, object(), policy, clock=lambda: clock[0])  # type: ignore[arg-type]
+        with pytest.raises(LiveSessionStoreError, match="clock is behind"):
+            asyncio.run(restarted.tick([up]))
+        clock[0] = 10_000.0  # same second as the durable revision
+        asyncio.run(restarted.tick([up]))
+        assert identity.built == 1
+        assert len(up.published) == 1

@@ -29,6 +29,7 @@ import re
 import secrets
 import sqlite3
 import stat
+import time
 import uuid
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -64,7 +65,8 @@ if TYPE_CHECKING:
     from rill_provider.provider_identity import ProviderIdentity
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
-SCHEMA_VERSION = 3  # v1 (no custody) and v2 (no epoch inbox) are refused unchanged.
+SCHEMA_VERSION = 4  # v1-v3 (unreleased development formats) are refused unchanged.
+DEFAULT_MAX_SESSIONS = 1000  # retained sessions, confirmed or not
 MAX_DOCUMENT_BYTES = 65_536
 MAX_CHALLENGE_TRIES = 4
 MAX_LABEL_CHARS = 256
@@ -92,7 +94,8 @@ SCHEMA = (
         "transcript_digest TEXT, phase TEXT NOT NULL CHECK "
         "(phase IN ('RESERVED', 'ACCEPT_COMMITTED', 'CONFIRMED')), "
         "blocked INTEGER NOT NULL CHECK (blocked IN (0, 1)), revision INTEGER NOT NULL, "
-        "next_client_seq INTEGER NOT NULL, next_provider_seq INTEGER NOT NULL)"
+        "next_client_seq INTEGER NOT NULL, next_provider_seq INTEGER NOT NULL, "
+        "reserved_at INTEGER NOT NULL)"
     ),
     (
         "CREATE TABLE inbox (session_id TEXT NOT NULL, sender_key TEXT NOT NULL, "
@@ -116,6 +119,10 @@ SCHEMA = (
         "CREATE TABLE epochs (epoch_key TEXT PRIMARY KEY, secret_age BLOB NOT NULL, "
         "created_at INTEGER NOT NULL, retire_after INTEGER NOT NULL)"
     ),
+    (
+        "CREATE TABLE announcements (slot INTEGER PRIMARY KEY CHECK (slot = 1), "
+        "created_at INTEGER NOT NULL)"
+    ),
 )
 
 
@@ -125,6 +132,10 @@ class LiveSessionStoreError(ValueError):
 
 class StaleOwnerError(LiveSessionStoreError):
     """The handle no longer owns the store; stop all exposure immediately."""
+
+
+class SessionCapacityError(LiveSessionStoreError):
+    """No new session fits; existing sessions and replays are unaffected."""
 
 
 class SessionBlockedError(LiveSessionStoreError):
@@ -236,6 +247,7 @@ class LiveSessionStore:
         store_uuid: str,
         custody_identity: x25519.Identity,
         public_keys: CustodyPublicKeys,
+        max_sessions: int,
     ) -> None:
         """Use provision() or acquire(); never construct directly."""
         self.path = path
@@ -249,6 +261,7 @@ class LiveSessionStore:
         self._store_uuid = store_uuid
         self._custody_identity = custody_identity
         self._public_keys = public_keys
+        self._max_sessions = max_sessions
         self._pid = os.getpid()
 
     @staticmethod
@@ -318,7 +331,7 @@ class LiveSessionStore:
             os.close(directory)
 
     @classmethod
-    def acquire(  # noqa: PLR0913 - independent expectations explicit
+    def acquire(  # noqa: PLR0913, PLR0915 - independent expectations explicit
         cls,
         path: str | PathLike[str],
         network: NetworkIdentity,
@@ -328,8 +341,15 @@ class LiveSessionStore:
         crypto: EnvelopeSchnorrVerifier,
         custody_identity: str,
         public_keys: CustodyPublicKeys,
+        max_sessions: int = DEFAULT_MAX_SESSIONS,
     ) -> Self:
-        """Take lifetime exclusive ownership; refuse any unknown or copied state."""
+        """Take lifetime exclusive ownership; refuse any unknown or copied state.
+
+        ``max_sessions`` caps retained sessions so strangers cannot grow the
+        store without bound; ``expire_unconfirmed`` reclaims capacity.
+        """
+        if type(max_sessions) is not int or max_sessions < 1:
+            raise LiveSessionStoreError("session capacity unsupported")
         network_jcs, identity = _expected(network, provider_identity)
         try:
             unlocking = x25519.Identity.from_str(custody_identity)
@@ -389,6 +409,7 @@ class LiveSessionStore:
                 store_uuid=row[0][7],
                 custody_identity=unlocking,
                 public_keys=public_keys,
+                max_sessions=max_sessions,
             )
         except LiveSessionStoreError:
             _discard(connection, lock_fd)
@@ -486,7 +507,7 @@ class LiveSessionStore:
             raise LiveSessionStoreError("untrusted or unsupported handshake initiation")
         return outer, init
 
-    def reserve(self, init_document: bytes) -> SessionReservation:
+    def reserve(self, init_document: bytes, *, now: int | None = None) -> SessionReservation:
         """Reserve one fresh provider challenge per session; replay is stable.
 
         The init is unsigned, so different bytes for a known session may come
@@ -513,11 +534,14 @@ class LiveSessionStore:
                     blocked = True
                 else:
                     blocked = False
+                    (retained,) = connection.execute("SELECT COUNT(*) FROM sessions").fetchone()
+                    if retained >= self._max_sessions:
+                        raise SessionCapacityError("session capacity reached")  # noqa: TRY301
                     challenge = _fresh_challenge(connection, init)
                     key, sealed = self._new_session_key(init, challenge)
                     connection.execute(
                         "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, 'LIVE', "
-                        "NULL, NULL, NULL, 'RESERVED', 0, 0, 1, 0)",
+                        "NULL, NULL, NULL, 'RESERVED', 0, 0, 1, 0, ?)",
                         (
                             init.session_id,
                             init_document,
@@ -526,6 +550,7 @@ class LiveSessionStore:
                             challenge,
                             key,
                             sealed,
+                            int(time.time()) if now is None else now,
                         ),
                     )
         except LiveSessionStoreError:
@@ -915,19 +940,26 @@ class LiveSessionStore:
             outer.session_id, outer.message_id, digest, admitted_revision, replay=False
         )
 
-    def rotate_epochs(self, *, now: int, period: int, retention: int) -> tuple[str, ...]:
+    def rotate_epochs(
+        self, *, now: int, period: int, retention: int, advertise_for: int
+    ) -> tuple[str, ...]:
         """Ensure a current epoch inbox key; return keys to advertise, newest first.
 
         A new epoch starts when the newest is ``period`` seconds old. Each key
         keeps decoding until ``created_at + period + retention``; set
         ``retention`` to at least the announcement lifetime so late inits
-        still decode. Epoch keys only receive public inits (availability, not
-        authority), and their sealed secrets bind this store.
+        still decode. Only keys that stay decodable for ``advertise_for``
+        more seconds are returned (announcement lifetime plus delivery grace),
+        so a valid announcement never names a key about to retire. Epoch keys
+        only receive public inits (availability, not authority), and their
+        sealed secrets bind this store.
         """
         if not (
             type(now) is int
             and type(period) is int
             and type(retention) is int
+            and type(advertise_for) is int
+            and 0 <= advertise_for <= retention
             and now > 0
             and period > 0
             and retention >= 0
@@ -947,7 +979,7 @@ class LiveSessionStore:
                 rows = connection.execute(
                     "SELECT epoch_key FROM epochs WHERE retire_after > ? "
                     "ORDER BY created_at DESC LIMIT ?",
-                    (now, MAX_ADVERTISED_EPOCHS),
+                    (now + advertise_for, MAX_ADVERTISED_EPOCHS),
                 ).fetchall()
         except LiveSessionStoreError:
             raise
@@ -1022,6 +1054,60 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - uniform, redacted refusal (RS-006)
             raise LiveSessionStoreError("epoch frame refused") from None
         return candidate.envelope_bytes
+
+    def expire_unconfirmed(self, *, now: int, max_age: int) -> int:
+        """Delete never-confirmed sessions reserved at least ``max_age`` ago.
+
+        Their keys, pending accepts, and conflict evidence go with them. A
+        replayed init later starts a fresh session (new challenge and key),
+        which only the client key holder can confirm. Confirmed sessions are
+        never deleted here. Returns the number of sessions removed.
+        """
+        if not (type(now) is int and type(max_age) is int and max_age > 0):
+            raise LiveSessionStoreError("expiry schedule unsupported")
+        try:
+            with self._write() as connection:
+                expired = [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT session_id FROM sessions "
+                        "WHERE phase != 'CONFIRMED' AND reserved_at <= ?",
+                        (now - max_age,),
+                    )
+                ]
+                for table in ("inbox", "outbox", "conflicts", "sessions"):
+                    connection.executemany(
+                        f"DELETE FROM {table} WHERE session_id=?",  # noqa: S608 - fixed names
+                        [(session_id,) for session_id in expired],
+                    )
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("session expiry refused") from None
+        return len(expired)
+
+    def record_announcement(self, created_at: int) -> None:
+        """Durably order an RS-005 announcement revision before publishing it.
+
+        Revisions equal ``created_at`` and must strictly increase across
+        restarts; a clock rollback is refused rather than published lower.
+        """
+        if type(created_at) is not int or created_at <= 0:
+            raise LiveSessionStoreError("announcement time unsupported")
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT created_at FROM announcements WHERE slot=1"
+                ).fetchone()
+                if row is not None and created_at <= row[0]:
+                    raise LiveSessionStoreError("announcement revision would not increase")  # noqa: TRY301
+                connection.execute(
+                    "INSERT OR REPLACE INTO announcements VALUES (1, ?)", (created_at,)
+                )
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("announcement ordering refused") from None
 
     def awaiting_confirm_mailboxes(self) -> tuple[str, ...]:
         """Return our session mailbox keys that still expect a client confirm."""

@@ -850,23 +850,30 @@ def test_epoch_rotation_schedule_retention_and_cap(harness: Harness) -> None:
     harness.provision()
     with harness.acquire() as store:
         with pytest.raises(LiveSessionStoreError, match="schedule"):
-            store.rotate_epochs(now=100, period=0, retention=0)
-        first = store.rotate_epochs(now=1000, period=100, retention=250)
+            store.rotate_epochs(now=100, period=0, retention=0, advertise_for=0)
+        first = store.rotate_epochs(now=1000, period=100, retention=250, advertise_for=0)
         assert len(first) == 1
-        assert store.rotate_epochs(now=1099, period=100, retention=250) == first
-        second = store.rotate_epochs(now=1100, period=100, retention=250)
+        assert store.rotate_epochs(now=1099, period=100, retention=250, advertise_for=0) == first
+        second = store.rotate_epochs(now=1100, period=100, retention=250, advertise_for=0)
         assert second[1:] == first
         assert len(second) == 2
         with pytest.raises(LiveSessionStoreError, match="clock is behind"):
-            store.rotate_epochs(now=1050, period=100, retention=250)
-        advertised = store.rotate_epochs(now=1349, period=100, retention=250)
+            store.rotate_epochs(now=1050, period=100, retention=250, advertise_for=0)
+        advertised = store.rotate_epochs(now=1349, period=100, retention=250, advertise_for=0)
         assert first[0] in advertised  # retire_after = 1000 + 100 + 250
-        later = store.rotate_epochs(now=1350, period=100, retention=250)
+        later = store.rotate_epochs(now=1350, period=100, retention=250, advertise_for=0)
         assert first[0] not in later
         for step in range(6):
-            capped = store.rotate_epochs(now=1400 + 100 * step, period=100, retention=10_000)
+            capped = store.rotate_epochs(
+                now=1400 + 100 * step, period=100, retention=10_000, advertise_for=0
+            )
         assert len(capped) == live.MAX_ADVERTISED_EPOCHS
         assert harness.identity not in capped
+        with pytest.raises(LiveSessionStoreError, match="schedule"):
+            store.rotate_epochs(now=2100, period=100, retention=10, advertise_for=11)
+        newest = store.rotate_epochs(now=2100, period=100, retention=10_000, advertise_for=0)
+        near = store.rotate_epochs(now=2100, period=100, retention=10_000, advertise_for=9_950)
+        assert near == newest[:1]  # only the key decodable past the announcement
     for file in harness.path.parent.iterdir():
         assert b"secret_scalar" not in file.read_bytes()
 
@@ -900,7 +907,7 @@ def test_native_init_received_on_epoch_inbox(harness: Harness) -> None:
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
         harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store,
     ):
-        (epoch,) = store.rotate_epochs(now=1000, period=100, retention=100)
+        (epoch,) = store.rotate_epochs(now=1000, period=100, retention=100, advertise_for=0)
         frame = _wrap_envelope(
             harness.init,
             sender_session_secret=client_secret,
@@ -922,3 +929,65 @@ def test_native_init_received_on_epoch_inbox(harness: Harness) -> None:
             store.open_epoch_frame(not_init, now=1150, transport=crypto)
         with pytest.raises(LiveSessionStoreError, match="refused"):
             store.open_epoch_frame(frame[:-5] + b"0000}", now=1150, transport=crypto)
+
+
+def _other_init(harness: Harness, index: int) -> bytes:
+    envelope = copy.deepcopy(harness.envelopes[0])
+    session = f"{index:064x}"
+    envelope["session_id"] = envelope["payload"]["session_id"] = session
+    envelope["message_id"] = f"{index + 0x100:064x}"
+    return _bytes(envelope)
+
+
+def test_capacity_counts_retained_sessions_and_expiry_reclaims_unconfirmed(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import secrets  # noqa: PLC0415
+
+    monkeypatch.setattr(live, "_new_challenge", lambda: secrets.token_hex(32))
+    monkeypatch.setattr(live, "_new_session_scalar", lambda: secrets.token_bytes(32))
+    harness.provision()
+    with pytest.raises(LiveSessionStoreError, match="capacity unsupported"):
+        harness.acquire_at(harness.path, max_sessions=0)
+    with harness.acquire_at(harness.path, max_sessions=2) as store:
+        first = store.reserve(_other_init(harness, 1), now=1000)
+        store.reserve(_other_init(harness, 2), now=1500)
+        with pytest.raises(live.SessionCapacityError):
+            store.reserve(_other_init(harness, 3), now=1500)
+        assert store.reserve(_other_init(harness, 1), now=1600) == first  # replay unaffected
+        with pytest.raises(LiveSessionStoreError, match="expiry schedule"):
+            store.expire_unconfirmed(now=2000, max_age=0)
+        assert store.expire_unconfirmed(now=1999, max_age=1000) == 0
+        assert store.expire_unconfirmed(now=2000, max_age=1000) == 1
+        assert store.expire_unconfirmed(now=2000, max_age=500) == 1
+        third = store.reserve(_other_init(harness, 3), now=2000)
+        again = store.reserve(_other_init(harness, 1), now=2000)  # expired init is fresh
+        assert again.provider_challenge != first.provider_challenge
+        assert third.revision == again.revision == 0
+    with (
+        harness.acquire_at(harness.path, max_sessions=2) as store,  # durable count
+        pytest.raises(live.SessionCapacityError),
+    ):
+        store.reserve(_other_init(harness, 4), now=2000)
+
+
+def test_expiry_never_removes_confirmed_sessions(harness: Harness) -> None:
+    harness.provision()
+    with harness.acquire() as store:
+        store.reserve(harness.init, now=10)
+        store.commit_accept(harness.accept)
+        store.admit_confirm(harness.confirm)
+        assert store.expire_unconfirmed(now=10**9, max_age=1) == 0
+        assert store.reserve(harness.init).revision != 0
+
+
+def test_announcement_revisions_strictly_increase_across_owners(harness: Harness) -> None:
+    harness.provision()
+    with harness.acquire() as store:
+        store.record_announcement(1000)
+        with pytest.raises(LiveSessionStoreError, match="would not increase"):
+            store.record_announcement(1000)
+    with harness.acquire() as store:
+        with pytest.raises(LiveSessionStoreError, match="would not increase"):
+            store.record_announcement(999)
+        store.record_announcement(1001)

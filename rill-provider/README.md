@@ -75,7 +75,7 @@ absent, partial, old, or restored state grants no key allocation or action
 authority.
 
 `live_session_store.LiveSessionStore` is the **authoritative** handshake
-session store (SQLite `RLS1` v3; v1 and v2 files are refused unchanged), and the only provider store whose rows may
+session store (SQLite `RLS1` v4; unreleased v1-v3 files are refused unchanged), and the only provider store whose rows may
 permit exposing an accept or admitting a confirm. It must be created
 explicitly with `LiveSessionStore.provision(...)` and an
 `AuthorityDeclaration`, in which the operator attests that the volume is
@@ -147,7 +147,7 @@ the store:
 
 The internal `_nip59_send` wrapper and NIP-44 v2 encryption are the exact
 inverse of the receive decoder. They are checked against the official NIP-44
-vector and by native round trips. `rotate_epochs(now=, period=, retention=)` keeps a current RS-006 epoch inbox
+vector and by native round trips. `rotate_epochs(now=, period=, retention=, advertise_for=)` keeps a current RS-006 epoch inbox
 key and returns the keys to advertise, newest first. At most 4 are returned,
 the RS-005 maximum. A new epoch starts once the newest key is `period` seconds
 old. Each key keeps decoding until `created_at + period + retention`, so set
@@ -159,6 +159,23 @@ returns the exact init bytes only if the envelope sender is the seal author.
 That sender is still a stranger, so the init must still go through `reserve`.
 The epoch-inbox schedule is a local availability policy, because RS-005 and
 RS-006 do not specify one.
+
+Only keys that stay decodable for `advertise_for` more seconds are
+advertised, so a valid announcement never names a key that is about to
+retire.
+
+The store has a fixed capacity, `acquire(..., max_sessions=1000)`. It counts
+every retained session from the durable rows, so a restart does not reset
+it. When it is full, new inits are refused (`SessionCapacityError`), while
+replays of known sessions still work.
+`expire_unconfirmed(now=, max_age=)` deletes sessions that were never
+confirmed, along with their keys, pending accepts, and conflict evidence.
+Confirmed sessions are never deleted. If an expired init is replayed, it
+starts a fresh session with a new challenge and key, which only the holder
+of the client key can confirm. `record_announcement(created_at)` makes sure
+announcement revisions strictly increase across restarts. It runs before
+publication, and a clock rollback is refused instead of publishing a lower
+revision.
 
 `create_accept(session_id, identity=ProviderIdentity, transport_endpoints=...)`
 builds the accept inside the store. It selects the client's most-preferred
@@ -206,7 +223,9 @@ fields refused). It sets the network identity, the identity key printed
 above, the identity and store paths, the age `custody_recipient`, the
 `custody_identity_file`, the native crypto library, the `authority`
 attestation, the negotiated `handshake` selection, the public `terms`,
-`relay_urls`, and optional schedules. Relative paths resolve from the
+`relay_urls`, and optional schedules and limits (`max_sessions`, default
+1000 retained sessions; `handshake_timeout`, default 600 s before a
+never-confirmed session is deleted; `max_sends_per_tick`). Relative paths resolve from the
 config's directory. The config holds no secrets. The custody identity file
 must be a regular, owner-owned `0600` file with exactly one
 `AGE-SECRET-KEY-` line. Keep it out of the store volume's images. Both

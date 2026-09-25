@@ -77,6 +77,7 @@ async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
         crypto=crypto,
         custody_identity=custody,
         public_keys=crypto,
+        max_sessions=config.max_sessions,
     ) as store:
         service = HandshakeService(store, identity, crypto, config.service_policy())
         await service.run(stop)

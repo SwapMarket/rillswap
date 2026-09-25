@@ -29,7 +29,10 @@ class RelayError(RuntimeError):
 def _event_json(event: object) -> bytes | None:
     if type(event) is not dict:
         return None
-    return json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    try:
+        return json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except (UnicodeEncodeError, ValueError, TypeError):
+        return None  # e.g. lone surrogates from a hostile relay
 
 
 class RelayConnection:
@@ -59,6 +62,9 @@ class RelayConnection:
         except (aiohttp.ClientError, TimeoutError):
             await self._session.close()
             raise RelayError("relay unavailable") from None
+        except BaseException:  # cancellation while opening: do not leak the session
+            await self._session.close()
+            raise
         self._reader = asyncio.create_task(self._read())
         return self
 
@@ -66,7 +72,7 @@ class RelayConnection:
         """Close the socket and fail any outstanding publications."""
         if self._reader is not None:
             self._reader.cancel()
-            with suppress(asyncio.CancelledError):
+            with suppress(asyncio.CancelledError, Exception):  # reader faults = closed relay
                 await self._reader
         if self._socket is not None:
             await self._socket.close()
@@ -102,6 +108,8 @@ class RelayConnection:
                 if message.type != aiohttp.WSMsgType.TEXT:
                     break
                 self._dispatch(message.data)
+        except (aiohttp.ClientError, ConnectionError, ValueError):
+            pass  # a broken or hostile relay only ends this connection
         finally:
             self._fail_pending()
 
@@ -146,12 +154,23 @@ class RelayConnection:
 
     async def events(self) -> AsyncIterator[bytes]:
         """Yield raw, UNVERIFIED event JSON until the connection closes."""
+        reader = self._reader
+        if reader is None:
+            return
         while True:
             getter = asyncio.ensure_future(self._events.get())
-            reader = self._reader
-            if reader is None:
-                getter.cancel()
-                return
+            try:
+                await asyncio.wait({getter, reader}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                if not getter.done():
+                    getter.cancel()
+                    await asyncio.gather(getter, return_exceptions=True)
+            if not getter.cancelled():
+                yield getter.result()
+                continue
+            while not self._events.empty():
+                yield self._events.get_nowait()
+            return
             done, _ = await asyncio.wait({getter, reader}, return_when=asyncio.FIRST_COMPLETED)
             if getter in done:
                 yield getter.result()
