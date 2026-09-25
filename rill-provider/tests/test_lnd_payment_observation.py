@@ -203,6 +203,21 @@ def test_terminal_failed_is_a_reported_payment_status_not_retry_permission(
     assert channel.methods == [observer.TRACK_METHOD]
 
 
+def test_terminal_failed_without_attempt_history_is_not_absence_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream = FakeStream([_payment(3)])
+    channel, _ = _transport(monkeypatch, stream)
+    result = _client(tmp_path).track(HASH)
+    assert result.completion == "terminal"
+    assert result.snapshots[-1].status == "FAILED"
+    assert result.snapshots[-1].htlc_attempts == ()
+    assert channel.methods == [observer.TRACK_METHOD]
+    assert stream.cancelled
+    assert channel.closed
+
+
 def test_bounded_nonterminal_stream_cancels_without_claiming_absence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

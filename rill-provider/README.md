@@ -347,9 +347,10 @@ invoice over TLS with an operator-provisioned `invoices:read` macaroon. It
 returns only bounded typed selected non-secret payment-hash, invoice state and amount,
 timing, and **all** HTLC channel/index, state, amount, acceptance-height,
 expiry-height, and MPP-total fields. It rejects a wrong hash, duplicate HTLC
-identifier pair, unknown status, AMP/keysend/blinded invoices, custom-channel
-data, or oversized responses. Ordinary custom-TLV payments may be conservatively
-refused. Payment hashes, channel IDs, and amounts remain sensitive operational
+identifier pair, unknown status, AMP/keysend/blinded invoices, or nonempty
+`custom_channel_data` (including ordinary serialized custom TLV records).
+The latter is a deliberate fail-closed compatibility boundary, not proof of a
+custom channel. Payment hashes, channel IDs, and amounts remain sensitive operational
 metadata and must not be logged or broadcast. Partial
 amounts, zero expiries, empty HTLC lists, and canceled history are reported,
 not called safely accepted; no preimage, custom records, raw protobuf, or
@@ -373,7 +374,7 @@ and exact generation-tool versions are checked. The focused fake transport
 and real synthetic loopback gRPC TLS tests run in the normal pytest suite;
 the synthetic tests alone are **not** a real LND regtest integration check.
 
-To run the three opt-in pinned **disposable-regtest** diagnostics, keep `rill-core` and
+To run the four opt-in pinned **disposable-regtest** diagnostics, keep `rill-core` and
 `rill-provider` as sibling source checkouts. Install `requirements-dev.txt`
 in this repository's local Python 3.14 `.venv` (including pinned
 `grpcio-tools`), and have Docker capable of running the pinned `linux/amd64`
@@ -404,9 +405,24 @@ both nodes, and a confirmed P2WSH funding output in Core. No invoice, HTLC,
 Lightning payment, or swap occurs in this third test. Failed or ambiguous
 channel submissions are never retried; all owned containers are torn down.
 This is infrastructure evidence, **not** an accepted-hold or funded swap trial.
+The fourth, independently isolated test funds another disposable channel, then
+uses test-only `SendPaymentV2` to create a **single-part** accepted hold on the
+receiver. It checks the pinned backend's raw accepted amount, channel, HTLC
+expiry, MPP total, and sender in-flight route, cancels the invoice **once**, and
+checks failed outgoing payment plus canceled incoming HTLC. The preimage is
+never transmitted or settled. The production read-only invoice observer
+**refuses** this ordinary pinned-LND record because it contains nonempty
+`custom_channel_data`. This fourth test records that incompatibility, rather
+than overriding the existing refusal test or claiming that the provider can
+observe accepted holds for funding admission. LND may prune failed HTLC
+attempt history by default: terminal FAILED with an empty history is not proof
+that no attempt occurred or permission to retry. This fixture proves neither
+unsafe-MPP earliest-expiry refusal (L01), partial or mismatched hold refusal (L02), nor
+capability suppression on missing expiry evidence (L07).
 Cleanup verifies each container's run label before removal and attempts every
 container even if one cleanup step fails. If the runner is interrupted, check
-for leftover `rillswap-lnd-*`, `rillswap-invoice-*`, or `rillswap-channel-*` containers with
+for leftover `rillswap-lnd-*`, `rillswap-invoice-*`, `rillswap-channel-*`, or
+`rillswap-hold-*` containers with
 `docker ps -a`, then verify the
 `org.rillswap.test-run` label and mounts using `docker inspect` on each exact
 container. After confirming the associated runner is no longer active, use

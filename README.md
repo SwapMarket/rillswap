@@ -19,7 +19,10 @@ This is one Git repository containing six components:
 Each component retains its own dependency lock, local development setup, and
 README. The pinned provider integration lock is a **historical** snapshot, not
 conformance evidence for later components. The default tests do not exercise
-the opt-in funded regtest channel diagnostic or complete either swap profile.
+the opt-in funded regtest channel and held-payment diagnostics or complete
+either swap profile. The held-payment fixture also demonstrates that the
+read-only provider invoice observer currently refuses ordinary pinned LND
+custom-record evidence; it is not a funding-eligibility test.
 
 To replay that historical provider v2 baseline without nested repositories,
 use Python 3.14 with the provider's pinned development dependencies, Bun

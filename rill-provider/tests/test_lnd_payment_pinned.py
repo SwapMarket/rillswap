@@ -58,7 +58,9 @@ def _docker(*args: str, timeout: int = 60, check: bool = True) -> str:
         grpc_codes = re.findall(r"StatusCode\.([A-Z_]+)", completed.stderr)
         diagnostics = re.findall(
             r"^DIAGNOSTIC: (peer_not_ready|insufficient_funds|"
-            r"unconfirmed_funds|fee_rejected|other)$",
+            r"unconfirmed_funds|fee_rejected|payment_failed_[0-9]|"
+            r"stream_ended|hash_mismatch|graph_missing|policy_missing|"
+            r"route_unavailable|other)$",
             completed.stderr,
             re.MULTILINE,
         )
@@ -838,15 +840,20 @@ def test_pinned_lnd_unfunded_invoice_observation(tmp_path: Path) -> None:
         _cleanup_containers((sidecar, lnd, core), run_id, cert)
 
 
-# Infrastructure-only: no invoice, HTLC, payment, swap, or production journal.
-# One mutation per fresh disposable test. A lost response is never retried.
-CHANNEL_BOOTSTRAP = """
-import json, secrets, sys, time
+# Shared test-only channel fixture. Each scenario gets fresh isolated wallets;
+# no mutation is retried after an ambiguous response.
+CHANNEL_SETUP = """
+import hashlib, json, os, secrets, sys, tempfile, time
 from decimal import Decimal
 from pathlib import Path
 import grpc
 import httpx
+from rill_core.wire.types import NetworkIdentity
 from rill_provider._lnd_proto import lightning_pb2 as ln
+from rill_provider._lnd_proto.invoicesrpc import invoices_pb2 as inv
+from rill_provider._lnd_proto.routerrpc import router_pb2 as router
+from rill_provider.lnd_invoice_observation import RegtestLndInvoiceObserver
+from rill_provider.lnd_payment_observation import LndProtocolError, RegtestLndPaymentObserver
 import walletunlocker_pb2 as unlock
 import stateservice_pb2 as state
 
@@ -990,18 +997,249 @@ with httpx.Client(base_url='http://127.0.0.1:18443',
     assert output['value'] == Decimal('0.01000000')
     script = output['scriptPubKey']['hex']
     assert len(script) == 68 and script.startswith('0020')
+"""
+
+CHANNEL_BOOTSTRAP = (
+    CHANNEL_SETUP
+    + """
     print(json.dumps({'funding_txid': txid, 'vout': point.output_index,
         'capacity_sat': views[0][0].capacity, 'confirmations': output['confirmations']}))
 """
-
-
-@pytest.mark.lnd
-@pytest.mark.skipif(
-    os.environ.get("RILLSWAP_RUN_LND") != "1",
-    reason="set RILLSWAP_RUN_LND=1 for pinned disposable LND",
 )
-def test_pinned_two_node_funded_channel_bootstrap(tmp_path: Path) -> None:  # noqa: PLR0915
-    """Fund one disposable private channel, not an LN payment or swap."""
+
+
+HELD_HTLC_PAYMENT = (
+    CHANNEL_SETUP
+    + """
+# Test-only SendPaymentV2 creates the incoming evidence; it is not a
+# production pay_with_deadline implementation or funding permission.
+assert views[0][0].chan_id == views[1][0].chan_id != 0
+channel_id = views[0][0].chan_id
+amount_msat = 1_000_000
+print('PHASE: hold_route_preflight', file=sys.stderr)
+preflight = 'route_unavailable'
+for _ in range(100):
+    try:
+        edge = call(a, a_secret, 'GetChanInfo', ln.ChanInfoRequest, ln.ChannelEdge,
+            ln.ChanInfoRequest(chan_id=channel_id), timeout=2)
+        if edge.channel_id != channel_id:
+            preflight = 'graph_missing'
+        else:
+            policy = edge.node1_policy if edge.node1_pub == a_key else edge.node2_policy
+            if edge.node1_pub != a_key and edge.node2_pub != a_key:
+                preflight = 'graph_missing'
+            elif not policy or policy.disabled:
+                preflight = 'policy_missing'
+            else:
+                available = call(a, a_secret, 'QueryRoutes',
+                    ln.QueryRoutesRequest, ln.QueryRoutesResponse,
+                    ln.QueryRoutesRequest(pub_key=b_key, amt_msat=amount_msat,
+                        final_cltv_delta=80, outgoing_chan_ids=[channel_id],
+                        fee_limit=ln.FeeLimit(fixed_msat=0), use_mission_control=False),
+                    timeout=2)
+                if (available.routes and len(available.routes[0].hops) == 1
+                        and available.routes[0].hops[0].chan_id == channel_id
+                        and available.routes[0].total_amt_msat == amount_msat):
+                    break
+    except grpc.RpcError:
+        pass
+    time.sleep(0.2)
+else:
+    print('DIAGNOSTIC: ' + preflight, file=sys.stderr)
+    raise AssertionError('exact read-only channel route not available')
+network = NetworkIdentity.model_validate(json.loads(
+    Path('/work/provider/tests/fixtures/initial-btc-to-ln-v1.json').read_text()
+)['contract_terms']['network_identity'])
+def bake_read(channel, secret, entity):
+    request = ln.BakeMacaroonRequest(
+        permissions=[ln.MacaroonPermission(entity=entity, action='read')],
+        root_key_id=0, allow_external_permissions=False)
+    value = call(channel, secret, 'BakeMacaroon',
+        ln.BakeMacaroonRequest, ln.BakeMacaroonResponse, request).macaroon
+    assert 0 < len(value) <= 8192
+    return bytes.fromhex(value)
+def private_file(parent, name, contents):
+    file = Path(parent) / name
+    fd = os.open(file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'wb') as target:
+        target.write(contents)
+    return file
+def observe_invoice(observer, selected_hash, expected_state):
+    for _ in range(100):
+        result = observer.lookup(selected_hash, deadline_seconds=3)
+        if result.state == expected_state:
+            return result
+        time.sleep(0.2)
+    raise AssertionError('held-invoice state not observed within bound')
+def next_status(stream, selected_hash, expected):
+    for _ in range(16):
+        try:
+            value = next(stream)
+        except StopIteration:
+            print('DIAGNOSTIC: stream_ended', file=sys.stderr)
+            raise AssertionError('payment stream ended without expected status') from None
+        if value.payment_hash != selected_hash.hex():
+            print('DIAGNOSTIC: hash_mismatch', file=sys.stderr)
+            raise AssertionError('payment hash mismatch')
+        if value.status == expected and value.htlcs:
+            return value
+        if value.status == ln.Payment.FAILED:
+            reason = int(value.failure_reason)
+            print('DIAGNOSTIC: payment_failed_' + str(reason if 0 <= reason <= 9 else 9),
+                  file=sys.stderr)
+            raise AssertionError('outgoing test payment failed before held observation')
+        assert value.status in (ln.Payment.INITIATED, ln.Payment.IN_FLIGHT)
+        assert len(value.htlcs) <= 1
+    raise AssertionError('payment stream did not reach expected status with attempt')
+def one_attempt(payment, expected, peer, selected_channel, amount):
+    assert len(payment.htlcs) == 1
+    attempt = payment.htlcs[0]
+    assert attempt.attempt_id > 0 and attempt.status == expected
+    assert len(attempt.route.hops) == 1
+    hop = attempt.route.hops[0]
+    assert hop.pub_key == peer and hop.chan_id == selected_channel
+    assert hop.amt_to_forward_msat == amount
+    assert attempt.route.total_amt_msat == amount
+    assert attempt.route.total_fees_msat == 0
+    mpp = hop.mpp_record.total_amt_msat if hop.HasField('mpp_record') else 0
+    return attempt.route.total_time_lock, hop.expiry, mpp
+
+with tempfile.TemporaryDirectory(prefix='rill-hold-reads-', dir='/tmp') as credentials:
+    invoice_file = private_file(credentials, 'invoice.macaroon', bake_read(b, b_secret, 'invoices'))
+    payment_file = private_file(credentials, 'payment.macaroon', bake_read(a, a_secret, 'offchain'))
+    invoice_observer = RegtestLndInvoiceObserver(host='127.0.0.1', port=10010,
+        tls_certificate_path='/work/public/b.cert', invoice_macaroon_path=invoice_file,
+        network=network)
+    payment_observer = RegtestLndPaymentObserver(host='127.0.0.1', port=10009,
+        tls_certificate_path='/work/public/a.cert', read_macaroon_path=payment_file,
+        network=network)
+    raw_lookup = unary(b, '/lnrpc.Lightning/LookupInvoice', ln.PaymentHash, ln.Invoice)
+    def observe_raw(selected_hash, expected):
+        for _ in range(100):
+            value = raw_lookup(ln.PaymentHash(r_hash=selected_hash),
+                metadata=metadata(invoice_file.read_bytes()), timeout=3)
+            assert value.r_hash == selected_hash
+            if value.state == expected:
+                return value
+            time.sleep(0.2)
+        raise AssertionError('raw pinned LND invoice state not observed')
+    preimage = secrets.token_bytes(32)
+    selected_hash = hashlib.sha256(preimage).digest()
+    del preimage  # no settlement call and no preimage ever sent
+    print('PHASE: hold_create_once', file=sys.stderr)
+    created = unary(b, '/invoicesrpc.Invoices/AddHoldInvoice',
+        inv.AddHoldInvoiceRequest, inv.AddHoldInvoiceResp)(
+        inv.AddHoldInvoiceRequest(hash=selected_hash, value_msat=amount_msat,
+                                  expiry=3600, cltv_expiry=80),
+        metadata=metadata(b_secret), timeout=15)
+    assert created.payment_request
+    cancel_started = False
+    def cancel_once():
+        global cancel_started
+        assert not cancel_started
+        cancel_started = True
+        unary(b, '/invoicesrpc.Invoices/CancelInvoice',
+            inv.CancelInvoiceMsg, inv.CancelInvoiceResp)(
+            inv.CancelInvoiceMsg(payment_hash=selected_hash),
+            metadata=metadata(b_secret), timeout=5)
+    try:
+        opened = invoice_observer.lookup(selected_hash, deadline_seconds=3)
+        assert opened.state == 'OPEN' and opened.htlcs == ()
+        assert opened.value_msat == amount_msat and opened.payment_hash == selected_hash.hex()
+        print('PHASE: hold_send_once', file=sys.stderr)
+        send = a.unary_stream('/routerrpc.Router/SendPaymentV2',
+            request_serializer=router.SendPaymentRequest.SerializeToString,
+            response_deserializer=ln.Payment.FromString)
+        sending = send(router.SendPaymentRequest(payment_request=created.payment_request,
+            max_parts=1, outgoing_chan_ids=[channel_id], no_inflight_updates=False,
+            fee_limit_msat=0, timeout_seconds=30),
+            metadata=metadata(a_secret), timeout=90)
+        print('PHASE: hold_stream_open', file=sys.stderr)
+        live = next_status(iter(sending), selected_hash, ln.Payment.IN_FLIGHT)
+        print('PHASE: hold_payment_live', file=sys.stderr)
+        route_expiry, hop_expiry, mpp_total = one_attempt(
+            live, ln.HTLCAttempt.IN_FLIGHT, b_key, channel_id, amount_msat)
+        print('PHASE: hold_route_checked', file=sys.stderr)
+        tracked = a.unary_stream('/routerrpc.Router/TrackPaymentV2',
+            request_serializer=router.TrackPaymentRequest.SerializeToString,
+            response_deserializer=ln.Payment.FromString)(
+            router.TrackPaymentRequest(payment_hash=selected_hash, no_inflight_updates=False),
+            metadata=metadata(payment_file.read_bytes()), timeout=60)
+        print('PHASE: hold_track_open', file=sys.stderr)
+        tracked_live = next_status(iter(tracked), selected_hash, ln.Payment.IN_FLIGHT)
+        print('PHASE: hold_tracked_live', file=sys.stderr)
+        assert tracked_live.htlcs[0].attempt_id == live.htlcs[0].attempt_id
+        assert one_attempt(tracked_live, ln.HTLCAttempt.IN_FLIGHT,
+                           b_key, channel_id, amount_msat) == (route_expiry, hop_expiry, mpp_total)
+        print('PHASE: hold_accepted', file=sys.stderr)
+        accepted = observe_raw(selected_hash, ln.Invoice.ACCEPTED)
+        assert accepted.value_msat == accepted.amt_paid_msat == amount_msat
+        assert len(accepted.htlcs) == 1
+        part = accepted.htlcs[0]
+        assert part.state == ln.InvoiceHTLCState.ACCEPTED and part.amt_msat == amount_msat
+        assert part.chan_id == channel_id and part.htlc_index >= 0
+        assert part.mpp_total_amt_msat == mpp_total
+        assert mpp_total in (0, amount_msat)  # absent TLV or exact single-part total
+        assert part.accept_height >= 102
+        assert part.expiry_height == hop_expiry == route_expiry
+        assert part.custom_channel_data  # pinned LND serializes ordinary custom records here
+        try:
+            invoice_observer.lookup(selected_hash, deadline_seconds=3)
+        except LndProtocolError as error:
+            assert str(error) == 'LND invoice HTLC identity or state unsupported'
+        else:
+            raise AssertionError('provider observer must refuse unsupported custom data')
+        info = call(b, b_secret, 'GetInfo', ln.GetInfoRequest, ln.GetInfoResponse,
+            ln.GetInfoRequest())
+        assert info.block_height == 103
+        assert part.expiry_height - info.block_height >= 80
+        print('PHASE: hold_cancel_once', file=sys.stderr)
+        cancel_once()
+        print('PHASE: hold_cancel_acknowledged', file=sys.stderr)
+        failed = next_status(iter(sending), selected_hash, ln.Payment.FAILED)
+        print('PHASE: hold_payment_failed', file=sys.stderr)
+        assert failed.htlcs[0].attempt_id == live.htlcs[0].attempt_id
+        one_attempt(failed, ln.HTLCAttempt.FAILED, b_key, channel_id, amount_msat)
+        print('PHASE: hold_attempt_failed', file=sys.stderr)
+        observed = payment_observer.track(selected_hash, deadline_seconds=20)
+        print('PHASE: hold_payment_observed', file=sys.stderr)
+        assert observed.completion == 'terminal'
+        print('PHASE: hold_terminal', file=sys.stderr)
+        assert observed.snapshots[-1].status == 'FAILED'
+        history = observed.snapshots[-1].htlc_attempts
+        assert len(history) <= 1  # pinned LND may prune failed attempts by default
+        if history:
+            assert history[0].status == 'FAILED'
+            assert history[0].lnd_attempt_id == failed.htlcs[0].attempt_id
+        rejected = observe_raw(selected_hash, ln.Invoice.CANCELED)
+        print('PHASE: hold_canceled_observed', file=sys.stderr)
+        assert len(rejected.htlcs) == 1
+        assert rejected.htlcs[0].state == ln.InvoiceHTLCState.CANCELED
+        assert (rejected.htlcs[0].chan_id, rejected.htlcs[0].htlc_index,
+                rejected.htlcs[0].amt_msat, rejected.htlcs[0].expiry_height) == (
+                part.chan_id, part.htlc_index, part.amt_msat, part.expiry_height)
+        print(json.dumps({'funding_txid': txid, 'vout': point.output_index,
+            'capacity_sat': views[0][0].capacity, 'confirmations': output['confirmations'],
+            'backend_hold_observed': True, 'observer_refused_custom': True,
+            'payment_failed': True, 'history_returned': bool(history)}))
+    finally:
+        if not cancel_started:
+            try:
+                cancel_once()
+            except grpc.RpcError:
+                pass  # unknown cancellation outcome, never retry
+"""
+)
+
+
+def _run_two_node_sidecar(  # noqa: PLR0915 - isolated test infrastructure
+    tmp_path: Path,
+    program: str,
+    *,
+    prefix: str,
+    deadline: int,
+) -> dict[str, object]:
+    """Use fresh owned Core/LND containers for one bounded sidecar scenario."""
     assert DOCKER is not None
     public = tmp_path / "public"
     public.mkdir(mode=0o700)
@@ -1010,10 +1248,10 @@ def test_pinned_two_node_funded_channel_bootstrap(tmp_path: Path) -> None:  # no
     _state_messages(generated)
     run_id = secrets.token_hex(16)
     label = f"org.rillswap.test-run={run_id}"
-    core = f"rillswap-channel-core-{secrets.token_hex(6)}"
-    a = f"rillswap-channel-lnd-a-{secrets.token_hex(6)}"
-    b = f"rillswap-channel-lnd-b-{secrets.token_hex(6)}"
-    sidecar = f"rillswap-channel-client-{secrets.token_hex(6)}"
+    core = f"rillswap-{prefix}-core-{secrets.token_hex(6)}"
+    a = f"rillswap-{prefix}-lnd-a-{secrets.token_hex(6)}"
+    b = f"rillswap-{prefix}-lnd-b-{secrets.token_hex(6)}"
+    sidecar = f"rillswap-{prefix}-client-{secrets.token_hex(6)}"
     cert_a, cert_b = public / "a.cert", public / "b.cert"
     try:
         _docker(
@@ -1135,8 +1373,8 @@ def test_pinned_two_node_funded_channel_bootstrap(tmp_path: Path) -> None:  # no
             PYTHON_IMAGE,
             "python",
             "-c",
-            CHANNEL_BOOTSTRAP,
-            timeout=210,
+            program,
+            timeout=deadline,
         )
         evidence = json.loads(result)
         assert evidence["capacity_sat"] == 1_000_000
@@ -1154,8 +1392,32 @@ def test_pinned_two_node_funded_channel_bootstrap(tmp_path: Path) -> None:  # no
         )
         assert output["confirmations"] >= 1
         assert output["value"] == Decimal("0.01000000")
+        return evidence
     finally:
         try:
             _cleanup_containers((sidecar, b, a, core), run_id, cert_a)
         finally:
             cert_b.unlink(missing_ok=True)
+
+
+@pytest.mark.lnd
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_LND") != "1",
+    reason="set RILLSWAP_RUN_LND=1 for pinned disposable LND",
+)
+def test_pinned_two_node_funded_channel_bootstrap(tmp_path: Path) -> None:
+    """Fund one disposable private channel, not an LN payment or swap."""
+    _run_two_node_sidecar(tmp_path, CHANNEL_BOOTSTRAP, prefix="channel", deadline=210)
+
+
+@pytest.mark.lnd
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_LND") != "1",
+    reason="set RILLSWAP_RUN_LND=1 for pinned disposable LND",
+)
+def test_pinned_single_part_hold_accepted_then_canceled(tmp_path: Path) -> None:
+    """Observe backend HTLC lifecycle and adapter refusal, never fund BTC."""
+    evidence = _run_two_node_sidecar(tmp_path, HELD_HTLC_PAYMENT, prefix="hold", deadline=270)
+    assert evidence["backend_hold_observed"] is True
+    assert evidence["observer_refused_custom"] is True
+    assert evidence["payment_failed"] is True
