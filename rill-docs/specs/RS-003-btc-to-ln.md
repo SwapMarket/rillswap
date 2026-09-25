@@ -128,3 +128,41 @@ hash-reservation history MUST NOT issue firm offers. Fresh sessions keep the
 invoice private to the selected provider. They cannot stop a client from
 racing the same invoice at several providers, and possessing an invoice does
 not authenticate its owner.
+
+## Acceptance, funding, and settlement messages
+
+Payload structure is defined by `schemas/wire/settlement-v1.schema.json`.
+Every message below is a session-key-signed envelope in the post-confirm
+sender streams (RS-001 section 8) with `contract_hash` set to the accepted
+contract hash.
+
+- `terms_accept` (client): replies (`in_reply_to`) to the provider's
+  `terms_offer`. The payload is `{acceptance, client_acceptance_signature}`.
+  `acceptance` is `ClientAcceptanceV1` for this session, transcript, and
+  contract. The provider admits it only when all of these hold:
+  - the offer is the one it recorded;
+  - `terms_expiry` has not passed;
+  - the invoice still has `minimum_invoice_remaining_seconds` left.
+
+  Admission atomically moves the session to an accepted state that idle
+  expiry never deletes. The provider answers with `ack`
+  `{acknowledged_message_id}`. The client MUST export recovery material before
+  sending `terms_accept`.
+- `funding_binding` (client, unsolicited, `in_reply_to` null): the payload is
+  `{binding, funding_binding_signature, funding_transaction}`. `binding` is the
+  RS-001 `FundingBindingV1` signed by the client session key.
+  `funding_transaction` is the exact serialized transaction. The provider
+  checks it statically against the binding and terms. It records the binding
+  and answers `ack`. It then independently retrieves the transaction from its
+  own node and waits for `funding_confirmations` of the exact unspent contract
+  output before any payment.
+- `observation` (provider, unsolicited): `payment_settled` carries the
+  preimage the client can check against the payment hash. `payment_failed`
+  says the provider will not pay, so the client waits for refund eligibility.
+  `claim_broadcast` names the provider's claim transaction. Observations
+  inform only. The client still verifies the preimage and the chain itself.
+
+Version one uses the unilateral claim leaf. Cooperative MuSig2 claims are
+optional and not yet negotiated. A provider using LND `SendPaymentV2` bounds
+the absolute HTLC expiry with `cltv_limit` so that it never exceeds
+`timing_policy.max_outgoing_htlc_expiry_height`.

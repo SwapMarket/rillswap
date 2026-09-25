@@ -1,0 +1,155 @@
+{
+  "format": "rillswap-settlement-vectors",
+  "format_version": 1,
+  "source": "vectors/recovery/initial-btc-to-ln-v1.json",
+  "valid": {
+    "termsAccept": [
+      {
+        "acceptance": {
+          "contract_hash": "35fdbb89024750e8c84833e730e4395cd8745e00ee59c24b668c880f1880cb54",
+          "handshake_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8",
+          "session_id": "1010101010101010101010101010101010101010101010101010101010101010",
+          "client_session_xonly_key": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+          "provider_session_xonly_key": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+        },
+        "client_acceptance_signature": "48784189fe96d08f9175d239058c4226ba508ba67df9ff41e014606322934c29c8d358ae491ab9cfeb2f5469a114534860cddccea2e7b9210ca4f896e4c3d246"
+      }
+    ],
+    "fundingBindingMessage": [
+      {
+        "binding": {
+          "contract_hash": "35fdbb89024750e8c84833e730e4395cd8745e00ee59c24b668c880f1880cb54",
+          "funding_attempt_id": "3131313131313131313131313131313131313131313131313131313131313131",
+          "binding_revision": 0,
+          "funder_role": "client",
+          "lineage_anchor_txid": "4141414141414141414141414141414141414141414141414141414141414141",
+          "lineage_anchor_vout": 0,
+          "funding_txid": "5151515151515151515151515151515151515151515151515151515151515151",
+          "contract_vout": 0,
+          "contract_value_sat": "101000",
+          "contract_script_pubkey": "512092b3a00badd1c4e6474a1df8f4a858bb86342cbc1ba8b589a8e955b49458ed14",
+          "replaces_txid": null,
+          "created_at": 1700000100
+        },
+        "funding_binding_signature": "61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+        "funding_transaction": "02000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+      }
+    ],
+    "ack": [
+      {
+        "acknowledged_message_id": "7171717171717171717171717171717171717171717171717171717171717171"
+      }
+    ],
+    "observation": [
+      {
+        "kind": "payment_settled",
+        "payment_preimage": "8181818181818181818181818181818181818181818181818181818181818181"
+      },
+      {
+        "kind": "payment_failed"
+      },
+      {
+        "kind": "claim_broadcast",
+        "claim_txid": "9191919191919191919191919191919191919191919191919191919191919191"
+      }
+    ]
+  },
+  "invalid": {
+    "termsAccept": [
+      {
+        "acceptance": {
+          "contract_hash": "35fdbb89024750e8c84833e730e4395cd8745e00ee59c24b668c880f1880cb54",
+          "handshake_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8",
+          "session_id": "1010101010101010101010101010101010101010101010101010101010101010",
+          "client_session_xonly_key": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+          "provider_session_xonly_key": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+        }
+      },
+      {
+        "acceptance": {
+          "contract_hash": "35fdbb89024750e8c84833e730e4395cd8745e00ee59c24b668c880f1880cb54",
+          "handshake_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8",
+          "session_id": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+          "client_session_xonly_key": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+          "provider_session_xonly_key": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+        },
+        "client_acceptance_signature": "48784189fe96d08f9175d239058c4226ba508ba67df9ff41e014606322934c29c8d358ae491ab9cfeb2f5469a114534860cddccea2e7b9210ca4f896e4c3d246"
+      }
+    ],
+    "fundingBindingMessage": [
+      {
+        "binding": {
+          "contract_hash": "35fdbb89024750e8c84833e730e4395cd8745e00ee59c24b668c880f1880cb54",
+          "funding_attempt_id": "3131313131313131313131313131313131313131313131313131313131313131",
+          "binding_revision": 0,
+          "funder_role": "client",
+          "lineage_anchor_txid": "4141414141414141414141414141414141414141414141414141414141414141",
+          "lineage_anchor_vout": 0,
+          "funding_txid": "5151515151515151515151515151515151515151515151515151515151515151",
+          "contract_vout": 0,
+          "contract_value_sat": "101000",
+          "contract_script_pubkey": "512092b3a00badd1c4e6474a1df8f4a858bb86342cbc1ba8b589a8e955b49458ed14",
+          "replaces_txid": null,
+          "created_at": 1700000100
+        },
+        "funding_binding_signature": "61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+        "funding_transaction": "0200"
+      },
+      {
+        "binding": {
+          "contract_hash": "35fdbb89024750e8c84833e730e4395cd8745e00ee59c24b668c880f1880cb54",
+          "funding_attempt_id": "3131313131313131313131313131313131313131313131313131313131313131",
+          "binding_revision": 0,
+          "funder_role": "client",
+          "lineage_anchor_txid": "4141414141414141414141414141414141414141414141414141414141414141",
+          "lineage_anchor_vout": 0,
+          "funding_txid": "5151515151515151515151515151515151515151515151515151515151515151",
+          "contract_vout": 0,
+          "contract_value_sat": "101000",
+          "contract_script_pubkey": "512092b3a00badd1c4e6474a1df8f4a858bb86342cbc1ba8b589a8e955b49458ed14",
+          "replaces_txid": null,
+          "created_at": 1700000100
+        },
+        "funding_binding_signature": "61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+        "funding_transaction": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+        "binding": {
+          "contract_hash": "35fdbb89024750e8c84833e730e4395cd8745e00ee59c24b668c880f1880cb54",
+          "funding_attempt_id": "3131313131313131313131313131313131313131313131313131313131313131",
+          "binding_revision": 0,
+          "funder_role": "client",
+          "lineage_anchor_txid": "4141414141414141414141414141414141414141414141414141414141414141",
+          "lineage_anchor_vout": 0,
+          "funding_txid": "5151515151515151515151515151515151515151515151515151515151515151",
+          "contract_vout": 0,
+          "contract_value_sat": "101000",
+          "contract_script_pubkey": "512092b3a00badd1c4e6474a1df8f4a858bb86342cbc1ba8b589a8e955b49458ed14",
+          "replaces_txid": null,
+          "created_at": 1700000100
+        },
+        "funding_binding_signature": "61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+        "funding_transaction": "02000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "surprise": 1
+      }
+    ],
+    "ack": [
+      {},
+      {
+        "acknowledged_message_id": "71"
+      }
+    ],
+    "observation": [
+      {
+        "kind": "payment_settled"
+      },
+      {
+        "kind": "payment_failed",
+        "reason": "x"
+      },
+      {
+        "kind": "unknown"
+      }
+    ]
+  }
+}

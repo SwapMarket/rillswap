@@ -173,3 +173,19 @@ def test_quote_terms_offer_vector_binds_recovery_contract_hash() -> None:
     tag = hashlib.sha256(b"RillSwap/contract/v1").digest()
     digest = hashlib.sha256(tag + tag + rfc8785.dumps(terms["contract_terms"])).hexdigest()
     assert digest == terms["contract_hash"]
+
+
+SETTLEMENT_SCHEMA = "https://spec.rillswap.invalid/schemas/wire/settlement-v1.schema.json"
+SETTLEMENT_VECTORS = load_json(ROOT / "vectors/wire/settlement-v1.json")
+
+
+@pytest.mark.parametrize("definition", sorted(SETTLEMENT_VECTORS["valid"]))
+def test_settlement_vectors_match_schema(definition: str) -> None:
+    registry, _schemas = schema_registry()
+    validator = jsonschema.Draft202012Validator(
+        {"$ref": f"{SETTLEMENT_SCHEMA}#/$defs/{definition}"}, registry=registry
+    )
+    for case in SETTLEMENT_VECTORS["valid"][definition]:
+        validator.validate(case)
+    for case in SETTLEMENT_VECTORS["invalid"][definition]:
+        assert not validator.is_valid(case), case
