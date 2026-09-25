@@ -34,12 +34,13 @@ import uuid
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, Protocol, Self
 
 import pyrage  # type: ignore[import-untyped]
 from pyrage import x25519
 from rill_core.wire import verify_static_handshake_accept, verify_static_handshake_transcript
 from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_model_json
+from rill_core.wire.envelope_authentication import verify_static_signed_envelope
 from rill_core.wire.hashes import handshake_init_hash, unsigned_envelope_hash
 from rill_core.wire.messages import (
     Envelope,
@@ -66,6 +67,8 @@ if TYPE_CHECKING:
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
 SCHEMA_VERSION = 4  # v1-v3 (unreleased development formats) are refused unchanged.
+FIRST_REQUEST_SEQUENCE = 2  # RS-001: first client message after the confirm
+MAX_REQUESTS_PER_SESSION = 16  # further requests are refused unanswered
 DEFAULT_MAX_SESSIONS = 1000  # live (unexpired) sessions
 DEFAULT_MAX_TOMBSTONES = 1_000_000  # permanent expired-session IDs (~100 bytes each)
 DEFAULT_NEW_SESSIONS_PER_MINUTE = 60  # global admission rate; known sessions exempt
@@ -114,7 +117,7 @@ SCHEMA = (
     ),
     (
         "CREATE TABLE conflicts (session_id TEXT NOT NULL, kind TEXT NOT NULL CHECK "
-        "(kind IN ('init', 'confirm')), evidence_bytes BLOB NOT NULL, "
+        "(kind IN ('init', 'confirm', 'request')), evidence_bytes BLOB NOT NULL, "
         "PRIMARY KEY (session_id, kind))"
     ),
     (
@@ -207,6 +210,31 @@ class ConfirmAdmission:
     transcript_digest: str
     revision: int
     replay: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RequestAnswer:
+    """A client request admitted with its recorded, signed answer (not yet sent)."""
+
+    session_id: str
+    request_message_id: str
+    response_message_id: str
+    replay: bool
+
+
+class EnvelopeSigner(Protocol):
+    """BIP-340 signing, e.g. ``rill_crypto.Context``."""
+
+    def schnorr_sign(self, secret_key: bytes, message: bytes, auxiliary_random: bytes) -> bytes:
+        """Sign a 32-byte digest."""
+        ...
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    # Pure, deterministic policy: (request, earlier admitted requests) -> answer.
+    Responder = Callable[[Envelope, tuple[Envelope, ...]], tuple[str, dict[str, Any]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1167,6 +1195,189 @@ class LiveSessionStore:
             raise
         except Exception:  # noqa: BLE001 - never echo storage details
             raise LiveSessionStoreError("announcement ordering refused") from None
+
+    def answer_request(
+        self,
+        request_document: bytes,
+        *,
+        responder: Responder,
+        signer: EnvelopeSigner,
+        now: int | None = None,
+    ) -> RequestAnswer:
+        """Admit one signed client request and durably record its signed answer.
+
+        One transaction checks the client session-key signature and the
+        contiguous sequence, calls the pure ``responder`` for the answer
+        payload, signs it with the session key, and records both. Only then may
+        the answer be published (via ``pending_outbox``). An exact replay,
+        even with a fresh signature, returns the recorded answer. A different
+        validly signed message reusing a message ID or sequence is kept as
+        evidence and blocks the session. Anything unverifiable, out of order,
+        or over budget is refused with no record and no reply.
+        """
+        now = int(time.time()) if now is None else now
+        conflict = False
+        try:
+            outer = _canonical_envelope(request_document)
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT client_key, provider_session_key, phase, blocked, revision, "
+                    "next_client_seq, next_provider_seq FROM sessions WHERE session_id=?",
+                    (outer.session_id,),
+                ).fetchone()
+                if (
+                    row is None
+                    and connection.execute(
+                        "SELECT 1 FROM expired WHERE session_id=?", (outer.session_id,)
+                    ).fetchone()
+                ):
+                    raise SessionExpiredError("session expired")  # noqa: TRY301
+                if row is None or row[2] != "CONFIRMED":
+                    raise LiveSessionStoreError("no confirmed session")  # noqa: TRY301
+                client, key, _, blocked, revision, client_seq, provider_seq = row
+                if blocked:
+                    raise SessionBlockedError("session blocked by conflict evidence")  # noqa: TRY301
+                digest = verify_static_signed_envelope(
+                    request_document,
+                    expected_session_id=outer.session_id,
+                    expected_profile=self._policy.profile,
+                    expected_network=self._network,
+                    expected_sender_key=client,
+                    supported_features=self._policy.features,
+                    crypto=self._crypto,
+                ).hex()
+                seen = connection.execute(
+                    "SELECT message_id, seq, unsigned_digest FROM inbox "
+                    "WHERE session_id=? AND sender_key=? AND (message_id=? OR seq=?)",
+                    (outer.session_id, client, outer.message_id, outer.sequence),
+                ).fetchall()
+                if seen:
+                    if seen == [(outer.message_id, outer.sequence, digest)]:
+                        answer = connection.execute(
+                            "SELECT message_id FROM outbox WHERE session_id=? AND in_reply_to=?",
+                            (outer.session_id, outer.message_id),
+                        ).fetchone()
+                        return RequestAnswer(
+                            outer.session_id, outer.message_id, answer[0], replay=True
+                        )
+                    _record_conflict(connection, outer.session_id, "request", request_document)
+                    connection.execute(
+                        "UPDATE sessions SET blocked=1, revision=revision + 1 WHERE session_id=?",
+                        (outer.session_id,),
+                    )
+                    conflict = True
+                else:
+                    if not (
+                        outer.sequence == client_seq
+                        and outer.message_type == "quote_request"
+                        and outer.in_reply_to is None
+                        and outer.contract_hash is None
+                        and client_seq - FIRST_REQUEST_SEQUENCE < MAX_REQUESTS_PER_SESSION
+                    ):
+                        raise LiveSessionStoreError("request not admissible")  # noqa: TRY301
+                    prior = tuple(
+                        _canonical_envelope(document)
+                        for (document,) in connection.execute(
+                            "SELECT canonical_bytes FROM inbox WHERE session_id=? "
+                            "AND sender_key=? AND seq>=? ORDER BY seq",
+                            (outer.session_id, client, FIRST_REQUEST_SEQUENCE),
+                        )
+                    )
+                    answer_type, payload = responder(outer, prior)
+                    scalar, _ = self._unseal(connection, outer.session_id)
+                    try:
+                        response = self._signed_envelope(
+                            outer, key, provider_seq, answer_type, payload, scalar, signer
+                        )
+                    finally:
+                        del scalar
+                    admitted = revision + 1
+                    connection.execute(
+                        "INSERT INTO inbox VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            outer.session_id,
+                            client,
+                            outer.message_id,
+                            outer.sequence,
+                            digest,
+                            request_document,
+                            admitted,
+                        ),
+                    )
+                    connection.execute(
+                        "INSERT INTO outbox VALUES (?, ?, ?, ?, ?, ?, 'PENDING')",
+                        (
+                            response.message_id,
+                            outer.session_id,
+                            provider_seq,
+                            outer.message_id,
+                            canonicalize(response.model_dump(mode="json")),
+                            admitted,
+                        ),
+                    )
+                    connection.execute(
+                        "UPDATE sessions SET revision=?, next_client_seq=?, "
+                        "next_provider_seq=?, active_at=? WHERE session_id=?",
+                        (admitted, client_seq + 1, provider_seq + 1, now, outer.session_id),
+                    )
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo caller documents or crypto details
+            raise LiveSessionStoreError("request refused") from None
+        if conflict:
+            raise SessionBlockedError("conflicting signed request is durable")
+        return RequestAnswer(outer.session_id, outer.message_id, response.message_id, replay=False)
+
+    def _signed_envelope(  # noqa: PLR0913, PLR0917 - one envelope's explicit parts
+        self,
+        request: Envelope,
+        key: str,
+        sequence: int,
+        message_type: str,
+        payload: dict[str, Any],
+        scalar: bytes,
+        signer: EnvelopeSigner,
+    ) -> Envelope:
+        unsigned = Envelope.model_validate_json(
+            canonicalize(
+                {
+                    "protocol": "rillswap",
+                    "wire_version": "1",
+                    "profile_id": request.profile_id,
+                    "network_identity": request.network_identity.model_dump(mode="json"),
+                    "session_id": request.session_id,
+                    "message_id": _new_message_id(),
+                    "sender_session_key": key,
+                    "sequence": sequence,
+                    "in_reply_to": request.message_id,
+                    "contract_hash": None,
+                    "message_type": message_type,
+                    "payload": payload,
+                    "required_features": [],
+                    "extensions": {},
+                    "signature": None,
+                }
+            ),
+            strict=True,
+        )
+        digest = unsigned_envelope_hash(unsigned)
+        signature = signer.schnorr_sign(scalar, digest, secrets.token_bytes(32))
+        self._crypto.schnorr_verify(bytes.fromhex(key), digest, signature)
+        return unsigned.model_copy(update={"signature": signature.hex()})
+
+    def session_mailboxes(self) -> tuple[str, ...]:
+        """Return our mailbox keys for sessions that may still send to us."""
+        try:
+            with self._write() as connection:
+                rows = connection.execute(
+                    "SELECT provider_session_key FROM sessions WHERE blocked=0 "
+                    "AND phase IN ('ACCEPT_COMMITTED', 'CONFIRMED') ORDER BY revision"
+                ).fetchall()
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("session mailboxes unavailable") from None
+        return tuple(row[0] for row in rows)
 
     def awaiting_confirm_mailboxes(self) -> tuple[str, ...]:
         """Return our session mailbox keys that still expect a client confirm."""

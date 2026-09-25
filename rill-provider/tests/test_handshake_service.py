@@ -13,6 +13,7 @@ from fake_relay import FakeRelay
 from pyrage import x25519  # type: ignore[import-untyped]
 from rill_core.wire.hashes import handshake_hash, unsigned_envelope_hash
 from rill_core.wire.messages import Envelope, HandshakeAccept, HandshakeInit
+from rill_core.wire.quotes import QuoteOffer
 from test_live_session_store import Harness, _bytes
 
 from rill_provider.handshake_service import HandshakeService, ServicePolicy
@@ -63,6 +64,26 @@ def _signed_confirm(harness: Harness, accept: Envelope, crypto: Context) -> dict
     return confirm
 
 
+def _signed_quote_request(harness: Harness, crypto: Context) -> dict[str, Any]:
+    request = copy.deepcopy(harness.envelopes[2])
+    request.update(
+        message_id="21" * 32,
+        sequence=2,
+        in_reply_to=None,
+        message_type="quote_request",
+        payload={
+            "kind": "btc-to-ln",
+            "mode": "indicative",
+            "lightning_principal_sat": "50000",
+            "extensions": {},
+        },
+        signature=None,
+    )
+    unsigned = unsigned_envelope_hash(Envelope.model_validate_json(json.dumps(request)))
+    request["signature"] = crypto.schnorr_sign(CLIENT_SECRET, unsigned, b"\x67" * 32).hex()
+    return request
+
+
 async def _next(connection: RelayConnection, predicate: object) -> bytes:
     async for event in connection.events():
         if predicate(json.loads(event)):  # type: ignore[operator]
@@ -72,7 +93,7 @@ async def _next(connection: RelayConnection, predicate: object) -> bytes:
 
 @pytest.mark.native_crypto
 @NATIVE
-def test_native_handshake_through_relay_and_service(
+def test_native_handshake_through_relay_and_service(  # noqa: PLR0915 - one end-to-end story
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from rill_crypto import Context  # noqa: PLC0415
@@ -115,7 +136,7 @@ def test_native_handshake_through_relay_and_service(
         client_key = crypto.public_key(CLIENT_SECRET)[1:].hex()
         try:
             with harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store:
-                service = HandshakeService(store, signer, crypto, policy)
+                service = HandshakeService(store, signer, crypto, policy, chain_tip=lambda: 500)
                 runner = asyncio.create_task(service.run(stop, tick_seconds=0.2))
                 async with RelayConnection(url) as client:
                     await client.subscribe(
@@ -159,6 +180,34 @@ def test_native_handshake_through_relay_and_service(
                         await asyncio.sleep(0.05)
                     assert store.pending_outbox() == ()
                     assert store.awaiting_confirm_mailboxes() == ()
+                    request = _signed_quote_request(harness, crypto)
+                    await relay.inject(
+                        _wrap_envelope(
+                            _bytes(request),
+                            sender_session_secret=CLIENT_SECRET,
+                            recipient_xonly_key=accept.sender_session_key,
+                            crypto=crypto,
+                        )
+                    )
+                    wrap = await asyncio.wait_for(_next(client, lambda e: e["kind"] == 1059), 10)
+                    offer = _decode_gift_wrap_candidate(
+                        wrap,
+                        recipient_mailbox_secret=CLIENT_SECRET,
+                        expected_recipient_xonly_key=client_key,
+                        expected_network=harness.network,
+                        expected_profile_id="btc-to-ln/v1",
+                        crypto=crypto,
+                    ).envelope
+                    assert (offer.message_type, offer.sequence) == ("quote_offer", 1)
+                    assert offer.in_reply_to == request["message_id"]
+                    crypto.schnorr_verify(
+                        bytes.fromhex(accept.sender_session_key),
+                        unsigned_envelope_hash(offer),
+                        bytes.fromhex(offer.signature or ""),
+                    )
+                    quote = QuoteOffer.model_validate_json(json.dumps(offer.payload))
+                    assert quote.economics.contract_amount_sat == "50100"  # L + base 50 + 1000 ppm
+                    assert quote.reference_height == 500
                 stop.set()
                 await asyncio.wait_for(runner, 10)
         finally:

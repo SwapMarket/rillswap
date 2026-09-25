@@ -177,3 +177,21 @@ def test_native_serve_announces_and_stops_on_sigterm(tmp_path: Path) -> None:
             await relay.stop()
 
     asyncio.run(scenario())
+
+
+def test_bitcoin_core_cookie_resolves_and_quote_settings_reach_the_service(
+    tmp_path: Path,
+) -> None:
+    config = load_config(
+        _config(
+            tmp_path,
+            bitcoin_core={"port": 18443, "cookie_file": "core.cookie"},
+            quote={"lifetime": 30},
+        )
+    )
+    assert config.bitcoin_core is not None
+    assert config.bitcoin_core.cookie_file == tmp_path / "core.cookie"
+    assert config.service_policy().quote.lifetime == 30
+    assert config.service_policy().quote.funding_confirmations == 2
+    with pytest.raises(OperatorConfigError):
+        load_config(_config(tmp_path, quote={"lifetime": 0}))

@@ -22,6 +22,7 @@ from rill_provider.live_session_store import (
     DEFAULT_NEW_SESSIONS_PER_MINUTE,
     AuthorityDeclaration,
 )
+from rill_provider.quote_policy import QuoteSchedule
 
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_IDENTITY_FILE_BYTES = 4096
@@ -52,6 +53,27 @@ class Attestation(_Strict):
     single_host: bool
 
 
+class BitcoinCore(_Strict):
+    """Loopback regtest Core RPC, used only for indicative quote heights."""
+
+    port: int = Field(ge=1, le=65535)
+    cookie_file: Path
+
+
+class QuoteSettings(_Strict):
+    """Quote parameters beyond the public announcement terms."""
+
+    funding_confirmations: int = Field(default=2, ge=1)
+    settlement_confirmations: int = Field(default=3, ge=1)
+    refund_resolution_confirmations: int = Field(default=6, ge=1)
+    max_refund_delay_blocks: int = Field(default=288, ge=1)
+    max_funding_fee_sat: int = Field(default=5_000, ge=0)
+    max_claim_fee_sat: int = Field(default=5_000, ge=0)
+    max_refund_fee_sat: int = Field(default=5_000, ge=0)
+    minimum_invoice_remaining_seconds: int = Field(default=1_800, ge=1)
+    lifetime: int = Field(default=60, ge=1)
+
+
 class PublicTerms(_Strict):
     """RS-005 announcement terms."""
 
@@ -72,6 +94,8 @@ class OperatorConfig(_Strict):
     custody_recipient: str
     custody_identity_file: Path
     native_crypto_library: Path
+    bitcoin_core: BitcoinCore | None = None
+    quote: QuoteSettings = QuoteSettings()
     authority: Attestation
     handshake: HandshakeSelection
     terms: PublicTerms
@@ -117,6 +141,7 @@ class OperatorConfig(_Strict):
             outbox_retry=self.outbox_retry,
             handshake_timeout=self.handshake_timeout,
             max_sends_per_tick=self.max_sends_per_tick,
+            quote=QuoteSchedule(**self.quote.model_dump()),
         )
 
 
@@ -136,17 +161,20 @@ def load_config(path: Path) -> OperatorConfig:
     except (OSError, ValueError) as error:
         raise OperatorConfigError(f"config refused: {type(error).__name__}") from None
     base = path.parent.absolute()
-    return config.model_copy(
-        update={
-            name: _resolve(base, getattr(config, name))
-            for name in (
-                "identity_file",
-                "store_path",
-                "custody_identity_file",
-                "native_crypto_library",
-            )
-        }
-    )
+    update: dict[str, object] = {
+        name: _resolve(base, getattr(config, name))
+        for name in (
+            "identity_file",
+            "store_path",
+            "custody_identity_file",
+            "native_crypto_library",
+        )
+    }
+    if config.bitcoin_core is not None:
+        update["bitcoin_core"] = config.bitcoin_core.model_copy(
+            update={"cookie_file": _resolve(base, config.bitcoin_core.cookie_file)}
+        )
+    return config.model_copy(update=update)
 
 
 def read_custody_identity(path: Path) -> str:

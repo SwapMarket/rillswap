@@ -30,6 +30,8 @@ from rill_provider.live_session_store import (
 )
 
 if TYPE_CHECKING:
+    from rill_crypto import Context
+
     from rill_provider.provider_identity import ProviderIdentity
 
 FIXTURE = Path(__file__).parent / "fixtures" / "initial-btc-to-ln-v1.json"
@@ -1021,3 +1023,91 @@ def test_announcement_revisions_strictly_increase_across_owners(harness: Harness
         with pytest.raises(LiveSessionStoreError, match="would not increase"):
             store.record_announcement(999)
         store.record_announcement(1001)
+
+
+def _signed_request(
+    harness: Harness,
+    crypto: Context,
+    sequence: int,
+    message_id: str,
+    **payload: Any,  # noqa: ANN401
+) -> bytes:
+    request = copy.deepcopy(harness.envelopes[2])
+    request.update(
+        message_id=message_id,
+        sequence=sequence,
+        in_reply_to=None,
+        message_type="quote_request",
+        payload=payload or {"kind": "btc-to-ln", "mode": "indicative"},
+        signature=None,
+    )
+    digest = unsigned_envelope_hash(Envelope.model_validate_json(json.dumps(request)))
+    request["signature"] = crypto.schnorr_sign((2).to_bytes(32, "big"), digest, b"\x66" * 32).hex()
+    return _bytes(request)
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
+)
+def test_native_signed_requests_get_one_durable_signed_answer(harness: Harness) -> None:
+    from rill_crypto import Context  # noqa: PLC0415
+
+    seen: list[int] = []
+
+    def responder(request: Envelope, prior: tuple[Envelope, ...]) -> tuple[str, dict[str, Any]]:
+        seen.append(len(prior))
+        return "error", {"code": "capacity_unavailable", "message": str(request.sequence)}
+
+    harness.provision()
+    with (
+        Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
+        harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store,
+    ):
+        store.reserve(harness.init)
+        first = _signed_request(harness, crypto, 2, "21" * 32)
+        with pytest.raises(LiveSessionStoreError):
+            store.answer_request(first, responder=responder, signer=crypto)  # not confirmed
+        store.commit_accept(harness.accept)
+        store.admit_confirm(harness.confirm)
+        assert store.session_mailboxes() == (harness.envelopes[1]["sender_session_key"],)
+        with pytest.raises(LiveSessionStoreError):  # gap: sequence 3 before 2
+            store.answer_request(
+                _signed_request(harness, crypto, 3, "22" * 32), responder=responder, signer=crypto
+            )
+        answer = store.answer_request(first, responder=responder, signer=crypto, now=5)
+        (pending,) = store.pending_outbox()
+        response = Envelope.model_validate_json(pending.canonical_bytes)
+        assert (response.message_id, response.sequence) == (answer.response_message_id, 1)
+        assert response.in_reply_to == "21" * 32
+        assert response.sender_session_key == harness.envelopes[1]["sender_session_key"]
+        crypto.schnorr_verify(
+            bytes.fromhex(response.sender_session_key),
+            unsigned_envelope_hash(response),
+            bytes.fromhex(response.signature or ""),
+        )
+        resigned = json.loads(first)
+        resigned["signature"] = crypto.schnorr_sign(
+            (2).to_bytes(32, "big"),
+            unsigned_envelope_hash(Envelope.model_validate_json(first)),
+            b"\x77" * 32,
+        ).hex()
+        replay = store.answer_request(_bytes(resigned), responder=responder, signer=crypto)
+        assert replay.replay
+        assert replay.response_message_id == answer.response_message_id
+        second = store.answer_request(
+            _signed_request(harness, crypto, 3, "22" * 32), responder=responder, signer=crypto
+        )
+        assert seen == [0, 1]
+        assert not second.replay
+        forged = json.loads(first)
+        forged["signature"] = "00" * 64
+        with pytest.raises(LiveSessionStoreError):
+            store.answer_request(_bytes(forged), responder=responder, signer=crypto)
+        conflicting = _signed_request(harness, crypto, 2, "21" * 32, kind="btc-to-ln", mode="firm")
+        with pytest.raises(live.SessionBlockedError):
+            store.answer_request(conflicting, responder=responder, signer=crypto)
+        with pytest.raises(live.SessionBlockedError):  # evidence is durable
+            store.answer_request(first, responder=responder, signer=crypto)
+        assert store.session_mailboxes() == ()

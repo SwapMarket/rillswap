@@ -213,14 +213,41 @@ replaceable subscription, and yields raw, unverified event JSON. Publication
 means one relay stored the event, never that the peer received it.
 
 `handshake_service.HandshakeService` connects relays to the live store. On
-each tick it rotates epoch keys, republishes the RS-005 announcement when the
-keys change or the refresh interval elapses, resubscribes to the epoch keys
-and to session mailboxes awaiting a confirm, and retries the pending outbox.
-Each inbound event is either a confirm on a session mailbox (`admit_confirm`)
-or an init on an epoch inbox (`reserve`, then `create_accept`, then wrap and
-publish). Dispositions are content-free. The service adds scheduling and
-retries, never authority. A confirmed session grants no quote, funding, or
-payment action, because none is wired yet.
+each tick it:
+- rotates epoch keys;
+- republishes the RS-005 announcement when the keys change or the refresh
+  interval elapses;
+- resubscribes to the epoch keys and to the open session mailboxes
+  (`session_mailboxes`);
+- retries the pending outbox.
+
+Each inbound event is one of three things:
+- an init on an epoch inbox (`reserve`, then `create_accept`, then wrap and
+  publish);
+- a confirm on a session mailbox (`admit_confirm`);
+- a later signed client request (`answer_request`).
+
+Dispositions are content-free. The service adds scheduling and retries, never
+authority.
+
+`answer_request(document, responder=, signer=)` handles one signed client
+`quote_request` (RS-003 quotes) in a single transaction. It checks the client
+session-key signature and the contiguous sequence, calls a pure responder,
+signs the answer with the session key, and records both the request and the
+answer before anything is sent. An exact replay, even with a fresh
+signature, returns the recorded answer, which the service re-sends. A
+different validly signed message with the same message ID or sequence blocks
+the session. Unverifiable, out-of-order, or over-budget requests (more than 16
+per session) get no record and no reply.
+
+`quote_policy.answer_quote` is that responder. It prices indicative quotes as
+`base + ceil(L * ppm / 1e6)` within the announced bands. It takes the
+reference height from Bitcoin Core (`tip_height`, from the optional
+`bitcoin_core` config) and answers `capacity_unavailable` when no tip is
+available. **Firm requests are refused with `unsupported_request`.** RS-003
+forbids signed terms until a complete payment-hash reservation history
+exists, and it does not exist yet. An indicative quote grants no funding or
+payment action.
 
 ### Operator entrypoint (private regtest only)
 
@@ -236,7 +263,8 @@ fields refused). It sets the network identity, the identity key printed
 above, the identity and store paths, the age `custody_recipient`, the
 `custody_identity_file`, the native crypto library, the `authority`
 attestation, the negotiated `handshake` selection, the public `terms`,
-`relay_urls`, and optional schedules and limits (`max_sessions`,
+`relay_urls`, the optional `bitcoin_core` (`port`, `cookie_file`) and `quote`
+settings, and optional schedules and limits (`max_sessions`,
 `max_tombstones`, `new_sessions_per_minute`; `handshake_timeout`, default 600 s of idleness before a
 pre-economic session expires; `max_sends_per_tick`). Relative paths resolve from the
 config's directory. The config holds no secrets. The custody identity file

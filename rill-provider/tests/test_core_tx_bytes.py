@@ -746,3 +746,32 @@ def test_candidate_unknown_or_mismatched_chain_never_returns_authority(
             reader.observe_candidate_outpoint(binding, terms, keys=None)  # type: ignore[arg-type]
     assert len(requests) in (1, 4, 5, 6, 7)
     assert [item["method"] for item in requests].count("gettxout") <= 1
+
+
+def test_tip_height_checks_chain_and_genesis(tmp_path: Path) -> None:
+    _terms, _binding, network = _context()
+    tip = {
+        "chain": "regtest",
+        "bestblockhash": "11" * 32,
+        "blocks": 1234,
+        "initialblockdownload": False,
+    }
+
+    def reply(genesis: str) -> Any:  # noqa: ANN401
+        def answer(payload: dict[str, Any]) -> tuple[int, bytes]:
+            result = tip if payload["method"] == "getblockchaininfo" else genesis
+            return 200, json.dumps(
+                {"jsonrpc": "2.0", "id": payload["id"], "result": result}
+            ).encode()
+
+        return answer
+
+    requests: list[dict[str, Any]] = []
+    cookie = _cookie(tmp_path)
+    with _server(reply(GENESIS), requests) as port:
+        reader = RegtestCoreTransactionReader(port=port, cookie_path=cookie, network=network)
+        assert reader.tip_height() == 1234
+    with _server(reply("22" * 32), requests) as port:
+        reader = RegtestCoreTransactionReader(port=port, cookie_path=cookie, network=network)
+        with pytest.raises(core_tx_bytes.CoreProtocolError, match="genesis"):
+            reader.tip_height()

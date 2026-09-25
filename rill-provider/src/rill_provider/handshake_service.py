@@ -23,6 +23,7 @@ from rill_provider.live_session_store import (
     StaleOwnerError,
 )
 from rill_provider.provider_identity import AnnouncementTerms
+from rill_provider.quote_policy import QuoteSchedule, QuoteTerms, answer_quote
 from rill_provider.relay_client import RelayConnection, RelayError
 
 if TYPE_CHECKING:
@@ -71,6 +72,7 @@ class ServicePolicy:
     outbox_retry: int = 60
     handshake_timeout: int = 10 * 60
     max_sends_per_tick: int = 16
+    quote: QuoteSchedule = field(default_factory=QuoteSchedule)
 
     def __post_init__(self) -> None:
         """Refuse schedules that would leave advertised epochs undecodable."""
@@ -100,7 +102,7 @@ class _State:
 class HandshakeService:
     """Single-owner orchestration; the caller owns the store and relays."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - explicit injected resources
         self,
         store: LiveSessionStore,
         identity: ProviderIdentity,
@@ -108,13 +110,20 @@ class HandshakeService:
         policy: ServicePolicy,
         *,
         clock: Callable[[], float] = time.time,
+        chain_tip: Callable[[], int] | None = None,
     ) -> None:
-        """Bind already-acquired, already-verified resources."""
+        """Bind already-acquired, already-verified resources.
+
+        ``chain_tip`` (blocking; run off the event loop) supplies an indicative
+        quote's reference height. Without it, or when it fails, quotes are
+        answered ``capacity_unavailable``.
+        """
         self._store = store
         self._identity = identity
         self._transport = transport
         self._policy = policy
         self._clock = clock
+        self._chain_tip = chain_tip
         self._state = _State()
 
     def _now(self) -> int:
@@ -130,7 +139,7 @@ class HandshakeService:
         # Every still-decodable epoch, not only advertised ones: clients may
         # hold an older, still-valid announcement.
         epochs = self._store.receiving_epochs(now=self._now())
-        keys = sorted({*epochs, *self._store.awaiting_confirm_mailboxes()})
+        keys = sorted({*epochs, *self._store.session_mailboxes()})
         return [
             {
                 "kinds": [1059],
@@ -249,6 +258,8 @@ class HandshakeService:
                 document = None
             now = self._now()
             if document is not None:
+                if json.loads(document).get("message_type") != "handshake_confirm":
+                    return await self._answer(document, relays, now)
                 admitted = store.admit_confirm(document, now=now)
                 await self._resubscribe(relays)
                 return "confirm-replay" if admitted.replay else "confirm-admitted"
@@ -272,6 +283,32 @@ class HandshakeService:
         except LiveSessionStoreError:
             return "refused"
         return "init-accepted"
+
+    async def _answer(self, document: bytes, relays: Sequence[Relay], now: int) -> str:
+        policy = self._policy
+        tip: int | None = None
+        if self._chain_tip is not None:
+            try:
+                tip = await asyncio.to_thread(self._chain_tip)
+            except Exception:  # noqa: BLE001 - an unavailable tip only disables quotes
+                LOG.warning("chain tip unavailable; quotes answered capacity_unavailable")
+        terms = QuoteTerms(
+            amount_bands=policy.amount_bands,
+            base_fee_sat=policy.base_fee_sat,
+            proportional_millionths=policy.proportional_millionths,
+            schedule=policy.quote,
+            tip_height=tip,
+            now=now,
+        )
+        answer = self._store.answer_request(
+            document,
+            responder=lambda request, prior: answer_quote(request, prior, terms),
+            signer=self._transport,
+            now=now,
+        )
+        # A replay re-sends the recorded answer (RS-001 stable replay).
+        await self._send_pending(answer.response_message_id, relays)
+        return "request-replay" if answer.replay else "request-answered"
 
     async def run(self, stop: asyncio.Event, *, tick_seconds: float = 15.0) -> None:
         """Serve until ``stop`` is set, reconnecting relays with backoff."""

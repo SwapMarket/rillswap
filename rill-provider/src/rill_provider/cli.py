@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from rill_provider.core_tx_bytes import RegtestCoreTransactionReader
 from rill_provider.handshake_service import HandshakeService
 from rill_provider.live_session_store import LiveSessionStore, LiveSessionStoreError
 from rill_provider.operator_config import (
@@ -26,7 +27,7 @@ from rill_provider.operator_config import (
 from rill_provider.provider_identity import ProviderIdentity, ProviderIdentityError
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from rill_crypto import Context
 
@@ -58,6 +59,19 @@ def _provision_store(config: OperatorConfig) -> int:
     return 0
 
 
+def _chain_tip(config: OperatorConfig) -> Callable[[], int] | None:
+    core = config.bitcoin_core
+    if core is None:
+        return None
+    try:
+        reader = RegtestCoreTransactionReader(
+            port=core.port, cookie_path=core.cookie_file, network=config.network
+        )
+    except ValueError:
+        raise OperatorConfigError("bitcoin_core requires a regtest network") from None
+    return reader.tip_height
+
+
 async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
     identity = ProviderIdentity.load(
         config.identity_file,
@@ -81,7 +95,9 @@ async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
         max_tombstones=config.max_tombstones,
         new_sessions_per_minute=config.new_sessions_per_minute,
     ) as store:
-        service = HandshakeService(store, identity, crypto, config.service_policy())
+        service = HandshakeService(
+            store, identity, crypto, config.service_policy(), chain_tip=_chain_tip(config)
+        )
         await service.run(stop)
 
 

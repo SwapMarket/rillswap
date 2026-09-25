@@ -160,6 +160,28 @@ class RegtestCoreTransactionReader:
         self._cookie_path = Path(cookie_path)
         self._network = network
 
+    def tip_height(self) -> int:
+        """Return the current regtest tip height after checking chain and genesis.
+
+        Informational only (e.g. an indicative quote's reference height); a
+        height read here authorizes nothing.
+        """
+        username, password = _cookie(self._cookie_path)
+        try:
+            with httpx.Client(
+                base_url=self._url,
+                auth=httpx.BasicAuth(username, password),
+                trust_env=False,
+                follow_redirects=False,
+                timeout=httpx.Timeout(READ_SECONDS, connect=CONNECT_SECONDS),
+            ) as client:
+                _, height = _chain_tip(self._rpc(client, "getblockchaininfo", [], 1))
+                if self._rpc(client, "getblockhash", [0], 2) != self._network.genesis_hash:
+                    raise CoreProtocolError("Core genesis differs from configured regtest")
+        except httpx.HTTPError:
+            raise CoreUnavailableError("Core RPC transport unavailable") from None
+        return height
+
     def fetch_binding_byte_match(
         self,
         binding: FundingBinding,
