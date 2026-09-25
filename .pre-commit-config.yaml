@@ -1,0 +1,33 @@
+# Run with `prek run --all-files` (or pre-commit). Ruff versions match each
+# component's requirements-dev pin; ruff reads the nearest pyproject.toml.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check-core-crypto
+        name: ruff check (core, crypto; ruff 0.13.1)
+        language: python
+        additional_dependencies: [ruff==0.13.1]
+        entry: ruff check --force-exclude
+        types_or: [python, pyi]
+        files: ^(rill-core|rill-crypto)/
+      - id: ruff-format-core-crypto
+        name: ruff format --check (core, crypto; ruff 0.13.1)
+        language: python
+        additional_dependencies: [ruff==0.13.1]
+        entry: ruff format --check --force-exclude
+        types_or: [python, pyi]
+        files: ^(rill-core|rill-crypto)/
+      - id: ruff-check-provider-cli
+        name: ruff check (provider, cli; ruff 0.16.8)
+        language: python
+        additional_dependencies: [ruff==0.16.8]
+        entry: ruff check --force-exclude
+        types_or: [python, pyi]
+        files: ^(rill-provider|rill-cli)/
+      - id: ruff-format-provider-cli
+        name: ruff format --check (provider, cli; ruff 0.16.8)
+        language: python
+        additional_dependencies: [ruff==0.16.8]
+        entry: ruff format --check --force-exclude
+        types_or: [python, pyi]
+        files: ^(rill-provider|rill-cli)/
