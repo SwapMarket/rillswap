@@ -84,6 +84,42 @@ test("browser ciphertext is inspectable by independent Go age and native CLI for
         "--crypto-library", native, "--identity", identityPath, corruptPath,
       ], { encoding: "utf8", timeout: 30_000 });
       expect(corruptResult.status).not.toBe(0);
+
+      // The disconnected browser container intentionally performs only
+      // canonical/version preflight. CLI import must still reject a decrypted
+      // semantic-invalid file before producing a recovery report.
+      expect(object.contract_hash).not.toBe("00".repeat(32));
+      const semanticInvalid = [
+        ["missing-user-secret", Object.fromEntries(
+          Object.entries(object).filter(([field]) => field !== "user_secret"),
+        )],
+        ["wrong-contract-hash", { ...object, contract_hash: "00".repeat(32) }],
+      ] as const;
+      for (const [label, invalidObject] of semanticInvalid) {
+        const invalidCanonical = canonicalize(invalidObject);
+        if (invalidCanonical === undefined) throw new Error("invalid fixture did not canonicalize");
+        const invalidPlaintext = new TextEncoder().encode(invalidCanonical);
+        const invalidEncrypted = Uint8Array.from(await page.evaluate(async ({ bytes, selected }) => {
+          const asset = "/recovery-age-test-only.js";
+          const { encryptCanonicalRecoveryForRecipient } = await import(asset) as typeof import("../src/recoveryAgeContainer");
+          return Array.from(await encryptCanonicalRecoveryForRecipient(
+            Uint8Array.from(bytes), selected,
+          ));
+        }, { bytes: Array.from(invalidPlaintext), selected: recipient }));
+        const invalidPath = join(directory, `${label}-${profile.replace("/", "-")}.age`);
+        writeFileSync(invalidPath, invalidEncrypted, { mode: 0o600, flag: "wx" });
+        expect(execFileSync(age, ["-d", "-i", identityPath, invalidPath], {
+          timeout: 30_000, maxBuffer: 256 * 1024,
+        })).toEqual(Buffer.from(invalidPlaintext));
+        const refused = spawnSync(cli, [
+          "recover", "inspect", "--network", network,
+          "--crypto-library", native, "--identity", identityPath, invalidPath,
+        ], { encoding: "utf8", timeout: 30_000, maxBuffer: 256 * 1024 });
+        expect(refused.status).not.toBe(0);
+        expect(refused.stdout).toBe("");
+        expect(refused.stderr).toBe("Recovery operation failed; no payment or funding authority.\n");
+        expect(refused.stderr).not.toContain(identity);
+      }
     }
     expect(offsite).toEqual([]);
   } finally {

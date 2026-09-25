@@ -104,7 +104,9 @@ Unit and Chromium CSP tests use synthetic public fixtures for both profiles.
 The opt-in `RILLSWAP_RUN_WEB_CLI_AGE=1 RILL_CRYPTO_LIBRARY=<local native path>
 AGE_BINARY=<Go age v1.3.1 path> bun run test -- tests/recovery-cli-interop.spec.ts`
 checks actual browser-produced bytes with independent Go age decryption and
-CLI native offline inspection; missing native/Go prerequisites fail that
+CLI native offline inspection, and verifies that the CLI refuses browser-age
+containers with missing required recovery fields or inconsistent contract
+hashes without emitting a report; missing native/Go prerequisites fail that
 explicit opt-in. This is age-container interoperability, **not W03** browser
 recovery generation, durable verified export before funding, or authority to
 sign, send, pay, or recover. Upgrading from previous versions introduces no
