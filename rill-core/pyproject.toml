@@ -1,0 +1,31 @@
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+markers = ["native_crypto: opt-in contract tests against the pinned rill-crypto library"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+check_untyped_defs = true
+disallow_any_generics = true
+no_implicit_optional = true
+show_error_codes = true
+warn_unused_ignores = true
+plugins = ["pydantic.mypy"]
+mypy_path = ["packages/core/src", "packages/adapters/src"]
+
+[[tool.mypy.overrides]]
+module = ["rfc8785"]
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["packages/core/src", "packages/adapters/src"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["C901", "COM812", "D105", "D203", "D213", "EM101", "EM102", "TRY003"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D", "INP001", "PLR2004", "RUF001", "S101"]
