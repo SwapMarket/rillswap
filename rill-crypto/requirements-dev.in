@@ -1,0 +1,5 @@
+-e ./python
+mypy==1.18.1
+pytest==8.4.2
+ruff==0.13.1
+types-cffi==2.0.0.20260518
