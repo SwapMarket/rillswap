@@ -1,0 +1,8 @@
+{
+  "family": "bitcoin",
+  "name": "testnet3",
+  "genesis_hash": "000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943",
+  "signet_challenge": null,
+  "consensus_profile": "bitcoin-core-v30.0",
+  "deployment_namespace": null
+}
