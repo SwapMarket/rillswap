@@ -66,7 +66,9 @@ if TYPE_CHECKING:
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
 SCHEMA_VERSION = 4  # v1-v3 (unreleased development formats) are refused unchanged.
-DEFAULT_MAX_SESSIONS = 1000  # retained sessions, confirmed or not
+DEFAULT_MAX_SESSIONS = 1000  # live (unexpired) sessions
+DEFAULT_MAX_TOMBSTONES = 1_000_000  # permanent expired-session IDs (~100 bytes each)
+DEFAULT_NEW_SESSIONS_PER_MINUTE = 60  # global admission rate; known sessions exempt
 MAX_DOCUMENT_BYTES = 65_536
 MAX_CHALLENGE_TRIES = 4
 MAX_LABEL_CHARS = 256
@@ -92,10 +94,10 @@ SCHEMA = (
         "session_secret_age BLOB NOT NULL, key_state TEXT NOT NULL CHECK "
         "(key_state IN ('LIVE', 'RETIRED')), accept_bytes BLOB, accept_message_id TEXT, "
         "transcript_digest TEXT, phase TEXT NOT NULL CHECK "
-        "(phase IN ('RESERVED', 'ACCEPT_COMMITTED', 'CONFIRMED', 'EXPIRED')), "
+        "(phase IN ('RESERVED', 'ACCEPT_COMMITTED', 'CONFIRMED')), "
         "blocked INTEGER NOT NULL CHECK (blocked IN (0, 1)), revision INTEGER NOT NULL, "
         "next_client_seq INTEGER NOT NULL, next_provider_seq INTEGER NOT NULL, "
-        "active_at INTEGER NOT NULL, replay_until INTEGER)"
+        "active_at INTEGER NOT NULL)"
     ),
     (
         "CREATE TABLE inbox (session_id TEXT NOT NULL, sender_key TEXT NOT NULL, "
@@ -119,6 +121,7 @@ SCHEMA = (
         "CREATE TABLE epochs (epoch_key TEXT PRIMARY KEY, secret_age BLOB NOT NULL, "
         "created_at INTEGER NOT NULL, retire_after INTEGER NOT NULL)"
     ),
+    ("CREATE TABLE expired (session_id TEXT PRIMARY KEY, expired_at INTEGER NOT NULL)"),
     (
         "CREATE TABLE announcements (slot INTEGER PRIMARY KEY CHECK (slot = 1), "
         "created_at INTEGER NOT NULL)"
@@ -171,14 +174,6 @@ class AuthorityDeclaration:
                 "single_host": True,
             }
         )
-
-
-@dataclass(frozen=True, slots=True)
-class EpochInit:
-    """Sender-bound init bytes (still a stranger's) and the epoch they arrived on."""
-
-    init_document: bytes
-    epoch_key: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +255,8 @@ class LiveSessionStore:
         custody_identity: x25519.Identity,
         public_keys: CustodyPublicKeys,
         max_sessions: int,
+        max_tombstones: int,
+        new_sessions_per_minute: int,
     ) -> None:
         """Use provision() or acquire(); never construct directly."""
         self.path = path
@@ -274,6 +271,8 @@ class LiveSessionStore:
         self._custody_identity = custody_identity
         self._public_keys = public_keys
         self._max_sessions = max_sessions
+        self._max_tombstones = max_tombstones
+        self._admission = _TokenBucket(new_sessions_per_minute)
         self._pid = os.getpid()
 
     @staticmethod
@@ -354,13 +353,18 @@ class LiveSessionStore:
         custody_identity: str,
         public_keys: CustodyPublicKeys,
         max_sessions: int = DEFAULT_MAX_SESSIONS,
+        max_tombstones: int = DEFAULT_MAX_TOMBSTONES,
+        new_sessions_per_minute: int = DEFAULT_NEW_SESSIONS_PER_MINUTE,
     ) -> Self:
         """Take lifetime exclusive ownership; refuse any unknown or copied state.
 
         ``max_sessions`` caps retained sessions so strangers cannot grow the
         store without bound; ``expire_unconfirmed`` reclaims capacity.
         """
-        if type(max_sessions) is not int or max_sessions < 1:
+        if not all(
+            type(limit) is int and limit >= 1
+            for limit in (max_sessions, max_tombstones, new_sessions_per_minute)
+        ):
             raise LiveSessionStoreError("session capacity unsupported")
         network_jcs, identity = _expected(network, provider_identity)
         try:
@@ -422,6 +426,8 @@ class LiveSessionStore:
                 custody_identity=unlocking,
                 public_keys=public_keys,
                 max_sessions=max_sessions,
+                max_tombstones=max_tombstones,
+                new_sessions_per_minute=new_sessions_per_minute,
             )
         except LiveSessionStoreError:
             _discard(connection, lock_fd)
@@ -519,45 +525,29 @@ class LiveSessionStore:
             raise LiveSessionStoreError("untrusted or unsupported handshake initiation")
         return outer, init
 
-    def reserve(
-        self, init_document: bytes, *, now: int | None = None, via_epoch: str | None = None
-    ) -> SessionReservation:
+    def reserve(self, init_document: bytes, *, now: int | None = None) -> SessionReservation:
         """Reserve one fresh provider challenge per session; replay is stable.
 
         The init is unsigned, so different bytes for a known session may come
         from a stranger. They are kept as bounded conflict evidence and block
         new risk for that session (an availability cost, never exposure).
-
-        ``via_epoch`` names the epoch inbox the init arrived on. Only the client
-        key holder can rewrap an init to another epoch, so the session record
-        (and its replay answer) is kept until every epoch it arrived through
-        has retired. Without ``via_epoch`` the record is kept forever.
+        An expired session ID is answered ``SessionExpiredError`` forever.
+        New sessions need free live capacity, free tombstone capacity, and a
+        token from the global admission rate limit.
         """
         now = int(time.time()) if now is None else now
         try:
             outer, init = self._init(init_document)
             with self._write() as connection:
-                horizon = None
-                if via_epoch is not None:
-                    epoch = connection.execute(
-                        "SELECT retire_after FROM epochs WHERE epoch_key=?", (via_epoch,)
-                    ).fetchone()
-                    if epoch is None:
-                        raise LiveSessionStoreError("unknown epoch inbox")  # noqa: TRY301
-                    horizon = epoch[0]
+                if connection.execute(
+                    "SELECT 1 FROM expired WHERE session_id=?", (init.session_id,)
+                ).fetchone():
+                    raise SessionExpiredError("session expired")  # noqa: TRY301
                 row = connection.execute(
-                    "SELECT init_bytes, provider_challenge, blocked, revision, phase, "
-                    "replay_until FROM sessions WHERE session_id=?",
+                    "SELECT init_bytes, provider_challenge, blocked, revision FROM sessions "
+                    "WHERE session_id=?",
                     (init.session_id,),
                 ).fetchone()
-                if row is not None and row[5] is not None:
-                    extended = None if horizon is None else max(row[5], horizon)
-                    connection.execute(
-                        "UPDATE sessions SET replay_until=? WHERE session_id=?",
-                        (extended, init.session_id),
-                    )
-                if row is not None and row[4] == "EXPIRED" and row[0] == init_document:
-                    raise SessionExpiredError("session expired")  # noqa: TRY301
                 if row is not None:
                     if row[0] == init_document and not row[2]:
                         # Replay reuses the key; broken custody is never replaced.
@@ -570,14 +560,17 @@ class LiveSessionStore:
                     blocked = True
                 else:
                     blocked = False
-                    (retained,) = connection.execute("SELECT COUNT(*) FROM sessions").fetchone()
-                    if retained >= self._max_sessions:
+                    (live,) = connection.execute("SELECT COUNT(*) FROM sessions").fetchone()
+                    (dead,) = connection.execute("SELECT COUNT(*) FROM expired").fetchone()
+                    if live >= self._max_sessions or dead >= self._max_tombstones:
                         raise SessionCapacityError("session capacity reached")  # noqa: TRY301
+                    if not self._admission.take(now):
+                        raise SessionCapacityError("session admission rate exceeded")  # noqa: TRY301
                     challenge = _fresh_challenge(connection, init)
                     key, sealed = self._new_session_key(init, challenge)
                     connection.execute(
                         "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, 'LIVE', "
-                        "NULL, NULL, NULL, 'RESERVED', 0, 0, 1, 0, ?, ?)",
+                        "NULL, NULL, NULL, 'RESERVED', 0, 0, 1, 0, ?)",
                         (
                             init.session_id,
                             init_document,
@@ -587,7 +580,6 @@ class LiveSessionStore:
                             key,
                             sealed,
                             now,
-                            horizon,
                         ),
                     )
         except LiveSessionStoreError:
@@ -909,10 +901,15 @@ class LiveSessionStore:
                     "client_key, phase, blocked, revision FROM sessions WHERE session_id=?",
                     (outer.session_id,),
                 ).fetchone()
+                if (
+                    row is None
+                    and connection.execute(
+                        "SELECT 1 FROM expired WHERE session_id=?", (outer.session_id,)
+                    ).fetchone()
+                ):
+                    raise SessionExpiredError("session expired")  # noqa: TRY301
                 if row is None or row[5] == "RESERVED":
                     raise LiveSessionStoreError("no committed accept for session")  # noqa: TRY301
-                if row[5] == "EXPIRED":
-                    raise SessionExpiredError("session expired")  # noqa: TRY301
                 init_bytes, accept_bytes, accept_id, digest, client, phase, blocked, revision = row
                 admitted = None
                 if phase == "CONFIRMED":
@@ -1052,7 +1049,7 @@ class LiveSessionStore:
             raise LiveSessionStoreError("epoch key custody not verifiable")
         return xonly, sealed
 
-    def open_epoch_frame(self, outer_event: bytes, *, now: int, transport: Context) -> EpochInit:
+    def open_epoch_frame(self, outer_event: bytes, *, now: int, transport: Context) -> bytes:
         """Decode a gift-wrapped handshake_init sent to an unretired epoch inbox.
 
         Returns exact canonical init bytes whose envelope sender is the seal
@@ -1096,54 +1093,37 @@ class LiveSessionStore:
             raise
         except Exception:  # noqa: BLE001 - uniform, redacted refusal (RS-006)
             raise LiveSessionStoreError("epoch frame refused") from None
-        return EpochInit(candidate.envelope_bytes, recipient)
+        return candidate.envelope_bytes
 
     def expire_idle(self, *, now: int, idle_timeout: int) -> int:
-        """Expire idle pre-economic sessions; delete them after their replay horizon.
+        """Expire idle pre-economic sessions into permanent compact tombstones.
 
         A session idle for ``idle_timeout`` (reserved, accepted, or confirmed
-        with nothing after the confirm) becomes EXPIRED: its session key is
-        destroyed and pending messages stop. The row stays, so a replayed init
-        or late confirm gets the recorded "expired" answer, never a new
-        accept. It is deleted only after ``replay_until``, when the last epoch
-        it arrived through has retired and nobody but the client can resend
-        it. Returns the number of sessions newly expired.
+        with nothing after the confirm) loses its key, messages, and conflict
+        evidence (SQLite ``secure_delete``). Its ID stays in ``expired``
+        forever, so any later init or confirm for it gets
+        ``SessionExpiredError``, never a second accept (RS-001 stable replay).
+        Tombstones count against ``max_tombstones``. Returns how many expired.
         """
         if not (type(now) is int and type(idle_timeout) is int and idle_timeout > 0):
             raise LiveSessionStoreError("expiry schedule unsupported")
         try:
             with self._write() as connection:
                 idle = [
-                    row[0]
+                    (row[0],)
                     for row in connection.execute(
                         "SELECT session_id FROM sessions WHERE phase IN "
                         "('RESERVED', 'ACCEPT_COMMITTED', 'CONFIRMED') AND active_at <= ?",
                         (now - idle_timeout,),
                     )
                 ]
-                for session_id in idle:
-                    connection.execute(
-                        "UPDATE sessions SET phase='EXPIRED', key_state='RETIRED', "
-                        "session_secret_age=x'', revision=revision + 1 WHERE session_id=?",
-                        (session_id,),
-                    )
-                    connection.execute(
-                        "UPDATE outbox SET delivery_state='RECONCILED' "
-                        "WHERE session_id=? AND delivery_state='PENDING'",
-                        (session_id,),
-                    )
-                gone = [
-                    (row[0],)
-                    for row in connection.execute(
-                        "SELECT session_id FROM sessions WHERE phase='EXPIRED' "
-                        "AND replay_until IS NOT NULL AND replay_until <= ?",
-                        (now,),
-                    )
-                ]
+                connection.executemany(
+                    "INSERT INTO expired VALUES (?, ?)", [(sid, now) for (sid,) in idle]
+                )
                 for table in ("inbox", "outbox", "conflicts", "sessions"):
                     connection.executemany(
                         f"DELETE FROM {table} WHERE session_id=?",  # noqa: S608 - fixed names
-                        gone,
+                        idle,
                     )
         except LiveSessionStoreError:
             raise
@@ -1244,6 +1224,25 @@ def _check_schema(connection: sqlite3.Connection) -> None:
         raise LiveSessionStoreError("live session store schema incompatible")
     if connection.execute("PRAGMA quick_check").fetchone() != ("ok",):
         raise LiveSessionStoreError("live session store integrity unavailable")
+
+
+class _TokenBucket:
+    """In-memory global admission rate (a restart refills it; capacity still binds)."""
+
+    def __init__(self, per_minute: int) -> None:
+        self._capacity = float(per_minute)
+        self._tokens = float(per_minute)
+        self._rate = per_minute / 60.0
+        self._last: int | None = None
+
+    def take(self, now: int) -> bool:
+        if self._last is not None and now > self._last:
+            self._tokens = min(self._capacity, self._tokens + (now - self._last) * self._rate)
+        self._last = now if self._last is None else max(self._last, now)
+        if self._tokens < 1:
+            return False
+        self._tokens -= 1
+        return True
 
 
 def _new_session_scalar() -> bytes:

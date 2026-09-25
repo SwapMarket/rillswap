@@ -16,7 +16,12 @@ from rill_core.wire.types import NetworkIdentity  # noqa: TC002 - pydantic runti
 
 from rill_provider.handshake_service import ServicePolicy
 from rill_provider.handshake_store import HandshakePolicy
-from rill_provider.live_session_store import DEFAULT_MAX_SESSIONS, AuthorityDeclaration
+from rill_provider.live_session_store import (
+    DEFAULT_MAX_SESSIONS,
+    DEFAULT_MAX_TOMBSTONES,
+    DEFAULT_NEW_SESSIONS_PER_MINUTE,
+    AuthorityDeclaration,
+)
 
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_IDENTITY_FILE_BYTES = 4096
@@ -78,6 +83,8 @@ class OperatorConfig(_Strict):
     handshake_timeout: int = 10 * 60
     max_sends_per_tick: int = 16
     max_sessions: int = Field(default=DEFAULT_MAX_SESSIONS, ge=1)
+    max_tombstones: int = Field(default=DEFAULT_MAX_TOMBSTONES, ge=1)
+    new_sessions_per_minute: int = Field(default=DEFAULT_NEW_SESSIONS_PER_MINUTE, ge=1)
 
     def handshake_policy(self) -> HandshakePolicy:
         """Return the store-bound negotiation policy."""

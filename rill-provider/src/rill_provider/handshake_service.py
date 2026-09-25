@@ -252,8 +252,8 @@ class HandshakeService:
                 admitted = store.admit_confirm(document, now=now)
                 await self._resubscribe(relays)
                 return "confirm-replay" if admitted.replay else "confirm-admitted"
-            frame = store.open_epoch_frame(event, now=now, transport=self._transport)
-            reserved = store.reserve(frame.init_document, now=now, via_epoch=frame.epoch_key)
+            init = store.open_epoch_frame(event, now=now, transport=self._transport)
+            reserved = store.reserve(init, now=now)
             if reserved.revision != 0:
                 return "init-replay"  # outbox retries own any re-send
             committed = store.create_accept(

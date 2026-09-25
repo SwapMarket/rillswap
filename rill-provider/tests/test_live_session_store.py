@@ -915,8 +915,8 @@ def test_native_init_received_on_epoch_inbox(harness: Harness) -> None:
             crypto=crypto,
         )
         opened = store.open_epoch_frame(frame, now=1150, transport=crypto)
-        assert opened == live.EpochInit(harness.init, epoch)
-        assert store.reserve(opened.init_document).session_id == harness.envelopes[0]["session_id"]
+        assert opened == harness.init
+        assert store.reserve(opened).session_id == harness.envelopes[0]["session_id"]
         with pytest.raises(LiveSessionStoreError, match="retired epoch"):
             store.open_epoch_frame(frame, now=1200, transport=crypto)
         not_init = _wrap_envelope(
@@ -939,7 +939,7 @@ def _other_init(harness: Harness, index: int) -> bytes:
     return _bytes(envelope)
 
 
-def test_capacity_counts_retained_and_expired_sessions(
+def test_live_tombstone_and_rate_limits_bind_only_new_sessions(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import secrets  # noqa: PLC0415
@@ -947,52 +947,52 @@ def test_capacity_counts_retained_and_expired_sessions(
     monkeypatch.setattr(live, "_new_challenge", lambda: secrets.token_hex(32))
     monkeypatch.setattr(live, "_new_session_scalar", lambda: secrets.token_bytes(32))
     harness.provision()
-    with pytest.raises(LiveSessionStoreError, match="capacity unsupported"):
-        harness.acquire_at(harness.path, max_sessions=0)
-    with harness.acquire_at(harness.path, max_sessions=2) as store:
+    for bad in ({"max_sessions": 0}, {"max_tombstones": 0}, {"new_sessions_per_minute": 0}):
+        with pytest.raises(LiveSessionStoreError, match="capacity unsupported"):
+            harness.acquire_at(harness.path, **bad)
+    with harness.acquire_at(harness.path, max_sessions=2, max_tombstones=3) as store:
         first = store.reserve(_other_init(harness, 1), now=1000)
-        store.reserve(_other_init(harness, 2), now=1500)
-        with pytest.raises(live.SessionCapacityError):
-            store.reserve(_other_init(harness, 3), now=1500)
-        assert store.reserve(_other_init(harness, 1), now=1600) == first  # replay unaffected
+        store.reserve(_other_init(harness, 2), now=1000)
+        with pytest.raises(live.SessionCapacityError, match="capacity reached"):
+            store.reserve(_other_init(harness, 3), now=1000)
+        assert store.reserve(_other_init(harness, 1), now=1000) == first  # replay unaffected
         with pytest.raises(LiveSessionStoreError, match="expiry schedule"):
             store.expire_idle(now=2000, idle_timeout=0)
         assert store.expire_idle(now=1999, idle_timeout=1000) == 0
-        assert store.expire_idle(now=2000, idle_timeout=1000) == 1
-        with pytest.raises(live.SessionExpiredError):
-            store.reserve(_other_init(harness, 1), now=2000)  # recorded answer, no new accept
-        assert store.expire_idle(now=10**9, idle_timeout=1) == 1
-        with pytest.raises(live.SessionCapacityError):  # no epoch horizon: kept forever
-            store.reserve(_other_init(harness, 3), now=10**9)
-    with (
-        harness.acquire_at(harness.path, max_sessions=2) as store,  # durable count
-        pytest.raises(live.SessionCapacityError),
-    ):
-        store.reserve(_other_init(harness, 4), now=10**9)
+        assert store.expire_idle(now=2000, idle_timeout=1000) == 2
+        store.reserve(_other_init(harness, 3), now=2000)  # live capacity freed
+        assert store.expire_idle(now=3000, idle_timeout=1000) == 1
+        with pytest.raises(live.SessionCapacityError, match="capacity reached"):
+            store.reserve(_other_init(harness, 4), now=3000)  # tombstones full
+    with harness.acquire_at(harness.path, new_sessions_per_minute=2) as store:
+        store.reserve(_other_init(harness, 5), now=3000)
+        store.reserve(_other_init(harness, 6), now=3000)
+        with pytest.raises(live.SessionCapacityError, match="rate"):
+            store.reserve(_other_init(harness, 7), now=3000)
+        store.reserve(_other_init(harness, 6), now=3000)  # known session: exempt
+        store.reserve(_other_init(harness, 7), now=3030)  # one token refilled
 
 
-def test_expired_record_is_kept_until_the_epoch_replay_horizon(harness: Harness) -> None:
+def test_expired_sessions_are_permanent_tombstones(harness: Harness) -> None:
     harness.provision()
     with harness.acquire() as store:
-        (epoch,) = store.rotate_epochs(now=1000, period=100, retention=100, advertise_for=0)
-        with pytest.raises(LiveSessionStoreError, match="unknown epoch"):
-            store.reserve(harness.init, now=1000, via_epoch="ab" * 32)
-        store.reserve(harness.init, now=1000, via_epoch=epoch)  # retire_after = 1200
+        store.reserve(harness.init, now=1000)
         store.commit_accept(harness.accept)
         assert store.expire_idle(now=1100, idle_timeout=100) == 1
         assert store.pending_outbox() == ()
         assert store.awaiting_confirm_mailboxes() == ()
         with pytest.raises(live.SessionExpiredError):
-            store.admit_confirm(harness.confirm)  # late confirm: recorded answer
+            store.admit_confirm(harness.confirm)
         with pytest.raises(live.SessionExpiredError):
-            store.reserve(harness.init, now=1150, via_epoch=epoch)
-        assert store.receiving_epochs(now=1199) == (epoch,)
-        store.expire_idle(now=1199, idle_timeout=100)
+            store.reserve(harness.init, now=10**9)
+        different = json.loads(harness.init)
+        different["message_id"] = "77" * 32
         with pytest.raises(live.SessionExpiredError):
-            store.reserve(harness.init, now=1199)
-        store.expire_idle(now=1200, idle_timeout=100)  # horizon passed: row deleted
-        assert store.receiving_epochs(now=1200) == ()
-        assert store.reserve(harness.init, now=1200).revision == 0
+            store.reserve(_bytes(different), now=1)  # any init for that ID, any clock
+    with harness.acquire() as store, pytest.raises(live.SessionExpiredError):
+        store.reserve(harness.init)
+    for file in harness.path.parent.iterdir():
+        assert harness.accept not in file.read_bytes()
 
 
 def test_idle_confirmed_sessions_expire_but_keep_their_record(harness: Harness) -> None:

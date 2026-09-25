@@ -164,22 +164,27 @@ Only keys that stay decodable for `advertise_for` more seconds are
 advertised, so a valid announcement never names a key that is about to
 retire.
 
-The store has a fixed capacity, `acquire(..., max_sessions=1000)`. It counts
-every retained session from the durable rows, so a restart does not reset
-it. When it is full, new inits are refused (`SessionCapacityError`), while
-replays of known sessions still work.
-`expire_idle(now=, idle_timeout=)` expires idle sessions before any economic
-step: sessions that are reserved, accepted, or confirmed with nothing after
-the confirm. It destroys the session key (with SQLite `secure_delete`) and
-stops pending messages, but keeps the record. A replayed init or a late
-confirm therefore gets `SessionExpiredError`, never a second accept. The
-record is deleted only after its replay horizon. That horizon is when the
-last epoch inbox the init arrived through (`reserve(..., via_epoch=)`) has
-retired, because only the client key holder can rewrap an init to a newer
-epoch. Sessions reserved without an epoch are kept forever. Expired records
-still count against capacity. The service subscribes to every still-decodable
-epoch (`receiving_epochs`), not only to the advertised ones. Ownership loss
-(`StaleOwnerError`) always stops the service.
+Three limits apply to new sessions only. Replays of known sessions are
+never limited.
+- `acquire(..., max_sessions=1000)` caps live sessions.
+- `max_tombstones=1_000_000` caps permanent expired-session IDs.
+- `new_sessions_per_minute=60` is a global, in-memory token bucket.
+
+Capacity is counted from the durable rows, so a restart does not reset it.
+A refused session raises `SessionCapacityError`. When the tombstones are
+full, new sessions stay refused until the operator acts. Strangers can still
+fill capacity, but only at the configured rate.
+
+`expire_idle(now=, idle_timeout=)` expires sessions that sit idle before any
+economic step: reserved, accepted, or confirmed with nothing after the
+confirm. It deletes their key, messages, and conflict evidence (with SQLite
+`secure_delete`) and keeps only a permanent tombstone of the session ID. Any
+later init or confirm for that ID gets `SessionExpiredError`, never a second
+accept, as RS-001's stable replay rule requires. A late confirm frame cannot
+even be decoded any more, so it gets no reply. The service subscribes to
+every still-decodable epoch (`receiving_epochs`), not only to the advertised
+ones. Ownership loss (`StaleOwnerError`) always stops the service.
+
 `record_announcement(created_at)` makes sure
 announcement revisions strictly increase across restarts. It runs before
 publication, and a clock rollback is refused instead of publishing a lower
@@ -231,8 +236,8 @@ fields refused). It sets the network identity, the identity key printed
 above, the identity and store paths, the age `custody_recipient`, the
 `custody_identity_file`, the native crypto library, the `authority`
 attestation, the negotiated `handshake` selection, the public `terms`,
-`relay_urls`, and optional schedules and limits (`max_sessions`, default
-1000 retained sessions; `handshake_timeout`, default 600 s of idleness before a
+`relay_urls`, and optional schedules and limits (`max_sessions`,
+`max_tombstones`, `new_sessions_per_minute`; `handshake_timeout`, default 600 s of idleness before a
 pre-economic session expires; `max_sends_per_tick`). Relative paths resolve from the
 config's directory. The config holds no secrets. The custody identity file
 must be a regular, owner-owned `0600` file with exactly one
