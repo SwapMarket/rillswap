@@ -17,6 +17,7 @@ dependencies = [
     "protobuf==7.36.2",
     "pyrage==1.4.0",
     "pycryptodomex==3.23.0",
+    "aiohttp==3.14.3",
 ]
 
 [tool.hatch.build.targets.wheel]
