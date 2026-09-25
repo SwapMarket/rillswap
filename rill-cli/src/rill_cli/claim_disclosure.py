@@ -171,6 +171,10 @@ def _disclose(  # noqa: PLR0913 - one explicit side-effect sequence
         and type(credentials) is X25519Credentials
         and type(plan_ciphertext) is bytes
         and 0 < len(plan_ciphertext) <= MAX_CIPHERTEXT_BYTES
+        # The selected binding must be the one the selectors name, on this network.
+        and binding.funding_attempt_id == funding_attempt_id
+        and binding.binding_revision == binding_revision
+        and terms.network_identity == network
     )
     raw, receipt = load_verified_claim_bytes_for_regtest_disclosure(
         plan_ciphertext,

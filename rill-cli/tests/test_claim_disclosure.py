@@ -311,3 +311,46 @@ def test_cli_reports_unknown_disclosure_without_upstream_secret(
     assert result.out == ""
     assert "preimage may have reached Core" in result.err
     assert "52" * 32 not in result.err
+
+
+@pytest.mark.parametrize("mismatch", ["attempt", "revision", "network"])
+def test_disclosure_refuses_selectors_not_bound_to_passed_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str
+) -> None:
+    terms, binding, network = _context()
+    identity = x25519.Identity.generate()
+    credentials = X25519Credentials(str(identity.to_public()), str(identity))
+    loaded: list[object] = []
+    monkeypatch.setattr(
+        disclosure,
+        "load_verified_claim_bytes_for_regtest_disclosure",
+        lambda *_a, **_kw: loaded.append(True),
+    )
+
+    class Reader:
+        def observe_claim(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("no observation before argument binding")
+
+        def _rpc(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("no RPC before argument binding")
+
+    kwargs: dict[str, Any] = {
+        "keys": object(),
+        "recovery_ciphertext": pyrage.encrypt(b"synthetic", [identity.to_public()]),
+        "plan_ciphertext": b"synthetic encrypted plan",
+        "network": network,
+        "credentials": credentials,
+        "funding_attempt_id": binding.funding_attempt_id,
+        "binding_revision": 0,
+        "intent_path": str(tmp_path / "intent.age"),
+    }
+    if mismatch == "attempt":
+        kwargs["funding_attempt_id"] = "ee" * 32
+    elif mismatch == "revision":
+        kwargs["binding_revision"] = 1
+    else:
+        kwargs["network"] = network.model_copy(update={"genesis_hash": "00" * 32})
+    with pytest.raises(disclosure.ClaimDisclosureRefusedError):
+        disclosure.disclose_claim_on_regtest(Reader(), binding, terms, **kwargs)  # type: ignore[arg-type]
+    assert loaded == []
+    assert not (tmp_path / "intent.age").exists()
