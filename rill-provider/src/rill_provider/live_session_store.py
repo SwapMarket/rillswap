@@ -40,7 +40,12 @@ from pyrage import x25519
 from rill_core.wire import verify_static_handshake_accept, verify_static_handshake_transcript
 from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_model_json
 from rill_core.wire.hashes import handshake_init_hash, unsigned_envelope_hash
-from rill_core.wire.messages import Envelope, HandshakeAcceptPayload, HandshakeInit
+from rill_core.wire.messages import (
+    Envelope,
+    HandshakeAccept,
+    HandshakeAcceptPayload,
+    HandshakeInit,
+)
 from rill_core.wire.types import NetworkIdentity
 
 from rill_provider._nip59_receive import _decode_gift_wrap_candidate
@@ -56,6 +61,7 @@ if TYPE_CHECKING:
     from rill_crypto import Context
 
     from rill_provider.handshake_custody_offline import CustodyPublicKeys
+    from rill_provider.provider_identity import ProviderIdentity
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
 SCHEMA_VERSION = 2  # v1 (no session-key custody) is refused unchanged.
@@ -668,6 +674,96 @@ class LiveSessionStore:
             raise LiveSessionStoreError("mailbox frame refused") from None
         return candidate.envelope_bytes
 
+    def create_accept(
+        self,
+        session_id: str,
+        *,
+        identity: ProviderIdentity,
+        transport_endpoints: tuple[str, ...],
+    ) -> AcceptCommit:
+        """Build, identity-sign, and durably commit this session's one accept.
+
+        Negotiation picks the client's most preferred supported suite and the
+        requested capabilities we support, in the client's order. A session
+        that already committed an accept returns that record, never a new one.
+        Nothing is exposed here; publish only via ``wrap_pending``.
+        """
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT init_bytes, provider_challenge, accept_bytes, blocked "
+                    "FROM sessions WHERE session_id=?",
+                    (session_id,),
+                ).fetchone()
+                if row is None:
+                    raise LiveSessionStoreError("no reservation for session")  # noqa: TRY301
+                init_bytes, challenge, stored, blocked = row
+                key = (
+                    None
+                    if stored is not None or blocked
+                    else self._require_custody(connection, session_id)
+                )
+            if stored is not None:
+                return self.commit_accept(stored)
+            if blocked or key is None:
+                raise SessionBlockedError("session blocked by conflict evidence")  # noqa: TRY301
+            outer, init = self._init(init_bytes)
+            if identity.xonly_public_key != self._identity:
+                raise LiveSessionStoreError("identity is not this store's provider")  # noqa: TRY301
+            policy = self._policy
+            suites = [s for s in init.requested_encryption_suites if s in policy.encryption_suites]
+            capabilities = tuple(c for c in init.requested_capabilities if c in policy.capabilities)
+            if not suites or not capabilities:
+                raise LiveSessionStoreError("no mutually supported selection")  # noqa: TRY301
+            selection = HandshakeAccept(
+                handshake_init_hash=handshake_init_hash(init).hex(),
+                protocol="rillswap",
+                wire_version="1",
+                profile_id=init.profile_id,
+                network_identity=init.network_identity,
+                session_id=init.session_id,
+                client_challenge=init.client_challenge,
+                provider_challenge=challenge,
+                client_session_xonly_key=init.client_session_xonly_key,
+                provider_session_xonly_key=key,
+                provider_identity_xonly_key=self._identity,
+                selected_encryption_suite=suites[0],
+                selected_capabilities=capabilities,
+                transport_endpoints=tuple(transport_endpoints),
+                required_features=(),
+                extensions={},
+            )
+            payload: dict[str, Any] = {
+                "accept": selection.model_dump(mode="json"),
+                "provider_identity_signature": identity.sign_handshake_accept(selection),
+            }
+            document = canonicalize(
+                {
+                    "protocol": "rillswap",
+                    "wire_version": "1",
+                    "profile_id": init.profile_id,
+                    "network_identity": init.network_identity.model_dump(mode="json"),
+                    "session_id": init.session_id,
+                    "message_id": _new_message_id(),
+                    "sender_session_key": key,
+                    "sequence": 0,
+                    "in_reply_to": outer.message_id,
+                    "contract_hash": None,
+                    "message_type": "handshake_accept",
+                    "payload": payload,
+                    "required_features": [],
+                    "extensions": {},
+                    "signature": None,
+                }
+            )
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo secret material or library errors
+            raise LiveSessionStoreError("accept construction refused") from None
+        # A concurrent identical build is impossible (single owner); a crash
+        # before this commit leaves nothing exposed and simply rebuilds.
+        return self.commit_accept(document)
+
     def commit_accept(self, accept_document: bytes) -> AcceptCommit:
         """Durably commit exact accept bytes BEFORE any publication.
 
@@ -871,6 +967,10 @@ def _new_session_scalar() -> bytes:
 
 
 def _new_challenge() -> str:
+    return secrets.token_hex(32)
+
+
+def _new_message_id() -> str:
     return secrets.token_hex(32)
 
 

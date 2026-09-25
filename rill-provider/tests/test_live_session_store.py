@@ -766,3 +766,83 @@ def test_native_handshake_over_nip59_session_mailboxes(harness: Harness) -> None
             store.open_mailbox_frame(elsewhere, transport=crypto)
         with pytest.raises(LiveSessionStoreError, match="refused"):
             store.open_mailbox_frame(frame[:-5] + b"0000}", transport=crypto)
+
+
+def test_create_accept_refuses_without_reservation_or_foreign_identity(harness: Harness) -> None:
+    class Foreign:
+        xonly_public_key = "aa" * 32
+
+    harness.provision()
+    with harness.acquire() as store:
+        with pytest.raises(LiveSessionStoreError, match="no reservation"):
+            store.create_accept(
+                "ab" * 32,
+                identity=Foreign(),
+                transport_endpoints=("wss://r/",),  # type: ignore[arg-type]
+            )
+        reserved = store.reserve(harness.init)
+        with pytest.raises(LiveSessionStoreError, match="not this store's provider"):
+            store.create_accept(
+                reserved.session_id,
+                identity=Foreign(),
+                transport_endpoints=("wss://r/",),  # type: ignore[arg-type]
+            )
+        assert store.pending_outbox() == ()
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
+)
+def test_native_owner_built_accept_and_fresh_client_confirm(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rill_crypto import Context  # noqa: PLC0415
+
+    from rill_provider import provider_identity  # noqa: PLC0415
+    from rill_provider.provider_identity import ProviderIdentity  # noqa: PLC0415
+
+    client_secret = (2).to_bytes(32, "big")  # Fixture-only public scalar of the client key.
+    harness.provision()
+    unlock = x25519.Identity.generate()
+    with (
+        Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
+        harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store,
+    ):
+        with monkeypatch.context() as patch:  # fixture identity scalar 1, provisioning only
+            patch.setattr(
+                provider_identity.secrets, "token_bytes", lambda _n: (1).to_bytes(32, "big")
+            )
+            xonly = ProviderIdentity.provision(
+                harness.path.parent / "id.age", recipient=str(unlock.to_public()), crypto=crypto
+            )
+        assert xonly == harness.identity
+        signer = ProviderIdentity.load(
+            harness.path.parent / "id.age",
+            custody_identity=str(unlock),
+            expected_xonly_public_key=xonly,
+            crypto=crypto,
+        )
+        reserved = store.reserve(harness.init)
+        committed = store.create_accept(
+            reserved.session_id, identity=signer, transport_endpoints=("wss://relay.test/",)
+        )
+        assert (
+            store.create_accept(
+                reserved.session_id, identity=signer, transport_endpoints=("wss://other/",)
+            )
+            == committed
+        )
+        accept = json.loads(committed.canonical_bytes)
+        assert accept["sender_session_key"] == reserved.provider_session_key
+        assert accept["in_reply_to"] == harness.envelopes[0]["message_id"]
+        confirm = copy.deepcopy(harness.envelopes[2])
+        confirm["in_reply_to"] = committed.message_id
+        confirm["payload"]["handshake_hash"] = committed.transcript_digest
+        confirm["signature"] = None
+        digest = unsigned_envelope_hash(Envelope.model_validate_json(json.dumps(confirm)))
+        confirm["signature"] = crypto.schnorr_sign(client_secret, digest, b"\x55" * 32).hex()
+        admitted = store.admit_confirm(_bytes(confirm))
+        assert admitted.transcript_digest == committed.transcript_digest
+        assert store.pending_outbox() == ()

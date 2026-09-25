@@ -147,9 +147,22 @@ the store:
 
 The internal `_nip59_send` wrapper and NIP-44 v2 encryption are the exact
 inverse of the receive decoder. They are checked against the official NIP-44
-vector and by native round trips. Epoch-inbox custody (to receive the init),
-owner-built accepts, the relay client, and the service loop are still
-missing.
+vector and by native round trips. `create_accept(session_id, identity=ProviderIdentity, transport_endpoints=...)`
+builds the accept inside the store. It selects the client's most-preferred
+supported suite and the supported requested capabilities, in client order.
+It binds the reserved challenge and custody session key, gets the signature
+from `provider_identity.ProviderIdentity`, and then goes through
+`commit_accept`. Calling it again returns the committed accept.
+
+`provider_identity.ProviderIdentity` holds the long-lived identity scalar in
+one age-encrypted file. The file is created explicitly with `provision` and
+is never replaced. `load` checks the file against the configured identity
+key. The identity signs only digests that it derives itself: a typed accept
+that names this identity, or a private-regtest RS-005 announcement
+(`build_announcement`, kind 39417). There is no raw-digest signing. The
+announcement `revision` equals `created_at`. The real web verifier accepts
+these announcements (opt-in interop test). Back up the identity file
+separately. It is small, long-lived, and not in the live store's volume.
 
 `handshake_custody_offline.OfflineHandshakeCustody` is an optional, **offline
 key-availability primitive**, deliberately not an implementation of the live
