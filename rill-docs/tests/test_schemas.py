@@ -140,3 +140,36 @@ def test_private_regtest_announcement_binds_application_signature_and_address() 
     digest = hashlib.sha256(message).digest()
     assert digest.hex() == vector["id"]
     assert verify(digest, bytes.fromhex(vector["pubkey"]), bytes.fromhex(vector["sig"]))
+
+
+QUOTE_SCHEMA = "https://spec.rillswap.invalid/schemas/wire/quote-v1.schema.json"
+QUOTE_VECTORS = load_json(ROOT / "vectors/wire/quote-v1.json")
+
+
+def _quote_validator(definition: str) -> jsonschema.Draft202012Validator:
+    registry, _schemas = schema_registry()
+    return jsonschema.Draft202012Validator(
+        {"$ref": f"{QUOTE_SCHEMA}#/$defs/{definition}"}, registry=registry
+    )
+
+
+@pytest.mark.parametrize("definition", sorted(QUOTE_VECTORS["valid"]))
+def test_quote_vectors_valid_cases_match_schema(definition: str) -> None:
+    validator = _quote_validator(definition)
+    for case in QUOTE_VECTORS["valid"][definition]:
+        validator.validate(case)
+
+
+@pytest.mark.parametrize("definition", sorted(QUOTE_VECTORS["invalid"]))
+def test_quote_vectors_invalid_cases_are_refused(definition: str) -> None:
+    validator = _quote_validator(definition)
+    for case in QUOTE_VECTORS["invalid"][definition]:
+        assert not validator.is_valid(case), case
+
+
+def test_quote_terms_offer_vector_binds_recovery_contract_hash() -> None:
+    (offer,) = QUOTE_VECTORS["valid"]["termsOffer"]
+    terms = offer["terms"]
+    tag = hashlib.sha256(b"RillSwap/contract/v1").digest()
+    digest = hashlib.sha256(tag + tag + rfc8785.dumps(terms["contract_terms"])).hexdigest()
+    assert digest == terms["contract_hash"]

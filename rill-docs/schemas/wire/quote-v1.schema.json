@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spec.rillswap.invalid/schemas/wire/quote-v1.schema.json",
+  "title": "RillSwap BTC to LN quote, firm request, terms offer, and error payloads v1",
+  "$defs": {
+    "sats": { "$ref": "common-v1.schema.json#/$defs/decimalSats" },
+    "positiveSats": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,15}$"
+    },
+    "blockHeight": { "type": "integer", "minimum": 1, "maximum": 499999999 },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_success_fee_sat",
+        "max_funding_fee_sat",
+        "max_claim_fee_sat",
+        "max_refund_fee_sat",
+        "max_refund_lock_height"
+      ],
+      "properties": {
+        "max_success_fee_sat": { "$ref": "#/$defs/sats" },
+        "max_funding_fee_sat": { "$ref": "#/$defs/sats" },
+        "max_claim_fee_sat": { "$ref": "#/$defs/sats" },
+        "max_refund_fee_sat": { "$ref": "#/$defs/sats" },
+        "max_refund_lock_height": { "$ref": "#/$defs/blockHeight" }
+      }
+    },
+    "indicativeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "mode", "lightning_principal_sat", "extensions"],
+      "properties": {
+        "kind": { "const": "btc-to-ln" },
+        "mode": { "const": "indicative" },
+        "lightning_principal_sat": { "$ref": "#/$defs/positiveSats" },
+        "extensions": { "$ref": "common-v1.schema.json#/$defs/extensions" }
+      }
+    },
+    "firmRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "mode",
+        "lightning_principal_sat",
+        "invoice",
+        "client_contract_compressed_key",
+        "recovery_authorization_xonly_key",
+        "client_destination_script",
+        "limits",
+        "extensions"
+      ],
+      "properties": {
+        "kind": { "const": "btc-to-ln" },
+        "mode": { "const": "firm" },
+        "lightning_principal_sat": { "$ref": "#/$defs/positiveSats" },
+        "invoice": { "type": "string", "pattern": "^ln[a-z0-9]{1,2046}$" },
+        "client_contract_compressed_key": { "$ref": "common-v1.schema.json#/$defs/hex33" },
+        "recovery_authorization_xonly_key": { "$ref": "common-v1.schema.json#/$defs/hex32" },
+        "client_destination_script": { "$ref": "common-v1.schema.json#/$defs/scriptHex" },
+        "limits": { "$ref": "#/$defs/limits" },
+        "extensions": { "$ref": "common-v1.schema.json#/$defs/extensions" }
+      }
+    },
+    "quoteRequest": {
+      "oneOf": [
+        { "$ref": "#/$defs/indicativeRequest" },
+        { "$ref": "#/$defs/firmRequest" }
+      ]
+    },
+    "quoteOffer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "indicative",
+        "economics",
+        "funding_confirmations",
+        "settlement_confirmations",
+        "refund_resolution_confirmations",
+        "reference_height",
+        "max_refund_delay_blocks",
+        "max_funding_fee_sat",
+        "max_claim_fee_sat",
+        "max_refund_fee_sat",
+        "minimum_invoice_remaining_seconds",
+        "expires_at",
+        "extensions"
+      ],
+      "properties": {
+        "kind": { "const": "btc-to-ln" },
+        "indicative": { "const": true },
+        "economics": { "$ref": "contract-terms-v1.schema.json#/$defs/btcToLnEconomics" },
+        "funding_confirmations": { "$ref": "common-v1.schema.json#/$defs/positiveCount" },
+        "settlement_confirmations": { "$ref": "common-v1.schema.json#/$defs/positiveCount" },
+        "refund_resolution_confirmations": { "$ref": "common-v1.schema.json#/$defs/positiveCount" },
+        "reference_height": { "$ref": "#/$defs/blockHeight" },
+        "max_refund_delay_blocks": { "$ref": "common-v1.schema.json#/$defs/positiveCount" },
+        "max_funding_fee_sat": { "$ref": "#/$defs/sats" },
+        "max_claim_fee_sat": { "$ref": "#/$defs/sats" },
+        "max_refund_fee_sat": { "$ref": "#/$defs/sats" },
+        "minimum_invoice_remaining_seconds": { "$ref": "common-v1.schema.json#/$defs/positiveCount" },
+        "expires_at": { "$ref": "common-v1.schema.json#/$defs/exactInteger" },
+        "extensions": { "$ref": "common-v1.schema.json#/$defs/extensions" }
+      }
+    },
+    "providerTerms": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_hash", "contract_terms", "handshake_hash"],
+      "properties": {
+        "contract_hash": { "$ref": "common-v1.schema.json#/$defs/hex32" },
+        "contract_terms": { "$ref": "contract-terms-v1.schema.json" },
+        "handshake_hash": { "$ref": "common-v1.schema.json#/$defs/hex32" }
+      }
+    },
+    "termsOffer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["terms", "provider_terms_signature"],
+      "properties": {
+        "terms": { "$ref": "#/$defs/providerTerms" },
+        "provider_terms_signature": { "$ref": "common-v1.schema.json#/$defs/signature64" }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "enum": [
+            "amount_out_of_range",
+            "capacity_unavailable",
+            "invoice_unacceptable",
+            "limits_unsatisfiable",
+            "request_unacceptable",
+            "unsupported_request"
+          ]
+        },
+        "message": { "type": "string", "pattern": "^[ -~]{0,256}$" }
+      }
+    }
+  }
+}

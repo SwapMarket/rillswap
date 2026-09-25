@@ -37,3 +37,94 @@ If the provider does not obtain claim authority, the user monitors through
 refund eligibility, constructs or fee-bumps the unilateral refund, broadcasts,
 and continues until the configured confirmation depth. The claim branch
 remains valid after the refund height, so eligibility alone is not completion.
+
+## Quotes and firm requests
+
+No economic message is valid before `handshake_confirm`. Every message below
+is an ordinary application envelope signed by the sender session key
+(RS-001 section 8). Requests have null `in_reply_to` and null `contract_hash`.
+Each request has exactly one terminal response. The response replies to the
+request and uses the next provider sequence number. An exact replay of a
+request returns the recorded response, even after the offer has expired.
+
+`quote_request` carries `QuoteRequestV1`. It has exactly `kind`
+(`"btc-to-ln"`), `mode`, `lightning_principal_sat` (a positive decimal sat
+string), and `extensions`. When `mode` is `"firm"`, it additionally has
+exactly `invoice`, `client_contract_compressed_key`,
+`recovery_authorization_xonly_key`, `client_destination_script`, and
+`limits`.
+
+- **Indicative request** (`mode` is `"indicative"`). It carries no invoice,
+  payment hash, destination, or contract key, so a client can shop without
+  exposing a swap. The provider answers with `quote_offer` or `error`. A
+  session MAY carry at most 8 indicative requests. An indicative quote grants
+  no authority and commits nobody.
+- **Firm request** (`mode` is `"firm"`). It is the first and only
+  `quote_request` of a fresh session with the selected provider. A provider
+  MUST answer `unsupported_request` to a firm request that follows any other
+  request in its session, and to any request after a firm one.
+  - `invoice` is a lowercase BOLT11 string of at most 2048 characters. Its
+    whole-satoshi amount MUST equal `lightning_principal_sat`.
+  - `client_destination_script` is a version-1 destination script (P2WPKH
+    or P2TR).
+  - `limits` has exactly `max_success_fee_sat`, `max_funding_fee_sat`,
+    `max_claim_fee_sat`, `max_refund_fee_sat` (decimal sat strings), and
+    `max_refund_lock_height` (a block height).
+  - The provider answers with `terms_offer` or `error`.
+
+`quote_offer` carries `QuoteOfferV1`. It has exactly the following members:
+- `kind`;
+- `indicative` (the JSON value `true`);
+- `economics`, a `BtcToLnEconomics` object that echoes `L`;
+- `funding_confirmations`, `settlement_confirmations`, and
+  `refund_resolution_confirmations`;
+- `reference_height` and `max_refund_delay_blocks`;
+- `max_funding_fee_sat`, `max_claim_fee_sat`, and `max_refund_fee_sat`;
+- `minimum_invoice_remaining_seconds`;
+- `expires_at`;
+- `extensions`.
+
+The refund delay is `(refund_lock_height + 1) - reference_height`, measured to
+the first refund-eligible block, not to a completed refund. The fee members
+are caps, not estimates. A later firm offer from the same provider is not
+bound by an indicative quote, but the client checks it against its own
+`limits`.
+
+`terms_offer` carries exactly `terms`, a `ProviderTermsV1` object, and
+`provider_terms_signature`, a signature by the provider identity key using
+`RillSwap/provider-terms/v1` (RS-001 section 6). Its envelope `contract_hash`
+equals `terms.contract_hash`. The terms MUST be `btc-to-ln/v1`, with the
+provider as claimant and the client as refund party. They MUST satisfy all of
+the following:
+- they bind the decoded invoice and the session `handshake_hash`;
+- they echo the request's client contract key, recovery key, and destination
+  script exactly;
+- they set `lightning_principal_sat` to `L`;
+- every fee is within `limits`;
+- `refund_lock_height <= max_refund_lock_height`.
+
+The client MUST verify every term independently before `terms_accept`.
+
+`error` carries `ErrorV1`, which has exactly `code` and `message`. `code` is
+one of the following:
+- `amount_out_of_range`;
+- `capacity_unavailable`;
+- `invoice_unacceptable`;
+- `limits_unsatisfiable`;
+- `request_unacceptable`;
+- `unsupported_request`.
+
+`message` is at most 256 printable ASCII characters and never reveals a
+parsing, decryption, payment-status, or hash-ownership oracle. Errors are sent
+only for authenticated, admitted requests. Undecodable input gets no reply.
+
+Before exposing a `terms_offer`, the provider MUST durably reserve its payment
+hash in the same transaction that records the offer. A firm request whose hash
+is already reserved by another session gets `request_unacceptable`, while a
+replay of the original request still returns its recorded offer.
+Reservations are never released because an offer expired: an old signed
+contract may still be funded. A provider store that cannot prove a complete
+hash-reservation history MUST NOT issue firm offers. Fresh sessions keep the
+invoice private to the selected provider. They cannot stop a client from
+racing the same invoice at several providers, and possessing an invoice does
+not authenticate its owner.
