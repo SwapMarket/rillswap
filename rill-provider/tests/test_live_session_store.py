@@ -9,7 +9,7 @@ import os
 import shutil
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pyrage  # type: ignore[import-untyped]
 import pytest
@@ -28,6 +28,9 @@ from rill_provider.live_session_store import (
     SessionBlockedError,
     StaleOwnerError,
 )
+
+if TYPE_CHECKING:
+    from rill_provider.provider_identity import ProviderIdentity
 
 FIXTURE = Path(__file__).parent / "fixtures" / "initial-btc-to-ln-v1.json"
 CONFIRM_SIGNATURE = (
@@ -772,20 +775,15 @@ def test_create_accept_refuses_without_reservation_or_foreign_identity(harness: 
     class Foreign:
         xonly_public_key = "aa" * 32
 
+    foreign = cast("ProviderIdentity", Foreign())
     harness.provision()
     with harness.acquire() as store:
         with pytest.raises(LiveSessionStoreError, match="no reservation"):
-            store.create_accept(
-                "ab" * 32,
-                identity=Foreign(),
-                transport_endpoints=("wss://r/",),  # type: ignore[arg-type]
-            )
+            store.create_accept("ab" * 32, identity=foreign, transport_endpoints=("wss://r/",))
         reserved = store.reserve(harness.init)
         with pytest.raises(LiveSessionStoreError, match="not this store's provider"):
             store.create_accept(
-                reserved.session_id,
-                identity=Foreign(),
-                transport_endpoints=("wss://r/",),  # type: ignore[arg-type]
+                reserved.session_id, identity=foreign, transport_endpoints=("wss://r/",)
             )
         assert store.pending_outbox() == ()
 
@@ -800,7 +798,6 @@ def test_native_owner_built_accept_and_fresh_client_confirm(
 ) -> None:
     from rill_crypto import Context  # noqa: PLC0415
 
-    from rill_provider import provider_identity  # noqa: PLC0415
     from rill_provider.provider_identity import ProviderIdentity  # noqa: PLC0415
 
     client_secret = (2).to_bytes(32, "big")  # Fixture-only public scalar of the client key.
@@ -812,7 +809,8 @@ def test_native_owner_built_accept_and_fresh_client_confirm(
     ):
         with monkeypatch.context() as patch:  # fixture identity scalar 1, provisioning only
             patch.setattr(
-                provider_identity.secrets, "token_bytes", lambda _n: (1).to_bytes(32, "big")
+                "rill_provider.provider_identity.secrets.token_bytes",
+                lambda _n: (1).to_bytes(32, "big"),
             )
             xonly = ProviderIdentity.provision(
                 harness.path.parent / "id.age", recipient=str(unlock.to_public()), crypto=crypto

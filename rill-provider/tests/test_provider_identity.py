@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pyrage import x25519
+from pyrage import x25519  # type: ignore[import-untyped]
 from rill_core.wire.canonical import canonicalize
 from rill_core.wire.hashes import tagged_hash
 from rill_core.wire.types import NetworkIdentity
@@ -191,7 +191,8 @@ def _web_verify(bun: str, event: bytes, xonly: str, network: dict[str, Any]) -> 
         check=False,
     )
     assert result.returncode == 0, "web verifier refused provider announcement"
-    return json.loads(result.stdout)
+    verified: dict[str, Any] = json.loads(result.stdout)
+    return verified
 
 
 @pytest.mark.web_nip59_interop
