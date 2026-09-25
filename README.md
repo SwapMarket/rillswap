@@ -29,7 +29,9 @@ component checks. The crypto job downloads checksum-pinned native source and
 uses a digest-pinned Emscripten container; it is not an independent audit.
 Provider and CLI jobs use version-pinned but **not hash-locked** Python
 development dependencies and exclude opt-in backend cases. The web job builds
-and runs unit tests but does not run Playwright or exercise recovery durability.
+and runs unit and default Playwright Chromium tests, but does not run opt-in
+native/Go age interoperability or exercise recovery durability. The Playwright
+browser download is not an audited release artifact.
 These jobs do not run funded backend trials or establish release provenance;
 their hosted execution has not been verified in this workspace.
 
