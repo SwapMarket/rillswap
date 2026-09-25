@@ -20,8 +20,8 @@ from typing import TYPE_CHECKING, Any
 import pyrage  # type: ignore[import-untyped]
 from pyrage import x25519
 from rill_core.wire.canonical import canonicalize
-from rill_core.wire.hashes import handshake_accept_hash, tagged_hash
-from rill_core.wire.messages import HandshakeAccept
+from rill_core.wire.hashes import handshake_accept_hash, provider_terms_hash, tagged_hash
+from rill_core.wire.messages import HandshakeAccept, ProviderTerms
 from rill_core.wire.types import NetworkIdentity
 
 from rill_provider import _nip01_event as nip01
@@ -156,6 +156,14 @@ class ProviderIdentity:
         ):
             raise ProviderIdentityError("accept does not name this provider identity")
         return self._sign(handshake_accept_hash(accept))
+
+    def sign_provider_terms(self, offer: ProviderTerms) -> str:
+        """Sign typed, hash-checked terms, only if they name this identity."""
+        if type(offer) is not ProviderTerms or (
+            offer.contract_terms.provider_identity_key != self.xonly_public_key
+        ):
+            raise ProviderIdentityError("terms do not name this provider identity")
+        return self._sign(provider_terms_hash(offer))
 
     def build_announcement(self, terms: AnnouncementTerms) -> bytes:
         """Return one signed private-regtest kind-39417 event (RS-005).

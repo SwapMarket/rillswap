@@ -220,3 +220,39 @@ def test_provider_announcement_passes_the_web_verifier(tmp_path: Path) -> None:
     assert verified["epochInboxKeys"] == advertisement["epoch_inbox_xonly_keys"]
     assert verified["addressD"] == identity.announcement_address(terms.network, terms.slot)
     assert verified["revision"] == now
+
+
+@pytest.mark.native_crypto
+@NATIVE
+def test_native_provider_terms_signature_verifies_and_is_scoped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rill_core.wire.hashes import provider_terms_hash  # noqa: PLC0415
+    from rill_core.wire.messages import ProviderTerms  # noqa: PLC0415
+    from rill_crypto import Context  # noqa: PLC0415
+
+    vector = json.loads((ROOT / "rill-docs/vectors/wire/quote-v1.json").read_text())
+    offer = ProviderTerms.model_validate_json(
+        json.dumps(vector["valid"]["termsOffer"][0]["terms"]), strict=True
+    )
+    with Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto:
+        with monkeypatch.context() as patch:
+            patch.setattr(identity.secrets, "token_bytes", lambda _n: (1).to_bytes(32, "big"))
+            path, custody, xonly = _provisioned(tmp_path, crypto)
+        assert xonly == offer.contract_terms.provider_identity_key
+        signer = ProviderIdentity.load(
+            path, custody_identity=str(custody), expected_xonly_public_key=xonly, crypto=crypto
+        )
+        signature = signer.sign_provider_terms(offer)
+        crypto.schnorr_verify(
+            bytes.fromhex(xonly), provider_terms_hash(offer), bytes.fromhex(signature)
+        )
+        foreign = offer.model_copy(
+            update={
+                "contract_terms": offer.contract_terms.model_copy(
+                    update={"provider_identity_key": "aa" * 32}
+                )
+            }
+        )
+        with pytest.raises(ProviderIdentityError, match="identity"):
+            signer.sign_provider_terms(foreign)
