@@ -1,0 +1,6 @@
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+markers = [
+  "bitcoin_core: opt-in execution against the pinned Bitcoin Core v30.0 image",
+]

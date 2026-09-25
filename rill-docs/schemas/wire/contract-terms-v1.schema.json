@@ -1,0 +1,319 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spec.rillswap.invalid/schemas/wire/contract-terms-v1.schema.json",
+  "title": "RillSwap contract terms v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "contract_version",
+    "profile_id",
+    "network_identity",
+    "provider_identity_key",
+    "client_contract_compressed_key",
+    "provider_contract_compressed_key",
+    "claimant",
+    "refund_party",
+    "invoice_binding",
+    "economics",
+    "refund_lock_height",
+    "funding_confirmations",
+    "settlement_confirmations",
+    "refund_resolution_confirmations",
+    "max_funding_fee_sat",
+    "max_claim_fee_sat",
+    "max_refund_fee_sat",
+    "client_destination_script",
+    "provider_destination_script",
+    "recovery_authorization_xonly_key",
+    "terms_expiry",
+    "timing_policy",
+    "required_features",
+    "extensions"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "rillswap"
+    },
+    "contract_version": {
+      "const": "1"
+    },
+    "profile_id": {
+      "enum": ["btc-to-ln/v1", "ln-to-btc/v1"]
+    },
+    "network_identity": {
+      "$ref": "common-v1.schema.json#/$defs/networkIdentity"
+    },
+    "provider_identity_key": {
+      "$ref": "common-v1.schema.json#/$defs/hex32"
+    },
+    "client_contract_compressed_key": {
+      "$ref": "common-v1.schema.json#/$defs/hex33"
+    },
+    "provider_contract_compressed_key": {
+      "$ref": "common-v1.schema.json#/$defs/hex33"
+    },
+    "claimant": {
+      "enum": ["client", "provider"]
+    },
+    "refund_party": {
+      "enum": ["client", "provider"]
+    },
+    "invoice_binding": {
+      "$ref": "#/$defs/invoiceBinding"
+    },
+    "economics": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/btcToLnEconomics"
+        },
+        {
+          "$ref": "#/$defs/lnToBtcEconomics"
+        }
+      ]
+    },
+    "refund_lock_height": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 499999999
+    },
+    "funding_confirmations": {
+      "$ref": "common-v1.schema.json#/$defs/positiveCount"
+    },
+    "settlement_confirmations": {
+      "$ref": "common-v1.schema.json#/$defs/positiveCount"
+    },
+    "refund_resolution_confirmations": {
+      "$ref": "common-v1.schema.json#/$defs/positiveCount"
+    },
+    "max_funding_fee_sat": {
+      "$ref": "common-v1.schema.json#/$defs/decimalSats"
+    },
+    "max_claim_fee_sat": {
+      "$ref": "common-v1.schema.json#/$defs/decimalSats"
+    },
+    "max_refund_fee_sat": {
+      "$ref": "common-v1.schema.json#/$defs/decimalSats"
+    },
+    "client_destination_script": {
+      "$ref": "common-v1.schema.json#/$defs/scriptHex"
+    },
+    "provider_destination_script": {
+      "$ref": "common-v1.schema.json#/$defs/scriptHex"
+    },
+    "recovery_authorization_xonly_key": {
+      "$ref": "common-v1.schema.json#/$defs/hex32"
+    },
+    "terms_expiry": {
+      "$ref": "common-v1.schema.json#/$defs/exactInteger"
+    },
+    "timing_policy": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/btcToLnTiming"
+        },
+        {
+          "$ref": "#/$defs/lnToBtcTiming"
+        }
+      ]
+    },
+    "required_features": {
+      "$ref": "common-v1.schema.json#/$defs/featureList"
+    },
+    "extensions": {
+      "$ref": "common-v1.schema.json#/$defs/extensions"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "profile_id": {
+            "const": "btc-to-ln/v1"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "claimant": {
+            "const": "provider"
+          },
+          "refund_party": {
+            "const": "client"
+          },
+          "economics": {
+            "$ref": "#/$defs/btcToLnEconomics"
+          },
+          "timing_policy": {
+            "$ref": "#/$defs/btcToLnTiming"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "claimant": {
+            "const": "client"
+          },
+          "refund_party": {
+            "const": "provider"
+          },
+          "economics": {
+            "$ref": "#/$defs/lnToBtcEconomics"
+          },
+          "timing_policy": {
+            "$ref": "#/$defs/lnToBtcTiming"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "invoiceBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bolt11_sha256",
+        "payment_hash",
+        "amount_msat",
+        "payee_compressed_pubkey",
+        "created_at",
+        "expires_at",
+        "min_final_cltv_delta"
+      ],
+      "properties": {
+        "bolt11_sha256": {
+          "$ref": "common-v1.schema.json#/$defs/hex32"
+        },
+        "payment_hash": {
+          "$ref": "common-v1.schema.json#/$defs/hex32"
+        },
+        "amount_msat": {
+          "$ref": "common-v1.schema.json#/$defs/decimalMillisats"
+        },
+        "payee_compressed_pubkey": {
+          "$ref": "common-v1.schema.json#/$defs/hex33"
+        },
+        "created_at": {
+          "$ref": "common-v1.schema.json#/$defs/exactInteger"
+        },
+        "expires_at": {
+          "$ref": "common-v1.schema.json#/$defs/exactInteger"
+        },
+        "min_final_cltv_delta": {
+          "$ref": "common-v1.schema.json#/$defs/positiveCount"
+        }
+      }
+    },
+    "btcToLnEconomics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "lightning_principal_sat", "success_fee_sat", "contract_amount_sat"],
+      "properties": {
+        "kind": {
+          "const": "btc-to-ln"
+        },
+        "lightning_principal_sat": {
+          "$ref": "common-v1.schema.json#/$defs/decimalSats"
+        },
+        "success_fee_sat": {
+          "$ref": "common-v1.schema.json#/$defs/decimalSats"
+        },
+        "contract_amount_sat": {
+          "$ref": "common-v1.schema.json#/$defs/decimalSats"
+        }
+      }
+    },
+    "lnToBtcEconomics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "contract_amount_sat",
+        "nominal_payout_sat",
+        "claim_fee_reserve_sat",
+        "success_fee_sat",
+        "mining_prepayment_sat",
+        "hold_invoice_sat"
+      ],
+      "properties": {
+        "kind": {
+          "const": "ln-to-btc"
+        },
+        "contract_amount_sat": {
+          "$ref": "common-v1.schema.json#/$defs/decimalSats"
+        },
+        "nominal_payout_sat": {
+          "$ref": "common-v1.schema.json#/$defs/decimalSats"
+        },
+        "claim_fee_reserve_sat": {
+          "$ref": "common-v1.schema.json#/$defs/decimalSats"
+        },
+        "success_fee_sat": {
+          "$ref": "common-v1.schema.json#/$defs/decimalSats"
+        },
+        "mining_prepayment_sat": {
+          "$ref": "common-v1.schema.json#/$defs/decimalSats"
+        },
+        "hold_invoice_sat": {
+          "$ref": "common-v1.schema.json#/$defs/decimalSats"
+        }
+      }
+    },
+    "btcToLnTiming": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "max_outgoing_htlc_expiry_height",
+        "learn_and_claim_blocks",
+        "client_response_blocks",
+        "claim_confirmation_blocks"
+      ],
+      "properties": {
+        "kind": {
+          "const": "btc-to-ln"
+        },
+        "max_outgoing_htlc_expiry_height": {
+          "$ref": "common-v1.schema.json#/$defs/exactInteger"
+        },
+        "learn_and_claim_blocks": {
+          "$ref": "common-v1.schema.json#/$defs/positiveCount"
+        },
+        "client_response_blocks": {
+          "$ref": "common-v1.schema.json#/$defs/positiveCount"
+        },
+        "claim_confirmation_blocks": {
+          "$ref": "common-v1.schema.json#/$defs/positiveCount"
+        }
+      }
+    },
+    "lnToBtcTiming": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "min_incoming_htlc_expiry_height",
+        "refund_and_ln_resolution_blocks",
+        "client_response_blocks",
+        "claim_confirmation_blocks"
+      ],
+      "properties": {
+        "kind": {
+          "const": "ln-to-btc"
+        },
+        "min_incoming_htlc_expiry_height": {
+          "$ref": "common-v1.schema.json#/$defs/exactInteger"
+        },
+        "refund_and_ln_resolution_blocks": {
+          "$ref": "common-v1.schema.json#/$defs/positiveCount"
+        },
+        "client_response_blocks": {
+          "$ref": "common-v1.schema.json#/$defs/positiveCount"
+        },
+        "claim_confirmation_blocks": {
+          "$ref": "common-v1.schema.json#/$defs/positiveCount"
+        }
+      }
+    }
+  }
+}

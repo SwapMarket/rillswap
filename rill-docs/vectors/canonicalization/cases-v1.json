@@ -1,0 +1,64 @@
+{
+  "vector_version": "rillswap-canonicalization-v1-pre.1",
+  "valid": [
+    {
+      "id": "object-order",
+      "value": {
+        "z": 0,
+        "a": [true, null, "text"]
+      },
+      "canonical_utf8": "{\"a\":[true,null,\"text\"],\"z\":0}",
+      "canonical_sha256": "a595043e67b3dfd24d95f851a79f12dcfe4ed8fa6890a0d1c9fbf26d38ddc27c"
+    },
+    {
+      "id": "unicode",
+      "value": {
+        "label": "Rill é 水",
+        "escaped": "line\nfeed"
+      },
+      "canonical_utf8": "{\"escaped\":\"line\\nfeed\",\"label\":\"Rill é 水\"}",
+      "canonical_sha256": "ca4d81f742d43994413928d2b7789cc971c9a4c0129a665ce5a3bbbf0e8f0110"
+    },
+    {
+      "id": "exact-integers",
+      "value": {
+        "maximum": 9007199254740991,
+        "minimum": -9007199254740991
+      },
+      "canonical_utf8": "{\"maximum\":9007199254740991,\"minimum\":-9007199254740991}",
+      "canonical_sha256": "fbfd7545b6e2e70fe97a1b1de6bb85a3cea527c9e49f787bb6392cd36964b62c"
+    },
+    {
+      "id": "amount-strings",
+      "value": {
+        "msat": "2100000000000000000",
+        "sat": "2100000000000000",
+        "zero": "0"
+      },
+      "canonical_utf8": "{\"msat\":\"2100000000000000000\",\"sat\":\"2100000000000000\",\"zero\":\"0\"}",
+      "canonical_sha256": "02820bc12f75724358da4cabe4cdeaa78e55d5572cec1573164dcc8173735430"
+    }
+  ],
+  "invalid": [
+    {
+      "id": "duplicate-key",
+      "encoded_utf8": "{\"amount\":\"1\",\"amount\":\"2\"}",
+      "reason": "duplicate-object-key"
+    },
+    {
+      "id": "floating-point",
+      "encoded_utf8": "{\"amount\":1.0}",
+      "reason": "floating-point-forbidden"
+    },
+    {
+      "id": "exponent-number",
+      "encoded_utf8": "{\"amount\":1e3}",
+      "reason": "floating-point-forbidden"
+    },
+    {
+      "id": "integer-above-exact-range",
+      "encoded_utf8": "{\"height\":9007199254740992}",
+      "reason": "integer-out-of-range"
+    }
+  ]
+}
