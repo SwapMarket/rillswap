@@ -24,6 +24,10 @@ either swap profile. The held-payment fixture also demonstrates that the
 read-only provider invoice observer currently refuses ordinary pinned LND
 custom-record evidence; it is not a funding-eligibility test.
 
+The root `.github/workflows/` directory defines source-only specification and
+Core checks. These jobs do not run funded backend trials or establish release
+provenance; their hosted execution has not been verified in this workspace.
+
 To replay that historical provider v2 baseline without nested repositories,
 use Python 3.14 with the provider's pinned development dependencies, Bun
 1.3.11, uv, CMake, and the documented network access:
