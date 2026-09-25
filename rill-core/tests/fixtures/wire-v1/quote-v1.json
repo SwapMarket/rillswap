@@ -1,0 +1,331 @@
+{
+  "format": "rillswap-quote-vectors",
+  "format_version": 1,
+  "source": "vectors/recovery/initial-btc-to-ln-v1.json",
+  "valid": {
+    "quoteRequest": [
+      {
+        "kind": "btc-to-ln",
+        "mode": "indicative",
+        "lightning_principal_sat": "100000",
+        "extensions": {}
+      },
+      {
+        "kind": "btc-to-ln",
+        "mode": "firm",
+        "lightning_principal_sat": "100000",
+        "invoice": "lnbcrt1m1pexamplenotarealinvoice",
+        "client_contract_compressed_key": "02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13",
+        "recovery_authorization_xonly_key": "fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+        "client_destination_script": "00143131313131313131313131313131313131313131",
+        "limits": {
+          "max_success_fee_sat": "1000",
+          "max_funding_fee_sat": "500",
+          "max_claim_fee_sat": "400",
+          "max_refund_fee_sat": "600",
+          "max_refund_lock_height": 1100
+        },
+        "extensions": {}
+      }
+    ],
+    "quoteOffer": [
+      {
+        "kind": "btc-to-ln",
+        "indicative": true,
+        "economics": {
+          "kind": "btc-to-ln",
+          "lightning_principal_sat": "100000",
+          "success_fee_sat": "1000",
+          "contract_amount_sat": "101000"
+        },
+        "funding_confirmations": 2,
+        "settlement_confirmations": 3,
+        "refund_resolution_confirmations": 4,
+        "reference_height": 1000,
+        "max_refund_delay_blocks": 101,
+        "max_funding_fee_sat": "500",
+        "max_claim_fee_sat": "400",
+        "max_refund_fee_sat": "600",
+        "minimum_invoice_remaining_seconds": 1800,
+        "expires_at": 1700000600,
+        "extensions": {}
+      }
+    ],
+    "termsOffer": [
+      {
+        "terms": {
+          "contract_hash": "35fdbb89024750e8c84833e730e4395cd8745e00ee59c24b668c880f1880cb54",
+          "contract_terms": {
+            "protocol": "rillswap",
+            "contract_version": "1",
+            "profile_id": "btc-to-ln/v1",
+            "network_identity": {
+              "family": "bitcoin",
+              "name": "regtest",
+              "genesis_hash": "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206",
+              "signet_challenge": null,
+              "consensus_profile": "bitcoin-core-v30.0-regtest-default",
+              "deployment_namespace": "rillswap-e2e-v1"
+            },
+            "provider_identity_key": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            "client_contract_compressed_key": "02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13",
+            "provider_contract_compressed_key": "022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+            "claimant": "provider",
+            "refund_party": "client",
+            "invoice_binding": {
+              "bolt11_sha256": "d53eda7a637c99cc7fb566d96e9fa109bf15c478410a3f5eb4d4c4e26cd081f6",
+              "payment_hash": "425ed4e4a36b30ea21b90e21c712c649e8214c29b7eaf68089d1039c6e55384c",
+              "amount_msat": "100000000",
+              "payee_compressed_pubkey": "025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc",
+              "created_at": 1700000000,
+              "expires_at": 1700003600,
+              "min_final_cltv_delta": 18
+            },
+            "economics": {
+              "kind": "btc-to-ln",
+              "lightning_principal_sat": "100000",
+              "success_fee_sat": "1000",
+              "contract_amount_sat": "101000"
+            },
+            "refund_lock_height": 1100,
+            "funding_confirmations": 2,
+            "settlement_confirmations": 3,
+            "refund_resolution_confirmations": 4,
+            "max_funding_fee_sat": "500",
+            "max_claim_fee_sat": "400",
+            "max_refund_fee_sat": "600",
+            "client_destination_script": "00143131313131313131313131313131313131313131",
+            "provider_destination_script": "51202f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01",
+            "recovery_authorization_xonly_key": "fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+            "terms_expiry": 1700001800,
+            "timing_policy": {
+              "kind": "btc-to-ln",
+              "max_outgoing_htlc_expiry_height": 1070,
+              "learn_and_claim_blocks": 20,
+              "client_response_blocks": 6,
+              "claim_confirmation_blocks": 6
+            },
+            "required_features": [],
+            "extensions": {}
+          },
+          "handshake_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8"
+        },
+        "provider_terms_signature": "84666843d34e78e411e4d79fd1430393feae262402ca69f8e7567942bcbbe5debe7f51ab59b5230204744b5150d55decd935548fe77115541765a133ac45fa95"
+      }
+    ],
+    "error": [
+      {
+        "code": "amount_out_of_range",
+        "message": "amount outside announced bands"
+      }
+    ]
+  },
+  "invalid": {
+    "quoteRequest": [
+      {
+        "kind": "btc-to-ln",
+        "mode": "indicative",
+        "lightning_principal_sat": "100000",
+        "extensions": {},
+        "invoice": "lnbcrt1m1pexamplenotarealinvoice"
+      },
+      {
+        "kind": "btc-to-ln",
+        "mode": "indicative",
+        "lightning_principal_sat": "0",
+        "extensions": {}
+      },
+      {
+        "kind": "btc-to-ln",
+        "mode": "indicative",
+        "lightning_principal_sat": "01",
+        "extensions": {}
+      },
+      {
+        "kind": "btc-to-ln",
+        "mode": "firm",
+        "lightning_principal_sat": "100000",
+        "invoice": "lnbcrt1m1pexamplenotarealinvoice",
+        "client_contract_compressed_key": "02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13",
+        "recovery_authorization_xonly_key": "fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+        "client_destination_script": "00143131313131313131313131313131313131313131",
+        "extensions": {}
+      },
+      {
+        "kind": "btc-to-ln",
+        "mode": "firm",
+        "lightning_principal_sat": "100000",
+        "invoice": "LNBCRT1M",
+        "client_contract_compressed_key": "02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13",
+        "recovery_authorization_xonly_key": "fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+        "client_destination_script": "00143131313131313131313131313131313131313131",
+        "limits": {
+          "max_success_fee_sat": "1000",
+          "max_funding_fee_sat": "500",
+          "max_claim_fee_sat": "400",
+          "max_refund_fee_sat": "600",
+          "max_refund_lock_height": 1100
+        },
+        "extensions": {}
+      },
+      {
+        "kind": "btc-to-ln",
+        "mode": "binding",
+        "lightning_principal_sat": "100000",
+        "invoice": "lnbcrt1m1pexamplenotarealinvoice",
+        "client_contract_compressed_key": "02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13",
+        "recovery_authorization_xonly_key": "fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+        "client_destination_script": "00143131313131313131313131313131313131313131",
+        "limits": {
+          "max_success_fee_sat": "1000",
+          "max_funding_fee_sat": "500",
+          "max_claim_fee_sat": "400",
+          "max_refund_fee_sat": "600",
+          "max_refund_lock_height": 1100
+        },
+        "extensions": {}
+      }
+    ],
+    "quoteOffer": [
+      {
+        "kind": "btc-to-ln",
+        "indicative": false,
+        "economics": {
+          "kind": "btc-to-ln",
+          "lightning_principal_sat": "100000",
+          "success_fee_sat": "1000",
+          "contract_amount_sat": "101000"
+        },
+        "funding_confirmations": 2,
+        "settlement_confirmations": 3,
+        "refund_resolution_confirmations": 4,
+        "reference_height": 1000,
+        "max_refund_delay_blocks": 101,
+        "max_funding_fee_sat": "500",
+        "max_claim_fee_sat": "400",
+        "max_refund_fee_sat": "600",
+        "minimum_invoice_remaining_seconds": 1800,
+        "expires_at": 1700000600,
+        "extensions": {}
+      },
+      {
+        "kind": "btc-to-ln",
+        "indicative": true,
+        "economics": {
+          "kind": "btc-to-ln",
+          "lightning_principal_sat": "100000",
+          "success_fee_sat": "1000",
+          "contract_amount_sat": "101000"
+        },
+        "funding_confirmations": 0,
+        "settlement_confirmations": 3,
+        "refund_resolution_confirmations": 4,
+        "reference_height": 1000,
+        "max_refund_delay_blocks": 101,
+        "max_funding_fee_sat": "500",
+        "max_claim_fee_sat": "400",
+        "max_refund_fee_sat": "600",
+        "minimum_invoice_remaining_seconds": 1800,
+        "expires_at": 1700000600,
+        "extensions": {}
+      },
+      {
+        "kind": "btc-to-ln",
+        "indicative": true,
+        "economics": {
+          "kind": "btc-to-ln",
+          "lightning_principal_sat": "100000",
+          "success_fee_sat": "1000",
+          "contract_amount_sat": "101000"
+        },
+        "funding_confirmations": 2,
+        "settlement_confirmations": 3,
+        "refund_resolution_confirmations": 4,
+        "reference_height": 1000,
+        "max_refund_delay_blocks": 101,
+        "max_funding_fee_sat": "500",
+        "max_claim_fee_sat": "400",
+        "max_refund_fee_sat": "600",
+        "minimum_invoice_remaining_seconds": 1800,
+        "expires_at": 1700000600,
+        "extensions": {},
+        "surprise": 1
+      }
+    ],
+    "termsOffer": [
+      {
+        "terms": {
+          "contract_hash": "35fdbb89024750e8c84833e730e4395cd8745e00ee59c24b668c880f1880cb54",
+          "contract_terms": {
+            "protocol": "rillswap",
+            "contract_version": "1",
+            "profile_id": "btc-to-ln/v1",
+            "network_identity": {
+              "family": "bitcoin",
+              "name": "regtest",
+              "genesis_hash": "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206",
+              "signet_challenge": null,
+              "consensus_profile": "bitcoin-core-v30.0-regtest-default",
+              "deployment_namespace": "rillswap-e2e-v1"
+            },
+            "provider_identity_key": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            "client_contract_compressed_key": "02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13",
+            "provider_contract_compressed_key": "022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+            "claimant": "provider",
+            "refund_party": "client",
+            "invoice_binding": {
+              "bolt11_sha256": "d53eda7a637c99cc7fb566d96e9fa109bf15c478410a3f5eb4d4c4e26cd081f6",
+              "payment_hash": "425ed4e4a36b30ea21b90e21c712c649e8214c29b7eaf68089d1039c6e55384c",
+              "amount_msat": "100000000",
+              "payee_compressed_pubkey": "025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc",
+              "created_at": 1700000000,
+              "expires_at": 1700003600,
+              "min_final_cltv_delta": 18
+            },
+            "economics": {
+              "kind": "btc-to-ln",
+              "lightning_principal_sat": "100000",
+              "success_fee_sat": "1000",
+              "contract_amount_sat": "101000"
+            },
+            "refund_lock_height": 1100,
+            "funding_confirmations": 2,
+            "settlement_confirmations": 3,
+            "refund_resolution_confirmations": 4,
+            "max_funding_fee_sat": "500",
+            "max_claim_fee_sat": "400",
+            "max_refund_fee_sat": "600",
+            "client_destination_script": "00143131313131313131313131313131313131313131",
+            "provider_destination_script": "51202f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01",
+            "recovery_authorization_xonly_key": "fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+            "terms_expiry": 1700001800,
+            "timing_policy": {
+              "kind": "btc-to-ln",
+              "max_outgoing_htlc_expiry_height": 1070,
+              "learn_and_claim_blocks": 20,
+              "client_response_blocks": 6,
+              "claim_confirmation_blocks": 6
+            },
+            "required_features": [],
+            "extensions": {}
+          },
+          "handshake_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8"
+        }
+      }
+    ],
+    "error": [
+      {
+        "code": "hash_already_reserved",
+        "message": "amount outside announced bands"
+      },
+      {
+        "code": "amount_out_of_range",
+        "message": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      {
+        "code": "amount_out_of_range",
+        "message": "tab\there"
+      }
+    ]
+  }
+}
