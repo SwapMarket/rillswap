@@ -16,8 +16,14 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from rill_core.errors import ValidationError
-from rill_core.settlement import FundingBindingTransactionMatch
-from rill_core.wire.messages import ContractTerms, FundingBinding
+from rill_core.settlement import (
+    FundingBindingTransactionMatch,
+    SignedFundingBinding,
+    verify_static_signed_funding_binding_history,
+)
+from rill_core.wire.hashes import funding_binding_hash
+from rill_core.wire.messages import ContractTerms, FundingBinding, HandshakeAccept, HandshakeInit
+from rill_core.wire.types import NetworkIdentity
 
 from rill_provider import core_tx_bytes
 from rill_provider.core_tx_bytes import (
@@ -29,8 +35,6 @@ from rill_provider.core_tx_bytes import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-
-    from rill_core.wire.types import NetworkIdentity
 
 FIXTURES = Path(__file__).parent / "fixtures"
 GENESIS = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
@@ -424,6 +428,105 @@ def test_fetched_bytes_pass_real_core_static_checker_only(tmp_path: Path) -> Non
         changed = binding.model_copy(update={"funding_txid": "88" * 32})
         with pytest.raises(ValidationError, match="transaction ID differs"):
             reader.fetch_binding_byte_match(changed, terms, keys=Keys())
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 and RILL_CRYPTO_LIBRARY",
+)
+def test_static_signed_history_precedes_core_candidate_sample(tmp_path: Path) -> None:
+    """Fixture composition only, never admission or a current-lineage claim."""
+    from rill_crypto import Context  # noqa: PLC0415 - opt-in native library
+
+    terms, template, _ = _context()  # Hash-check pinned public synthetic fixture.
+    fixture = json.loads((FIXTURES / "initial-btc-to-ln-v1.json").read_bytes())
+    context = fixture["verification_context"]
+    network = NetworkIdentity.model_validate(
+        {
+            "family": "bitcoin",
+            "name": "regtest",
+            "genesis_hash": GENESIS,
+            "signet_challenge": None,
+            "consensus_profile": "bitcoin-core-v30.0-regtest-default",
+            "deployment_namespace": "rillswap-e2e-v1",
+        }
+    )
+    trusted_provider = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+    assert terms.network_identity == network
+    script = bytes.fromhex(fixture["taproot_contract"]["script_pubkey"])
+    amount = int(terms.economics.contract_amount_sat)
+    change = b"\x51\x20" + b"\x44" * 32
+    raw = (
+        b"\x02\x00\x00\x00\x01"
+        + bytes.fromhex(template.lineage_anchor_txid)[::-1]
+        + b"\x00\x00\x00\x00\x00\xfd\xff\xff\xff\x02"
+        + (9_000).to_bytes(8, "little")
+        + bytes([len(change)])
+        + change
+        + amount.to_bytes(8, "little")
+        + bytes([len(script)])
+        + script
+        + b"\x00\x00\x00\x00"
+    )
+    txid = hashlib.sha256(hashlib.sha256(raw).digest()).digest()[::-1].hex()
+    binding = template.model_copy(update={"funding_txid": txid})
+    requests: list[dict[str, Any]] = []
+
+    def respond(payload: dict[str, Any]) -> tuple[int, bytes]:
+        if payload["method"] == "getrawtransaction":
+            return 200, json.dumps(
+                {"jsonrpc": "2.0", "id": payload["id"], "result": raw.hex()}
+            ).encode()
+        return _candidate_reply(payload, binding)
+
+    with Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto:
+        client_secret = (2).to_bytes(32, "big")
+        assert crypto.public_key(client_secret)[1:].hex() == context["client_session_xonly_key"]
+        signature = crypto.schnorr_sign(
+            client_secret, funding_binding_hash(binding), b"\x33" * 32
+        ).hex()
+
+        def verify(funder_signature: str) -> None:
+            verify_static_signed_funding_binding_history(
+                terms=terms,
+                handshake_init=HandshakeInit.model_validate_json(
+                    json.dumps(context["handshake_init"])
+                ),
+                handshake_accept=HandshakeAccept.model_validate_json(
+                    json.dumps(context["handshake_accept"])
+                ),
+                provider_identity_signature=context["provider_identity_signature"],
+                provider_terms_signature=context["provider_terms_signature"],
+                client_acceptance_signature=context["client_acceptance_signature"],
+                signed_bindings=(SignedFundingBinding(binding, funder_signature),),
+                expected_provider_identity=trusted_provider,
+                expected_network=network,
+                crypto=crypto,
+            )
+
+        with _server(respond, requests) as port:
+            reader = RegtestCoreTransactionReader(
+                port=port, cookie_path=_cookie(tmp_path), network=network
+            )
+            tampered = signature[:-2] + ("00" if signature[-2:] != "00" else "01")
+            with pytest.raises(ValidationError, match="invalid static signed funding declaration"):
+                verify(tampered)
+            assert requests == []
+            verify(signature)
+            observed = reader.observe_candidate_outpoint(binding, terms, keys=crypto)
+    assert observed.static_match == FundingBindingTransactionMatch(
+        txid, binding.contract_vout, binding.lineage_anchor_txid, binding.lineage_anchor_vout
+    )
+    assert [item["method"] for item in requests] == [
+        "getblockchaininfo",
+        "getblockhash",
+        "getrawtransaction",
+        "gettxout",
+        "getblockhash",
+        "getrawtransaction",
+        "getblockchaininfo",
+    ]
 
 
 def _candidate_reply(  # noqa: PLR0912, PLR0915 - explicit malformed Core response variants

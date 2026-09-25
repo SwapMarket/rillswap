@@ -276,6 +276,14 @@ HTTP tests also pass a synthetic matching funding transaction through the
 real core static checker. Neither test proves a live signed swap funding
 workflow or complete backend reconciliation.
 
+An additional `native_crypto` opt-in test composes a hash-pinned public
+recovery fixture's handshake and a freshly signed funding binding with the
+named-tip Core diagnostic. It rejects a tampered funder signature before any
+Core RPC and observes only the exact binding supplied by that test. This is
+test-local interoperability, **not** a provider admission API, proof of a
+complete/current replacement history, F10 closure, or permission to release a
+preimage.
+
 The separate `payment_journal` records immutable BTC-to-LN outgoing payment
 requests and append-only backend-reported observations. Its database is bound
 to an exact network and backend, must be created explicitly, and never
