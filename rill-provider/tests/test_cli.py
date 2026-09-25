@@ -195,3 +195,5 @@ def test_bitcoin_core_cookie_resolves_and_quote_settings_reach_the_service(
     assert config.service_policy().quote.funding_confirmations == 2
     with pytest.raises(OperatorConfigError):
         load_config(_config(tmp_path, quote={"lifetime": 0}))
+    with pytest.raises(OperatorConfigError):  # not a representable wire integer
+        load_config(_config(tmp_path, quote={"funding_confirmations": 2**53}))

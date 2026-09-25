@@ -12,10 +12,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from rill_core.wire.canonical import canonicalize
+from rill_core.domain.amounts import MAX_SATS
+from rill_core.wire.canonical import canonicalize, parse_model_json
 from rill_core.wire.quotes import (
     MAX_INDICATIVE_REQUESTS_PER_SESSION,
     FirmQuoteRequest,
+    QuoteOffer,
     parse_quote_request,
 )
 
@@ -23,6 +25,7 @@ if TYPE_CHECKING:
     from rill_core.wire.messages import Envelope
 
 MILLIONTHS = 1_000_000
+MAX_WIRE_INTEGER = 9_007_199_254_740_991  # RS-001 exact JSON integer
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +53,10 @@ class QuoteSchedule:
             self.lifetime,
         )
         fees = (self.max_funding_fee_sat, self.max_claim_fee_sat, self.max_refund_fee_sat)
-        if not (all(value > 0 for value in counts) and all(value >= 0 for value in fees)):
+        if not (
+            all(0 < value <= MAX_WIRE_INTEGER for value in counts)
+            and all(0 <= value <= MAX_SATS for value in fees)
+        ):
             raise ValueError("quote schedule unsupported")
 
 
@@ -74,13 +80,13 @@ def answer_quote(  # noqa: PLR0911 - one closed answer per rule
     request: Envelope, prior: tuple[Envelope, ...], terms: QuoteTerms
 ) -> tuple[str, dict[str, Any]]:
     """Return ``(message_type, payload)`` answering one admitted request."""
+    earlier = [item.payload.get("mode") for item in prior]
+    if "firm" in earlier:  # RS-003: unconditional, whatever the payload
+        return _error("unsupported_request", "no request may follow a firm request")
     try:
         parsed = parse_quote_request(canonicalize(request.payload))
     except ValueError:
         return _error("request_unacceptable", "malformed quote request")
-    earlier = [item.payload.get("mode") for item in prior]
-    if "firm" in earlier:
-        return _error("unsupported_request", "no request may follow a firm request")
     if isinstance(parsed, FirmQuoteRequest):
         return _error("unsupported_request", "firm requests are not offered yet")
     if len(earlier) >= MAX_INDICATIVE_REQUESTS_PER_SESSION:
@@ -92,7 +98,7 @@ def answer_quote(  # noqa: PLR0911 - one closed answer per rule
         return _error("capacity_unavailable", "quotes temporarily unavailable")
     fee = terms.base_fee_sat + -(-principal * terms.proportional_millionths // MILLIONTHS)
     schedule = terms.schedule
-    return "quote_offer", {
+    offer: dict[str, Any] = {
         "kind": "btc-to-ln",
         "indicative": True,
         "economics": {
@@ -113,3 +119,8 @@ def answer_quote(  # noqa: PLR0911 - one closed answer per rule
         "expires_at": terms.now + schedule.lifetime,
         "extensions": {},
     }
+    try:  # never sign a payload the wire model would refuse (e.g. overflow)
+        parse_model_json(QuoteOffer, canonicalize(offer))
+    except ValueError:
+        return _error("capacity_unavailable", "quotes temporarily unavailable")
+    return "quote_offer", offer

@@ -237,14 +237,19 @@ signs the answer with the session key, and records both the request and the
 answer before anything is sent. An exact replay, even with a fresh
 signature, returns the recorded answer, which the service re-sends. A
 different validly signed message with the same message ID or sequence blocks
-the session. Unverifiable, out-of-order, or over-budget requests (more than 16
-per session) get no record and no reply.
+the session, whatever its `message_type` (a mailbox message that is not a
+valid confirm is classified the same way). Unverifiable, out-of-order, or
+over-budget requests (more than 16 per session) get no record and no reply.
+The same applies to a validly signed message at the next sequence that is not
+a `quote_request`. Nothing is admitted, so the client stream stays at that
+sequence.
 
 `quote_policy.answer_quote` is that responder. It prices indicative quotes as
 `base + ceil(L * ppm / 1e6)` within the announced bands. It takes the
 reference height from Bitcoin Core (`tip_height`, from the optional
-`bitcoin_core` config) and answers `capacity_unavailable` when no tip is
-available. **Firm requests are refused with `unsupported_request`.** RS-003
+`bitcoin_core` config). The service reads it once per tick, never per request,
+and answers `capacity_unavailable` when no tip is available or when an offer
+would not be representable on the wire. **Firm requests are refused with `unsupported_request`.** RS-003
 forbids signed terms until a complete payment-hash reservation history
 exists, and it does not exist yet. An indicative quote grants no funding or
 payment action.

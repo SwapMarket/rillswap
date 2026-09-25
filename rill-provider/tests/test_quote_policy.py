@@ -6,10 +6,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from rill_core.domain.amounts import MAX_SATS
 from rill_core.wire.canonical import canonicalize, parse_model_json
 from rill_core.wire.quotes import QuoteError, QuoteOffer
 
-from rill_provider.quote_policy import QuoteSchedule, QuoteTerms, answer_quote
+from rill_provider.quote_policy import MAX_WIRE_INTEGER, QuoteSchedule, QuoteTerms, answer_quote
 
 TERMS = QuoteTerms(
     amount_bands=((1_000, 100_000),),
@@ -92,3 +93,19 @@ def test_nothing_follows_a_firm_request() -> None:
 def test_schedule_refuses_unrepresentable_values() -> None:
     with pytest.raises(ValueError, match="schedule"):
         QuoteSchedule(lifetime=0)
+
+
+def test_anything_after_a_firm_request_is_unsupported_even_if_malformed() -> None:
+    kind, body = answer_quote(_envelope({"mode": "bogus"}), (_envelope(FIRM),), TERMS)
+    assert (kind, body["code"]) == ("error", "unsupported_request")
+
+
+def test_unrepresentable_offer_is_never_produced() -> None:
+    kind, error = _answer(INDICATIVE, base_fee_sat=MAX_SATS)  # contract amount > 21M BTC
+    assert (kind, error.code) == ("error", "capacity_unavailable")
+    kind, error = _answer(INDICATIVE, now=MAX_WIRE_INTEGER)  # expires_at overflows
+    assert (kind, error.code) == ("error", "capacity_unavailable")
+    with pytest.raises(ValueError, match="schedule"):
+        QuoteSchedule(funding_confirmations=MAX_WIRE_INTEGER + 1)
+    with pytest.raises(ValueError, match="schedule"):
+        QuoteSchedule(max_claim_fee_sat=MAX_SATS + 1)

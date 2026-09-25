@@ -12,6 +12,7 @@ import stat
 from pathlib import Path  # noqa: TC003 - pydantic resolves field types at runtime
 
 from pydantic import BaseModel, ConfigDict, Field
+from rill_core.domain.amounts import MAX_SATS
 from rill_core.wire.types import NetworkIdentity  # noqa: TC002 - pydantic runtime type
 
 from rill_provider.handshake_service import ServicePolicy
@@ -22,7 +23,7 @@ from rill_provider.live_session_store import (
     DEFAULT_NEW_SESSIONS_PER_MINUTE,
     AuthorityDeclaration,
 )
-from rill_provider.quote_policy import QuoteSchedule
+from rill_provider.quote_policy import MAX_WIRE_INTEGER, QuoteSchedule
 
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_IDENTITY_FILE_BYTES = 4096
@@ -63,15 +64,15 @@ class BitcoinCore(_Strict):
 class QuoteSettings(_Strict):
     """Quote parameters beyond the public announcement terms."""
 
-    funding_confirmations: int = Field(default=2, ge=1)
-    settlement_confirmations: int = Field(default=3, ge=1)
-    refund_resolution_confirmations: int = Field(default=6, ge=1)
-    max_refund_delay_blocks: int = Field(default=288, ge=1)
-    max_funding_fee_sat: int = Field(default=5_000, ge=0)
-    max_claim_fee_sat: int = Field(default=5_000, ge=0)
-    max_refund_fee_sat: int = Field(default=5_000, ge=0)
-    minimum_invoice_remaining_seconds: int = Field(default=1_800, ge=1)
-    lifetime: int = Field(default=60, ge=1)
+    funding_confirmations: int = Field(default=2, ge=1, le=MAX_WIRE_INTEGER)
+    settlement_confirmations: int = Field(default=3, ge=1, le=MAX_WIRE_INTEGER)
+    refund_resolution_confirmations: int = Field(default=6, ge=1, le=MAX_WIRE_INTEGER)
+    max_refund_delay_blocks: int = Field(default=288, ge=1, le=MAX_WIRE_INTEGER)
+    max_funding_fee_sat: int = Field(default=5_000, ge=0, le=MAX_SATS)
+    max_claim_fee_sat: int = Field(default=5_000, ge=0, le=MAX_SATS)
+    max_refund_fee_sat: int = Field(default=5_000, ge=0, le=MAX_SATS)
+    minimum_invoice_remaining_seconds: int = Field(default=1_800, ge=1, le=MAX_WIRE_INTEGER)
+    lifetime: int = Field(default=60, ge=1, le=MAX_WIRE_INTEGER)
 
 
 class PublicTerms(_Strict):

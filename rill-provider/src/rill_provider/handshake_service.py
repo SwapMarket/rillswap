@@ -97,6 +97,7 @@ class _State:
     republish: bool = False
     attempts: dict[str, int] = field(default_factory=dict)
     seen: OrderedDict[str, None] = field(default_factory=OrderedDict)
+    tip: int | None = None  # per-tick snapshot; requests never trigger RPC
 
 
 class HandshakeService:
@@ -114,9 +115,9 @@ class HandshakeService:
     ) -> None:
         """Bind already-acquired, already-verified resources.
 
-        ``chain_tip`` (blocking; run off the event loop) supplies an indicative
-        quote's reference height. Without it, or when it fails, quotes are
-        answered ``capacity_unavailable``.
+        ``chain_tip`` (blocking; run off the event loop once per tick, never
+        per request) supplies an indicative quote's reference height. Without
+        it, or when it fails, quotes are answered ``capacity_unavailable``.
         """
         self._store = store
         self._identity = identity
@@ -162,6 +163,7 @@ class HandshakeService:
             advertise_for=2 * policy.announcement_lifetime - 1,
         )
         self._store.expire_idle(now=now, idle_timeout=policy.handshake_timeout)
+        await self._refresh_tip()
         if epochs != state.announced_keys or now >= state.announced_at + (
             policy.announcement_refresh
         ):
@@ -189,6 +191,15 @@ class HandshakeService:
         for message_id in list(state.attempts):
             if message_id not in {entry.message_id for entry in self._store.pending_outbox()}:
                 del state.attempts[message_id]
+
+    async def _refresh_tip(self) -> None:
+        if self._chain_tip is None:
+            return
+        try:
+            self._state.tip = await asyncio.to_thread(self._chain_tip)
+        except Exception:  # noqa: BLE001 - an unavailable tip only disables quotes
+            self._state.tip = None
+            LOG.warning("chain tip unavailable; quotes answered capacity_unavailable")
 
     async def _announce(self, epochs: tuple[str, ...], now: int) -> None:
         policy, state = self._policy, self._state
@@ -258,11 +269,18 @@ class HandshakeService:
                 document = None
             now = self._now()
             if document is not None:
-                if json.loads(document).get("message_type") != "handshake_confirm":
-                    return await self._answer(document, relays, now)
-                admitted = store.admit_confirm(document, now=now)
-                await self._resubscribe(relays)
-                return "confirm-replay" if admitted.replay else "confirm-admitted"
+                if json.loads(document).get("message_type") == "handshake_confirm":
+                    try:
+                        admitted = store.admit_confirm(document, now=now)
+                    except (StaleOwnerError, SessionBlockedError, SessionExpiredError):
+                        raise
+                    except LiveSessionStoreError:
+                        # Not a valid confirm: classify it like any signed message,
+                        # so reusing an admitted sequence is still a conflict.
+                        return await self._answer(document, relays, now)
+                    await self._resubscribe(relays)
+                    return "confirm-replay" if admitted.replay else "confirm-admitted"
+                return await self._answer(document, relays, now)
             init = store.open_epoch_frame(event, now=now, transport=self._transport)
             reserved = store.reserve(init, now=now)
             if reserved.revision != 0:
@@ -286,18 +304,12 @@ class HandshakeService:
 
     async def _answer(self, document: bytes, relays: Sequence[Relay], now: int) -> str:
         policy = self._policy
-        tip: int | None = None
-        if self._chain_tip is not None:
-            try:
-                tip = await asyncio.to_thread(self._chain_tip)
-            except Exception:  # noqa: BLE001 - an unavailable tip only disables quotes
-                LOG.warning("chain tip unavailable; quotes answered capacity_unavailable")
         terms = QuoteTerms(
             amount_bands=policy.amount_bands,
             base_fee_sat=policy.base_fee_sat,
             proportional_millionths=policy.proportional_millionths,
             schedule=policy.quote,
-            tip_height=tip,
+            tip_height=self._state.tip,
             now=now,
         )
         answer = self._store.answer_request(

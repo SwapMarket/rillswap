@@ -333,3 +333,63 @@ def test_ownership_loss_is_never_swallowed_as_a_refusal() -> None:
     event = json.dumps({"id": "ab" * 32}).encode()
     with pytest.raises(StaleOwnerError):
         asyncio.run(service.handle(event, []))
+
+
+@pytest.mark.native_crypto
+@NATIVE
+@pytest.mark.parametrize(("label", "sequence"), [("handshake_confirm", 2), ("quote_request", 1)])
+def test_native_sequence_reuse_conflicts_whatever_the_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, label: str, sequence: int
+) -> None:
+    from rill_crypto import Context  # noqa: PLC0415
+
+    from rill_provider._nip59_send import _wrap_envelope  # noqa: PLC0415
+
+    harness = Harness(tmp_path, monkeypatch)
+    harness.provision()
+    policy = ServicePolicy(
+        network=harness.network,
+        profiles=("btc-to-ln/v1",),
+        amount_bands=((1000, 100_000),),
+        base_fee_sat=50,
+        proportional_millionths=1000,
+        slot="s",
+        relay_urls=("ws://r/",),
+    )
+    tips: list[int] = []
+
+    def chain_tip() -> int:
+        tips.append(500)
+        return 500
+
+    with (
+        Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
+        harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store,
+    ):
+        store.reserve(harness.init)
+        store.commit_accept(harness.accept)
+        store.admit_confirm(harness.confirm)
+        mailbox = harness.envelopes[1]["sender_session_key"]
+        service = HandshakeService(store, object(), crypto, policy, chain_tip=chain_tip)  # type: ignore[arg-type]
+        asyncio.run(service._refresh_tip())  # noqa: SLF001 - the per-tick step alone
+
+        def deliver(envelope: dict[str, Any]) -> str:
+            wrap = _wrap_envelope(
+                _bytes(envelope),
+                sender_session_secret=CLIENT_SECRET,
+                recipient_xonly_key=mailbox,
+                crypto=crypto,
+            )
+            return asyncio.run(service.handle(wrap, []))
+
+        request = _signed_quote_request(harness, crypto)
+        assert deliver(request) == "request-answered"
+        assert deliver(request) == "request-replay"
+        reuse = copy.deepcopy(request)
+        reuse.update(message_id="23" * 32, sequence=sequence, message_type=label, signature=None)
+        unsigned = unsigned_envelope_hash(Envelope.model_validate_json(json.dumps(reuse)))
+        reuse["signature"] = crypto.schnorr_sign(CLIENT_SECRET, unsigned, b"\x68" * 32).hex()
+        assert deliver(reuse) == "blocked"
+        assert deliver(request) == "blocked"
+        assert store.session_mailboxes() == ()
+        assert tips == [500]  # requests never trigger chain RPC
