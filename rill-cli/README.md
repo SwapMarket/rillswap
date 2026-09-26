@@ -51,6 +51,14 @@ responses. Selecting a regtest network file does not authorize a different
 wallet backend. The check is not cached across calls. Existing installations
 need no state migration; a mismatched endpoint now fails before wallet effects.
 
+Funding uses one confirmed, safe P2WPKH or P2TR coin. Core receives that exact
+input with `add_inputs=false`, and its proposed input set is checked before
+signing. If no single coin covers the amount and a conservative 165-vbyte fee
+reserve, the command fails rather than combining coins of unrelated origin.
+Multi-input cluster-aware selection and durable concurrent-wallet reservations
+are not implemented. This policy prevents new cross-input consolidation; it
+does not establish anonymity or erase a coin's existing transaction history.
+
 `rill recover observe-funding` is a **read-only, explicitly requested regtest
 diagnostic**, not a refund transaction or an automatic watcher. It requires a
 complete independently trusted network JSON file, protected age X25519

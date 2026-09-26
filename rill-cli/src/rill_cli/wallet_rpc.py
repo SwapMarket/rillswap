@@ -33,6 +33,7 @@ METHODS = frozenset(
         "getblockchaininfo",
         "getblockhash",
         "getnewaddress",
+        "listunspent",
         "sendrawtransaction",
         "walletcreatefundedpsbt",
         "walletprocesspsbt",
@@ -145,7 +146,15 @@ class RegtestWalletRpc:
         return bytes.fromhex(info["scriptPubKey"])
 
     def fund(self, script_pubkey: bytes, amount_sat: int, *, fee_rate_sat_vb: int) -> WalletFunding:
-        """Create, fund, and sign (not broadcast) a v2 transaction paying the script."""
+        """Fund from one confirmed witness coin, never silently combine origins.
+
+        One P2WPKH input and two P2TR outputs fit within 165 virtual bytes;
+        reserve that conservative fee amount before asking Core to fund.
+        The caller still enforces the signed absolute funding-fee cap.
+        """
+        if type(fee_rate_sat_vb) is not int or fee_rate_sat_vb <= 0:
+            raise WalletRpcError("funding fee rate must be a positive integer")
+        coin = self._select_coin(amount_sat + 165 * fee_rate_sat_vb)
         decoded = self._call("decodescript", script_pubkey.hex(), wallet=False)
         address = decoded.get("address") if isinstance(decoded, dict) else None
         if not isinstance(address, str):
@@ -153,16 +162,32 @@ class RegtestWalletRpc:
         amount = format(Decimal(amount_sat) / SATS_PER_BTC, ".8f")
         created = self._call(
             "walletcreatefundedpsbt",
-            [],
+            [{"txid": coin.txid.hex(), "vout": coin.output_index}],
             [{address: amount}],
             0,
-            {"change_type": "bech32m", "fee_rate": fee_rate_sat_vb, "replaceable": False},
+            {
+                "change_type": "bech32m",
+                "fee_rate": fee_rate_sat_vb,
+                "replaceable": False,
+                "add_inputs": False,
+            },
         )
+        if not isinstance(created, dict) or not isinstance(created.get("psbt"), str):
+            raise WalletRpcError("Core funding PSBT unusable")
+        before_signing = self._call("decodepsbt", created["psbt"], wallet=False)
+        try:
+            actual = tuple((vin["txid"], vin["vout"]) for vin in before_signing["tx"]["vin"])
+        except (KeyError, TypeError):
+            raise WalletRpcError("wallet funding input description unusable") from None
+        if actual != ((coin.txid.hex(), coin.output_index),):
+            raise WalletRpcError("Core changed the approved funding input")
         processed = self._call(
             "walletprocesspsbt",
             created["psbt"],
             True,  # noqa: FBT003 - Core sign flag
         )
+        if not isinstance(processed, dict) or not isinstance(processed.get("psbt"), str):
+            raise WalletRpcError("Core signed PSBT unusable")
         final = self._call(
             "finalizepsbt",
             processed["psbt"],
@@ -172,6 +197,7 @@ class RegtestWalletRpc:
             raise WalletRpcError("wallet could not sign every funding input")
         described = self._call("decodepsbt", processed["psbt"], wallet=False)
         try:
+            raw = bytes.fromhex(final["hex"])
             inputs = tuple(
                 FundingPrevout(
                     txid=bytes.fromhex(vin["txid"]),
@@ -189,7 +215,37 @@ class RegtestWalletRpc:
             fee = _sats(described["fee"])
         except (KeyError, TypeError, ValueError):
             raise WalletRpcError("wallet funding description unusable") from None
-        return WalletFunding(bytes.fromhex(final["hex"]), inputs, others, fee)
+        if inputs != (coin,):
+            raise WalletRpcError("Core changed the approved funding input details")
+        return WalletFunding(raw, inputs, others, fee)
+
+    def _select_coin(self, required_sat: int) -> FundingPrevout:
+        available = self._call("listunspent", 1)
+        if not isinstance(available, list):
+            raise WalletRpcError("Core coin list unusable")
+        candidates: list[FundingPrevout] = []
+        for item in available:
+            if not isinstance(item, dict) or not all(
+                item.get(field) is True for field in ("safe", "spendable", "solvable")
+            ):
+                continue
+            if type(item.get("confirmations")) is not int or item["confirmations"] < 1:
+                continue
+            try:
+                script = bytes.fromhex(item["scriptPubKey"])
+                witness_coin = (
+                    script[:2] in (b"\x00\x14", b"\x51\x20") and len(script) == script[1] + 2
+                )
+                value = _sats(item["amount"])
+                if witness_coin and value >= required_sat:
+                    candidates.append(
+                        FundingPrevout(bytes.fromhex(item["txid"]), item["vout"], value, script)
+                    )
+            except (KeyError, TypeError, ValueError):
+                raise WalletRpcError("Core coin description unusable") from None
+        if not candidates:
+            raise WalletRpcError("no single confirmed coin covers funding and its fee reserve")
+        return min(candidates, key=lambda coin: (coin.value_sat, coin.txid, coin.output_index))
 
     def broadcast(self, raw: bytes) -> str:
         """Submit exact bytes; return Core's txid."""

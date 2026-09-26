@@ -31,6 +31,18 @@ def _answers() -> dict[str, Any]:
     return {
         "getblockchaininfo": {"chain": "regtest", "initialblockdownload": False, "blocks": 850},
         "getblockhash": NETWORK.genesis_hash,
+        "listunspent": [
+            {
+                "txid": "41" * 32,
+                "vout": 1,
+                "scriptPubKey": COIN,
+                "amount": "#0.00070300#",
+                "safe": True,
+                "spendable": True,
+                "solvable": True,
+                "confirmations": 2,
+            }
+        ],
         "decodescript": {"address": "bcrt1pcontract"},
         "walletcreatefundedpsbt": {"psbt": "P0"},
         "walletprocesspsbt": {"psbt": "P1"},
@@ -175,3 +187,90 @@ def test_network_attestation_is_not_cached_across_calls(
     with pytest.raises(WalletRpcError, match="wallet chain"):
         wallet.broadcast(b"\x02\x00")
     assert not {call["method"] for call in calls} & WALLET_EFFECTS
+
+
+def test_funding_approves_one_coin_before_core_selection(
+    core: tuple[RegtestWalletRpc, list[dict[str, Any]]], answers: dict[str, Any]
+) -> None:
+    wallet, calls = core
+    template = answers["listunspent"][0]
+    # Unrelated smaller coins must not become an exact-match consolidation.
+    answers["listunspent"].extend(
+        template | {"txid": f"{index:064x}", "amount": "#0.00025000#"} for index in range(5)
+    )
+    wallet.fund(bytes.fromhex(CONTRACT), 50_000, fee_rate_sat_vb=2)
+    create = next(call for call in calls if call["method"] == "walletcreatefundedpsbt")
+    assert create["params"][0] == [{"txid": "41" * 32, "vout": 1}]
+    assert create["params"][3]["add_inputs"] is False
+    methods = [call["method"] for call in calls]
+    assert methods.index("decodepsbt") < methods.index("walletprocesspsbt")
+
+
+def test_insufficient_single_coin_never_consolidates(
+    core: tuple[RegtestWalletRpc, list[dict[str, Any]]], answers: dict[str, Any]
+) -> None:
+    wallet, calls = core
+    template = answers["listunspent"][0]
+    answers["listunspent"] = [
+        template | {"txid": f"{index:064x}", "amount": "#0.00025000#"} for index in range(5)
+    ]
+    with pytest.raises(WalletRpcError, match="no single confirmed coin"):
+        wallet.fund(bytes.fromhex(CONTRACT), 50_000, fee_rate_sat_vb=2)
+    assert not {call["method"] for call in calls} & WALLET_EFFECTS
+
+
+@pytest.mark.parametrize("change", [{"safe": False}, {"confirmations": 0}, {"solvable": False}])
+def test_unsafe_coins_never_fund(
+    core: tuple[RegtestWalletRpc, list[dict[str, Any]]],
+    answers: dict[str, Any],
+    change: dict[str, object],
+) -> None:
+    wallet, calls = core
+    answers["listunspent"][0].update(change)
+    with pytest.raises(WalletRpcError, match="no single confirmed coin"):
+        wallet.fund(bytes.fromhex(CONTRACT), 50_000, fee_rate_sat_vb=2)
+    assert not {call["method"] for call in calls} & WALLET_EFFECTS
+
+
+def test_added_input_is_rejected_before_signing(
+    core: tuple[RegtestWalletRpc, list[dict[str, Any]]], answers: dict[str, Any]
+) -> None:
+    wallet, calls = core
+    answers["decodepsbt"]["tx"]["vin"].append({"txid": "42" * 32, "vout": 0})
+    with pytest.raises(WalletRpcError, match="changed the approved funding input"):
+        wallet.fund(bytes.fromhex(CONTRACT), 50_000, fee_rate_sat_vb=2)
+    assert "walletprocesspsbt" not in {call["method"] for call in calls}
+
+
+@pytest.mark.parametrize("change", [{"txid": "41" * 31}, {"vout": True}, {"vout": -1}])
+def test_malformed_selected_coin_is_refused_before_signing(
+    core: tuple[RegtestWalletRpc, list[dict[str, Any]]],
+    answers: dict[str, Any],
+    change: dict[str, object],
+) -> None:
+    wallet, calls = core
+    answers["listunspent"][0].update(change)
+    with pytest.raises(WalletRpcError, match="coin description unusable"):
+        wallet.fund(bytes.fromhex(CONTRACT), 50_000, fee_rate_sat_vb=2)
+    assert "walletprocesspsbt" not in {call["method"] for call in calls}
+
+
+@pytest.mark.parametrize(
+    ("method", "response"),
+    [
+        ("walletcreatefundedpsbt", None),
+        ("walletprocesspsbt", {}),
+        ("finalizepsbt", {"complete": True, "hex": "zz"}),
+    ],
+)
+def test_malformed_psbt_results_have_sanitized_wallet_errors(
+    core: tuple[RegtestWalletRpc, list[dict[str, Any]]],
+    answers: dict[str, Any],
+    method: str,
+    response: object,
+) -> None:
+    wallet, calls = core
+    answers[method] = response
+    with pytest.raises(WalletRpcError, match="unusable"):
+        wallet.fund(bytes.fromhex(CONTRACT), 50_000, fee_rate_sat_vb=2)
+    assert "sendrawtransaction" not in {call["method"] for call in calls}
