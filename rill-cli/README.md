@@ -70,8 +70,8 @@ rill swap btc-to-ln \
 ```
 
 If the provider never pays, the funds stay in the contract. After the
-printed refund lock height, refund with `rill recover sign-refund` and
-`broadcast-refund` on the `.funded` snapshot.
+printed refund lock height, run `rill recover watch-refund` on the `.funded`
+snapshot (or the manual `sign-refund` and `broadcast-refund`).
 
 Exit codes:
 - `5`: the swap stopped with a stated reason.
@@ -273,6 +273,32 @@ This does not guarantee classification for interruptions during earlier intent
 preparation/publication or after the helper returns. Other process-control
 exceptions are not translated. Neither signal classification nor a returned
 txid proves chain inclusion or makes a second attempt safe.
+
+`rill recover watch-refund` is the automatic form for a swap the provider
+never paid: it polls until the refund confirms, the invoice settles, or the
+contract output is spent by something else. Before every attempt it asks your
+own LND (`--lnd-port`, `--lnd-tls-cert`, `--lnd-invoice-macaroon`, an
+`invoices:read` macaroon) for the invoice state and **refuses to refund a
+SETTLED invoice** (the provider paid you; refunding would take their funds).
+Missing LND or Core evidence only waits. After the refund lock height, it
+signs the refund at `--initial-fee-sat`, rising linearly to `--max-fee-sat`
+(capped by the signed `max_refund_fee_sat`) over `--escalate-blocks`
+blocks, replacing the unconfirmed attempt by opt-in RBF when a new block has
+passed and the fee beats the previous one by 1 sat/vB. Every signed attempt
+is written to a create-only `refund-NN-<txid>.json` in `--intent-dir` before
+it is sent; those files are the state, so a restart reloads and verifies
+them and never signs a lower fee. The final JSON names every attempt and the
+outcome (`refund_confirmed` with its depth, `invoice_settled`, or
+`outpoint_spent_elsewhere`, which usually means the provider claimed).
+
+```sh
+rill recover watch-refund --network signet.json --crypto-library /path/librill_crypto.so \
+  --funding-attempt-id ATTEMPT --binding-revision 0 --identity /protected/age-identity \
+  --rpc-cookie ~/.bitcoin/signet/.cookie --rpc-port 38332 \
+  --lnd-port 10009 --lnd-tls-cert tls.cert --lnd-invoice-macaroon invoices.macaroon \
+  --intent-dir /trusted/private/refund-attempts --initial-fee-sat 300 --max-fee-sat 3000 \
+  swap-recovery.age.funded
+```
 Existing intent paths are never overwritten or automatically resumed; the
 operator must reconcile exact txid, mempool, selected chain, conflicts, and
 LN state before any separate manual action. Even a `node_accepted` response

@@ -17,13 +17,15 @@ from rill_core.recovery import inspect_recovery_successor
 from rill_core.settlement import FundingOutput, UnilateralAuthorization, validate_unilateral_spend
 from rill_core.wire.types import NetworkIdentity
 from rill_crypto import Context
+from rill_provider.lnd_invoice_observation import LndInvoiceObserver
 from rill_provider.relay_client import RelayError
 
-from rill_cli import provider_directory, swap_command
+from rill_cli import provider_directory, refund_watcher, swap_command
 from rill_cli.age_container import (
     MAX_CIPHERTEXT_BYTES,
     MAX_PLAINTEXT_BYTES,
     PassphraseCredentials,
+    RecoveryCredentials,
     X25519Credentials,
     construct_container_selected_refund,
     decrypt_verified_plaintext,
@@ -59,7 +61,7 @@ from rill_cli.refund_publication import (
 )
 
 if TYPE_CHECKING:
-    from rill_core.recovery import OfflineRecoveryInspection
+    from rill_core.recovery import OfflineRecoveryInspection, SelectedRecoveryFundingContext
 
 
 class RecoveryCLIError(ValueError):
@@ -70,7 +72,7 @@ MAX_NETWORK_FILE_BYTES = 4096
 MAX_IDENTITY_FILE_BYTES = 1024
 
 
-def _parser() -> argparse.ArgumentParser:
+def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - one flat command table
     parser = argparse.ArgumentParser(
         prog="rill", description="Pre-release RillSwap client and recovery tools"
     )
@@ -115,6 +117,7 @@ def _parser() -> argparse.ArgumentParser:
         ("broadcast-claim", "EXPERIMENTAL regtest preimage disclosure and one send"),
         ("sign-refund", "explicit BTC-to-LN refund artifact (never broadcasts)"),
         ("broadcast-refund", "explicit regtest refund submit (never retries)"),
+        ("watch-refund", "refund a failed swap with fee escalation until it confirms"),
     ):
         operation = commands.add_parser(command, help=description)
         operation.add_argument(
@@ -151,6 +154,23 @@ def _parser() -> argparse.ArgumentParser:
                 operation.add_argument(
                     "--output", required=True, help="create-only encrypted claim plan file"
                 )
+        if command == "watch-refund":
+            operation.add_argument(
+                "--intent-dir", required=True, help="directory of create-only attempt records"
+            )
+            operation.add_argument("--initial-fee-sat", required=True, type=int)
+            operation.add_argument(
+                "--max-fee-sat", required=True, type=int, help="capped by the signed terms"
+            )
+            operation.add_argument(
+                "--escalate-blocks", type=int, default=12, help="blocks to reach the maximum"
+            )
+            operation.add_argument("--poll-seconds", type=float, default=30.0)
+            operation.add_argument("--lnd-port", required=True, type=int)
+            operation.add_argument("--lnd-tls-cert", required=True)
+            operation.add_argument(
+                "--lnd-invoice-macaroon", required=True, help="invoices:read macaroon"
+            )
         if command == "broadcast-claim":
             operation.add_argument("--plan", required=True, help="selected encrypted claim plan")
             operation.add_argument(
@@ -274,6 +294,7 @@ def _run(args: argparse.Namespace) -> str:  # noqa: PLR0911, PLR0912, PLR0915 - 
             "broadcast-claim",
             "sign-refund",
             "broadcast-refund",
+            "watch-refund",
         }:
             if args.command in {"prepare-claim", "broadcast-claim"} and not args.identity:
                 raise RecoveryCLIError("protected X25519 identity required for claim plan")
@@ -298,7 +319,7 @@ def _run(args: argparse.Namespace) -> str:  # noqa: PLR0911, PLR0912, PLR0915 - 
                 binding_revision=args.binding_revision,
                 crypto=crypto,
             )
-            if args.command in {"sign-refund", "broadcast-refund"} and (
+            if args.command in {"sign-refund", "broadcast-refund", "watch-refund"} and (
                 selected.terms.profile_id != "btc-to-ln/v1"
                 or selected.terms.refund_party != "client"
             ):
@@ -313,6 +334,15 @@ def _run(args: argparse.Namespace) -> str:  # noqa: PLR0911, PLR0912, PLR0915 - 
                 cookie_path=Path(args.rpc_cookie),
                 network=network,
             )
+            if args.command == "watch-refund":
+                return _watch_refund(
+                    args,
+                    network,
+                    selected,
+                    reader=reader,
+                    credentials=inspection_credentials,
+                    crypto=crypto,
+                )
             if args.command == "broadcast-claim":
                 if not isinstance(inspection_credentials, X25519Credentials):
                     raise RecoveryCLIError("protected X25519 identity required")
@@ -556,6 +586,78 @@ def _run(args: argparse.Namespace) -> str:  # noqa: PLR0911, PLR0912, PLR0915 - 
                 separators=(",", ":"),
             )
         raise RecoveryCLIError("unsupported recovery command")
+
+
+def _watch_refund(  # noqa: PLR0913 - explicit wiring of the collaborators
+    args: argparse.Namespace,
+    network: NetworkIdentity,
+    selected: SelectedRecoveryFundingContext,
+    *,
+    reader: RecoveryCoreReader,
+    credentials: RecoveryCredentials,
+    crypto: Context,
+) -> str:
+    binding, terms = selected.binding, selected.terms
+    funding = FundingOutput(
+        bytes.fromhex(binding.funding_txid),
+        binding.contract_vout,
+        int(binding.contract_value_sat),
+        bytes.fromhex(binding.contract_script_pubkey),
+    )
+    authorization = UnilateralAuthorization.from_terms(terms, funding, "refund", keys=crypto)
+    intent_dir = Path(args.intent_dir)
+    if not intent_dir.is_dir():
+        raise RecoveryCLIError("intent directory must exist")
+    attempts = refund_watcher.load_attempts(intent_dir, authorization, verifier=crypto)
+    chain, confirmations, submit = refund_watcher.core_collaborators(
+        reader, funding_txid=binding.funding_txid, contract_vout=binding.contract_vout
+    )
+    observer = LndInvoiceObserver(
+        host="127.0.0.1",
+        port=args.lnd_port,
+        tls_certificate_path=args.lnd_tls_cert,
+        invoice_macaroon_path=args.lnd_invoice_macaroon,
+        network=network,
+    )
+
+    def sign(fee: int, tip: int) -> tuple[bytes, str, int, int]:
+        signed = construct_container_selected_refund(
+            Path(args.file).read_bytes(),
+            network,
+            credentials=credentials,
+            funding_attempt_id=args.funding_attempt_id,
+            binding_revision=args.binding_revision,
+            live_funding=funding,
+            sampled_tip_height=tip,
+            fee_sat=fee,
+            auxiliary_random=os.urandom(32),
+            crypto=crypto,
+        )
+        checked = validate_unilateral_spend(signed, authorization, verifier=crypto)
+        return signed, checked.txid, checked.fee_sat, checked.vsize
+
+    watcher = refund_watcher.RefundWatcher(
+        attempts=attempts,
+        intent_dir=intent_dir,
+        funding_txid=binding.funding_txid,
+        contract_vout=binding.contract_vout,
+        refund_lock_height=terms.refund_lock_height,
+        initial_fee_sat=args.initial_fee_sat,
+        max_fee_sat=min(args.max_fee_sat, int(terms.max_refund_fee_sat)),
+        escalate_blocks=args.escalate_blocks,
+        chain=chain,
+        invoice_state=refund_watcher.lnd_invoice_state(
+            observer, terms.invoice_binding.payment_hash
+        ),
+        sign=sign,
+        submit=submit,
+        confirmations=confirmations,
+        authorization=authorization,
+        verifier=crypto,
+        poll_seconds=args.poll_seconds,
+    )
+    outcome = watcher.run()
+    return json.dumps(outcome, sort_keys=True, separators=(",", ":"))
 
 
 def _inspect_identity_credentials(path: str) -> X25519Credentials:
