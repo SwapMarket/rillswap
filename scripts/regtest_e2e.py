@@ -374,7 +374,14 @@ def check_absolute_payment(stack: Stack, work: Path) -> None:
         admissions = connection.execute(
             "SELECT COUNT(*) FROM epoch_admissions"
         ).fetchone()[0]
+        reservations = connection.execute(
+            "SELECT payment_hash, state, release_evidence FROM economic_reservations"
+        ).fetchall()
     payment_hash, state, record_bytes, offer_bytes, init_bytes = row
+    # The confirmed claim released the swap's economic reservation with evidence.
+    ((reserved_hash, reservation, evidence),) = reservations
+    assert (reserved_hash, reservation) == (payment_hash, "RELEASED")
+    assert json.loads(evidence)["reason"] == "claim-confirmed"
     record = json.loads(record_bytes)
     terms = json.loads(offer_bytes)["payload"]["terms"]["contract_terms"]
     required_features = json.loads((work / "provider.json").read_text())["handshake"][

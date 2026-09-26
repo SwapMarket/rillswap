@@ -149,7 +149,60 @@ class SettlementEngine:
                 continue
             if state != item.state:
                 results[item.session_id] = state
+        for session_id in await self._close_unfunded(now):
+            results[session_id] = "FAILED"
+        await self._release_claims()
         return results
+
+    async def _close_unfunded(self, now: int) -> list[str]:
+        """Fail accepted, never-funded swaps once the provider can no longer pay.
+
+        Mirrors the FUNDING_SEEN deadline guard. The transition is terminal
+        and the store releases the swap's never-dispatched reservation in the
+        same transaction. A late funding binding is then refused; the client
+        keeps its unilateral refund. A concurrent binding wins as a stale swap.
+        """
+        closed: list[str] = []
+        unfunded = self._store.unfunded_swaps()
+        if not unfunded:
+            return closed
+        try:
+            tip = await asyncio.to_thread(self._chain.tip_height)
+        except Exception:  # noqa: BLE001 - no fresh tip, no height-based closure
+            tip = None
+        for session_id, offer in unfunded:
+            try:
+                terms = offered_terms(Envelope.model_validate_json(offer, strict=True))
+                invoice = terms.invoice_binding
+                expiry = int(terms.timing_policy.model_dump()["max_outgoing_htlc_expiry_height"])
+                if now < invoice.expires_at and (
+                    tip is None or tip + invoice.min_final_cltv_delta < expiry
+                ):
+                    continue
+                self._store.advance_swap(
+                    session_id,
+                    from_state="ACCEPTED",
+                    to_state="FAILED",
+                    signer=self._crypto,
+                    now=now,
+                    observation={"kind": "payment_failed"},
+                )
+            except StaleSwapError:
+                continue
+            except Exception:  # noqa: BLE001 - one swap's trouble never stops others
+                LOG.warning("unfunded swap closure deferred", exc_info=False)
+                continue
+            closed.append(session_id)
+        return closed
+
+    async def _release_claims(self) -> None:
+        """Release historical claimed reservations on fresh claim-depth evidence."""
+        for session_id, txid, _required in self._store.unreleased_claims():
+            try:
+                depth = await asyncio.to_thread(self._chain.confirmations, txid)
+                self._store.release_claim(session_id, txid, confirmations=depth)
+            except Exception:  # noqa: BLE001 - retried next tick; nothing is released
+                LOG.warning("claim reservation release deferred", exc_info=False)
 
     def _move(self, item: SettlementItem, to_state: str, now: int, **fields: object) -> str:
         self._store.advance_swap(

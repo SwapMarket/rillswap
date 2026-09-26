@@ -159,6 +159,9 @@ contract hash.
 - `observation` (provider, unsolicited): `payment_settled` carries the
   preimage the client can check against the payment hash. `payment_failed`
   says the provider will not pay, so the client waits for refund eligibility.
+  An accepted swap still unfunded once the provider can no longer pay within
+  its signed bounds fails the same way, and a later `funding_binding` is
+  refused. A client that funds anyway relies on its unilateral refund.
   `claim_broadcast` names the provider's claim transaction. Observations
   inform only. The client still verifies the preimage and the chain itself.
 

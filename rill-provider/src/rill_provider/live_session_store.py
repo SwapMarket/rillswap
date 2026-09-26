@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     from os import PathLike
 
     from rill_core.wire.envelope_authentication import EnvelopeSchnorrVerifier
+    from rill_core.wire.messages import ContractTerms
     from rill_crypto import Context
 
     from rill_provider.handshake_custody_offline import CustodyPublicKeys
@@ -74,6 +75,7 @@ CONTRACT_KEY_RECORD_KIND = "rillswap-provider-contract-key"
 OPEN_PHASES = ("CONFIRMED", "ACCEPTED")  # sessions that may still send requests
 SWAP_TRANSITIONS = frozenset(
     {
+        ("ACCEPTED", "FAILED"),  # never funded before the payment deadline
         ("FUNDING_SEEN", "PAYING"),
         ("FUNDING_SEEN", "FAILED"),
         ("PAYING", "PAID"),
@@ -1847,12 +1849,74 @@ class LiveSessionStore:
                         "INSERT INTO payment_dispatch VALUES (?, ?, 'UNSENT', NULL)",
                         (session_id, offer.terms.contract_terms.invoice_binding.payment_hash),
                     )
+                if to_state in ("FAILED", "CLAIMED"):
+                    _release_terminal(connection, session_id, to_state, now)
                 if observation is not None:
                     self._record_observation(connection, session_id, observation, signer, now)
         except LiveSessionStoreError:
             raise
         except Exception:  # noqa: BLE001 - never echo storage or crypto details
             raise LiveSessionStoreError("swap transition refused") from None
+
+    def unfunded_swaps(self) -> list[tuple[str, bytes]]:
+        """Return (session_id, terms_offer) for accepted swaps still awaiting funding."""
+        try:
+            with self._write() as connection:
+                return [
+                    (row[0], row[1])
+                    for row in connection.execute(
+                        "SELECT session_id, terms_offer FROM swaps WHERE state='ACCEPTED' "
+                        "ORDER BY session_id"
+                    )
+                ]
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("swap listing refused") from None
+
+    def unreleased_claims(self, *, limit: int = 16) -> list[tuple[str, str, int]]:
+        """Return (session_id, claim_txid, required depth) for claimed, unreleased swaps.
+
+        These are historical rows (for example migrated UNKNOWN reservations).
+        Only a fresh chain observation passed to release_claim can close them.
+        """
+        try:
+            with self._write() as connection:
+                rows = connection.execute(
+                    "SELECT w.session_id, w.claim_txid, w.terms_offer FROM swaps w "
+                    "JOIN economic_reservations r ON r.session_id=w.session_id "
+                    "WHERE w.state='CLAIMED' AND w.claim_txid IS NOT NULL "
+                    "AND r.state IN ('DISPATCHED', 'UNKNOWN') ORDER BY w.session_id LIMIT ?",
+                    (limit,),
+                ).fetchall()
+                return [
+                    (sid, txid, _offer_terms(offer).settlement_confirmations)
+                    for sid, txid, offer in rows
+                ]
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("claim listing refused") from None
+
+    def release_claim(self, session_id: str, claim_txid: str, *, confirmations: int) -> bool:
+        """Release a claimed swap's reservation on fresh evidence of claim depth.
+
+        Refuses anything but the retained claim txid of a CLAIMED swap observed
+        at no less than its signed ``settlement_confirmations``. This accepts
+        Bitcoin's depth-based reorganization risk, like the claim itself.
+        """
+        if type(confirmations) is not int or confirmations < 0:
+            raise LiveSessionStoreError("confirmations unsupported")
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT terms_offer FROM swaps WHERE session_id=? AND state='CLAIMED' "
+                    "AND claim_txid=?",
+                    (session_id, claim_txid),
+                ).fetchone()
+                if row is None or confirmations < _offer_terms(row[0]).settlement_confirmations:
+                    return False
+                return _release_terminal(connection, session_id, "CLAIMED", None, confirmations)
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("claim release refused") from None
 
     def _economic_capacity(self, connection: sqlite3.Connection, session_id: str) -> bool:
         """Whether one more firm offer in this session fits unreleased capacity."""
@@ -2235,6 +2299,56 @@ def _upgrade_v7(connection: sqlite3.Connection) -> None:
     )
     connection.execute("UPDATE meta SET schema_version=?", (SCHEMA_VERSION,))
     connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+
+def _release_terminal(
+    connection: sqlite3.Connection,
+    session_id: str,
+    to_state: str,
+    now: int | None,
+    confirmations: int | None = None,
+) -> bool:
+    """Release a terminal swap's reservation when its history proves closure.
+
+    FAILED releases only an UNSENT reservation: every dispatch marks its
+    reservation DISPATCHED in the same transaction, and FAILED is terminal,
+    so UNSENT proves no payment was or can be sent. A dispatched, migrated
+    UNKNOWN, or failed-after-dispatch reservation keeps its capacity.
+    CLAIMED (entered only at signed claim depth) releases a DISPATCHED or
+    UNKNOWN reservation: the claim proves the provider recovered its funds.
+    """
+    (offer, claim_txid) = connection.execute(
+        "SELECT terms_offer, claim_txid FROM swaps WHERE session_id=?", (session_id,)
+    ).fetchone()
+    terms = _offer_terms(offer)
+    if to_state == "FAILED":
+        evidence = _release_evidence("failed-before-dispatch", failed_at=int(now or 0))
+        allowed = ("UNSENT", "UNSENT")
+    else:
+        if type(claim_txid) is not str:
+            raise LiveSessionStoreError("claim evidence unavailable")
+        facts: dict[str, str | int] = {
+            "claim_txid": claim_txid,
+            "required_confirmations": terms.settlement_confirmations,
+        }
+        if confirmations is not None:
+            facts["observed_confirmations"] = confirmations
+        evidence = _release_evidence("claim-confirmed", **facts)
+        allowed = ("DISPATCHED", "UNKNOWN")
+    return bool(
+        connection.execute(
+            "UPDATE economic_reservations SET state='RELEASED', release_evidence=? "
+            "WHERE payment_hash=? AND session_id=? AND state IN (?, ?)",
+            (evidence, terms.invoice_binding.payment_hash, session_id, *allowed),
+        ).rowcount
+    )
+
+
+def _offer_terms(offer: bytes) -> ContractTerms:
+    """Return the contract terms of one retained canonical terms offer."""
+    return parse_model_json(
+        TermsOfferPayload, canonicalize(_canonical_envelope(offer).payload)
+    ).terms.contract_terms
 
 
 def _offered_payment_hash(offer: bytes) -> str:

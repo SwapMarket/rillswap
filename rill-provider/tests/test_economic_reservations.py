@@ -310,3 +310,142 @@ def test_upgraded_unknown_reservation_can_use_its_existing_grant(harness: Harnes
         assert _ledger(store)[_hash(harness)] == (session, "UNKNOWN", None)
         assert store.commit_payment_dispatch(session, _hash(harness), b"request")
         assert _ledger(store)[_hash(harness)][1] == "DISPATCHED"
+
+
+def _advance(store: live.LiveSessionStore, session: str, from_state: str, to_state: str) -> None:
+    store.advance_swap(session, from_state=from_state, to_state=to_state, signer=None, now=1500)  # type: ignore[arg-type]
+
+
+def _set_reservation(store: live.LiveSessionStore, state: str) -> None:
+    store._connection.execute(  # noqa: SLF001
+        "UPDATE economic_reservations SET state=?", (state,)
+    )
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [("UNSENT", "RELEASED"), ("DISPATCHED", "DISPATCHED"), ("UNKNOWN", "UNKNOWN")],
+)
+def test_failure_releases_only_a_never_dispatched_reservation(
+    harness: Harness, before: str, after: str
+) -> None:
+    with harness.acquire() as store:
+        session = _insert_funded_swap(store, harness, "FUNDING_SEEN")
+        _set_reservation(store, before)
+        _advance(store, session, "FUNDING_SEEN", "FAILED")
+        _session, state, evidence = _ledger(store)[_hash(harness)]
+        assert state == after
+        if after == "RELEASED":
+            assert evidence == b'{"failed_at":1500,"reason":"failed-before-dispatch","version":1}'
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [("DISPATCHED", "RELEASED"), ("UNKNOWN", "RELEASED"), ("UNSENT", "UNSENT")],
+)
+def test_confirmed_claim_releases_the_dispatched_reservation(
+    harness: Harness, before: str, after: str
+) -> None:
+    with harness.acquire() as store:
+        session = _insert_funded_swap(store, harness, "CLAIMING")
+        store._connection.execute("UPDATE swaps SET claim_txid=?", ("77" * 32,))  # noqa: SLF001
+        _set_reservation(store, before)
+        _advance(store, session, "CLAIMING", "CLAIMED")
+        _session, state, evidence = _ledger(store)[_hash(harness)]
+        assert state == after
+        if after == "RELEASED":
+            assert evidence is not None
+            assert b'"reason":"claim-confirmed"' in evidence
+            assert ("77" * 32).encode() in evidence
+
+
+def test_historical_claims_release_only_on_fresh_sufficient_depth(harness: Harness) -> None:
+    depth = int(harness.source["contract_terms"]["settlement_confirmations"])
+    with harness.acquire() as store:
+        session = _insert_funded_swap(store, harness, "CLAIMED")
+        store._connection.execute("UPDATE swaps SET claim_txid=?", ("77" * 32,))  # noqa: SLF001
+        _set_reservation(store, "UNKNOWN")  # a migrated, already claimed swap
+        assert store.unreleased_claims() == [(session, "77" * 32, depth)]
+        assert not store.release_claim(session, "77" * 32, confirmations=depth - 1)
+        assert not store.release_claim(session, "78" * 32, confirmations=depth)
+        assert _ledger(store)[_hash(harness)][1] == "UNKNOWN"
+        with pytest.raises(live.LiveSessionStoreError):
+            store.release_claim(session, "77" * 32, confirmations=-1)
+        assert store.release_claim(session, "77" * 32, confirmations=depth)
+        assert _ledger(store)[_hash(harness)][1] == "RELEASED"
+        assert b'"observed_confirmations"' in (_ledger(store)[_hash(harness)][2] or b"")
+        assert store.unreleased_claims() == []
+
+
+def test_engine_releases_historical_claims_from_chain_depth(harness: Harness) -> None:
+    import asyncio  # noqa: PLC0415
+    from unittest.mock import Mock  # noqa: PLC0415
+
+    from test_payment_reconciliation import Signer  # noqa: PLC0415
+
+    from rill_provider.settlement_engine import SettlementEngine  # noqa: PLC0415
+
+    with harness.acquire() as store:
+        _insert_funded_swap(store, harness, "CLAIMED")
+        store._connection.execute("UPDATE swaps SET claim_txid=?", ("77" * 32,))  # noqa: SLF001
+        _set_reservation(store, "UNKNOWN")
+        chain = Mock()
+        chain.confirmations.return_value = 0
+        engine = SettlementEngine(store, chain, Mock(), Signer(harness))
+        assert asyncio.run(engine.tick(now=1500)) == {}
+        assert _ledger(store)[_hash(harness)][1] == "UNKNOWN"
+        chain.confirmations.return_value = 100
+        asyncio.run(engine.tick(now=1500))
+        chain.confirmations.assert_called_with("77" * 32)
+        assert _ledger(store)[_hash(harness)][1] == "RELEASED"
+
+
+@pytest.mark.parametrize(
+    ("clock", "tip", "closed"),
+    [
+        ("before", 100, False),
+        ("before", RuntimeError("no tip"), False),
+        ("after", RuntimeError("no tip"), True),  # invoice expiry alone suffices
+        ("before", "deadline", True),
+    ],
+)
+def test_engine_fails_unfunded_swaps_only_past_the_payment_deadline(
+    harness: Harness,
+    clock: str,
+    tip: object,
+    closed: bool,  # noqa: FBT001 - parametrized
+) -> None:
+    import asyncio  # noqa: PLC0415
+    from unittest.mock import Mock  # noqa: PLC0415
+
+    from test_payment_reconciliation import Signer  # noqa: PLC0415
+
+    from rill_provider.settlement_engine import SettlementEngine  # noqa: PLC0415
+
+    terms = harness.source["contract_terms"]
+    expires_at = int(terms["invoice_binding"]["expires_at"])
+    now = expires_at if clock == "after" else expires_at - 1
+    chain = Mock()
+    if isinstance(tip, Exception):
+        chain.tip_height.side_effect = tip
+    elif tip == "deadline":
+        chain.tip_height.return_value = int(
+            terms["timing_policy"]["max_outgoing_htlc_expiry_height"]
+        ) - int(terms["invoice_binding"]["min_final_cltv_delta"])
+    else:
+        chain.tip_height.return_value = tip
+    with harness.acquire() as store:
+        session = _insert_funded_swap(store, harness, "ACCEPTED")
+        outbox = len(store.pending_outbox())
+        engine = SettlementEngine(store, chain, Mock(), Signer(harness))
+        result = asyncio.run(engine.tick(now=now))
+        (state,) = store._connection.execute("SELECT state FROM swaps").fetchone()  # noqa: SLF001
+        reservation = _ledger(store)[_hash(harness)][1]
+        if closed:
+            assert result == {session: "FAILED"}
+            assert (state, reservation) == ("FAILED", "RELEASED")
+            assert len(store.pending_outbox()) == outbox + 1  # signed payment_failed
+        else:
+            assert result == {}
+            assert (state, reservation) == ("ACCEPTED", "UNSENT")
+            assert len(store.pending_outbox()) == outbox

@@ -195,11 +195,28 @@ if a responder ignores that. States:
 - `RELEASED`: only with canonical versioned `release_evidence`.
 
 A session holds at most one firm offer (RS-003), and the store refuses a second
-one as a backstop. The only release in this version is idle expiry of an open
-offer, recorded before its session is deleted (`expired-offer`). Accepted swaps,
-including `CLAIMED` and `FAILED`, keep their capacity for now: releasing them
-needs fresh claim-depth evidence or an explicit never-dispatched deadline
-closure, which are not implemented yet (production gate). Raise
+one as a backstop. Releases, each atomic with the fact that justifies it:
+
+- `expired-offer`: idle expiry of an open offer, before its session is deleted.
+- `failed-before-dispatch`: a transition to terminal `FAILED` while the
+  reservation is still `UNSENT`. Every dispatch marks its reservation in the
+  same transaction, so `UNSENT` proves no payment was sent, and `FAILED` has no
+  outgoing transition.
+- `claim-confirmed`: `CLAIMING` to `CLAIMED`, entered only at the signed
+  `settlement_confirmations`. Historical `CLAIMED` rows (for example migrated
+  `UNKNOWN`) release only after the engine freshly observes the retained claim
+  txid at that depth. This accepts Bitcoin's depth-based reorganization risk.
+
+The engine also fails an accepted swap that is still unfunded once the invoice
+has expired or the fresh tip leaves no room for the final CLTV delta (the same
+guard used before paying a funded swap). The transition is terminal and signs a
+`payment_failed` observation, and a later funding binding is refused. Without a
+fresh tip only invoice expiry closes it.
+
+Capacity stays held by `DISPATCHED` swaps that fail after dispatch (including
+bound tracked failures), `UNKNOWN` rows that never reach `CLAIMED`, and
+unresolved `PAYING` swaps. The claim path depends on the retained claim txid;
+storage integrity is assumed. Raise
 `max_active_reservations` to accept more exposure. Doing so does not resolve
 uncertainty, and freeing a slot does not replenish Lightning liquidity.
 
