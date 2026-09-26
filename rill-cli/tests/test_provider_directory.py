@@ -114,6 +114,7 @@ def test_cli_reports_when_no_relay_answers(
         str(tmp_path / "missing.so"),
         "--relay",
         "ws://127.0.0.1:9/",
+        "--allow-direct-relay",
     ]
     assert main.main(argv) == 2  # the native library is missing; nothing leaks
     assert capsys.readouterr().err == "Provider listing failed.\n"

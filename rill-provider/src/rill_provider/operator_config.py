@@ -122,6 +122,10 @@ class OperatorConfig(_Strict):
     handshake: HandshakeSelection
     terms: PublicTerms
     relay_urls: tuple[str, ...] = Field(min_length=1)
+    # Loopback Tor HTTPTunnelPort (http://127.0.0.1:9080). Required on public
+    # networks unless allow_direct_relays explicitly accepts IP exposure.
+    relay_proxy: str | None = None
+    allow_direct_relays: bool = False
     epoch_period: int = 24 * 60 * 60
     announcement_lifetime: int = 60 * 60
     announcement_refresh: int = 30 * 60
@@ -166,6 +170,7 @@ class OperatorConfig(_Strict):
             proportional_millionths=t.proportional_millionths,
             slot=t.slot,
             relay_urls=self.relay_urls,
+            relay_proxy=self.relay_proxy,
             epoch_period=self.epoch_period,
             announcement_lifetime=self.announcement_lifetime,
             announcement_refresh=self.announcement_refresh,

@@ -118,16 +118,30 @@ def add_parser(categories: argparse._SubParsersAction[argparse.ArgumentParser]) 
     command.add_argument(
         "--relay", required=True, action="append", help="Nostr relay URL; repeat for more"
     )
+    command.add_argument(
+        "--relay-proxy",
+        help="loopback Tor HTTPTunnelPort URL, required on public networks",
+    )
+    command.add_argument(
+        "--allow-direct-relay",
+        action="store_true",
+        help="connect to relays directly, revealing your IP address to them",
+    )
     command.add_argument("--timeout", type=float, default=10.0, help="per-relay query seconds")
 
 
 def run(args: argparse.Namespace, network: NetworkIdentity) -> str:
     """Query every relay and return the JSON listing; never moves funds."""
     from rill_crypto import Context  # noqa: PLC0415 - native library only when used
-    from rill_provider.relay_client import RelayConnection  # noqa: PLC0415
+    from rill_provider.relay_client import RelayConnection, require_relay_route  # noqa: PLC0415
+
+    proxy = require_relay_route(network, args.relay_proxy, allow_direct=args.allow_direct_relay)
+    urls = list(dict.fromkeys(args.relay))
+    for url in urls:
+        RelayConnection(url, proxy=proxy)  # refuse a bad route before any connection
 
     async def query(url: str, crypto: Context) -> dict[str, list[dict[str, Any]]]:
-        async with RelayConnection(url) as connection:
+        async with RelayConnection(url, proxy=proxy) as connection:
             return await _query(
                 connection,
                 network=network,
@@ -138,7 +152,7 @@ def run(args: argparse.Namespace, network: NetworkIdentity) -> str:
 
     async def everywhere(crypto: Context) -> list[dict[str, Any]]:
         results = await asyncio.gather(
-            *(query(url, crypto) for url in dict.fromkeys(args.relay)), return_exceptions=True
+            *(query(url, crypto) for url in urls), return_exceptions=True
         )
         answered = [result for result in results if isinstance(result, dict)]
         if not answered:

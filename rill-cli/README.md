@@ -18,7 +18,7 @@ different advertisements share its latest revision. It fails only if no relay
 answers.
 
 ```sh
-rill providers list --network signet.json \
+rill providers list --network signet.json --relay-proxy http://127.0.0.1:9080 \
   --crypto-library /absolute/path/to/librill_crypto.so \
   --relay wss://relay-one.example --relay wss://relay-two.example
 ```
@@ -27,6 +27,15 @@ A listing is discovery evidence only. It proves neither liquidity, solvency,
 availability, nor honesty, and relays can withhold events or be flooded (each
 relay's query stops after 4096 events, so use several independent relays).
 Choosing a provider stays an explicit `--provider` argument to `swap`.
+
+### Relay privacy
+
+On signet, testnet4, and mainnet, `providers list` and `swap` refuse to
+connect to relays unless `--relay-proxy http://127.0.0.1:9080` names a local
+Tor `HTTPTunnelPort` (proxied relays must be `wss://`, and names resolve inside
+Tor) or `--allow-direct-relay` explicitly accepts revealing your IP address.
+There is no fallback from the proxy to a direct connection. Regtest connects
+directly.
 
 ## Live swap: `rill swap btc-to-ln`
 

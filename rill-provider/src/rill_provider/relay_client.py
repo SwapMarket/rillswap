@@ -3,6 +3,11 @@
 Relay frames are untrusted. This module only enforces frame shape and size and
 hands raw event JSON to callers, which must verify it (the NIP-59 decoders do).
 Publication success means one relay stored the event, never peer delivery.
+
+Relay routing fails closed. On public networks a connection must go through a
+local HTTP CONNECT proxy (Tor's ``HTTPTunnelPort``) unless direct connections
+are explicitly allowed; there is never a silent fallback to a direct socket.
+The proxy receives the relay host name, so no local DNS lookup reveals it.
 """
 
 from __future__ import annotations
@@ -11,11 +16,14 @@ import asyncio
 import json
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Self
+from urllib.parse import urlsplit
 
 import aiohttp
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+    from rill_core.wire.types import NetworkIdentity
 
 MAX_FRAME_BYTES = 256 * 1024  # a 128 KiB event plus relay framing
 MAX_QUEUED_EVENTS = 1024
@@ -24,6 +32,46 @@ SUBSCRIPTION_ID = "rill-provider"
 
 class RelayError(RuntimeError):
     """The relay connection is unavailable; nothing about peers is implied."""
+
+
+def relay_proxy(proxy: str | None) -> str | None:
+    """Return a checked loopback ``http://host:port`` proxy URL, or ``None``."""
+    if proxy is None:
+        return None
+    try:
+        parts = urlsplit(proxy)
+        port = parts.port
+    except ValueError:
+        port = None
+        parts = None
+    if (
+        parts is None
+        or parts.scheme != "http"
+        or parts.hostname not in ("127.0.0.1", "::1")
+        or port is None
+        or parts.username is not None
+        or parts.path not in ("", "/")
+        or parts.query
+        or parts.fragment
+    ):
+        raise RelayError("relay proxy must be a loopback http://host:port (Tor HTTPTunnelPort)")
+    return proxy
+
+
+def require_relay_route(
+    network: NetworkIdentity, proxy: str | None, *, allow_direct: bool
+) -> str | None:
+    """Refuse direct relay sockets on public networks unless explicitly allowed.
+
+    A direct socket reveals the operator's or user's IP address to every relay.
+    Regtest is local test infrastructure and may connect directly.
+    """
+    checked = relay_proxy(proxy)
+    if checked is None and network.name != "regtest" and not allow_direct:
+        raise RelayError(
+            "public networks need a relay proxy; direct relay sockets must be allowed explicitly"
+        )
+    return checked
 
 
 def _event_json(event: object) -> bytes | None:
@@ -38,10 +86,15 @@ def _event_json(event: object) -> bytes | None:
 class RelayConnection:
     """One WebSocket to one relay, owned by one task."""
 
-    def __init__(self, url: str, *, open_timeout: float = 10.0) -> None:
+    def __init__(self, url: str, *, open_timeout: float = 10.0, proxy: str | None = None) -> None:
         """Prepare, but do not open, a connection to ``url``."""
         if not url.startswith(("wss://", "ws://")):
             raise RelayError("relay URL must be ws:// or wss://")
+        self._proxy = relay_proxy(proxy)
+        if self._proxy is not None and not url.startswith("wss://"):
+            # aiohttp only tunnels TLS targets with CONNECT; a plain ws:// request
+            # would be forwarded in cleartext rather than tunneled.
+            raise RelayError("a proxied relay must use wss://")
         self.url = url
         self._open_timeout = open_timeout
         self._session: aiohttp.ClientSession | None = None
@@ -54,10 +107,11 @@ class RelayConnection:
     async def __aenter__(self) -> Self:
         """Open the socket and start reading frames."""
         timeout = aiohttp.ClientTimeout(total=None, connect=self._open_timeout)
-        self._session = aiohttp.ClientSession(timeout=timeout)
+        # trust_env=False: environment proxies never silently reroute or bypass.
+        self._session = aiohttp.ClientSession(timeout=timeout, trust_env=False)
         try:
             self._socket = await self._session.ws_connect(
-                self.url, max_msg_size=MAX_FRAME_BYTES, heartbeat=30.0
+                self.url, max_msg_size=MAX_FRAME_BYTES, heartbeat=30.0, proxy=self._proxy
             )
         except (aiohttp.ClientError, TimeoutError):
             await self._session.close()

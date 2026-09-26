@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from rill_core.recovery import inspect_recovery_successor
 from rill_crypto import Context
 from rill_provider.lnd_invoice_decode import LndInvoiceDecoder
-from rill_provider.relay_client import RelayConnection
+from rill_provider.relay_client import RelayConnection, require_relay_route
 
 from rill_cli.age_container import (
     X25519Credentials,
@@ -36,6 +36,15 @@ def add_parser(categories: argparse._SubParsersAction[argparse.ArgumentParser]) 
     command.add_argument("--network", required=True, help="complete trusted network JSON file")
     command.add_argument("--crypto-library", required=True, help="verified native library path")
     command.add_argument("--relay", required=True, help="Nostr relay URL (ws:// or wss://)")
+    command.add_argument(
+        "--relay-proxy",
+        help="loopback Tor HTTPTunnelPort URL, required on public networks",
+    )
+    command.add_argument(
+        "--allow-direct-relay",
+        action="store_true",
+        help="connect to relays directly, revealing your IP address to them",
+    )
     command.add_argument("--provider", required=True, help="provider identity x-only key (hex)")
     command.add_argument("--invoice", required=True, help="BOLT11 invoice to be paid")
     command.add_argument("--max-success-fee-sat", required=True, type=int)
@@ -73,6 +82,9 @@ def run(args: argparse.Namespace, network: NetworkIdentity, identity: str) -> st
     """Run the swap; return the final report line."""
     output = Path(args.recovery_output)
     credentials = X25519Credentials(args.recipient, identity)
+    # Refuse an unsafe relay route before the native library, files, or wallet.
+    proxy = require_relay_route(network, args.relay_proxy, allow_direct=args.allow_direct_relay)
+    RelayConnection(args.relay, proxy=proxy)
     with Context(library_path=args.crypto_library) as crypto:
 
         def write_recovery(document: bytes, previous: bytes | None) -> None:
@@ -111,7 +123,7 @@ def run(args: argparse.Namespace, network: NetworkIdentity, identity: str) -> st
         )
 
         async def swap() -> str:
-            async with RelayConnection(args.relay) as connection:
+            async with RelayConnection(args.relay, proxy=proxy) as connection:
                 outcome = await run_swap(
                     connection,
                     identity=args.provider,

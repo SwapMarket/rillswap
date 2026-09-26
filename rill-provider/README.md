@@ -542,7 +542,10 @@ fields refused). It sets the network identity, the identity key printed
 above, the identity and store paths, the age `custody_recipient`, the
 `custody_identity_file`, the native crypto library, the `authority`
 attestation, the negotiated `handshake` selection, the public `terms`,
-`relay_urls`, the optional `bitcoin_core` (`port`, `cookie_file`) and `quote`
+`relay_urls` (with `relay_proxy`, a loopback Tor `HTTPTunnelPort` URL such as
+`http://127.0.0.1:9080`, required on signet, testnet4, and mainnet unless
+`allow_direct_relays` explicitly accepts exposing the host's IP address to
+relays; proxied relays must be `wss://`), the optional `bitcoin_core` (`port`, `cookie_file`) and `quote`
 settings, and optional schedules and limits (`max_sessions`,
 `max_tombstones`, `new_sessions_per_minute`, `max_active_reservations`; `handshake_timeout`, default 600 s of idleness before a
 pre-economic session expires; `max_sends_per_tick`). Relative paths resolve from the

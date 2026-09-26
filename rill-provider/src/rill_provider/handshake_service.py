@@ -84,6 +84,7 @@ class ServicePolicy:
     max_sends_per_tick: int = 16
     quote: QuoteSchedule = field(default_factory=QuoteSchedule)
     provider_destination_script: str | None = None  # required for firm offers
+    relay_proxy: str | None = None  # checked loopback CONNECT proxy, or direct
 
     def __post_init__(self) -> None:
         """Refuse schedules that would leave advertised epochs undecodable."""
@@ -390,7 +391,7 @@ class HandshakeService:
             delay = 1.0
             while not stop.is_set():
                 try:
-                    async with RelayConnection(url) as connection:
+                    async with RelayConnection(url, proxy=self._policy.relay_proxy) as connection:
                         connected[url] = connection
                         delay = 1.0
                         await self.subscribe(connection)

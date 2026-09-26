@@ -17,6 +17,7 @@ from rill_core.recovery import inspect_recovery_successor
 from rill_core.settlement import FundingOutput, UnilateralAuthorization, validate_unilateral_spend
 from rill_core.wire.types import NetworkIdentity
 from rill_crypto import Context
+from rill_provider.relay_client import RelayError
 
 from rill_cli import provider_directory, swap_command
 from rill_cli.age_container import (
@@ -569,6 +570,9 @@ def _swap(args: argparse.Namespace) -> int:
     except SwapError as error:
         sys.stderr.write(f"Swap stopped: {error}\n")
         return 5
+    except RelayError as error:  # raised before any wallet effect is attempted
+        sys.stderr.write(f"Swap refused before funding: {error}\n")
+        return 5
     except Exception:  # noqa: BLE001 - must not print secret native/library errors
         sys.stderr.write(
             "Swap failed. If a funded recovery snapshot ('.funded') exists, funds may be "
@@ -584,6 +588,9 @@ def _providers(args: argparse.Namespace) -> int:
         result = provider_directory.run(args, _network(args.network))
     except provider_directory.RelayQueryError:
         sys.stderr.write("Provider listing failed: no relay answered.\n")
+        return 5
+    except RelayError as error:
+        sys.stderr.write(f"Provider listing refused: {error}\n")
         return 5
     except Exception:  # noqa: BLE001 - must not print native/library errors
         sys.stderr.write("Provider listing failed.\n")

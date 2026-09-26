@@ -68,8 +68,13 @@ Relay `OK` is delivery information only. Messages are at least once and may be
 missing or reordered. The durable outbox retains a logical message until an
 application acknowledgment or state reconciliation makes it unnecessary.
 
-Tor-capable native clients use SOCKS with remote DNS and fail closed. No
-automatic clearnet fallback is permitted. Browser applications cannot promise
+Tor-capable native clients reach relays through a local Tor proxy (SOCKS or
+an HTTP CONNECT tunnel such as `HTTPTunnelPort`) with remote name resolution,
+and fail closed. No automatic clearnet fallback is permitted. On public
+networks a native client or provider without a configured proxy MUST refuse
+to connect unless the user explicitly accepts direct relay connections;
+regtest may connect directly. The reference implementation uses a loopback
+HTTP CONNECT proxy, so proxied relays must use `wss://`. Browser applications cannot promise
 arbitrary SOCKS and must accurately disclose the chosen browser/network mode.
 
 Relays can observe recipient tags, subscriptions, source addresses, timing,

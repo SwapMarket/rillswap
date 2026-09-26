@@ -35,6 +35,7 @@ from rill_provider.operator_config import (
 )
 from rill_provider.payment_reconciliation import reconcile_payment
 from rill_provider.provider_identity import ProviderIdentity, ProviderIdentityError
+from rill_provider.relay_client import RelayConnection, RelayError, require_relay_route
 from rill_provider.settlement_engine import SettlementEngine
 
 if TYPE_CHECKING:
@@ -212,6 +213,14 @@ async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
         require_funding_release(config.network)
     except ValidationError:
         raise OperatorConfigError("network is not release-accepted for serving") from None
+    try:
+        proxy = require_relay_route(
+            config.network, config.relay_proxy, allow_direct=config.allow_direct_relays
+        )
+        for url in config.relay_urls:  # refuse at startup, not in the reconnect loop
+            RelayConnection(url, proxy=proxy)
+    except RelayError as error:
+        raise OperatorConfigError(str(error)) from None
     identity = ProviderIdentity.load(
         config.identity_file,
         custody_identity=custody,
