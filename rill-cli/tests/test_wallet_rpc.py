@@ -97,9 +97,7 @@ def core(
     cookie.chmod(0o600)
     try:
         yield (
-            WalletRpc(
-                port=server.server_port, cookie_path=cookie, wallet="w", network=NETWORK
-            ),
+            WalletRpc(port=server.server_port, cookie_path=cookie, wallet="w", network=NETWORK),
             calls,
         )
     finally:

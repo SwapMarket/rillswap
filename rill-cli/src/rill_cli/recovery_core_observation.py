@@ -1,4 +1,4 @@
-"""Explicit local regtest Core observation of one selected recovery binding.
+"""Explicit local Core observation of one selected recovery binding.
 
 This is not chain reconciliation, a spendable funding proof, or permission to
 sign. The operator asserts complete deployment identity. Core attests only
@@ -16,13 +16,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
+from rill_core.errors import ValidationError
+from rill_core.networks import backend_names
 from rill_core.settlement import FundingBindingTransactionMatch, check_funding_binding_transaction
 from rill_core.wire.messages import FundingBinding
-from rill_core.wire.types import NetworkIdentity
 
 if TYPE_CHECKING:
     from rill_core.settlement import TaprootKeyOperations
     from rill_core.wire.messages import ContractTerms
+    from rill_core.wire.types import NetworkIdentity
 
 MAX_COOKIE_BYTES = 512
 MAX_RESPONSE_BYTES = 256 * 1024
@@ -106,16 +108,16 @@ def _cookie(path: Path) -> tuple[str, str]:
     raise RecoveryCoreUnavailableError("private Core RPC cookie unavailable")
 
 
-def _tip(value: object) -> tuple[str, int]:
+def _tip(value: object, chain: str) -> tuple[str, int]:
     if (
         not isinstance(value, dict)
-        or value.get("chain") != "regtest"
+        or value.get("chain") != chain
         or not _hash(value.get("bestblockhash"))
         or type(value.get("blocks")) is not int
         or value["blocks"] < 0
         or value.get("initialblockdownload") is not False
     ):
-        raise RecoveryCoreProtocolError("Core has no usable named regtest tip")
+        raise RecoveryCoreProtocolError("Core has no usable named tip on the configured chain")
     return value["bestblockhash"], value["blocks"]
 
 
@@ -169,8 +171,11 @@ class RecoveryCoreReader:
         """Store one operator-selected loopback endpoint, without connecting."""
         if host not in ("127.0.0.1", "::1") or type(port) is not int or not 1 <= port <= MAX_PORT:
             raise ValueError("Core RPC needs numeric loopback host and valid port")
-        if not isinstance(network, NetworkIdentity) or network.name != "regtest":
-            raise ValueError("only explicit complete regtest network identity is supported")
+        try:
+            # Observation and refunds recover funds, so no release gate applies.
+            self._chain = backend_names(network).core_chain
+        except ValidationError:
+            raise ValueError("only a supported complete network identity is accepted") from None
         self._url = f"http://[{host}]:{port}/" if host == "::1" else f"http://{host}:{port}/"
         self._cookie_path = Path(cookie_path)
         self._network = network
@@ -261,7 +266,7 @@ class RecoveryCoreReader:
                 follow_redirects=False,
                 timeout=httpx.Timeout(READ_SECONDS, connect=CONNECT_SECONDS),
             ) as client:
-                tip_hash, height = _tip(self._rpc(client, "getblockchaininfo", [], 1))
+                tip_hash, height = _tip(self._rpc(client, "getblockchaininfo", [], 1), self._chain)
                 if self._rpc(client, "getblockhash", [0], 2) != self._network.genesis_hash:
                     raise RecoveryCoreProtocolError("Core genesis differs from configured network")
                 output = self._rpc(
@@ -313,7 +318,9 @@ class RecoveryCoreReader:
                     mempool_tip, mempool_confirms = _outpoint(mempool_out, binding, height)
                     if mempool_tip != tip_hash or mempool_confirms != confirmations:
                         raise RecoveryCoreUnavailableError("mempool-aware outpoint sample changed")
-                last_hash, last_height = _tip(self._rpc(client, "getblockchaininfo", [], 6))
+                last_hash, last_height = _tip(
+                    self._rpc(client, "getblockchaininfo", [], 6), self._chain
+                )
                 # Resample the lookup height to reject observable inconsistency.
                 # Matching samples prove neither ancestry to the named tip nor
                 # an atomic snapshot under repeated rapid reorganization.

@@ -1,4 +1,4 @@
-"""Loopback regtest Bitcoin Core wallet calls used by the live swap client.
+"""Loopback Bitcoin Core wallet calls used by the live swap client.
 
 The wallet funds and signs; the caller authorizes the exact result against
 the signed terms (``authorize_funding_transaction``) before binding or
@@ -11,13 +11,17 @@ import json
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
+from rill_core.errors import ValidationError
+from rill_core.networks import backend_names, require_funding_release
 from rill_core.settlement import FundingPrevout, PlannedFundingOutput
-from rill_core.wire.types import NetworkIdentity
 
 from rill_cli.recovery_core_observation import _cookie
+
+if TYPE_CHECKING:
+    from rill_core.wire.types import NetworkIdentity
 
 SATS_PER_BTC = Decimal(100_000_000)
 MAX_RESPONSE_BYTES = 1024 * 1024
@@ -74,7 +78,7 @@ def _sats(value: object) -> int:
 
 
 class WalletRpc:
-    """One named Core wallet on a loopback regtest node (cookie auth)."""
+    """One named Core wallet on a loopback node of the configured network (cookie auth)."""
 
     def __init__(
         self, *, port: int, cookie_path: str | Path, wallet: str, network: NetworkIdentity
@@ -84,8 +88,12 @@ class WalletRpc:
             raise ValueError("Core RPC port unsupported")
         if not wallet or "/" in wallet:
             raise ValueError("Core wallet name unsupported")
-        if not isinstance(network, NetworkIdentity) or network.name != "regtest":
-            raise ValueError("live wallet funding currently requires explicit regtest identity")
+        try:
+            # Funding moves money: mainnet needs release acceptance in code.
+            require_funding_release(network)
+            self._chain = backend_names(network).core_chain
+        except ValidationError:
+            raise ValueError("live wallet funding requires a release-accepted network") from None
         self._url = f"http://127.0.0.1:{port}"
         self._cookie_path = Path(cookie_path)
         self._wallet = wallet
@@ -127,7 +135,7 @@ class WalletRpc:
         info = self._call("getblockchaininfo", wallet=False)
         if (
             not isinstance(info, dict)
-            or info.get("chain") != self._network.name
+            or info.get("chain") != self._chain
             or info.get("initialblockdownload") is not False
             or type(info.get("blocks")) is not int
             or info["blocks"] < 0

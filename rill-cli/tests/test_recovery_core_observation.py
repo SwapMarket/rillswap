@@ -376,7 +376,5 @@ def test_cookie_and_loopback_preflight_fail_before_rpc(
             port=18443, cookie_path=tmp_path / "cookie", network=network, host="192.0.2.1"
         )
     with pytest.raises(ValueError, match="loopback"):
-        observation.RecoveryCoreReader(
-            port=True, cookie_path=tmp_path / "cookie", network=network
-        )  # type: ignore[arg-type]
+        observation.RecoveryCoreReader(port=True, cookie_path=tmp_path / "cookie", network=network)  # type: ignore[arg-type]
     assert requests == []
