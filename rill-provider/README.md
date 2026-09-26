@@ -377,8 +377,13 @@ exact fee limit and absolute expiry height the payment would later use
 (`QueryRoutes` through the payment macaroon; LND checks first-hop local
 balance, synchronization, and network). No route, no liquidity, or an
 unsynced node answers `capacity_unavailable`; nothing is recorded or
-dispatched, and the route is discarded. This is point-in-time evidence, not
-a liquidity reservation: size `max_active_reservations` so that many
+dispatched, and the route is discarded. The whole preflight (including
+retries while LND reports itself briefly unsynced after a block) shares one
+10 second budget that LND enforces, and it is skipped when economic
+capacity is already full, so a flood of firm requests delays a settlement
+tick by at most one budget. Successful versus refused firm offers expose
+whether a route existed at that moment, not the node's liquidity. This is
+point-in-time evidence, not a liquidity reservation: size `max_active_reservations` so that many
 concurrent swaps at the top amount band fit your outbound capacity. On
 signet, testnet4, and mainnet, `serve` refuses to start with firm offers
 enabled (`provider_destination_script`) unless `lnd.payment_macaroon` and

@@ -53,6 +53,7 @@ HASH_BYTES = 32
 _SUCCEEDED, _FAILED = 2, 3
 FINAL_CLTV_PADDING = 3
 MAX_ROUTE_HOPS = 20
+PREPARE_DEADLINE_SECONDS = 20.0
 MAX_BLOCK_HEIGHT = 499_999_999
 
 type Status = Literal["SUCCEEDED", "FAILED", "IN_FLIGHT", "UNKNOWN"]
@@ -186,8 +187,14 @@ class LndPaymentSender:
         invoice_binding: InvoiceBinding,
         fee_limit_sat: int,
         max_expiry_height: int,
+        deadline_seconds: float = PREPARE_DEADLINE_SECONDS,
     ) -> PreparedPayment:
-        """Decode and query one route without making any payment attempt."""
+        """Decode and query one route without making any payment attempt.
+
+        ``deadline_seconds`` bounds every RPC of this call together, so a
+        caller with a shared budget (route readiness) can enforce it here
+        rather than abandoning a thread that keeps querying.
+        """
         if not (
             type(fee_limit_sat) is int
             and 0 <= fee_limit_sat < 2**63 // 1000
@@ -198,7 +205,12 @@ class LndPaymentSender:
             and invoice_matches_network(bolt11, self._network)
         ):
             raise ValueError("payment bounds unsupported")
-        deadline = time.monotonic() + 20
+        if not (
+            type(deadline_seconds) in (int, float)
+            and 0 < deadline_seconds <= PREPARE_DEADLINE_SECONDS
+        ):
+            raise ValueError("payment bounds unsupported")
+        deadline = time.monotonic() + deadline_seconds
         with self._connect() as calls:
             payreq = calls.unary(
                 DECODE_METHOD,

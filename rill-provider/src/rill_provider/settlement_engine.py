@@ -87,7 +87,7 @@ class ChainBackend(Protocol):
 CLAIM_PAGE = 16  # historical claims checked per tick
 CLAIM_URGENCY_BLOCKS = 6  # claim at the signed maximum fee this far before refund
 INCREMENTAL_RELAY_SAT_VB = 1  # BIP125 rule 4 at Core's default incremental relay fee
-READINESS_SYNC_ATTEMPTS = 10  # offer preflight waits at most about this many seconds
+READINESS_BUDGET_SECONDS = 10.0  # one shared bound for the whole offer preflight
 READINESS_SYNC_DELAY = 1.0
 
 
@@ -105,6 +105,7 @@ class LightningBackend(Protocol):
         invoice_binding: InvoiceBinding,
         fee_limit_sat: int,
         max_expiry_height: int,
+        deadline_seconds: float = 20.0,
     ) -> PreparedPayment:
         """Prepare exact, absolute-bounded dispatch bytes without paying."""
         ...
@@ -171,16 +172,19 @@ class SettlementEngine:
         LND reports itself unsynchronized for a moment after every block, so
         that one condition is retried briefly instead of refusing the offer.
         """
-        for attempt in range(READINESS_SYNC_ATTEMPTS):
+        deadline = time.monotonic() + READINESS_BUDGET_SECONDS
+        while True:
+            remaining = deadline - time.monotonic()
             try:
                 self._lightning.prepare(
                     invoice,
                     invoice_binding=invoice_binding,
                     fee_limit_sat=self._fee_limit(success_fee_sat),
                     max_expiry_height=max_expiry_height,
+                    deadline_seconds=max(0.1, remaining),
                 )
             except LndNotSyncedError:
-                if attempt + 1 == READINESS_SYNC_ATTEMPTS:
+                if remaining <= READINESS_SYNC_DELAY:
                     raise
                 time.sleep(READINESS_SYNC_DELAY)
             else:

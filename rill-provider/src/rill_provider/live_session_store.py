@@ -2232,6 +2232,23 @@ class LiveSessionStore:
             raise LiveSessionStoreError("session mailboxes unavailable") from None
         return tuple(row[0] for row in rows)
 
+    def firm_capacity_available(self) -> bool:
+        """Whether any session could still receive a firm offer (global count only).
+
+        A cheap pre-check so a full provider skips route preflight; the
+        authoritative per-session check runs inside ``answer_request``.
+        """
+        try:
+            with self._write() as connection:
+                (active,) = connection.execute(
+                    "SELECT COUNT(*) FROM economic_reservations WHERE state <> 'RELEASED'"
+                ).fetchone()
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("capacity check refused") from None
+        return bool(active < self._max_active_reservations)
+
     def pending_outbox(self) -> tuple[OutboxEntry, ...]:
         """Return committed bytes still owed to peers; current owner only."""
         try:

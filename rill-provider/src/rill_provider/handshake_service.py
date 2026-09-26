@@ -360,7 +360,9 @@ class HandshakeService:
             LOG.warning("invoice decoding unavailable; firm quote answered capacity_unavailable")
             return "unavailable"
 
-    async def _route_ready(self, document: bytes, terms: QuoteTerms) -> QuoteTerms:
+    async def _route_ready(  # noqa: PLR0911 - one closed rule per branch
+        self, document: bytes, terms: QuoteTerms
+    ) -> QuoteTerms:
         """Offer firm terms only when settlement could pay this invoice now."""
         binding, tip, settlement = terms.invoice, terms.tip_height, self._settlement
         if (
@@ -373,6 +375,8 @@ class HandshakeService:
         principal = int(binding.amount_msat) // 1000
         if not any(low <= principal <= high for low, high in terms.amount_bands):
             return terms  # the quote rules refuse this without asking for a route
+        if not self._store.firm_capacity_available():
+            return terms  # already full: the quote rules refuse without a route query
         try:
             await asyncio.to_thread(
                 lambda: settlement.route_ready(

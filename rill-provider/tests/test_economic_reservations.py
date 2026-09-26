@@ -210,6 +210,7 @@ def test_offer_reservations_refuse_over_budget_and_release_on_expiry(
             request = _signed_request(harness, crypto, sequence, f"{0x20 + sequence:064x}")
             return store.answer_request(request, responder=responder, signer=crypto, now=1000)
 
+        assert not store.firm_capacity_available()  # cheap global pre-check
         with pytest.raises(live.SessionCapacityError, match="economic capacity"):
             ask(2)  # full: the store refuses even a responder that ignores capacity
         assert not store._connection.execute(  # noqa: SLF001
@@ -221,7 +222,9 @@ def test_offer_reservations_refuse_over_budget_and_release_on_expiry(
             "WHERE payment_hash=?",
             ("ce" * 32,),
         )
+        assert store.firm_capacity_available()
         ask(2)  # the same, still unconsumed request now fits
+        assert not store.firm_capacity_available()
         assert _ledger(store)["a2" * 32] == (session, "UNSENT", None)
         with pytest.raises(live.LiveSessionStoreError, match="already has a firm offer"):
             ask(3)  # RS-003: one firm offer per session
