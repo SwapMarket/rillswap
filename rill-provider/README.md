@@ -428,9 +428,12 @@ Settlement steps:
   accepting funds for invoices this single-path sender cannot safely fulfill.
 - **Claim.** A verified preimage records `PAID` and sends a `payment_settled`
   observation. The engine then builds the unilateral claim-leaf spend, signed
-  inside the store by the sealed contract key. Its exact bytes are recorded
-  as `CLAIMING` with a `claim_broadcast` observation and as claim attempt 0
-  (fee and tip height), then broadcast.
+  inside the store by the sealed contract key. Its fee is Core's conservative
+  `estimatesmartfee` for a 6 block target applied to the claim's vsize,
+  never below the configured `claim_fee_sat` (also the fallback when Core has
+  no estimate, as on a fresh regtest) and never above the escalation maximum.
+  Its exact bytes are recorded as `CLAIMING` with a `claim_broadcast`
+  observation and as claim attempt 0 (fee and tip height), then broadcast.
 - **Claim fee escalation.** The client can refund after `refund_lock_height`,
   so an unconfirmed claim is replaced (opt-in RBF, fresh signature) on a
   schedule rising linearly from the first fee at its first-seen height to the

@@ -37,6 +37,7 @@ HTTP_OK = 200
 CONNECT_SECONDS = 2.0
 READ_SECONDS = 5.0
 HASH_HEX_LENGTH = 64
+MAX_ESTIMATE_TARGET = 1008  # Core's estimatesmartfee bound
 SATS_PER_BTC = Decimal(100_000_000)
 MAX_SATS = 21_000_000 * 100_000_000
 
@@ -358,6 +359,31 @@ class CoreTransactionReader:
             raise CoreProtocolError("Core outpoint status is inconsistent")
         return True
 
+    def fee_rate_sat_vb(self, target_blocks: int) -> float | None:
+        """Return Core's conservative feerate estimate in sat/vB, or ``None``.
+
+        An estimate is advice, not evidence: any failure, an answer with
+        ``errors``, or a non-positive rate yields ``None`` and the caller
+        falls back to its configured fee.
+        """
+        if type(target_blocks) is not int or not 1 <= target_blocks <= MAX_ESTIMATE_TARGET:
+            raise ValueError("estimate target out of range")
+        try:
+            with self._client() as client:
+                result = self._rpc(client, "estimatesmartfee", [target_blocks, "CONSERVATIVE"], 1)
+        except (CoreRpcError, httpx.HTTPError):
+            return None
+        if not isinstance(result, dict) or result.get("errors"):
+            return None
+        rate = result.get("feerate")
+        if (
+            not isinstance(rate, (int, float, Decimal))
+            or isinstance(rate, bool)
+            or not 0 < rate < 1
+        ):
+            return None  # BTC per kvB; anything at or above 1 BTC/kvB is nonsense
+        return float(Decimal(str(rate)) * 100_000)  # 1e8 sat per BTC over 1000 vB per kvB
+
     def block_hash(self, height: int) -> str:
         """Return the active-chain block hash at ``height``; failures raise."""
         if type(height) is not int or height < 0:
@@ -414,6 +440,7 @@ class CoreTransactionReader:
     ) -> Any:  # noqa: ANN401
         if method not in (
             "getblockchaininfo",
+            "estimatesmartfee",
             "getblockhash",
             "getindexinfo",
             "getrawtransaction",

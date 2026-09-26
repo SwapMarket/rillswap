@@ -865,3 +865,30 @@ def test_block_hash_reads_the_active_chain(tmp_path: Path) -> None:
         reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
         with pytest.raises(CoreProtocolError):
             reader.block_hash(7)
+
+
+@pytest.mark.parametrize(
+    ("result", "error", "expected"),
+    [
+        ({"feerate": 0.00012345, "blocks": 6}, None, 12.345),
+        ({"errors": ["Insufficient data"], "blocks": 6}, None, None),
+        ({"feerate": 1.5}, None, None),
+        ({"feerate": "0.0001"}, None, None),
+        (None, {"code": -32601, "message": "not found"}, None),
+    ],
+)
+def test_fee_estimate_is_advice_only(
+    tmp_path: Path, result: object, error: dict[str, Any] | None, expected: float | None
+) -> None:
+    _, _, network = _context()
+    requests: list[dict[str, Any]] = []
+    with _server(_rpc_reply(result, error=error), requests) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        rate = reader.fee_rate_sat_vb(6)
+        assert rate == expected or (rate is not None and abs(rate - expected) < 1e-9)  # type: ignore[operator]
+        with pytest.raises(ValueError, match="target"):
+            reader.fee_rate_sat_vb(0)
+    assert (requests[0]["method"], requests[0]["params"]) == (
+        "estimatesmartfee",
+        [6, "CONSERVATIVE"],
+    )

@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import math
 import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
@@ -91,9 +92,14 @@ class ChainBackend(Protocol):
         """Return the active-chain block hash at ``height`` or raise."""
         ...
 
+    def fee_rate_sat_vb(self, target_blocks: int) -> float | None:
+        """Return a conservative feerate estimate, or ``None`` when the node has none."""
+        ...
+
 
 CLAIM_PAGE = 16  # historical claims checked per tick
 CLAIM_URGENCY_BLOCKS = 6  # claim at the signed maximum fee this far before refund
+CLAIM_ESTIMATE_TARGET = 6  # confirmation target asked of Core for the first claim fee
 INCREMENTAL_RELAY_SAT_VB = 1  # BIP125 rule 4 at Core's default incremental relay fee
 READINESS_BUDGET_SECONDS = 10.0  # one shared bound for the whole offer preflight
 READINESS_SYNC_DELAY = 1.0
@@ -331,8 +337,7 @@ class SettlementEngine:
             return await self._advance(_with_state(item, "PAID", preimage=outcome.preimage), now)
         if item.state == "PAID" and item.preimage is not None:
             tip = await asyncio.to_thread(self._chain.tip_height)
-            ceiling = max_spendable_fee(self._authorization(terms, binding))
-            spend = self._claim(item, terms, binding, min(self._settings.claim_fee_sat, ceiling))
+            spend = await self._initial_claim(item, terms, binding)
             self._move(
                 item,
                 "CLAIMING",
@@ -562,6 +567,24 @@ class SettlementEngine:
             script_pubkey=bytes.fromhex(binding.contract_script_pubkey),
         )
         return UnilateralAuthorization.from_terms(terms, funding, "claim", keys=self._crypto)
+
+    async def _initial_claim(
+        self, item: SettlementItem, terms: ContractTerms, binding: FundingBinding
+    ) -> ValidatedUnilateralSpend:
+        """Build attempt 0 at the node's feerate estimate, never below the configured floor.
+
+        ``claim_fee_sat`` is the floor and the fallback when Core has no
+        estimate; the ceiling is the signed cap or the dust floor. Escalation
+        takes over from whatever this chooses.
+        """
+        ceiling = max_spendable_fee(self._authorization(terms, binding))
+        floor = min(self._settings.claim_fee_sat, ceiling)
+        spend = self._claim(item, terms, binding, floor)
+        rate = await asyncio.to_thread(self._chain.fee_rate_sat_vb, CLAIM_ESTIMATE_TARGET)
+        if rate is None:
+            return spend
+        wanted = min(ceiling, max(floor, math.ceil(rate * spend.vsize)))
+        return spend if wanted == floor else self._claim(item, terms, binding, wanted)
 
     def _claim(
         self, item: SettlementItem, terms: ContractTerms, binding: FundingBinding, fee: int
