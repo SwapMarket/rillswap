@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 from rill_core.settlement import FundingPrevout, PlannedFundingOutput
+from rill_core.wire.types import NetworkIdentity
 
 from rill_cli.recovery_core_observation import _cookie
 
@@ -29,10 +30,21 @@ METHODS = frozenset(
         "finalizepsbt",
         "getaddressinfo",
         "getblockcount",
+        "getblockchaininfo",
+        "getblockhash",
         "getnewaddress",
         "sendrawtransaction",
         "walletcreatefundedpsbt",
         "walletprocesspsbt",
+    }
+)
+WALLET_EFFECTS = frozenset(
+    {
+        "getnewaddress",
+        "walletcreatefundedpsbt",
+        "walletprocesspsbt",
+        "finalizepsbt",
+        "sendrawtransaction",
     }
 )
 
@@ -63,19 +75,26 @@ def _sats(value: object) -> int:
 class RegtestWalletRpc:
     """One named Core wallet on a loopback regtest node (cookie auth)."""
 
-    def __init__(self, *, port: int, cookie_path: str | Path, wallet: str) -> None:
+    def __init__(
+        self, *, port: int, cookie_path: str | Path, wallet: str, network: NetworkIdentity
+    ) -> None:
         """Configure only; no network or file access."""
         if type(port) is not int or not 1 <= port <= MAX_PORT:
             raise ValueError("Core RPC port unsupported")
         if not wallet or "/" in wallet:
             raise ValueError("Core wallet name unsupported")
+        if not isinstance(network, NetworkIdentity) or network.name != "regtest":
+            raise ValueError("live wallet funding currently requires explicit regtest identity")
         self._url = f"http://127.0.0.1:{port}"
         self._cookie_path = Path(cookie_path)
         self._wallet = wallet
+        self._network = network
 
     def _call(self, method: str, *params: object, wallet: bool = True) -> Any:  # noqa: ANN401
         if method not in METHODS:
             raise WalletRpcError("unsupported Core wallet method")
+        if method in WALLET_EFFECTS:
+            self._verify_network()
         username, password = _cookie(self._cookie_path)
         path = f"/wallet/{self._wallet}" if wallet else "/"
         try:
@@ -100,11 +119,22 @@ class RegtestWalletRpc:
         return body.get("result")
 
     def tip_height(self) -> int:
-        """Return the node's best height."""
-        height = self._call("getblockcount", wallet=False)
-        if type(height) is not int or height < 0:
-            raise WalletRpcError("Core height unusable")
-        return height
+        """Return the best height only after checking the actual wallet backend."""
+        return self._verify_network()
+
+    def _verify_network(self) -> int:
+        info = self._call("getblockchaininfo", wallet=False)
+        if (
+            not isinstance(info, dict)
+            or info.get("chain") != self._network.name
+            or info.get("initialblockdownload") is not False
+            or type(info.get("blocks")) is not int
+            or info["blocks"] < 0
+        ):
+            raise WalletRpcError("Core wallet chain is unavailable or differs from configuration")
+        if self._call("getblockhash", 0, wallet=False) != self._network.genesis_hash:
+            raise WalletRpcError("Core wallet genesis differs from configuration")
+        return int(info["blocks"])
 
     def new_destination_script(self) -> bytes:
         """Return a fresh wallet P2TR scriptPubKey (the refund destination)."""

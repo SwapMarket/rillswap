@@ -45,6 +45,12 @@ Exit codes:
 
 The client currently reuses `rill-provider`'s Nostr transport modules.
 
+The live wallet verifies Core's actual chain and genesis before every wallet
+effect, including signing and broadcast, and refuses incomplete or initial-sync
+responses. Selecting a regtest network file does not authorize a different
+wallet backend. The check is not cached across calls. Existing installations
+need no state migration; a mismatched endpoint now fails before wallet effects.
+
 `rill recover observe-funding` is a **read-only, explicitly requested regtest
 diagnostic**, not a refund transaction or an automatic watcher. It requires a
 complete independently trusted network JSON file, protected age X25519

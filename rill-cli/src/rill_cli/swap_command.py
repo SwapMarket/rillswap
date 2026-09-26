@@ -99,7 +99,7 @@ def run(args: argparse.Namespace, network: NetworkIdentity, identity: str) -> st
             network=network,
         )
         wallet = RegtestWalletRpc(
-            port=args.core_port, cookie_path=args.core_cookie, wallet=args.wallet
+            port=args.core_port, cookie_path=args.core_cookie, wallet=args.wallet, network=network
         )
         limits = SwapLimits(
             max_success_fee_sat=args.max_success_fee_sat,
