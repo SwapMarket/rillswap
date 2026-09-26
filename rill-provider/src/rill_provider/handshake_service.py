@@ -243,6 +243,7 @@ class HandshakeService:
                 slot=policy.slot,
                 created_at=now,
                 expires_at=now + policy.announcement_lifetime,
+                epoch_bound_sessions=self._store.requires_epoch_bound_sessions,
             )
         )
         state.announced_keys, state.announced_at = epochs, now

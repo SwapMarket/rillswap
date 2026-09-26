@@ -82,6 +82,21 @@ def test_advertisement_address_and_event_id_match_docs_vector() -> None:
     )
 
 
+def test_epoch_requirement_is_advertised_only_when_explicitly_enabled() -> None:
+    manual, _ = _vectors()
+    ad = manual["advertisement"]
+    enabled = identity._advertisement(  # noqa: SLF001
+        ad["provider_identity_xonly_key"], _terms(ad, epoch_bound_sessions=True)
+    )
+    assert enabled["extensions"] == {
+        identity.HANDSHAKE_FEATURES_EXTENSION: [identity.EPOCH_SESSION_FEATURE]
+    }
+    with pytest.raises(ProviderIdentityError):
+        identity._advertisement(  # noqa: SLF001
+            ad["provider_identity_xonly_key"], _terms(ad, epoch_bound_sessions="true")
+        )
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -154,8 +169,10 @@ def test_native_identity_custody_is_explicit_and_bound(tmp_path: Path) -> None:
 
 @pytest.mark.native_crypto
 @NATIVE
-def test_native_announcement_signatures_verify(tmp_path: Path) -> None:
+@pytest.mark.parametrize("epoch_bound", [False, True])
+def test_native_announcement_signatures_verify(tmp_path: Path, *, epoch_bound: bool) -> None:
     from rill_crypto import Context  # noqa: PLC0415
+    from rill_crypto.binding import CryptoError  # noqa: PLC0415
 
     manual, _ = _vectors()
     with Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto:
@@ -163,7 +180,9 @@ def test_native_announcement_signatures_verify(tmp_path: Path) -> None:
         signer = ProviderIdentity.load(
             path, custody_identity=str(custody), expected_xonly_public_key=xonly, crypto=crypto
         )
-        raw = signer.build_announcement(_terms(manual["advertisement"]))
+        raw = signer.build_announcement(
+            _terms(manual["advertisement"], epoch_bound_sessions=epoch_bound)
+        )
         event = nip01._verify_signed_event(raw, verifier=crypto)  # noqa: SLF001
         assert (event.kind, event.pubkey) == (39417, xonly)
         wrapper = json.loads(event.content)
@@ -173,6 +192,17 @@ def test_native_announcement_signatures_verify(tmp_path: Path) -> None:
             tagged_hash(identity.ADVERTISEMENT_TAG, canonicalize(wrapper["advertisement"])),
             bytes.fromhex(wrapper["signature"]),
         )
+        wrapper["advertisement"]["extensions"] = (
+            {}
+            if epoch_bound
+            else {identity.HANDSHAKE_FEATURES_EXTENSION: [identity.EPOCH_SESSION_FEATURE]}
+        )
+        with pytest.raises(CryptoError):
+            crypto.schnorr_verify(
+                bytes.fromhex(xonly),
+                tagged_hash(identity.ADVERTISEMENT_TAG, canonicalize(wrapper["advertisement"])),
+                bytes.fromhex(wrapper["signature"]),
+            )
 
 
 def _web_verify(bun: str, event: bytes, xonly: str, network: dict[str, Any]) -> dict[str, Any]:
@@ -200,7 +230,10 @@ def _web_verify(bun: str, event: bytes, xonly: str, network: dict[str, Any]) -> 
     os.environ.get("RILLSWAP_RUN_WEB_NIP59") != "1",
     reason="explicit local web/native opt-in required",
 )
-def test_provider_announcement_passes_the_web_verifier(tmp_path: Path) -> None:
+@pytest.mark.parametrize("epoch_bound", [False, True])
+def test_provider_announcement_passes_the_web_verifier(
+    tmp_path: Path, *, epoch_bound: bool
+) -> None:
     from rill_crypto import Context  # noqa: PLC0415
 
     bun = shutil.which("bun")
@@ -213,7 +246,9 @@ def test_provider_announcement_passes_the_web_verifier(tmp_path: Path) -> None:
         signer = ProviderIdentity.load(
             path, custody_identity=str(custody), expected_xonly_public_key=xonly, crypto=crypto
         )
-        terms = _terms(advertisement, created_at=now, expires_at=now + 3600)
+        terms = _terms(
+            advertisement, created_at=now, expires_at=now + 3600, epoch_bound_sessions=epoch_bound
+        )
         verified = _web_verify(
             bun, signer.build_announcement(terms), xonly, advertisement["network_identities"][0]
         )

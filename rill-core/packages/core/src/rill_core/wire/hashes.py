@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
 EPOCH_SESSION_FEATURE = "epoch-bound-session/v1"
 EPOCH_SESSION_EXTENSION = "rillswap/epoch-bound-session"
+HANDSHAKE_FEATURES_EXTENSION = "rillswap/handshake-required-features"
 _XONLY_KEY: TypeAdapter[str] = TypeAdapter(XOnlyKey)
 
 

@@ -30,6 +30,7 @@ from rill_core.settlement.unilateral import (
 )
 from rill_core.wire.canonical import JsonValue, canonicalize, parse_json_strict
 from rill_core.wire.hashes import (
+    EPOCH_SESSION_FEATURE,
     client_acceptance_hash,
     contract_hash,
     handshake_accept_hash,
@@ -534,7 +535,7 @@ def _inspect(
     )
     _require(record.profile_id == terms.profile_id == initiation.profile_id, "profile")
     _require(not terms.required_features, "unsupported contract feature")
-    acceptance.validate_against(initiation, supported_features=frozenset())
+    acceptance.validate_against(initiation, supported_features=frozenset({EPOCH_SESSION_FEATURE}))
     _require(context.client_session_xonly_key == initiation.client_session_xonly_key, "session")
     _require(context.provider_session_xonly_key == acceptance.provider_session_xonly_key, "session")
     _require(

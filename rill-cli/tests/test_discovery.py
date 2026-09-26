@@ -83,3 +83,42 @@ def test_announcement_revision_must_be_an_exact_bounded_integer(
         live_swap.verify_announcement(
             b"event", identity=identity, network=network, crypto=Mock(), now=1
         )
+
+
+@pytest.mark.parametrize(
+    "requirement",
+    [
+        None,
+        True,
+        [],
+        "epoch-bound-session/v1",
+        ["unknown/v1"],
+        ["epoch-bound-session/v1", "unknown/v1"],
+    ],
+)
+def test_advertised_handshake_requirement_never_downgrades_on_malformed_or_unknown(
+    requirement: object,
+) -> None:
+    with pytest.raises(live_swap.SwapError, match="handshake requirements"):
+        live_swap._requires_epoch_binding(  # noqa: SLF001
+            {"extensions": {live_swap.HANDSHAKE_FEATURES_EXTENSION: requirement}}
+        )
+
+
+def test_handshake_mode_requires_an_explicit_advertised_requirement() -> None:
+    assert not live_swap._requires_epoch_binding({"extensions": {}})  # noqa: SLF001
+    assert live_swap._requires_epoch_binding(  # noqa: SLF001
+        {"extensions": {live_swap.HANDSHAKE_FEATURES_EXTENSION: [live_swap.EPOCH_SESSION_FEATURE]}}
+    )
+
+
+def test_nostr_requirement_does_not_enable_unknown_extensions() -> None:
+    for extensions in (
+        {"test/data": "signed"},
+        {
+            live_swap.HANDSHAKE_FEATURES_EXTENSION: [live_swap.EPOCH_SESSION_FEATURE],
+            "test/data": "signed",
+        },
+    ):
+        with pytest.raises(live_swap.SwapError, match="handshake requirements"):
+            live_swap._requires_epoch_binding({"extensions": extensions})  # noqa: SLF001

@@ -79,6 +79,39 @@ test("vendored published test vector matches committed discovery fixture hash", 
 });
 
 describe("private-regtest NIP-01 signed announcement", () => {
+  test("accepts the signed epoch requirement without treating it as live admission", () => {
+    const wrapper = structuredClone(application);
+    (wrapper.advertisement.extensions as Record<string, unknown>)["rillswap/handshake-required-features"] = ["epoch-bound-session/v1"];
+    const original = fixtureEvent();
+    // Signing only the outer wrapper must not authenticate changed application content.
+    expect(() => accept(JSON.stringify(reSign({ ...original, content: jcs(wrapper) }))))
+      .toThrow(AnnouncementRefusedError);
+    reSignApplication(wrapper);
+    const event = reSign({ ...original, content: jcs(wrapper) });
+    expect(accept(JSON.stringify(event)).identityXOnlyKey).toBe(PUBLIC);
+  });
+
+  test.each([null, true, [], "epoch-bound-session/v1", ["unknown/v1"],
+    ["epoch-bound-session/v1", "unknown/v1"], ["epoch-bound-session/v1", "epoch-bound-session/v1"]].map(value => [value]))(
+    "refuses a signed malformed or unsupported handshake requirement %j", (value) => {
+      const wrapper = structuredClone(application);
+      (wrapper.advertisement.extensions as Record<string, unknown>)["rillswap/handshake-required-features"] = value;
+      reSignApplication(wrapper);
+      expect(() => accept(JSON.stringify(reSign({ ...fixtureEvent(), content: jcs(wrapper) }))))
+        .toThrow(AnnouncementRefusedError);
+    },
+  );
+
+  test("known handshake requirement does not authorize unrelated signed extensions", () => {
+    const wrapper = structuredClone(application);
+    Object.assign(wrapper.advertisement.extensions, {
+      "rillswap/handshake-required-features": ["epoch-bound-session/v1"], "test/data": "signed",
+    });
+    reSignApplication(wrapper);
+    expect(() => accept(JSON.stringify(reSign({ ...fixtureEvent(), content: jcs(wrapper) }))))
+      .toThrow(AnnouncementRefusedError);
+  });
+
   test("published reference signatures, JCS content and address verify independently", () => {
     const event = fixtureEvent();
     expect(getPublicKey(SECRET)).toBe(PUBLIC);

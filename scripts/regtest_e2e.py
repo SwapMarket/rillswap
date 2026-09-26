@@ -296,6 +296,7 @@ def provider_config(
         },
         "handshake": {
             "profile": "btc-to-ln/v1",
+            "features": ["epoch-bound-session/v1"] if args.epoch_bound else [],
             "encryption_suites": ["noise-xk-secp256k1-chachapoly-sha256/v1"],
             "capabilities": ["core/v1", "recovery/v1"],
         },
@@ -344,12 +345,21 @@ def check_absolute_payment(stack: Stack, work: Path) -> None:
         (work / "provider-store/live.sqlite").as_uri() + "?mode=ro", uri=True
     ) as connection:
         (row,) = connection.execute(
-            "SELECT p.payment_hash, p.state, p.request, s.terms_offer "
-            "FROM payment_dispatch p JOIN swaps s ON s.session_id=p.session_id"
+            "SELECT p.payment_hash, p.state, p.request, s.terms_offer, h.init_bytes "
+            "FROM payment_dispatch p JOIN swaps s ON s.session_id=p.session_id "
+            "JOIN sessions h ON h.session_id=p.session_id"
         ).fetchall()
-    payment_hash, state, record_bytes, offer_bytes = row
+        admissions = connection.execute(
+            "SELECT COUNT(*) FROM epoch_admissions"
+        ).fetchone()[0]
+    payment_hash, state, record_bytes, offer_bytes, init_bytes = row
     record = json.loads(record_bytes)
     terms = json.loads(offer_bytes)["payload"]["terms"]["contract_terms"]
+    required_features = json.loads((work / "provider.json").read_text())["handshake"][
+        "features"
+    ]
+    assert json.loads(init_bytes)["payload"]["required_features"] == required_features
+    assert admissions == (1 if required_features else 0)
     assert state == "SUBMITTED" and record["method"] == "SendToRouteV2"
     request = router_pb2.SendToRouteRequest.FromString(
         bytes.fromhex(record["request_hex"])
@@ -373,6 +383,11 @@ def check_absolute_payment(stack: Stack, work: Path) -> None:
 def main() -> int:  # noqa: PLR0915 - one ordered scenario
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--crypto-library", required=True)
+    parser.add_argument(
+        "--epoch-bound",
+        action="store_true",
+        help="exercise negotiated epoch-bound admission",
+    )
     parser.add_argument(
         "--keep", action="store_true", help="keep containers for inspection"
     )

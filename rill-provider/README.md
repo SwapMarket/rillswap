@@ -204,8 +204,15 @@ session traffic. Temporary tombstone capacity recovers after retirement, even
 if the legacy tombstone quota is full. Total retained storage is **not bounded**:
 accepted contracts, legacy replay IDs, payment-hash history, and the public key
 ledger remain authoritative. The accepted-session quota is unchanged pending
-separate economic admission policy. Client negotiation and signed capability
-advertisement are not activated by this store-only implementation.
+separate economic admission policy. The service advertises this requirement in
+the signed `rillswap/handshake-required-features` extension only when its durable
+store policy requires it. The CLI negotiates it without changing legacy
+advertisements; offline recovery accepts this known handshake feature but still
+rejects unknown contract features. Configure `handshake.features` as
+`["epoch-bound-session/v1"]` and run `migrate-store` explicitly before serving
+an existing installation. Omitted features keep the existing legacy policy;
+there is no silent configuration upgrade. The browser's disconnected Nostr
+verifier recognizes the same signed requirement, not live swap authority.
 
 `record_announcement(created_at)` makes sure
 announcement revisions strictly increase across restarts. It runs before

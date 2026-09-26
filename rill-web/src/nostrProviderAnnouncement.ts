@@ -10,6 +10,17 @@ import { parseStrictEventJson } from "./strictEventJson";
 const HEX32 = /^[0-9a-f]{64}$/;
 const HEX64 = /^[0-9a-f]{128}$/;
 const encoder = new TextEncoder();
+const HANDSHAKE_REQUIREMENTS = "rillswap/handshake-required-features";
+
+function supportedExtensions(value: unknown): boolean {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const extensions = value as Record<string, unknown>;
+  const keys = Object.keys(extensions);
+  if (keys.length === 0) return true;
+  const required = extensions[HANDSHAKE_REQUIREMENTS];
+  return keys.length === 1 && keys[0] === HANDSHAKE_REQUIREMENTS &&
+    Array.isArray(required) && required.length === 1 && required[0] === "epoch-bound-session/v1";
+}
 
 export interface AnnouncementCandidate extends Omit<ManualProviderCandidate, "source"> {
   readonly source: "signed-nip01-announcement";
@@ -89,10 +100,7 @@ export function verifyPrivateRegtestAnnouncement(
         !Array.isArray(advertisement.network_identities) ||
         advertisement.network_identities.length !== 1 ||
         (advertisement.network_identities[0] as Record<string, unknown>)?.name !== "regtest" ||
-        advertisement.extensions === null ||
-        typeof advertisement.extensions !== "object" ||
-        Array.isArray(advertisement.extensions) ||
-        Object.keys(advertisement.extensions).length !== 0) {
+        !supportedExtensions(advertisement.extensions)) {
       throw new AnnouncementRefusedError();
     }
     const selected = verifyManualProviderAdvertisement(

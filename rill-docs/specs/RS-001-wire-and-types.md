@@ -322,10 +322,11 @@ temporary session tombstones, this history grows with provider-controlled key
 rotations and is not bounded total storage. Retired epoch secret keys need not
 remain available.
 
-Implementation staging: the core defines the binding and validation primitive;
-provider v7 stores support explicit epoch custody/retirement and policy migration.
-Default live activation still requires client feature negotiation and signed
-capability advertisement. None of these primitives enable that rollout implicitly.
+Provider v7 stores support explicit epoch custody/retirement and policy migration.
+An opted-in provider advertises its requirement as defined in RS-005, and clients
+negotiate it from that signed advertisement. Offline recovery validates the
+binding as historical evidence; it does not require an epoch to remain active.
+Existing configurations do not acquire this feature implicitly.
 
 ## 8. Message authentication, ordering, and effects
 

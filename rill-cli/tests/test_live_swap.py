@@ -96,9 +96,23 @@ class FakeWallet:
 
 @pytest.mark.native_crypto
 @NATIVE
-def test_native_live_swap_settles_through_the_provider(tmp_path: Path) -> None:  # noqa: PLR0915
+@pytest.mark.parametrize("epoch_bound", [False, True])
+def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
+    tmp_path: Path, *, epoch_bound: bool
+) -> None:
     sys.path.insert(0, str(PROVIDER_TESTS))
     from fake_relay import FakeRelay  # type: ignore[import-not-found]  # noqa: PLC0415
+    from rill_core.settlement.funding_authentication import (  # noqa: PLC0415
+        SignedFundingBinding,
+        verify_static_signed_funding_binding_history,
+    )
+    from rill_core.wire.hashes import EPOCH_SESSION_FEATURE  # noqa: PLC0415
+    from rill_core.wire.messages import (  # noqa: PLC0415
+        ContractTerms,
+        FundingBinding,
+        HandshakeAccept,
+        HandshakeInit,
+    )
     from rill_crypto import Context  # noqa: PLC0415
     from rill_provider.handshake_service import HandshakeService, ServicePolicy  # noqa: PLC0415
     from rill_provider.handshake_store import HandshakePolicy  # noqa: PLC0415
@@ -120,7 +134,7 @@ def test_native_live_swap_settles_through_the_provider(tmp_path: Path) -> None: 
     sent: list[dict[str, Any]] = []
     policy_store = HandshakePolicy(
         profile="btc-to-ln/v1",
-        features=frozenset(),
+        features=frozenset({EPOCH_SESSION_FEATURE}) if epoch_bound else frozenset(),
         encryption_suites=frozenset({"noise-xk-secp256k1-chachapoly-sha256/v1"}),
         capabilities=frozenset({"core/v1", "recovery/v1"}),
     )
@@ -244,6 +258,31 @@ def test_native_live_swap_settles_through_the_provider(tmp_path: Path) -> None: 
                 await relay.stop()
         assert outcome.payment_preimage == PREIMAGE
         assert len(recoveries) == 2  # terms first, then the funded snapshot
+        context = json.loads(recoveries[0])["verification_context"]
+        expected_features = [EPOCH_SESSION_FEATURE] if epoch_bound else []
+        assert context["handshake_init"]["required_features"] == expected_features
+        assert context["handshake_accept"]["required_features"] == expected_features
+        funded = json.loads(recoveries[1])
+        verify_static_signed_funding_binding_history(
+            terms=ContractTerms.model_validate_json(json.dumps(funded["contract_terms"])),
+            handshake_init=HandshakeInit.model_validate_json(json.dumps(context["handshake_init"])),
+            handshake_accept=HandshakeAccept.model_validate_json(
+                json.dumps(context["handshake_accept"])
+            ),
+            provider_identity_signature=context["provider_identity_signature"],
+            provider_terms_signature=context["provider_terms_signature"],
+            client_acceptance_signature=context["client_acceptance_signature"],
+            signed_bindings=tuple(
+                SignedFundingBinding(
+                    FundingBinding.model_validate_json(json.dumps(item["binding"])),
+                    item["funder_session_signature"],
+                )
+                for item in funded["funding_history"]
+            ),
+            expected_provider_identity=identity,
+            expected_network=NETWORK,
+            crypto=crypto,
+        )
         assert len(wallet.broadcasts) == 1
         assert outcome.funding_txid == wallet.broadcast(wallet.broadcasts[0])
         assert [item["invoice"] for item in sent] == [INVOICE]  # paid exactly once

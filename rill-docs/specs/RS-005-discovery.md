@@ -47,7 +47,7 @@ filters only; fetch by kind (or a known address's `d`) and verify locally.
 
 Only this Nostr adapter restricts the application advertisement to exactly
 one `network_identities` entry, whose `name` is `regtest`, and to empty
-`extensions`. Produce separate signed advertisements for separate complete
+`extensions` or the exact epoch-admission requirement below. Produce separate signed advertisements for separate complete
 network identities; the schema and out-of-band manual application import
 remain compatible with multiple networks. The producer MUST strictly
 increase both signed revision and outer timestamp for an address (waiting
@@ -55,6 +55,22 @@ for the next second when necessary). A relay's replacement ordering by event
 timestamp is not application revision ordering. Consumers compare revision
 only within `(kind, identity pubkey, d)` after all signatures and complete
 network checks; a matching coarse `network` tag alone proves nothing.
+
+An explicitly migrated epoch-bound provider advertises exactly:
+
+```json
+{"rillswap/handshake-required-features": ["epoch-bound-session/v1"]}
+```
+
+in `extensions`. Both signatures cover this requirement. New clients select
+the advertised epoch before deriving their session ID and MUST negotiate the
+RS-001 epoch-bound feature in both initiation and acceptance. Unknown or
+malformed requirements, or additional extension keys in this Nostr adapter,
+are refused rather than downgraded. Empty extensions retain the legacy handshake
+contract. Replaying an older signed legacy announcement after provider opt-in
+cannot enable legacy admission: the provider's durable policy independently
+refuses new unbound sessions. An advertisement is still discovery evidence,
+not permission to fund or a proof that its epoch is currently usable.
 
 This adapter rejects more than 64 KiB of UTF-8 bytes in the **decoded content
 string**, more than 128 KiB of **received raw UTF-8 event-object JSON bytes**

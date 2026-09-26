@@ -20,7 +20,13 @@ from typing import TYPE_CHECKING, Any
 import pyrage  # type: ignore[import-untyped]
 from pyrage import x25519
 from rill_core.wire.canonical import canonicalize
-from rill_core.wire.hashes import handshake_accept_hash, provider_terms_hash, tagged_hash
+from rill_core.wire.hashes import (
+    EPOCH_SESSION_FEATURE,
+    HANDSHAKE_FEATURES_EXTENSION,
+    handshake_accept_hash,
+    provider_terms_hash,
+    tagged_hash,
+)
 from rill_core.wire.messages import HandshakeAccept, ProviderTerms
 from rill_core.wire.types import NetworkIdentity
 
@@ -60,6 +66,7 @@ class AnnouncementTerms:
     slot: str
     created_at: int
     expires_at: int
+    epoch_bound_sessions: bool = False
 
 
 def _xonly(public_keys: Context, scalar: bytes) -> str:
@@ -214,7 +221,8 @@ def _advertisement(identity: str, terms: AnnouncementTerms) -> dict[str, Any]:
     epochs = terms.epoch_inbox_xonly_keys
     bands = terms.amount_bands
     if not (
-        type(terms.network) is NetworkIdentity
+        type(terms.epoch_bound_sessions) is bool
+        and type(terms.network) is NetworkIdentity
         and terms.network.name == "regtest"
         and 1 <= len(terms.profiles) <= 8  # noqa: PLR2004
         and len(set(terms.profiles)) == len(terms.profiles)
@@ -253,5 +261,9 @@ def _advertisement(identity: str, terms: AnnouncementTerms) -> dict[str, Any]:
         "revision": terms.created_at,
         "created_at": terms.created_at,
         "expires_at": terms.expires_at,
-        "extensions": {},
+        "extensions": (
+            {HANDSHAKE_FEATURES_EXTENSION: [EPOCH_SESSION_FEATURE]}
+            if terms.epoch_bound_sessions
+            else {}
+        ),
     }

@@ -31,8 +31,12 @@ from rill_core.settlement import (
 )
 from rill_core.wire.canonical import canonicalize, parse_model_json
 from rill_core.wire.hashes import (
+    EPOCH_SESSION_EXTENSION,
+    EPOCH_SESSION_FEATURE,
+    HANDSHAKE_FEATURES_EXTENSION,
     client_acceptance_hash,
     contract_hash,
+    epoch_bound_session_id,
     funding_binding_hash,
     handshake_accept_hash,
     handshake_hash,
@@ -160,7 +164,22 @@ def verify_announcement(
         or not advertisement["epoch_inbox_xonly_keys"]
     ):
         raise SwapError("announcement does not offer this swap now")
+    _requires_epoch_binding(advertisement)
     return dict(advertisement)
+
+
+def _requires_epoch_binding(advertisement: dict[str, Any]) -> bool:
+    """Interpret only an explicit, signed requirement; malformed is not legacy."""
+    extensions = advertisement.get("extensions", {})
+    if not isinstance(extensions, dict):
+        raise SwapError("announcement extensions unsupported")
+    if not extensions:
+        return False
+    if set(extensions) != {HANDSHAKE_FEATURES_EXTENSION} or extensions[
+        HANDSHAKE_FEATURES_EXTENSION
+    ] != [EPOCH_SESSION_FEATURE]:
+        raise SwapError("announcement handshake requirements unsupported")
+    return True
 
 
 async def discover(  # noqa: PLR0913 - explicit trust inputs
@@ -441,6 +460,12 @@ async def _handshake(
     session: _Session, advertisement: dict[str, Any], identity: str
 ) -> tuple[HandshakeInit, HandshakeAccept, str, str]:
     """Return init, accept, identity signature, and handshake hash."""
+    epoch = advertisement["epoch_inbox_xonly_keys"][0]
+    epoch_bound = _requires_epoch_binding(advertisement)
+    if epoch_bound:
+        session.session_id = epoch_bound_session_id(
+            session.network, identity, epoch, session.key
+        ).hex()
     init = HandshakeInit(
         protocol="rillswap",
         wire_version="1",
@@ -452,16 +477,18 @@ async def _handshake(
         expected_provider_identity_xonly_key=identity,
         requested_encryption_suites=ENCRYPTION_SUITES,
         requested_capabilities=CAPABILITIES,
-        required_features=(),
-        extensions={},
+        required_features=(EPOCH_SESSION_FEATURE,) if epoch_bound else (),
+        extensions={EPOCH_SESSION_EXTENSION: {"epoch_inbox_xonly_key": epoch}}
+        if epoch_bound
+        else {},
     )
     request = session.envelope("handshake_init", init.model_dump(mode="json"), signed=False)
     await session.listen()
-    await session.send(request, advertisement["epoch_inbox_xonly_keys"][0])
+    await session.send(request, epoch)
     answer = await session.reply_to(request, "handshake_accept")
     accept = parse_model_json(HandshakeAccept, canonicalize(answer.payload["accept"]))
     signature = str(answer.payload["provider_identity_signature"])
-    accept.validate_against(init, supported_features=frozenset())
+    accept.validate_against(init, supported_features=frozenset({EPOCH_SESSION_FEATURE}))
     session.crypto.schnorr_verify(
         bytes.fromhex(identity), handshake_accept_hash(accept), bytes.fromhex(signature)
     )
