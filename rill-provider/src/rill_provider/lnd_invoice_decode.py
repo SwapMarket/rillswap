@@ -15,8 +15,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import grpc
+from rill_core.errors import ValidationError
+from rill_core.networks import backend_names, invoice_matches_network
 from rill_core.wire.messages import InvoiceBinding
-from rill_core.wire.types import NetworkIdentity
 
 from rill_provider._lnd_proto import lightning_pb2
 from rill_provider.lnd_payment_observation import (
@@ -35,12 +36,13 @@ from rill_provider.lnd_payment_observation import (
 if TYPE_CHECKING:
     import os
 
+    from rill_core.wire.types import NetworkIdentity
+
 DECODE_METHOD = "/lnrpc.Lightning/DecodePayReq"
 MAX_INVOICE_CHARS = 2048
 HASH_HEX = 64
 PAYMENT_SECRET_BYTES = 32
 REJECTED = (grpc.StatusCode.UNKNOWN, grpc.StatusCode.INVALID_ARGUMENT)  # LND decode errors
-REGTEST_PREFIX = "lnbcrt"
 # Classic, single-path payment-secret invoices. Optional route-blinding support
 # is advertised by ordinary LND invoices too; actual blinded paths are refused.
 PAYMENT_FEATURES = frozenset({8, 9, 14, 15, 17, 25})
@@ -90,8 +92,8 @@ def binding_from_payreq(bolt11: str, payreq: lightning_pb2.PayReq) -> InvoiceBin
         raise InvoiceRejectedError("decoded invoice is not a valid binding") from None
 
 
-class RegtestLndInvoiceDecoder:
-    """Loopback, regtest-only ``DecodePayReq`` with a dedicated read macaroon."""
+class LndInvoiceDecoder:
+    """Loopback ``DecodePayReq`` for one network with a dedicated read macaroon."""
 
     def __init__(
         self,
@@ -105,8 +107,11 @@ class RegtestLndInvoiceDecoder:
         """Configure only; no credential read or network dial."""
         if host not in ("127.0.0.1", "::1") or type(port) is not int or not 1 <= port <= MAX_PORT:
             raise ValueError("LND endpoint must be a numeric loopback host and port")
-        if not isinstance(network, NetworkIdentity) or network.name != "regtest":
-            raise ValueError("LND invoice decoding requires explicit regtest network identity")
+        try:
+            backend_names(network)  # refuses unsupported identities
+        except ValidationError:
+            raise ValueError("LND invoice decoding requires a supported network identity") from None
+        self._network = network
         self._target = f"[{host}]:{port}" if host == "::1" else f"{host}:{port}"
         self._certificate = Path(tls_certificate_path)
         self._macaroon = Path(macaroon_path)
@@ -118,12 +123,7 @@ class RegtestLndInvoiceDecoder:
         if type(bolt11) is not str or not 0 < len(bolt11) <= MAX_INVOICE_CHARS:
             raise InvoiceRejectedError("invoice string unsupported")
         # The backend decodes for its own chain; bind the invoice to ours too.
-        prefix = len(REGTEST_PREFIX)
-        if (
-            len(bolt11) <= prefix
-            or not bolt11.startswith(REGTEST_PREFIX)
-            or bolt11[prefix].isalpha()
-        ):
+        if not invoice_matches_network(bolt11, self._network):
             raise InvoiceRejectedError("invoice is not for the configured network")
         certificate = _read_file(self._certificate, MAX_CERT_BYTES, private=False)
         macaroon = _read_file(self._macaroon, MAX_MACAROON_BYTES, private=True)

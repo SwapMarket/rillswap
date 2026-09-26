@@ -10,7 +10,7 @@ from pathlib import Path
 from pydantic import ValidationError
 from rill_core.wire.types import NetworkIdentity
 
-from rill_provider.lnd_payment_observation import LndObservationError, RegtestLndPaymentObserver
+from rill_provider.lnd_payment_observation import LndObservationError, LndPaymentObserver
 from rill_provider.payment_journal import OutgoingPaymentJournal, PaymentJournalError
 from rill_provider.payment_track_recording import record_payment_track
 
@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         network = _network(args.network_identity)
         journal = OutgoingPaymentJournal.open_existing(args.journal, network, args.backend_identity)
-        observer = RegtestLndPaymentObserver(
+        observer = LndPaymentObserver(
             host=args.lnd_host,
             port=args.lnd_port,
             tls_certificate_path=args.tls_cert,

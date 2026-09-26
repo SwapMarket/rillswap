@@ -29,8 +29,8 @@ from rill_provider import core_tx_bytes
 from rill_provider.core_tx_bytes import (
     CoreAuthError,
     CoreProtocolError,
+    CoreTransactionReader,
     CoreUnavailableError,
-    RegtestCoreTransactionReader,
 )
 
 if TYPE_CHECKING:
@@ -162,7 +162,7 @@ def test_fetch_is_explicit_read_only_network_checked_and_cookie_rotates(
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
     cookie = _cookie(tmp_path)
     with _server(_success, requests) as port:
-        reader = RegtestCoreTransactionReader(port=port, cookie_path=cookie, network=network)
+        reader = CoreTransactionReader(port=port, cookie_path=cookie, network=network)
         assert not requests
         assert reader.fetch_binding_byte_match(binding, terms, keys=None) == result  # type: ignore[arg-type]
         cookie.write_text("__cookie__:rotated\n")
@@ -196,9 +196,7 @@ def test_fetch_is_explicit_read_only_network_checked_and_cookie_rotates(
 def test_remote_or_wallet_endpoints_are_not_configurable(tmp_path: Path, host: str) -> None:
     _, _, network = _context()
     with pytest.raises(ValueError, match="loopback"):
-        RegtestCoreTransactionReader(
-            port=18443, host=host, cookie_path=tmp_path / "none", network=network
-        )
+        CoreTransactionReader(port=18443, host=host, cookie_path=tmp_path / "none", network=network)
 
 
 @pytest.mark.parametrize(
@@ -207,7 +205,7 @@ def test_remote_or_wallet_endpoints_are_not_configurable(tmp_path: Path, host: s
 def test_missing_or_bad_cookie_stops_before_network(tmp_path: Path, cookie: str) -> None:
     terms, binding, network = _context()
     path = _cookie(tmp_path, cookie)
-    reader = RegtestCoreTransactionReader(port=18443, cookie_path=path, network=network)
+    reader = CoreTransactionReader(port=18443, cookie_path=path, network=network)
     with pytest.raises(CoreAuthError) as caught:
         reader.fetch_binding_byte_match(binding, terms, keys=None)  # type: ignore[arg-type]
     assert caught.value.__cause__ is None
@@ -264,16 +262,12 @@ def test_inactivity_timeout_and_slow_header_limitation(
     monkeypatch.setattr(core_tx_bytes, "check_funding_binding_transaction", checker)
     monkeypatch.setattr(core_tx_bytes, "READ_SECONDS", 1.0)
     with _server(_success, [], header_mode="stall") as port:
-        reader = RegtestCoreTransactionReader(
-            port=port, cookie_path=_cookie(tmp_path), network=network
-        )
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
         with pytest.raises(CoreUnavailableError):
             reader.fetch_binding_byte_match(binding, terms, keys=None)  # type: ignore[arg-type]
     assert seen == 0
     with _server(_success, [], header_mode="trickle") as port:
-        reader = RegtestCoreTransactionReader(
-            port=port, cookie_path=_cookie(tmp_path), network=network
-        )
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
         start = time.monotonic()
         try:
             match = reader.fetch_binding_byte_match(binding, terms, keys=None)  # type: ignore[arg-type]
@@ -340,9 +334,7 @@ def test_bad_rpc_response_cannot_become_static_match(
         return status, body
 
     with _server(broken, []) as port:
-        reader = RegtestCoreTransactionReader(
-            port=port, cookie_path=_cookie(tmp_path), network=network
-        )
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
         expected = (
             CoreAuthError
             if kind == "unauthorized"
@@ -367,9 +359,7 @@ def test_static_checker_rejection_is_never_recast_as_funding_absence(
 
     monkeypatch.setattr(core_tx_bytes, "check_funding_binding_transaction", fail_match)
     with _server(_success, []) as port:
-        reader = RegtestCoreTransactionReader(
-            port=port, cookie_path=_cookie(tmp_path), network=network
-        )
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
         with pytest.raises(ValidationError, match="static byte mismatch"):
             reader.fetch_binding_byte_match(binding, terms, keys=None)  # type: ignore[arg-type]
 
@@ -419,9 +409,7 @@ def test_fetched_bytes_pass_real_core_static_checker_only(tmp_path: Path) -> Non
         ).encode()
 
     with _server(respond, []) as port:
-        reader = RegtestCoreTransactionReader(
-            port=port, cookie_path=_cookie(tmp_path), network=network
-        )
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
         match = reader.fetch_binding_byte_match(binding, terms, keys=Keys())
         assert match.funding_txid == txid
         assert match.contract_vout == 1
@@ -506,7 +494,7 @@ def test_static_signed_history_precedes_core_candidate_sample(tmp_path: Path) ->
             )
 
         with _server(respond, requests) as port:
-            reader = RegtestCoreTransactionReader(
+            reader = CoreTransactionReader(
                 port=port, cookie_path=_cookie(tmp_path), network=network
             )
             tampered = signature[:-2] + ("00" if signature[-2:] != "00" else "01")
@@ -639,9 +627,7 @@ def test_candidate_is_a_named_tip_utxo_sample_not_lineage_authority(
     monkeypatch.setattr(core_tx_bytes, "check_funding_binding_transaction", checker)
     requests: list[dict[str, Any]] = []
     with _server(lambda payload: _candidate_reply(payload, binding), requests) as port:
-        reader = RegtestCoreTransactionReader(
-            port=port, cookie_path=_cookie(tmp_path), network=network
-        )
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
         result = reader.observe_candidate_outpoint(binding, terms, keys=None)  # type: ignore[arg-type]
     assert calls == [bytes.fromhex("02000000000100")]
     assert result.network_identity == network
@@ -685,9 +671,7 @@ def test_candidate_tip_block_inclusion_is_still_not_lineage_authority(
     with _server(
         lambda payload: _candidate_reply(payload, binding, change="tip-inclusion"), requests
     ) as port:
-        reader = RegtestCoreTransactionReader(
-            port=port, cookie_path=_cookie(tmp_path), network=network
-        )
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
         result = reader.observe_candidate_outpoint(binding, terms, keys=None)  # type: ignore[arg-type]
     assert result.inclusion_height == 105
     assert result.inclusion_block_hash == "aa" * 32
@@ -739,9 +723,7 @@ def test_candidate_unknown_or_mismatched_chain_never_returns_authority(
     with _server(
         lambda payload: _candidate_reply(payload, binding, change=change), requests
     ) as port:
-        reader = RegtestCoreTransactionReader(
-            port=port, cookie_path=_cookie(tmp_path), network=network
-        )
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
         with pytest.raises(error_type):
             reader.observe_candidate_outpoint(binding, terms, keys=None)  # type: ignore[arg-type]
     assert len(requests) in (1, 4, 5, 6, 7)
@@ -769,10 +751,10 @@ def test_tip_height_checks_chain_and_genesis(tmp_path: Path) -> None:
     requests: list[dict[str, Any]] = []
     cookie = _cookie(tmp_path)
     with _server(reply(GENESIS), requests) as port:
-        reader = RegtestCoreTransactionReader(port=port, cookie_path=cookie, network=network)
+        reader = CoreTransactionReader(port=port, cookie_path=cookie, network=network)
         assert reader.tip_height() == 1234
     with _server(reply("22" * 32), requests) as port:
-        reader = RegtestCoreTransactionReader(port=port, cookie_path=cookie, network=network)
+        reader = CoreTransactionReader(port=port, cookie_path=cookie, network=network)
         with pytest.raises(core_tx_bytes.CoreProtocolError, match="genesis"):
             reader.tip_height()
 
@@ -793,26 +775,18 @@ def test_broadcast_is_exact_and_idempotent(tmp_path: Path) -> None:
     requests: list[dict[str, Any]] = []
     txid = "ab" * 32
     with _server(_rpc_reply(txid), requests) as port:
-        reader = RegtestCoreTransactionReader(
-            port=port, cookie_path=_cookie(tmp_path), network=network
-        )
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
         assert reader.broadcast(b"\x02\x00", txid) == txid
     assert (requests[0]["method"], requests[0]["params"]) == ("sendrawtransaction", ["0200"])
     with _server(_rpc_reply(error={"code": -27, "message": "already"}), []) as port:
-        reader = RegtestCoreTransactionReader(
-            port=port, cookie_path=_cookie(tmp_path), network=network
-        )
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
         assert reader.broadcast(b"\x02\x00", txid) == txid  # already in the chain
     with _server(_rpc_reply(error={"code": -26, "message": "rejected"}), []) as port:
-        reader = RegtestCoreTransactionReader(
-            port=port, cookie_path=_cookie(tmp_path), network=network
-        )
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
         with pytest.raises(CoreUnavailableError):
             reader.broadcast(b"\x02\x00", txid)
     with _server(_rpc_reply("cd" * 32), []) as port:
-        reader = RegtestCoreTransactionReader(
-            port=port, cookie_path=_cookie(tmp_path), network=network
-        )
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
         with pytest.raises(CoreProtocolError):
             reader.broadcast(b"\x02\x00", txid)
 
@@ -822,13 +796,11 @@ def test_confirmations_counts_mempool_as_zero(tmp_path: Path) -> None:
     txid = "ab" * 32
     for result, expected in (({"txid": txid}, 0), ({"txid": txid, "confirmations": 4}, 4)):
         with _server(_rpc_reply(result), []) as port:
-            reader = RegtestCoreTransactionReader(
+            reader = CoreTransactionReader(
                 port=port, cookie_path=_cookie(tmp_path), network=network
             )
             assert reader.confirmations(txid) == expected
     with _server(_rpc_reply({"txid": "cd" * 32}), []) as port:
-        reader = RegtestCoreTransactionReader(
-            port=port, cookie_path=_cookie(tmp_path), network=network
-        )
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
         with pytest.raises(CoreProtocolError):
             reader.confirmations(txid)

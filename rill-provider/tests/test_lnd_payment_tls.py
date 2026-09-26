@@ -23,8 +23,8 @@ from rill_provider._lnd_proto import lightning_pb2
 from rill_provider._lnd_proto.routerrpc import router_pb2
 from rill_provider.lnd_payment_observation import (
     LndAuthError,
+    LndPaymentObserver,
     LndUnavailableError,
-    RegtestLndPaymentObserver,
 )
 
 if TYPE_CHECKING:
@@ -146,7 +146,7 @@ def test_verified_loopback_tls_and_restricted_macaroon_metadata(tmp_path: Path) 
     macaroon.write_bytes(b"synthetic-offchain-read-only")
     macaroon.chmod(0o600)
     with _server(cert, key, macaroon_hex=macaroon.read_bytes().hex()) as (port, received):
-        observer = RegtestLndPaymentObserver(
+        observer = LndPaymentObserver(
             host="127.0.0.1",
             port=port,
             tls_certificate_path=cert,
@@ -162,7 +162,7 @@ def test_verified_loopback_tls_and_restricted_macaroon_metadata(tmp_path: Path) 
         with pytest.raises(LndAuthError) as auth:
             observer.track(HASH, deadline_seconds=2)
         assert "synthetic" not in str(auth.value)
-        wrong = RegtestLndPaymentObserver(
+        wrong = LndPaymentObserver(
             host="127.0.0.1",
             port=port,
             tls_certificate_path=wrong_cert,
@@ -192,7 +192,7 @@ def test_real_tls_deadline_and_receive_limit_never_yield_partial_success(
         port,
         received,
     ):
-        client = RegtestLndPaymentObserver(
+        client = LndPaymentObserver(
             host="127.0.0.1",
             port=port,
             tls_certificate_path=cert,

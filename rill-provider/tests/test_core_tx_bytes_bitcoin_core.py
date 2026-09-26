@@ -58,7 +58,7 @@ from rill_core.errors import ValidationError
 from rill_core.wire.messages import ContractTerms, FundingBinding
 from rill_core.settlement import FundingBindingTransactionMatch
 from rill_provider import core_tx_bytes
-from rill_provider.core_tx_bytes import CoreUnavailableError, RegtestCoreTransactionReader
+from rill_provider.core_tx_bytes import CoreUnavailableError, CoreTransactionReader
 fixture = json.loads(Path('/work/provider/tests/fixtures/initial-btc-to-ln-v1.json').read_bytes())
 terms = ContractTerms.model_validate_json(json.dumps(fixture['contract_terms']))
 txid = os.environ['RILL_TEST_TXID']
@@ -76,7 +76,7 @@ class Keys:
         return bytes.fromhex(artifacts['internal_xonly_key']), artifacts['internal_key_parity']
     def musig_output_key(self, *_):
         return bytes.fromhex(artifacts['output_xonly_key']), artifacts['output_key_parity']
-reader = RegtestCoreTransactionReader(
+reader = CoreTransactionReader(
     port=18443, cookie_path='/work/cookie/core.cookie', network=terms.network_identity)
 try:
     reader.fetch_binding_byte_match(binding, terms, keys=Keys())

@@ -160,7 +160,7 @@ def _raw_bytes(value: object) -> bytes:
     return bytes.fromhex(value)
 
 
-class RegtestRecoveryCoreReader:
+class RecoveryCoreReader:
     """Read-only numeric-loopback RPC client, no wallet or background actions."""
 
     def __init__(

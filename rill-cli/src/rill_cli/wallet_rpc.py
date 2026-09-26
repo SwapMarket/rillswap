@@ -73,7 +73,7 @@ def _sats(value: object) -> int:
     return int(sats)
 
 
-class RegtestWalletRpc:
+class WalletRpc:
     """One named Core wallet on a loopback regtest node (cookie auth)."""
 
     def __init__(

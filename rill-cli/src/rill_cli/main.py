@@ -43,7 +43,7 @@ from rill_cli.publication import (
     RecoveryPublicationUncertainError,
     publish_new_ciphertext,
 )
-from rill_cli.recovery_core_observation import RegtestRecoveryCoreReader
+from rill_cli.recovery_core_observation import RecoveryCoreReader
 from rill_cli.refund_broadcast import (
     RefundPreflightError,
     RefundSubmissionUnknownError,
@@ -305,7 +305,7 @@ def _run(args: argparse.Namespace) -> str:  # noqa: PLR0911, PLR0912, PLR0915 - 
                 selected.terms.profile_id != "ln-to-btc/v1" or selected.terms.claimant != "client"
             ):
                 raise RecoveryCLIError("selected recovery is not a client claim")
-            reader = RegtestRecoveryCoreReader(
+            reader = RecoveryCoreReader(
                 port=args.rpc_port,
                 host=args.rpc_host,
                 cookie_path=Path(args.rpc_cookie),

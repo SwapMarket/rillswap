@@ -15,13 +15,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import grpc
-from rill_core.wire.types import NetworkIdentity
+from rill_core.errors import ValidationError
+from rill_core.networks import backend_names
 
 from rill_provider._lnd_proto import lightning_pb2
 from rill_provider._lnd_proto.routerrpc import router_pb2
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    from rill_core.wire.types import NetworkIdentity
 
 TRACK_METHOD = "/routerrpc.Router/TrackPaymentV2"
 INFO_METHOD = "/lnrpc.Lightning/GetInfo"
@@ -151,7 +154,9 @@ def _collect(stream: Iterator[lightning_pb2.Payment], expected_hash: str) -> Tra
     raise LndUnavailableError("LND track stream ended without terminal evidence")
 
 
-def _info_snapshot(info: lightning_pb2.GetInfoResponse, expected_key: bytes) -> LndInfoSnapshot:
+def _info_snapshot(
+    info: lightning_pb2.GetInfoResponse, expected_key: bytes, network: str
+) -> LndInfoSnapshot:
     if not isinstance(info, lightning_pb2.GetInfoResponse):
         raise LndProtocolError("LND info response is malformed")
     try:
@@ -163,7 +168,7 @@ def _info_snapshot(info: lightning_pb2.GetInfoResponse, expected_key: bytes) -> 
     if (
         len(info.chains) != 1
         or info.chains[0].chain != "bitcoin"
-        or info.chains[0].network != "regtest"
+        or info.chains[0].network != network
         or type(info.block_height) is not int
         or not 0 <= info.block_height <= MAX_HEIGHT
         or type(info.synced_to_chain) is not bool
@@ -175,7 +180,7 @@ def _info_snapshot(info: lightning_pb2.GetInfoResponse, expected_key: bytes) -> 
     )
 
 
-class RegtestLndInfoObserver:
+class LndInfoObserver:
     """Separate info:read, operator-invoked GetInfo diagnostic; never admission."""
 
     def __init__(  # noqa: PLR0913 - explicit endpoint, trust root, credential and pin
@@ -191,8 +196,11 @@ class RegtestLndInfoObserver:
         """Validate public configuration without reading files or dialing."""
         if host not in ("127.0.0.1", "::1") or type(port) is not int or not 1 <= port <= MAX_PORT:
             raise ValueError("LND endpoint must be a numeric loopback host and port")
-        if not isinstance(network, NetworkIdentity) or network.name != "regtest":
-            raise ValueError("LND diagnostic requires explicit regtest network identity")
+        try:
+            names = backend_names(network)
+        except ValidationError:
+            raise ValueError("LND diagnostic requires a supported network identity") from None
+        self._lnd_network = names.lnd_network
         if (
             type(expected_node_pubkey) is not str
             or len(expected_node_pubkey) != COMPRESSED_KEY_BYTES * 2
@@ -245,7 +253,7 @@ class RegtestLndInfoObserver:
                 metadata=(("macaroon", macaroon.hex()),),
                 wait_for_ready=False,
             )
-            return _info_snapshot(info, self._expected_key)
+            return _info_snapshot(info, self._expected_key, self._lnd_network)
         except grpc.RpcError as error:
             try:
                 denied = error.code() in (
@@ -272,7 +280,7 @@ class RegtestLndInfoObserver:
         raise failure
 
 
-class RegtestLndPaymentObserver:
+class LndPaymentObserver:
     """Operator-invoked TLS diagnostic only; construction does no I/O.
 
     TLS authenticates a configured endpoint, not the complete network
@@ -289,11 +297,14 @@ class RegtestLndPaymentObserver:
         read_macaroon_path: str | os.PathLike[str],
         network: NetworkIdentity,
     ) -> None:
-        """Configure one explicit regtest observer without reading files or dialing LND."""
+        """Configure one explicit observer without reading files or dialing LND."""
         if host not in ("127.0.0.1", "::1") or type(port) is not int or not 1 <= port <= MAX_PORT:
             raise ValueError("LND endpoint must be a numeric loopback host and port")
-        if not isinstance(network, NetworkIdentity) or network.name != "regtest":
-            raise ValueError("LND diagnostic requires explicit regtest network identity")
+        try:
+            names = backend_names(network)
+        except ValidationError:
+            raise ValueError("LND diagnostic requires a supported network identity") from None
+        self._lnd_network = names.lnd_network
         self._target = f"[{host}]:{port}" if host == "::1" else f"{host}:{port}"
         self._certificate = Path(tls_certificate_path)
         self._macaroon = Path(read_macaroon_path)

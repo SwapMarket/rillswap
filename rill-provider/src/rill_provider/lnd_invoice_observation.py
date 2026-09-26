@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import grpc
-from rill_core.wire.types import NetworkIdentity
+from rill_core.errors import ValidationError
+from rill_core.networks import backend_names
 
 from rill_provider._lnd_proto import lightning_pb2
 from rill_provider.lnd_payment_observation import (
@@ -32,6 +33,8 @@ from rill_provider.lnd_payment_observation import (
 
 if TYPE_CHECKING:
     import os
+
+    from rill_core.wire.types import NetworkIdentity
 
 LOOKUP_METHOD = "/lnrpc.Lightning/LookupInvoice"
 MAX_HTLCS = 64
@@ -124,7 +127,7 @@ def _snapshot(invoice: lightning_pb2.Invoice, selected_hash: bytes) -> InvoiceSn
     )
 
 
-class RegtestLndInvoiceObserver:
+class LndInvoiceObserver:
     """Explicit invoices:read diagnostic, separate from info/offchain credentials."""
 
     def __init__(
@@ -139,8 +142,12 @@ class RegtestLndInvoiceObserver:
         """Configure only; no credential read, network dial, or state change."""
         if host not in ("127.0.0.1", "::1") or type(port) is not int or not 1 <= port <= MAX_PORT:
             raise ValueError("LND endpoint must be a numeric loopback host and port")
-        if not isinstance(network, NetworkIdentity) or network.name != "regtest":
-            raise ValueError("LND invoice diagnostic requires explicit regtest network identity")
+        try:
+            backend_names(network)  # refuses unsupported identities
+        except ValidationError:
+            raise ValueError(
+                "LND invoice diagnostic requires a supported network identity"
+            ) from None
         self._target = f"[{host}]:{port}" if host == "::1" else f"{host}:{port}"
         self._certificate = Path(tls_certificate_path)
         self._macaroon = Path(invoice_macaroon_path)

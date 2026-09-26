@@ -80,7 +80,7 @@ def _decoder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, response: object) 
     channel = FakeChannel(response)
     monkeypatch.setattr(grpc, "ssl_channel_credentials", lambda **_: "TLS")
     monkeypatch.setattr(grpc, "secure_channel", lambda *_a, **_k: channel)
-    decoder = decode.RegtestLndInvoiceDecoder(
+    decoder = decode.LndInvoiceDecoder(
         host="127.0.0.1",
         port=10009,
         tls_certificate_path=tmp_path / "tls.cert",
@@ -161,15 +161,15 @@ def test_rpc_failures_distinguish_rejection_from_unavailability(
 
 def test_only_loopback_regtest_is_configurable(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="loopback"):
-        decode.RegtestLndInvoiceDecoder(
+        decode.LndInvoiceDecoder(
             host="10.0.0.1",
             port=10009,
             tls_certificate_path=tmp_path,
             macaroon_path=tmp_path,
             network=NETWORK,
         )
-    with pytest.raises(ValueError, match="regtest"):
-        decode.RegtestLndInvoiceDecoder(
+    with pytest.raises(ValueError, match="supported network"):  # mislabeled identity
+        decode.LndInvoiceDecoder(
             host="127.0.0.1",
             port=10009,
             tls_certificate_path=tmp_path,
@@ -186,3 +186,31 @@ def test_invoices_for_other_networks_never_reach_lnd(
     with pytest.raises(decode.InvoiceRejectedError):
         channel.decoder.decode(invoice)  # type: ignore[attr-defined]
     assert channel.requests == []
+
+
+NETWORKS = Path(__file__).parents[2] / "rill-docs" / "networks"
+
+
+@pytest.mark.parametrize(
+    ("name", "accepted", "refused"),
+    [
+        ("mainnet", "lnbc500u1pexample", "lnbcrt500u1pexample"),
+        ("signet", "lntbs500u1pexample", "lntb500u1pexample"),
+        ("testnet4", "lntb500u1pexample", "lntbs500u1pexample"),
+    ],
+)
+def test_public_networks_bind_invoices_to_their_own_prefix(
+    tmp_path: Path, name: str, accepted: str, refused: str
+) -> None:
+    network = NetworkIdentity.model_validate_json((NETWORKS / f"{name}.json").read_bytes())
+    decoder = decode.LndInvoiceDecoder(
+        host="127.0.0.1",
+        port=10009,
+        tls_certificate_path=tmp_path / "missing.cert",
+        macaroon_path=tmp_path / "missing.macaroon",
+        network=network,
+    )
+    with pytest.raises(decode.InvoiceRejectedError, match="configured network"):
+        decoder.decode(refused)
+    with pytest.raises(decode.LndAuthError):  # prefix passed; credentials missing
+        decoder.decode(accepted)

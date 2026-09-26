@@ -14,9 +14,9 @@ from rill_core.wire.types import NetworkIdentity
 from rill_provider import payment_track_recording
 from rill_provider.lnd_payment_observation import (
     HtlcAttemptSnapshot,
+    LndPaymentObserver,
     LndUnavailableError,
     PaymentSnapshot,
-    RegtestLndPaymentObserver,
     TrackResult,
 )
 from rill_provider.payment_journal import (
@@ -77,7 +77,7 @@ def _snap(
     return PaymentSnapshot(HASH, status, attempts)  # type: ignore[arg-type]
 
 
-class StubObserver(RegtestLndPaymentObserver):
+class StubObserver(LndPaymentObserver):
     def __init__(
         self, result: TrackResult | Exception, during_track: Callable[[], None] | None = None
     ) -> None:
@@ -325,7 +325,7 @@ def test_operator_command_requires_existing_journal_and_saves_private_evidence(
     )
     journal = _journal(tmp_path)
     observer = StubObserver(TrackResult("terminal", (_snap(),)))
-    monkeypatch.setattr(command, "RegtestLndPaymentObserver", lambda **_config: observer)
+    monkeypatch.setattr(command, "LndPaymentObserver", lambda **_config: observer)
     assert command.main(arguments) == 0
     output = capsys.readouterr()
     assert output.out == "Recorded 1 diagnostic observations; no action authority\n"

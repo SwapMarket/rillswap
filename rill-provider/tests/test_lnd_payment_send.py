@@ -122,7 +122,7 @@ class FakeChannel:
 
 def _sender(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, responses: list[Any] | BaseException
-) -> tuple[sender.RegtestLndPaymentSender, FakeChannel]:
+) -> tuple[sender.LndPaymentSender, FakeChannel]:
     (tmp_path / "tls.cert").write_bytes(b"ROOT")
     macaroon = tmp_path / "pay.macaroon"
     macaroon.write_bytes(b"PAY")
@@ -132,7 +132,7 @@ def _sender(
     monkeypatch.setattr(grpc, "ssl_channel_credentials", lambda **_: "TLS")
     monkeypatch.setattr(grpc, "secure_channel", lambda *_a, **_k: channel)
     return (
-        sender.RegtestLndPaymentSender(
+        sender.LndPaymentSender(
             host="127.0.0.1",
             port=10009,
             tls_certificate_path=tmp_path / "tls.cert",
@@ -234,7 +234,7 @@ def test_failed_payment_is_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert client.track(HASH) == sender.PaymentOutcome("FAILED")
 
 
-def _prepare(client: sender.RegtestLndPaymentSender) -> sender.PreparedPayment:
+def _prepare(client: sender.LndPaymentSender) -> sender.PreparedPayment:
     return client.prepare(
         INVOICE,
         invoice_binding=binding_from_payreq(INVOICE, _payreq()),

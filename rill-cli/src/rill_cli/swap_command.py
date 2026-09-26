@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from rill_core.recovery import inspect_recovery_successor
 from rill_crypto import Context
-from rill_provider.lnd_invoice_decode import RegtestLndInvoiceDecoder
+from rill_provider.lnd_invoice_decode import LndInvoiceDecoder
 from rill_provider.relay_client import RelayConnection
 
 from rill_cli.age_container import (
@@ -19,7 +19,7 @@ from rill_cli.age_container import (
 )
 from rill_cli.live_swap import SwapLimits, run_swap
 from rill_cli.publication import publish_new_ciphertext
-from rill_cli.wallet_rpc import RegtestWalletRpc
+from rill_cli.wallet_rpc import WalletRpc
 
 if TYPE_CHECKING:
     import argparse
@@ -91,14 +91,14 @@ def run(args: argparse.Namespace, network: NetworkIdentity, identity: str) -> st
             target = output if previous is None else _funded_path(output)
             publish_new_ciphertext(str(target), ciphertext, verify_from_disk=readback)
 
-        decoder = RegtestLndInvoiceDecoder(
+        decoder = LndInvoiceDecoder(
             host="127.0.0.1",
             port=args.lnd_port,
             tls_certificate_path=args.lnd_tls_cert,
             macaroon_path=args.lnd_macaroon,
             network=network,
         )
-        wallet = RegtestWalletRpc(
+        wallet = WalletRpc(
             port=args.core_port, cookie_path=args.core_cookie, wallet=args.wallet, network=network
         )
         limits = SwapLimits(

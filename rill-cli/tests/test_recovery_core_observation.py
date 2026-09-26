@@ -170,14 +170,14 @@ def _reader(  # noqa: PLR0913 - test seam controls independent inputs
     requests: list[dict[str, Any]],
     *,
     change: str = "none",
-) -> observation.RegtestRecoveryCoreReader:
+) -> observation.RecoveryCoreReader:
     client = httpx.Client
 
     def make_client(**kwargs: object) -> httpx.Client:
         return client(transport=_replies(requests, binding, network, change=change), **kwargs)
 
     monkeypatch.setattr(observation.httpx, "Client", make_client)
-    return observation.RegtestRecoveryCoreReader(
+    return observation.RecoveryCoreReader(
         port=18443, cookie_path=_cookie(tmp_path), network=network
     )
 
@@ -372,11 +372,11 @@ def test_cookie_and_loopback_preflight_fail_before_rpc(
         reader.observe(binding, terms, keys=object())  # type: ignore[arg-type]
     assert requests == []
     with pytest.raises(ValueError, match="loopback"):
-        observation.RegtestRecoveryCoreReader(
+        observation.RecoveryCoreReader(
             port=18443, cookie_path=tmp_path / "cookie", network=network, host="192.0.2.1"
         )
     with pytest.raises(ValueError, match="loopback"):
-        observation.RegtestRecoveryCoreReader(
+        observation.RecoveryCoreReader(
             port=True, cookie_path=tmp_path / "cookie", network=network
         )  # type: ignore[arg-type]
     assert requests == []

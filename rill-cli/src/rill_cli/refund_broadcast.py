@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from rill_core.settlement import TaprootKeyOperations
     from rill_core.wire.messages import ContractTerms, FundingBinding
 
-    from rill_cli.recovery_core_observation import RegtestRecoveryCoreReader
+    from rill_cli.recovery_core_observation import RecoveryCoreReader
 
 MAX_TRANSACTION_BYTES = 6_000
 TXID_LENGTH = 64
@@ -113,7 +113,7 @@ def _require_preflight(condition: bool) -> None:  # noqa: FBT001 - local predica
 
 
 def submit_prepared_refund(  # noqa: PLR0913 - exact read-only checks explicit
-    reader: RegtestRecoveryCoreReader,
+    reader: RecoveryCoreReader,
     binding: FundingBinding,
     terms: ContractTerms,
     *,

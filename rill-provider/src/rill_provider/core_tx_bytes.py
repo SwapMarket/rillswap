@@ -1,4 +1,4 @@
-"""Explicit read-only regtest Core RPC transaction-byte and UTXO diagnostics.
+"""Explicit read-only local Core RPC transaction-byte and UTXO observations.
 
 No wallet, ledger, mempool, funding, or payment action. Named-tip UTXO
 samples cannot establish persistent confirmation or live action authority.
@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
+from rill_core.errors import ValidationError
+from rill_core.networks import backend_names
 from rill_core.settlement import FundingBindingTransactionMatch, check_funding_binding_transaction
 from rill_core.wire.messages import FundingBinding
 from rill_core.wire.types import NetworkIdentity
@@ -88,16 +90,16 @@ def _hash(value: object) -> bool:
     )
 
 
-def _chain_tip(value: object) -> tuple[str, int]:
+def _chain_tip(value: object, chain: str) -> tuple[str, int]:
     if (
         not isinstance(value, dict)
-        or value.get("chain") != "regtest"
+        or value.get("chain") != chain
         or not _hash(value.get("bestblockhash"))
         or type(value.get("blocks")) is not int
         or value["blocks"] < 0
         or value.get("initialblockdownload") is not False
     ):
-        raise CoreProtocolError("Core has no usable current regtest tip")
+        raise CoreProtocolError("Core has no usable current tip on the configured chain")
     return value["bestblockhash"], value["blocks"]
 
 
@@ -136,7 +138,7 @@ def _read_cookie(path: Path) -> tuple[str, str]:
     return username, password
 
 
-class RegtestCoreTransactionReader:
+class CoreTransactionReader:
     """Fetch static bytes or a named-tip UTXO from local Bitcoin Core v30.
 
     A matching result does not authenticate the funder's binding signature,
@@ -155,14 +157,16 @@ class RegtestCoreTransactionReader:
         """Configure a numeric loopback endpoint without connecting to it."""
         if host not in ("127.0.0.1", "::1") or type(port) is not int or not 1 <= port <= MAX_PORT:
             raise ValueError("Core RPC must be a numeric loopback host and valid port")
-        if not isinstance(network, NetworkIdentity) or network.name != "regtest":
-            raise ValueError("only explicit complete regtest network identity is supported")
+        try:
+            self._chain = backend_names(network).core_chain
+        except ValidationError:
+            raise ValueError("only a supported complete network identity is accepted") from None
         self._url = f"http://[{host}]:{port}/" if host == "::1" else f"http://{host}:{port}/"
         self._cookie_path = Path(cookie_path)
         self._network = network
 
     def tip_height(self) -> int:
-        """Return the current regtest tip height after checking chain and genesis.
+        """Return the current tip height after checking chain and genesis.
 
         Informational only (e.g. an indicative quote's reference height); a
         height read here authorizes nothing.
@@ -176,9 +180,9 @@ class RegtestCoreTransactionReader:
                 follow_redirects=False,
                 timeout=httpx.Timeout(READ_SECONDS, connect=CONNECT_SECONDS),
             ) as client:
-                _, height = _chain_tip(self._rpc(client, "getblockchaininfo", [], 1))
+                _, height = _chain_tip(self._rpc(client, "getblockchaininfo", [], 1), self._chain)
                 if self._rpc(client, "getblockhash", [0], 2) != self._network.genesis_hash:
-                    raise CoreProtocolError("Core genesis differs from configured regtest")
+                    raise CoreProtocolError("Core genesis differs from configuration")
         except httpx.HTTPError:
             raise CoreUnavailableError("Core RPC transport unavailable") from None
         return height
@@ -192,7 +196,7 @@ class RegtestCoreTransactionReader:
     ) -> FundingBindingTransactionMatch:
         """Explicitly read bytes and run only the core static matcher.
 
-        Synchronous operator-invoked regtest diagnostic, not a service or
+        Synchronous operator-invoked diagnostic, not a service or
         watcher. Inactivity timeouts are NOT a total-duration bound: a
         configured listener that trickles incomplete HTTP can block this call
         indefinitely. Never use it to enforce funding/payment deadlines.
@@ -213,11 +217,11 @@ class RegtestCoreTransactionReader:
                 timeout=httpx.Timeout(READ_SECONDS, connect=CONNECT_SECONDS),
             ) as client:
                 info = self._rpc(client, "getblockchaininfo", [], 1)
-                if not isinstance(info, dict) or info.get("chain") != "regtest":
-                    raise CoreProtocolError("Core network label differs from configured regtest")
+                if not isinstance(info, dict) or info.get("chain") != self._chain:
+                    raise CoreProtocolError("Core network label differs from configuration")
                 genesis = self._rpc(client, "getblockhash", [0], 2)
                 if genesis != self._network.genesis_hash:
-                    raise CoreProtocolError("Core genesis differs from configured regtest")
+                    raise CoreProtocolError("Core genesis differs from configuration")
                 raw_hex = self._rpc(client, "getrawtransaction", [binding.funding_txid, False], 3)
         except httpx.HTTPError:
             raise CoreUnavailableError("Core RPC transport unavailable") from None
@@ -257,9 +261,11 @@ class RegtestCoreTransactionReader:
                 follow_redirects=False,
                 timeout=httpx.Timeout(READ_SECONDS, connect=CONNECT_SECONDS),
             ) as client:
-                tip_hash, tip_height = _chain_tip(self._rpc(client, "getblockchaininfo", [], 1))
+                tip_hash, tip_height = _chain_tip(
+                    self._rpc(client, "getblockchaininfo", [], 1), self._chain
+                )
                 if self._rpc(client, "getblockhash", [0], 2) != self._network.genesis_hash:
-                    raise CoreProtocolError("Core genesis differs from configured regtest")
+                    raise CoreProtocolError("Core genesis differs from configuration")
                 raw_hex = self._rpc(client, "getrawtransaction", [binding.funding_txid, False], 3)
                 raw = _transaction_bytes(raw_hex)
                 match = check_funding_binding_transaction(raw, binding, terms, keys=keys)
@@ -283,7 +289,9 @@ class RegtestCoreTransactionReader:
                 )
                 if block_raw != raw:
                     raise CoreProtocolError("Core block-qualified transaction bytes differ")
-                end_hash, end_height = _chain_tip(self._rpc(client, "getblockchaininfo", [], 7))
+                end_hash, end_height = _chain_tip(
+                    self._rpc(client, "getblockchaininfo", [], 7), self._chain
+                )
         except httpx.HTTPError:
             raise CoreUnavailableError("Core RPC transport unavailable") from None
         if tip_hash != end_hash or tip_height != end_height or output["bestblock"] != tip_hash:

@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from rill_core.recovery.inspection import RecoveryRefundCrypto
     from rill_core.wire.messages import ContractTerms, FundingBinding
 
-    from rill_cli.recovery_core_observation import RegtestRecoveryCoreReader
+    from rill_cli.recovery_core_observation import RecoveryCoreReader
 
 
 class ClaimDisclosureRefusedError(ValueError):
@@ -98,7 +98,7 @@ def _verify_intent(
 
 
 def disclose_claim_on_regtest(  # noqa: PLR0913 - exact external and signed inputs explicit
-    reader: RegtestRecoveryCoreReader,
+    reader: RecoveryCoreReader,
     binding: FundingBinding,
     terms: ContractTerms,
     *,
@@ -151,7 +151,7 @@ def disclose_claim_on_regtest(  # noqa: PLR0913 - exact external and signed inpu
 
 
 def _disclose(  # noqa: PLR0913 - one explicit side-effect sequence
-    reader: RegtestRecoveryCoreReader,
+    reader: RecoveryCoreReader,
     binding: FundingBinding,
     terms: ContractTerms,
     *,

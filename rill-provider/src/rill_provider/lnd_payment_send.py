@@ -1,4 +1,4 @@
-"""Pay and track one BTC to LN invoice with the provider's regtest LND.
+"""Pay and track one BTC to LN invoice with the provider's local LND.
 
 The caller must durably consume a one-shot dispatch grant before ``send``.
 Tracking an unknown hash is not sufficient authorization to send again after
@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import grpc
-from rill_core.wire.types import NetworkIdentity
+from rill_core.errors import ValidationError
+from rill_core.networks import backend_names, invoice_matches_network
 
 from rill_provider._lnd_proto import lightning_pb2
 from rill_provider._lnd_proto.routerrpc import router_pb2
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from rill_core.wire.messages import InvoiceBinding
+    from rill_core.wire.types import NetworkIdentity
 
 SEND_METHOD = "/routerrpc.Router/SendToRouteV2"
 QUERY_METHOD = "/lnrpc.Lightning/QueryRoutes"
@@ -148,8 +150,8 @@ def _outcome(stream: Iterator[lightning_pb2.Payment], payment_hash: str) -> Paym
     return last
 
 
-class RegtestLndPaymentSender:
-    """Loopback, regtest-only explicit-route submission and payment tracking."""
+class LndPaymentSender:
+    """Loopback explicit-route submission and payment tracking on one network."""
 
     def __init__(
         self,
@@ -163,8 +165,11 @@ class RegtestLndPaymentSender:
         """Configure only; no credential read or network dial."""
         if host not in ("127.0.0.1", "::1") or type(port) is not int or not 1 <= port <= MAX_PORT:
             raise ValueError("LND endpoint must be a numeric loopback host and port")
-        if not isinstance(network, NetworkIdentity) or network.name != "regtest":
-            raise ValueError("LND payments require explicit regtest network identity")
+        try:
+            names = backend_names(network)
+        except ValidationError:
+            raise ValueError("LND payments require a supported network identity") from None
+        self._lnd_network = names.lnd_network
         self._target = f"[{host}]:{port}" if host == "::1" else f"{host}:{port}"
         self._certificate = Path(tls_certificate_path)
         self._macaroon = Path(macaroon_path)
@@ -186,7 +191,7 @@ class RegtestLndPaymentSender:
             and 0 < max_expiry_height <= MAX_BLOCK_HEIGHT
             and type(bolt11) is str
             and 0 < len(bolt11) <= MAX_INVOICE_CHARS
-            and bolt11.startswith("lnbcrt")
+            and invoice_matches_network(bolt11, self._network)
         ):
             raise ValueError("payment bounds unsupported")
         deadline = time.monotonic() + 20
@@ -326,7 +331,7 @@ class RegtestLndPaymentSender:
     def _attest(
         self, calls: _Calls, deadline: float, *, expected: PaymentAuthority | None
     ) -> tuple[int, PaymentAuthority]:
-        """GetInfo on this channel: synced regtest tip and the payer identity.
+        """GetInfo on this channel: synced tip on our network and the payer identity.
 
         A mismatch with a bound dispatch's payer refuses the call rather than
         letting another node's history speak for the original payment.
@@ -338,10 +343,10 @@ class RegtestLndPaymentSender:
             info.synced_to_chain
             and len(info.chains) == 1
             and info.chains[0].chain == "bitcoin"
-            and info.chains[0].network == "regtest"
+            and info.chains[0].network == self._lnd_network
             and 0 < info.block_height <= MAX_BLOCK_HEIGHT
         ):
-            raise LndProtocolError("LND chain is not synchronized regtest")
+            raise LndProtocolError("LND chain is not the synchronized configured network")
         try:
             payer = PaymentAuthority(info.identity_pubkey, self._network)
         except (TypeError, ValueError):

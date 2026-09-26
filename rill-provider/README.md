@@ -735,7 +735,7 @@ new file can reserve a challenge. Do not expose the challenge through a
 handshake accept until separately durable signed-result and outbox ownership
 exist.
 
-The separate `core_tx_bytes.RegtestCoreTransactionReader` is an explicit,
+The separate `core_tx_bytes.CoreTransactionReader` is an explicit,
 read-only **regtest-only** Bitcoin Core v30 RPC probe. It takes a numeric
 loopback address, port, owner-private Core cookie file, and a complete trusted
 network identity. Construction and opening either existing ledger make no RPC
@@ -810,7 +810,7 @@ is no automated reconciliation, so crash and restart storage tests do not
 complete the D01, D02, or D09 release gates.
 
 An **explicit outgoing-only LND observation diagnostic** is available as
-`RegtestLndPaymentObserver.track(payment_hash)` in
+`LndPaymentObserver.track(payment_hash)` in
 `rill_provider.lnd_payment_observation`. It uses the vendored official LND
 `v0.21.0-beta` protobuf definitions (source commit and hashes in
 `proto/lnd-v0.21.0-beta/README.txt`), pinned Python gRPC runtime, a numeric
@@ -830,7 +830,7 @@ auth rejection, and interrupted tracking remain unknown, not proof of failure
 or absence. The payment observer does not query backend identity or network
 consensus; configured regtest identity is **not independently attested** by
 this method. A separate, explicitly invoked
-`RegtestLndInfoObserver.get_info()` uses a different, operator-provisioned
+`LndInfoObserver.get_info()` uses a different, operator-provisioned
 `info:read` macaroon and an independently configured expected compressed node
 key. It performs one bounded TLS `Lightning/GetInfo` call and refuses a
 mismatched reported key or a chain list other than exactly `bitcoin/regtest`.
@@ -892,7 +892,7 @@ The pinned LND source also includes exact `invoicesrpc/invoices.proto`
 and generated **message classes only**. Although their descriptors list mutating
 `AddHoldInvoice`, `CancelInvoice`, and `SettleInvoice` RPCs, no callable
 `InvoicesStub` is generated. An independent, explicitly invoked
-`RegtestLndInvoiceObserver.lookup(payment_hash)` reads one backend-reported
+`LndInvoiceObserver.lookup(payment_hash)` reads one backend-reported
 invoice over TLS with an operator-provisioned `invoices:read` macaroon. It
 returns only bounded typed selected non-secret payment-hash, invoice state and amount,
 timing, and **all** HTLC channel/index, state, amount, acceptance-height,

@@ -107,12 +107,12 @@ class FakeRpcError(grpc.RpcError):
         return "PRIVATE-INVOICE-PREIMAGE"
 
 
-def _client(tmp_path: Path) -> observer.RegtestLndInvoiceObserver:
+def _client(tmp_path: Path) -> observer.LndInvoiceObserver:
     (tmp_path / "tls.cert").write_bytes(b"FAKE-ROOT")
     macaroon = tmp_path / "invoice.macaroon"
     macaroon.write_bytes(b"INVOICE-READ-SECRET")
     macaroon.chmod(0o600)
-    return observer.RegtestLndInvoiceObserver(
+    return observer.LndInvoiceObserver(
         host="127.0.0.1",
         port=10009,
         tls_certificate_path=tmp_path / "tls.cert",
@@ -147,7 +147,7 @@ def test_construction_and_invalid_request_are_inert(
 ) -> None:
     monkeypatch.setattr(observer, "_read_file", lambda *_args, **_kw: pytest.fail("read"))
     monkeypatch.setattr(observer.grpc, "secure_channel", lambda *_args, **_kw: pytest.fail("dial"))
-    client = observer.RegtestLndInvoiceObserver(
+    client = observer.LndInvoiceObserver(
         host="127.0.0.1",
         port=10009,
         tls_certificate_path=tmp_path / "absent",

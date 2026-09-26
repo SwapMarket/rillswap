@@ -18,8 +18,8 @@ from rill_provider.lnd_payment_observation import (
     MAX_ATTEMPTS,
     MAX_UPDATES,
     HtlcAttemptSnapshot,
+    LndPaymentObserver,
     PaymentSnapshot,
-    RegtestLndPaymentObserver,
     TrackResult,
 )
 from rill_provider.payment_journal import (
@@ -85,7 +85,7 @@ def _snapshots(result: TrackResult, expected_hash: str) -> list[dict[str, object
 def record_payment_track(
     journal: OutgoingPaymentJournal,
     idempotency_key: str,
-    observer: RegtestLndPaymentObserver,
+    observer: LndPaymentObserver,
     evidence_path: Path,
     *,
     deadline_seconds: float = 10,
@@ -99,7 +99,7 @@ def record_payment_track(
     It contains sensitive payment metadata, but no raw route or credentials.
     """
     if not isinstance(journal, OutgoingPaymentJournal) or not isinstance(
-        observer, RegtestLndPaymentObserver
+        observer, LndPaymentObserver
     ):
         raise PaymentJournalError("existing journal and read-only LND observer required")
     intent = journal.get_intent(idempotency_key)

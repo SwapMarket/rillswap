@@ -86,7 +86,7 @@ class SwapError(RuntimeError):
 
 
 class Wallet(Protocol):
-    """The user's own Core wallet (``RegtestWalletRpc``)."""
+    """The user's own Core wallet (``WalletRpc``)."""
 
     def tip_height(self) -> int:
         """Return the best height."""

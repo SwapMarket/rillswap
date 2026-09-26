@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from rill_core.wire.types import NetworkIdentity
 
-from rill_cli.wallet_rpc import WALLET_EFFECTS, RegtestWalletRpc, WalletRpcError, _sats
+from rill_cli.wallet_rpc import WALLET_EFFECTS, WalletRpc, WalletRpcError, _sats
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -69,7 +69,7 @@ def answers() -> dict[str, Any]:
 @pytest.fixture
 def core(
     tmp_path: Path, answers: dict[str, Any]
-) -> Iterator[tuple[RegtestWalletRpc, list[dict[str, Any]]]]:
+) -> Iterator[tuple[WalletRpc, list[dict[str, Any]]]]:
     calls: list[dict[str, Any]] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -97,7 +97,7 @@ def core(
     cookie.chmod(0o600)
     try:
         yield (
-            RegtestWalletRpc(
+            WalletRpc(
                 port=server.server_port, cookie_path=cookie, wallet="w", network=NETWORK
             ),
             calls,
@@ -107,7 +107,7 @@ def core(
 
 
 def test_fund_returns_exact_declared_parts(
-    core: tuple[RegtestWalletRpc, list[dict[str, Any]]],
+    core: tuple[WalletRpc, list[dict[str, Any]]],
 ) -> None:
     wallet, calls = core
     funded = wallet.fund(bytes.fromhex(CONTRACT), 50_000, fee_rate_sat_vb=2)
@@ -132,18 +132,18 @@ def test_amounts_must_be_whole_satoshis() -> None:
 
 
 def test_only_fixed_methods_and_loopback_configuration(tmp_path: Path) -> None:
-    wallet = RegtestWalletRpc(port=1, cookie_path=tmp_path / "c", wallet="w", network=NETWORK)
+    wallet = WalletRpc(port=1, cookie_path=tmp_path / "c", wallet="w", network=NETWORK)
     with pytest.raises(WalletRpcError):
         wallet._call("dumpprivkey")  # noqa: SLF001 - the allowlist itself
     for port, name in ((0, "w"), (1, ""), (1, "a/b")):
         with pytest.raises(ValueError, match="unsupported"):
-            RegtestWalletRpc(port=port, cookie_path=tmp_path / "c", wallet=name, network=NETWORK)
+            WalletRpc(port=port, cookie_path=tmp_path / "c", wallet=name, network=NETWORK)
 
 
 @pytest.mark.parametrize("method", sorted(WALLET_EFFECTS))
 @pytest.mark.parametrize("chain", ["main", "signet", "test", "testnet4", None])
 def test_wrong_chain_never_reaches_any_wallet_effect(
-    core: tuple[RegtestWalletRpc, list[dict[str, Any]]],
+    core: tuple[WalletRpc, list[dict[str, Any]]],
     answers: dict[str, Any],
     method: str,
     chain: str | None,
@@ -156,7 +156,7 @@ def test_wrong_chain_never_reaches_any_wallet_effect(
 
 
 def test_wrong_genesis_never_reaches_funding(
-    core: tuple[RegtestWalletRpc, list[dict[str, Any]]], answers: dict[str, Any]
+    core: tuple[WalletRpc, list[dict[str, Any]]], answers: dict[str, Any]
 ) -> None:
     wallet, calls = core
     answers["getblockhash"] = "00" * 32
@@ -167,7 +167,7 @@ def test_wrong_genesis_never_reaches_funding(
 
 @pytest.mark.parametrize("info", [{}, None, {"chain": "regtest", "blocks": True}])
 def test_missing_or_partial_attestation_never_authorizes_broadcast(
-    core: tuple[RegtestWalletRpc, list[dict[str, Any]]],
+    core: tuple[WalletRpc, list[dict[str, Any]]],
     answers: dict[str, Any],
     info: object,
 ) -> None:
@@ -179,7 +179,7 @@ def test_missing_or_partial_attestation_never_authorizes_broadcast(
 
 
 def test_network_attestation_is_not_cached_across_calls(
-    core: tuple[RegtestWalletRpc, list[dict[str, Any]]], answers: dict[str, Any]
+    core: tuple[WalletRpc, list[dict[str, Any]]], answers: dict[str, Any]
 ) -> None:
     wallet, calls = core
     assert wallet.tip_height() == 850
@@ -190,7 +190,7 @@ def test_network_attestation_is_not_cached_across_calls(
 
 
 def test_funding_approves_one_coin_before_core_selection(
-    core: tuple[RegtestWalletRpc, list[dict[str, Any]]], answers: dict[str, Any]
+    core: tuple[WalletRpc, list[dict[str, Any]]], answers: dict[str, Any]
 ) -> None:
     wallet, calls = core
     template = answers["listunspent"][0]
@@ -207,7 +207,7 @@ def test_funding_approves_one_coin_before_core_selection(
 
 
 def test_insufficient_single_coin_never_consolidates(
-    core: tuple[RegtestWalletRpc, list[dict[str, Any]]], answers: dict[str, Any]
+    core: tuple[WalletRpc, list[dict[str, Any]]], answers: dict[str, Any]
 ) -> None:
     wallet, calls = core
     template = answers["listunspent"][0]
@@ -221,7 +221,7 @@ def test_insufficient_single_coin_never_consolidates(
 
 @pytest.mark.parametrize("change", [{"safe": False}, {"confirmations": 0}, {"solvable": False}])
 def test_unsafe_coins_never_fund(
-    core: tuple[RegtestWalletRpc, list[dict[str, Any]]],
+    core: tuple[WalletRpc, list[dict[str, Any]]],
     answers: dict[str, Any],
     change: dict[str, object],
 ) -> None:
@@ -233,7 +233,7 @@ def test_unsafe_coins_never_fund(
 
 
 def test_added_input_is_rejected_before_signing(
-    core: tuple[RegtestWalletRpc, list[dict[str, Any]]], answers: dict[str, Any]
+    core: tuple[WalletRpc, list[dict[str, Any]]], answers: dict[str, Any]
 ) -> None:
     wallet, calls = core
     answers["decodepsbt"]["tx"]["vin"].append({"txid": "42" * 32, "vout": 0})
@@ -244,7 +244,7 @@ def test_added_input_is_rejected_before_signing(
 
 @pytest.mark.parametrize("change", [{"txid": "41" * 31}, {"vout": True}, {"vout": -1}])
 def test_malformed_selected_coin_is_refused_before_signing(
-    core: tuple[RegtestWalletRpc, list[dict[str, Any]]],
+    core: tuple[WalletRpc, list[dict[str, Any]]],
     answers: dict[str, Any],
     change: dict[str, object],
 ) -> None:
@@ -264,7 +264,7 @@ def test_malformed_selected_coin_is_refused_before_signing(
     ],
 )
 def test_malformed_psbt_results_have_sanitized_wallet_errors(
-    core: tuple[RegtestWalletRpc, list[dict[str, Any]]],
+    core: tuple[WalletRpc, list[dict[str, Any]]],
     answers: dict[str, Any],
     method: str,
     response: object,

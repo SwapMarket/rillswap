@@ -147,7 +147,7 @@ def test_observe_funding_checks_selected_encrypted_record_before_any_core_rpc(  
                 1101,
             )
 
-    monkeypatch.setattr(cli_main, "RegtestRecoveryCoreReader", Reader)
+    monkeypatch.setattr(cli_main, "RecoveryCoreReader", Reader)
     selected_args = [
         "observe-funding",
         *common,
@@ -302,7 +302,7 @@ def test_sign_refund_rejects_provider_refund_profile_before_rpc(
     def should_not_connect(**_kwargs: object) -> None:
         pytest.fail("wrong profile must not connect to Core")
 
-    monkeypatch.setattr(cli_main, "RegtestRecoveryCoreReader", should_not_connect)
+    monkeypatch.setattr(cli_main, "RecoveryCoreReader", should_not_connect)
     assert (
         cli_main.main(
             [
@@ -383,7 +383,7 @@ def test_claim_observation_checks_profile_and_signed_record_before_rpc(
                 1101,
             )
 
-    monkeypatch.setattr(cli_main, "RegtestRecoveryCoreReader", Reader)
+    monkeypatch.setattr(cli_main, "RecoveryCoreReader", Reader)
     arguments = [
         "recover",
         "observe-claim",
@@ -527,7 +527,7 @@ def test_prepare_claim_publishes_only_encrypted_verified_selected_transaction(  
             calls.append("claim-read-only")
             return public_sample
 
-    monkeypatch.setattr(cli_main, "RegtestRecoveryCoreReader", Reader)
+    monkeypatch.setattr(cli_main, "RecoveryCoreReader", Reader)
     destination = tmp_path / "private-claim.age"
     args = [
         "recover",

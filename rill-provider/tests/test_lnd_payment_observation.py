@@ -93,13 +93,13 @@ class FakeChannel:
         self.closed = True
 
 
-def _client(tmp_path: Path) -> observer.RegtestLndPaymentObserver:
+def _client(tmp_path: Path) -> observer.LndPaymentObserver:
     cert = tmp_path / "tls.cert"
     cert.write_bytes(b"FAKE-PINNED-TLS-CERT")
     macaroon = tmp_path / "readonly.macaroon"
     macaroon.write_bytes(b"restricted-test-macaroon")
     macaroon.chmod(0o600)
-    return observer.RegtestLndPaymentObserver(
+    return observer.LndPaymentObserver(
         host="127.0.0.1",
         port=10009,
         tls_certificate_path=cert,
@@ -136,7 +136,7 @@ def test_construction_and_invalid_requests_are_inert(
     monkeypatch.setattr(
         observer.grpc, "secure_channel", lambda *_args, **_kw: pytest.fail("unexpected RPC")
     )
-    diagnostic = observer.RegtestLndPaymentObserver(
+    diagnostic = observer.LndPaymentObserver(
         host="127.0.0.1",
         port=10009,
         tls_certificate_path=tmp_path / "absent-cert",

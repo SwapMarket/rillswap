@@ -302,9 +302,9 @@ from rill_core.wire.types import NetworkIdentity
 from rill_provider._lnd_proto import lightning_pb2
 from rill_provider._lnd_proto.invoicesrpc import invoices_pb2
 from rill_provider._lnd_proto.routerrpc import router_pb2
-from rill_provider.lnd_invoice_observation import RegtestLndInvoiceObserver
+from rill_provider.lnd_invoice_observation import LndInvoiceObserver
 from rill_provider.lnd_payment_observation import (
-    RegtestLndInfoObserver, RegtestLndPaymentObserver, LndUnavailableError,
+    LndInfoObserver, LndPaymentObserver, LndUnavailableError,
 )
 import walletunlocker_pb2 as unlock
 
@@ -410,7 +410,7 @@ with os.fdopen(fd, 'wb') as output:
 selected_network = NetworkIdentity.model_validate(json.loads(
     Path('/work/provider/tests/fixtures/initial-btc-to-ln-v1.json').read_text()
 )['contract_terms']['network_identity'])
-invoice_observer = RegtestLndInvoiceObserver(host='127.0.0.1', port=10009,
+invoice_observer = LndInvoiceObserver(host='127.0.0.1', port=10009,
     tls_certificate_path='/work/public/tls.cert', invoice_macaroon_path=invoice_private,
     network=selected_network)
 try:
@@ -436,7 +436,7 @@ info_private = Path('/tmp/rill-info-only.macaroon')
 fd = os.open(info_private, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
 with os.fdopen(fd, 'wb') as output:
     output.write(info_restricted)
-info_observer = RegtestLndInfoObserver(host='127.0.0.1', port=10009,
+info_observer = LndInfoObserver(host='127.0.0.1', port=10009,
     tls_certificate_path='/work/public/tls.cert', info_macaroon_path=info_private,
     network=NetworkIdentity.model_validate(json.loads(
         Path('/work/provider/tests/fixtures/initial-btc-to-ln-v1.json').read_text()
@@ -461,7 +461,7 @@ with os.fdopen(fd, 'wb') as output:
 network = NetworkIdentity.model_validate(json.loads(
     Path('/work/provider/tests/fixtures/initial-btc-to-ln-v1.json').read_text()
 )['contract_terms']['network_identity'])
-observer = RegtestLndPaymentObserver(host='127.0.0.1', port=10009,
+observer = LndPaymentObserver(host='127.0.0.1', port=10009,
     tls_certificate_path='/work/public/tls.cert', read_macaroon_path=private, network=network)
 try:
     print('PHASE: observer_track', file=sys.stderr)
@@ -622,7 +622,7 @@ import grpc
 from rill_core.wire.types import NetworkIdentity
 from rill_provider._lnd_proto import lightning_pb2
 from rill_provider._lnd_proto.invoicesrpc import invoices_pb2
-from rill_provider.lnd_invoice_observation import RegtestLndInvoiceObserver
+from rill_provider.lnd_invoice_observation import LndInvoiceObserver
 import walletunlocker_pb2 as unlock
 import stateservice_pb2 as state
 
@@ -680,7 +680,7 @@ with os.fdopen(fd, 'wb') as output:
 network = NetworkIdentity.model_validate(json.loads(
     Path('/work/provider/tests/fixtures/initial-btc-to-ln-v1.json').read_text()
 )['contract_terms']['network_identity'])
-observer = RegtestLndInvoiceObserver(host='127.0.0.1', port=10009,
+observer = LndInvoiceObserver(host='127.0.0.1', port=10009,
     tls_certificate_path='/work/public/tls.cert', invoice_macaroon_path=private,
     network=network)
 selected = secrets.token_bytes(32)
@@ -852,8 +852,8 @@ from rill_core.wire.types import NetworkIdentity
 from rill_provider._lnd_proto import lightning_pb2 as ln
 from rill_provider._lnd_proto.invoicesrpc import invoices_pb2 as inv
 from rill_provider._lnd_proto.routerrpc import router_pb2 as router
-from rill_provider.lnd_invoice_observation import RegtestLndInvoiceObserver
-from rill_provider.lnd_payment_observation import LndProtocolError, RegtestLndPaymentObserver
+from rill_provider.lnd_invoice_observation import LndInvoiceObserver
+from rill_provider.lnd_payment_observation import LndProtocolError, LndPaymentObserver
 import walletunlocker_pb2 as unlock
 import stateservice_pb2 as state
 
@@ -1129,10 +1129,10 @@ def one_attempt(payment, expected, peer, selected_channel, amount):
 with tempfile.TemporaryDirectory(prefix='rill-hold-reads-', dir='/tmp') as credentials:
     invoice_file = private_file(credentials, 'invoice.macaroon', bake_read(b, b_secret, 'invoices'))
     payment_file = private_file(credentials, 'payment.macaroon', bake_read(a, a_secret, 'offchain'))
-    invoice_observer = RegtestLndInvoiceObserver(host='127.0.0.1', port=10010,
+    invoice_observer = LndInvoiceObserver(host='127.0.0.1', port=10010,
         tls_certificate_path='/work/public/b.cert', invoice_macaroon_path=invoice_file,
         network=network)
-    payment_observer = RegtestLndPaymentObserver(host='127.0.0.1', port=10009,
+    payment_observer = LndPaymentObserver(host='127.0.0.1', port=10009,
         tls_certificate_path='/work/public/a.cert', read_macaroon_path=payment_file,
         network=network)
     raw_lookup = unary(b, '/lnrpc.Lightning/LookupInvoice', ln.PaymentHash, ln.Invoice)

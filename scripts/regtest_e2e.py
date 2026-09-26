@@ -52,15 +52,15 @@ import os
 import sys
 from pathlib import Path
 from rill_provider.cli import main
-from rill_provider.lnd_payment_send import RegtestLndPaymentSender
-original = RegtestLndPaymentSender.send
+from rill_provider.lnd_payment_send import LndPaymentSender
+original = LndPaymentSender.send
 def send(self, *args, **kwargs):
     outcome = original(self, *args, **kwargs)
     if outcome.status == 'SUCCEEDED':
         Path(sys.argv[2]).write_text('settled before local commit')
         os._exit(73)
     return outcome
-RegtestLndPaymentSender.send = send
+LndPaymentSender.send = send
 raise SystemExit(main(['serve', '--config', sys.argv[1]]))
 """
 

@@ -80,12 +80,12 @@ def _info() -> lightning_pb2.GetInfoResponse:
     )
 
 
-def _client(tmp_path: Path, *, key: str = KEY) -> observer.RegtestLndInfoObserver:
+def _client(tmp_path: Path, *, key: str = KEY) -> observer.LndInfoObserver:
     (tmp_path / "tls.cert").write_bytes(b"FAKE-TLS-ROOT")
     macaroon = tmp_path / "info.macaroon"
     macaroon.write_bytes(b"info-read-only-secret")
     macaroon.chmod(0o600)
-    return observer.RegtestLndInfoObserver(
+    return observer.LndInfoObserver(
         host="127.0.0.1",
         port=10009,
         tls_certificate_path=tmp_path / "tls.cert",
@@ -120,7 +120,7 @@ def test_construction_and_invalid_deadlines_do_not_read_credentials_or_dial(
 ) -> None:
     monkeypatch.setattr(observer, "_read_file", lambda *_args, **_kw: pytest.fail("read"))
     monkeypatch.setattr(observer.grpc, "secure_channel", lambda *_args, **_kw: pytest.fail("dial"))
-    diagnostic = observer.RegtestLndInfoObserver(
+    diagnostic = observer.LndInfoObserver(
         host="127.0.0.1",
         port=10009,
         tls_certificate_path=tmp_path / "absent-cert",
@@ -133,7 +133,7 @@ def test_construction_and_invalid_deadlines_do_not_read_credentials_or_dial(
             diagnostic.get_info(deadline_seconds=deadline)
     for key in ("", "04" + "ab" * 32, "02" + "gg" * 32, KEY.upper(), KEY + "00"):
         with pytest.raises(ValueError, match="node key"):
-            observer.RegtestLndInfoObserver(
+            observer.LndInfoObserver(
                 host="127.0.0.1",
                 port=10009,
                 tls_certificate_path="absent",

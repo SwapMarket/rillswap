@@ -107,7 +107,7 @@ def test_cli_refuses_missing_backend_or_store_ownership_before_network_construct
     acquisition = Mock(side_effect=live.LiveSessionStoreError("store already owned"))
     constructor = Mock(side_effect=AssertionError("no network backend may be constructed"))
     monkeypatch.setattr(live.LiveSessionStore, "acquire", acquisition)
-    monkeypatch.setattr(cli, "RegtestLndPaymentSender", constructor)
+    monkeypatch.setattr(cli, "LndPaymentSender", constructor)
     assert (
         cli.main(["reconcile-payment", "--config", str(config), "--session-id", "00" * 32])
         == cli.REFUSED
@@ -139,11 +139,11 @@ def test_cli_uses_read_credentials_only_and_reports_no_secrets(
     )
     tracker = _tracker(PaymentOutcome(status, PREIMAGE if status == "SUCCEEDED" else None))
     constructor = Mock(return_value=tracker)
-    monkeypatch.setattr(cli, "RegtestLndPaymentSender", constructor)
+    monkeypatch.setattr(cli, "LndPaymentSender", constructor)
     monkeypatch.setattr(cli, "_context", lambda _library: nullcontext(Signer(harness)))
     for name in (
-        "RegtestCoreTransactionReader",
-        "RegtestLndInvoiceDecoder",
+        "CoreTransactionReader",
+        "LndInvoiceDecoder",
         "SettlementEngine",
         "HandshakeService",
         "_serve",
@@ -201,7 +201,7 @@ def test_cli_backend_failures_are_redacted_and_do_not_mutate_payments(
     constructor = Mock(return_value=tracker)
     if isinstance(failure, ValueError):
         constructor.side_effect = failure
-    monkeypatch.setattr(cli, "RegtestLndPaymentSender", constructor)
+    monkeypatch.setattr(cli, "LndPaymentSender", constructor)
     with harness.acquire() as store:
         session = _paying(store, harness, "SUBMITTED")
         before = _financial_rows(store)

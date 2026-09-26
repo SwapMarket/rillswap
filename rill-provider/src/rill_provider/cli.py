@@ -18,12 +18,15 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from rill_provider.core_tx_bytes import RegtestCoreTransactionReader
+from rill_core.errors import ValidationError
+from rill_core.networks import require_funding_release
+
+from rill_provider.core_tx_bytes import CoreTransactionReader
 from rill_provider.handshake_service import HandshakeService
 from rill_provider.live_session_store import LiveSessionStore, LiveSessionStoreError
-from rill_provider.lnd_invoice_decode import RegtestLndInvoiceDecoder
+from rill_provider.lnd_invoice_decode import LndInvoiceDecoder
 from rill_provider.lnd_payment_observation import LndObservationError
-from rill_provider.lnd_payment_send import RegtestLndPaymentSender
+from rill_provider.lnd_payment_send import LndPaymentSender
 from rill_provider.operator_config import (
     OperatorConfig,
     OperatorConfigError,
@@ -126,7 +129,7 @@ def _reconcile_payment(
         public_keys=crypto,
     ) as store:
         try:
-            tracker = RegtestLndPaymentSender(
+            tracker = LndPaymentSender(
                 host="127.0.0.1",
                 port=lnd.port,
                 tls_certificate_path=lnd.tls_certificate,
@@ -134,7 +137,9 @@ def _reconcile_payment(
                 network=config.network,
             )
         except ValueError:
-            raise OperatorConfigError("payment reconciliation requires a regtest network") from None
+            raise OperatorConfigError(
+                "payment reconciliation requires a supported network"
+            ) from None
         result = reconcile_payment(
             store, tracker, crypto, session_id=args.session_id, now=int(time.time())
         )
@@ -154,11 +159,11 @@ def _chain_tip(config: OperatorConfig) -> Callable[[], int] | None:
     if core is None:
         return None
     try:
-        reader = RegtestCoreTransactionReader(
+        reader = CoreTransactionReader(
             port=core.port, cookie_path=core.cookie_file, network=config.network
         )
     except ValueError:
-        raise OperatorConfigError("bitcoin_core requires a regtest network") from None
+        raise OperatorConfigError("bitcoin_core requires a supported network") from None
     return reader.tip_height
 
 
@@ -169,10 +174,10 @@ def _settlement(
     if lnd is None or core is None or lnd.payment_macaroon is None:
         return None
     try:
-        chain = RegtestCoreTransactionReader(
+        chain = CoreTransactionReader(
             port=core.port, cookie_path=core.cookie_file, network=config.network
         )
-        lightning = RegtestLndPaymentSender(
+        lightning = LndPaymentSender(
             host="127.0.0.1",
             port=lnd.port,
             tls_certificate_path=lnd.tls_certificate,
@@ -180,7 +185,7 @@ def _settlement(
             network=config.network,
         )
     except ValueError:
-        raise OperatorConfigError("settlement requires a regtest network") from None
+        raise OperatorConfigError("settlement requires a supported network") from None
     return SettlementEngine(store, chain, lightning, crypto)
 
 
@@ -189,7 +194,7 @@ def _invoice_decoder(config: OperatorConfig) -> Callable[[str], InvoiceBinding] 
     if lnd is None:
         return None
     try:
-        decoder = RegtestLndInvoiceDecoder(
+        decoder = LndInvoiceDecoder(
             host="127.0.0.1",
             port=lnd.port,
             tls_certificate_path=lnd.tls_certificate,
@@ -197,11 +202,16 @@ def _invoice_decoder(config: OperatorConfig) -> Callable[[str], InvoiceBinding] 
             network=config.network,
         )
     except ValueError:
-        raise OperatorConfigError("lnd requires a regtest network") from None
+        raise OperatorConfigError("lnd requires a supported network") from None
     return decoder.decode
 
 
 async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
+    try:
+        # Serving firm offers invites funding; mainnet needs release acceptance.
+        require_funding_release(config.network)
+    except ValidationError:
+        raise OperatorConfigError("network is not release-accepted for serving") from None
     identity = ProviderIdentity.load(
         config.identity_file,
         custody_identity=custody,

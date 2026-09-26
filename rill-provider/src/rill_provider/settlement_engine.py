@@ -58,7 +58,7 @@ LOG = logging.getLogger(__name__)
 
 
 class ChainBackend(Protocol):
-    """The provider's own Bitcoin Core (``RegtestCoreTransactionReader``)."""
+    """The provider's own Bitcoin Core (``CoreTransactionReader``)."""
 
     def tip_height(self) -> int:
         """Return the validated tip height."""
@@ -83,7 +83,7 @@ CLAIM_PAGE = 16  # historical claims checked per tick
 
 
 class LightningBackend(Protocol):
-    """The provider's own LND (``RegtestLndPaymentSender``)."""
+    """The provider's own LND (``LndPaymentSender``)."""
 
     def track(self, payment_hash: str, *, payer: PaymentAuthority | None = None) -> PaymentOutcome:
         """Return the payment status by hash, attesting ``payer`` when bound."""
