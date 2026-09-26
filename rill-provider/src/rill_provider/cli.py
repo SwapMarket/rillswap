@@ -64,7 +64,7 @@ def _provision_store(config: OperatorConfig) -> int:
 
 
 def _migrate_store(config: OperatorConfig, crypto: Context, custody: str) -> None:
-    """Explicitly upgrade an authoritative v5 store without running the service."""
+    """Explicitly upgrade an authoritative v5/v6 store without running the service."""
     with LiveSessionStore.acquire(
         config.store_path,
         config.network,
@@ -174,7 +174,7 @@ def _parser() -> argparse.ArgumentParser:
     identity.add_argument("--native-crypto-library", type=Path, required=True)
     for name, text in (
         ("provision-store", "create a new empty live session store"),
-        ("migrate-store", "explicitly upgrade an authoritative v5 store; no network actions"),
+        ("migrate-store", "explicitly upgrade an authoritative v5/v6 store; no network actions"),
         ("serve", "run the handshake service until SIGINT/SIGTERM"),
     ):
         command = commands.add_parser(name, help=text)

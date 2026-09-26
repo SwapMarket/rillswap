@@ -191,6 +191,7 @@ class Harness:
         self.scalar = SESSION_SECRET
         monkeypatch.setattr(live, "_new_session_scalar", lambda: self.scalar)
         self.custody = x25519.Identity.generate()
+        self.policy = POLICY
         self.init, self.accept, self.confirm = (_bytes(e) for e in self.envelopes)
 
     def provision(self) -> None:
@@ -198,7 +199,7 @@ class Harness:
             self.path,
             self.network,
             self.identity,
-            POLICY,
+            self.policy,
             AUTHORITY,
             custody_recipient=str(self.custody.to_public()),
         )
@@ -213,7 +214,7 @@ class Harness:
             "public_keys": PurePublicKeys(),
         }
         arguments.update(changed)
-        return LiveSessionStore.acquire(path, self.network, self.identity, POLICY, **arguments)
+        return LiveSessionStore.acquire(path, self.network, self.identity, self.policy, **arguments)
 
 
 @pytest.fixture
@@ -917,7 +918,8 @@ def test_native_init_received_on_epoch_inbox(harness: Harness) -> None:
             crypto=crypto,
         )
         opened = store.open_epoch_frame(frame, now=1150, transport=crypto)
-        assert opened == harness.init
+        assert opened.document == harness.init
+        assert opened.epoch_key == epoch
         assert store.reserve(opened).session_id == harness.envelopes[0]["session_id"]
         with pytest.raises(LiveSessionStoreError, match="retired epoch"):
             store.open_epoch_frame(frame, now=1200, transport=crypto)

@@ -60,10 +60,20 @@ def _insert_funded_swap(store: live.LiveSessionStore, harness: Harness, state: s
 
 
 def _as_v5(path: Path) -> None:
+    _as_v6(path)
     with sqlite3.connect(path) as connection:
         connection.execute("DROP TABLE payment_dispatch")
         connection.execute("UPDATE meta SET schema_version=5")
         connection.execute("PRAGMA user_version=5")
+
+
+def _as_v6(path: Path) -> None:
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP TABLE epoch_admissions")
+        connection.execute("DROP TABLE epoch_retirement")
+        connection.execute("DROP TABLE epoch_key_history")
+        connection.execute("UPDATE meta SET schema_version=6")
+        connection.execute("PRAGMA user_version=6")
 
 
 def _hash(harness: Harness) -> str:
@@ -138,7 +148,7 @@ def test_partial_current_schema_is_not_repaired_by_migration(harness: Harness) -
     with pytest.raises(live.LiveSessionStoreError, match="schema incompatible"):
         harness.acquire_at(harness.path, upgrade_from_v5=True)
     with sqlite3.connect(harness.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (6,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (7,)
         assert (
             connection.execute(
                 "SELECT name FROM sqlite_master WHERE name='payment_dispatch'"
@@ -164,7 +174,7 @@ def test_upgrade_is_explicit_and_never_backfills_send_permission(
         assert store._connection.execute("SELECT * FROM payment_dispatch").fetchall() == []  # noqa: SLF001
         assert not store.commit_payment_dispatch(session, _hash(harness), b"request")
     with harness.acquire() as store:
-        assert store._connection.execute("PRAGMA user_version").fetchone() == (6,)  # noqa: SLF001
+        assert store._connection.execute("PRAGMA user_version").fetchone() == (7,)  # noqa: SLF001
         assert not store.commit_payment_dispatch(session, _hash(harness), b"request")
 
 

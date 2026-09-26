@@ -75,7 +75,7 @@ absent, partial, old, or restored state grants no key allocation or action
 authority.
 
 `live_session_store.LiveSessionStore` is the **authoritative** handshake
-session store (SQLite `RLS1` v6; v5 requires explicit migration and unreleased v1-v4 files are refused unchanged), and the only provider store whose rows may
+session store (SQLite `RLS1` v7; v5/v6 require explicit migration and unreleased v1-v4 files are refused unchanged), and the only provider store whose rows may
 permit exposing an accept or admitting a confirm. It must be created
 explicitly with `LiveSessionStore.provision(...)` and an
 `AuthorityDeclaration`, in which the operator attests that the volume is
@@ -155,8 +155,9 @@ old. Each key keeps decoding until `created_at + period + retention`, so set
 the newest epoch, rotation is refused. Epoch secrets are age-sealed in the
 store and bound to its UUID. `open_epoch_frame(event, now=, transport=)`
 decodes a gift-wrapped `handshake_init` sent to an unretired epoch key. It
-returns the exact init bytes only if the envelope sender is the seal author.
-That sender is still a stranger, so the init must still go through `reserve`.
+returns an `EpochInitiation` containing the exact init bytes and authenticated
+recipient epoch only if the envelope sender is the seal author. That sender is
+still a stranger; pass this object intact to `reserve` for admission checks.
 The epoch-inbox schedule is a local availability policy, because RS-005 and
 RS-006 do not specify one.
 
@@ -167,7 +168,8 @@ retire.
 Three limits apply to new sessions only. Replays of known sessions are
 never limited.
 - `acquire(..., max_sessions=1000)` caps live sessions.
-- `max_tombstones=1_000_000` caps permanent expired-session IDs.
+- `max_tombstones=1_000_000` caps permanent legacy expired-session IDs, or
+  temporary epoch-bound tombstones independently when that mode is enabled.
 - `new_sessions_per_minute=60` is a global, in-memory token bucket.
 
 Capacity is counted from the durable rows, so a restart does not reset it.
@@ -184,6 +186,26 @@ accept, as RS-001's stable replay rule requires. A late confirm frame cannot
 even be decoded any more, so it gets no reply. The service subscribes to
 every still-decodable epoch (`receiving_epochs`), not only to the advertised
 ones. Ownership loss (`StaleOwnerError`) always stops the service.
+
+The optional `epoch-bound-session/v1` handshake policy changes **new** admission,
+not existing contracts. Enabling it requires explicit `migrate-store` with that
+feature in the configured handshake policy; the stored policy cannot later
+remove it. Known legacy sessions still replay, but new legacy IDs are refused.
+Session IDs in this mode bind the full network, provider identity, recipient
+epoch, and fresh client key. An optional extension without the required feature
+does not opt in. Missing ingress provenance never authorizes admission.
+
+Idle epoch-bound sessions retain temporary tombstones until their recipient
+epoch durably retires. The retirement watermark, deletion of expired epoch
+secrets, and tombstone pruning share the ownership transaction. Clock rollback
+cannot reopen retired epochs. A public epoch-key ledger prevents reuse of a
+formerly retired key. It grows with operator-controlled rotations, not inbound
+session traffic. Temporary tombstone capacity recovers after retirement, even
+if the legacy tombstone quota is full. Total retained storage is **not bounded**:
+accepted contracts, legacy replay IDs, payment-hash history, and the public key
+ledger remain authoritative. The accepted-session quota is unchanged pending
+separate economic admission policy. Client negotiation and signed capability
+advertisement are not activated by this store-only implementation.
 
 `record_announcement(created_at)` makes sure
 announcement revisions strictly increase across restarts. It runs before
@@ -336,15 +358,19 @@ rill-provider provision-store --config provider.json
 rill-provider serve --config provider.json           # until SIGINT/SIGTERM
 ```
 
-Upgrading an authoritative v5 installation is an explicit offline operation:
+Upgrading an authoritative v5/v6 installation is an explicit offline operation:
 
 ```sh
 rill-provider migrate-store --config provider.json
 ```
 
 Stop the old service first. This takes the existing exclusive owner lock,
-verifies the exact v5 schema, namespace, custody recipient, and original file
-inodes, then adds the dispatch table and updates the version in one transaction.
+verifies the exact predecessor schema, namespace, custody recipient, and original
+file inodes, then adds v7 epoch custody (and dispatch custody for v5) in one
+transaction. Existing epoch rows seed the public-key history; old sessions never
+gain epoch admission metadata. The initial retirement watermark is zero; later
+pruning requires an affirmative expired epoch record. A missing v7 watermark or
+table is corruption, not permission to reconstruct it.
 It does not start relays, scan a chain, send payments, publish messages, or delete
 history. Interrupted upgrades roll back; `serve` never migrates automatically.
 Missing, partial, copied, foreign, and unsupported older stores remain refused.
@@ -355,7 +381,7 @@ LND but cannot start another payment merely because tracking returns not found.
 An existing `FUNDING_SEEN` swap can obtain a new grant only through its normal
 checked transition to `PAYING`. Keys, preimages, contracts, and payment-hash
 reservations are retained. This migration is not restored-snapshot reconciliation.
-Existing v6 stores need no migration for explicit routes: consumed grants
+Existing v6 dispatch grants remain unchanged during migration. Consumed grants
 remain consumed, including older relative-send records. New dispatch records
 identify `SendToRouteV2` and retain the exact protobuf bytes as hex; no saved
 request, old or new, is automatically replayed.

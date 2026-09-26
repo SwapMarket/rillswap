@@ -33,7 +33,7 @@ import time
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, Self
 
@@ -42,7 +42,7 @@ from pyrage import x25519
 from rill_core.wire import verify_static_handshake_accept, verify_static_handshake_transcript
 from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_model_json
 from rill_core.wire.envelope_authentication import verify_static_signed_envelope
-from rill_core.wire.hashes import handshake_init_hash, unsigned_envelope_hash
+from rill_core.wire.hashes import EPOCH_SESSION_FEATURE, handshake_init_hash, unsigned_envelope_hash
 from rill_core.wire.messages import (
     Envelope,
     HandshakeAccept,
@@ -68,7 +68,7 @@ if TYPE_CHECKING:
     from rill_provider.provider_identity import ProviderIdentity
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
-SCHEMA_VERSION = 6  # v5 requires explicit upgrade; v1-v4 are refused unchanged.
+SCHEMA_VERSION = 7  # v5/v6 require explicit upgrade; v1-v4 are refused unchanged.
 CONTRACT_KEY_RECORD_KIND = "rillswap-provider-contract-key"
 OPEN_PHASES = ("CONFIRMED", "ACCEPTED")  # sessions that may still send requests
 SWAP_TRANSITIONS = frozenset(
@@ -171,7 +171,33 @@ PAYMENT_DISPATCH_SCHEMA = (
     "payment_hash TEXT NOT NULL UNIQUE, "
     "state TEXT NOT NULL CHECK (state IN ('UNSENT', 'SUBMITTED')), request BLOB)"
 )
-SCHEMA = (*SCHEMA_V5, PAYMENT_DISPATCH_SCHEMA)
+SCHEMA_V6 = (*SCHEMA_V5, PAYMENT_DISPATCH_SCHEMA)
+EPOCH_ADMISSION_SCHEMA = (
+    "CREATE TABLE epoch_admissions (session_id TEXT PRIMARY KEY, epoch_key TEXT NOT NULL, "
+    "retire_after INTEGER NOT NULL, expired INTEGER NOT NULL CHECK (expired IN (0, 1)))"
+)
+EPOCH_RETIREMENT_SCHEMA = (
+    "CREATE TABLE epoch_retirement (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
+    "retired_through INTEGER NOT NULL CHECK (retired_through >= 0))"
+)
+EPOCH_KEY_HISTORY_SCHEMA = "CREATE TABLE epoch_key_history (epoch_key TEXT PRIMARY KEY)"
+SCHEMA = (
+    *SCHEMA_V6,
+    EPOCH_ADMISSION_SCHEMA,
+    EPOCH_RETIREMENT_SCHEMA,
+    EPOCH_KEY_HISTORY_SCHEMA,
+)
+ADMISSION_INDEXES = (
+    "CREATE INDEX epoch_admissions_expiry ON epoch_admissions (expired, retire_after)",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class EpochInitiation:
+    """Canonical init and authenticated recipient provenance from open_epoch_frame()."""
+
+    document: bytes
+    epoch_key: str
 
 
 class LiveSessionStoreError(ValueError):
@@ -452,6 +478,9 @@ class LiveSessionStore:
                 connection.execute("BEGIN IMMEDIATE")
                 for statement in SCHEMA:
                     connection.execute(statement)
+                for statement in ADMISSION_INDEXES:
+                    connection.execute(statement)
+                connection.execute("INSERT INTO epoch_retirement VALUES (1, 0)")
                 connection.execute(
                     "INSERT INTO meta VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
                     (
@@ -480,7 +509,7 @@ class LiveSessionStore:
             os.close(directory)
 
     @classmethod
-    def acquire(  # noqa: PLR0913, PLR0915 - independent expectations explicit
+    def acquire(  # noqa: PLR0912, PLR0913, PLR0915 - independent custody guards explicit
         cls,
         path: str | PathLike[str],
         network: NetworkIdentity,
@@ -497,10 +526,11 @@ class LiveSessionStore:
     ) -> Self:
         """Take lifetime exclusive ownership; refuse any unknown or copied state.
 
-        ``max_sessions`` caps retained sessions so strangers cannot grow the
-        store without bound; ``expire_unconfirmed`` reclaims capacity.
-        ``upgrade_from_v5=True`` explicitly authorizes an additive, transactional
-        schema upgrade. It does not backfill permission to send old payments.
+        ``max_sessions`` caps retained sessions. ``expire_idle`` reclaims
+        pre-economic capacity; accepted-contract quota policy is unchanged.
+        The historical ``upgrade_from_v5=True`` spelling authorizes supported
+        v5/v6 schema upgrades and adding the epoch-bound admission feature.
+        No old payment or handshake gains new authority from the migration.
         """
         if not all(
             type(limit) is int and limit >= 1
@@ -542,7 +572,16 @@ class LiveSessionStore:
                 "db_inode, lock_inode, generation, store_uuid, authority_jcs, custody_recipient "
                 "FROM meta"
             ).fetchall()
-            if len(row) != 1 or row[0][:4] != (version, network_jcs, identity, policy_jcs):
+            if len(row) != 1 or row[0][:3] != (version, network_jcs, identity):
+                raise LiveSessionStoreError("store namespace or policy mismatch")  # noqa: TRY301
+            if row[0][3] != policy_jcs and not (
+                upgrade_from_v5 is True
+                and EPOCH_SESSION_FEATURE in policy.features
+                and row[0][3]
+                == _policy_bytes(
+                    replace(policy, features=policy.features - {EPOCH_SESSION_FEATURE})
+                )
+            ):
                 raise LiveSessionStoreError("store namespace or policy mismatch")  # noqa: TRY301
             _check_provisioning(row[0][7], row[0][8])
             if row[0][9] != str(unlocking.to_public()):
@@ -551,8 +590,17 @@ class LiveSessionStore:
                 raise LiveSessionStoreError(  # noqa: TRY301 - copied or restored file
                     "store files are not the provisioned authoritative copy"
                 )
-            if version == 5:  # noqa: PLR2004 - the only explicitly supported prior schema
+            if version == 5:  # noqa: PLR2004 - exact legacy schema
                 _upgrade_v5(connection)
+            if version in (5, 6):
+                _upgrade_v6(connection)
+            _epoch_watermark(connection)
+            if connection.execute(
+                "SELECT 1 FROM epochs e LEFT JOIN epoch_key_history h "
+                "ON h.epoch_key=e.epoch_key WHERE h.epoch_key IS NULL LIMIT 1"
+            ).fetchone():
+                raise LiveSessionStoreError("epoch key history unavailable")  # noqa: TRY301
+            connection.execute("UPDATE meta SET policy_jcs=?", (policy_jcs,))
             generation = row[0][6] + 1
             connection.execute("UPDATE meta SET generation=?", (generation,))
             connection.execute("COMMIT")
@@ -668,29 +716,61 @@ class LiveSessionStore:
             raise LiveSessionStoreError("untrusted or unsupported handshake initiation")
         return outer, init
 
-    def reserve(self, init_document: bytes, *, now: int | None = None) -> SessionReservation:
+    @property
+    def requires_epoch_bound_sessions(self) -> bool:
+        """Whether all new sessions require epoch binding (legacy replays remain valid)."""
+        return EPOCH_SESSION_FEATURE in self._policy.features
+
+    def reserve(  # noqa: PLR0912, PLR0915 - replay, provenance, and capacity share one transaction
+        self, initiation: bytes | EpochInitiation, *, now: int | None = None
+    ) -> SessionReservation:
         """Reserve one fresh provider challenge per session; replay is stable.
 
         The init is unsigned, so different bytes for a known session may come
         from a stranger. They are kept as bounded conflict evidence and block
         new risk for that session (an availability cost, never exposure).
-        An expired session ID is answered ``SessionExpiredError`` forever.
-        New sessions need free live capacity, free tombstone capacity, and a
-        token from the global admission rate limit.
+        Legacy expired IDs remain tombstoned forever. Epoch-bound idle sessions
+        keep a temporary tombstone until their epoch has durably retired. That
+        mode rejects every new unbound initiation, so legacy input cannot reuse
+        a retired epoch-bound ID. Existing legacy records still replay exactly.
         """
         now = int(time.time()) if now is None else now
+        ingress = initiation if isinstance(initiation, EpochInitiation) else None
+        init_document = (
+            initiation.document if isinstance(initiation, EpochInitiation) else initiation
+        )
         try:
             outer, init = self._init(init_document)
             with self._write() as connection:
-                if connection.execute(
-                    "SELECT 1 FROM expired WHERE session_id=?", (init.session_id,)
-                ).fetchone():
+                if _session_expired(connection, init.session_id):
                     raise SessionExpiredError("session expired")  # noqa: TRY301
+                epoch = init.epoch_inbox_xonly_key
+                retire_after = None
+                if epoch is not None:
+                    if ingress is None or ingress.epoch_key != epoch:
+                        raise LiveSessionStoreError("epoch admission provenance unavailable")  # noqa: TRY301
+                    epoch_row = connection.execute(
+                        "SELECT retire_after FROM epochs WHERE epoch_key=? AND retire_after > ?",
+                        (epoch, max(now, _epoch_watermark(connection))),
+                    ).fetchone()
+                    if epoch_row is None:
+                        raise SessionExpiredError("admission epoch retired")  # noqa: TRY301
+                    retire_after = epoch_row[0]
+                admission = connection.execute(
+                    "SELECT epoch_key, retire_after FROM epoch_admissions WHERE session_id=?",
+                    (init.session_id,),
+                ).fetchone()
                 row = connection.execute(
                     "SELECT init_bytes, provider_challenge, blocked, revision FROM sessions "
                     "WHERE session_id=?",
                     (init.session_id,),
                 ).fetchone()
+                if admission is not None and (row is None or admission != (epoch, retire_after)):
+                    # An unbound or differently bound init must not poison a
+                    # known epoch session through the legacy conflict path.
+                    raise LiveSessionStoreError("epoch admission custody unavailable")  # noqa: TRY301
+                if row is not None and epoch is not None and admission is None:
+                    raise LiveSessionStoreError("epoch admission custody unavailable")  # noqa: TRY301
                 if row is not None:
                     if row[0] == init_document and not row[2]:
                         # Replay reuses the key; broken custody is never replaced.
@@ -703,8 +783,15 @@ class LiveSessionStore:
                     blocked = True
                 else:
                     blocked = False
+                    if self.requires_epoch_bound_sessions and epoch is None:
+                        raise LiveSessionStoreError("new session requires epoch-bound admission")  # noqa: TRY301
                     (live,) = connection.execute("SELECT COUNT(*) FROM sessions").fetchone()
-                    (dead,) = connection.execute("SELECT COUNT(*) FROM expired").fetchone()
+                    if epoch is None:
+                        (dead,) = connection.execute("SELECT COUNT(*) FROM expired").fetchone()
+                    else:
+                        (dead,) = connection.execute(
+                            "SELECT COUNT(*) FROM epoch_admissions WHERE expired=1"
+                        ).fetchone()
                     if live >= self._max_sessions or dead >= self._max_tombstones:
                         raise SessionCapacityError("session capacity reached")  # noqa: TRY301
                     if not self._admission.take(now):
@@ -725,6 +812,11 @@ class LiveSessionStore:
                             now,
                         ),
                     )
+                    if epoch is not None:
+                        connection.execute(
+                            "INSERT INTO epoch_admissions VALUES (?, ?, ?, 0)",
+                            (init.session_id, epoch, retire_after),
+                        )
         except LiveSessionStoreError:
             raise
         except Exception:  # noqa: BLE001 - never echo caller documents
@@ -923,7 +1015,7 @@ class LiveSessionStore:
                 selected_encryption_suite=suites[0],
                 selected_capabilities=capabilities,
                 transport_endpoints=tuple(transport_endpoints),
-                required_features=(),
+                required_features=(EPOCH_SESSION_FEATURE,) if init.epoch_inbox_xonly_key else (),
                 extensions={},
             )
             payload: dict[str, Any] = {
@@ -1044,12 +1136,7 @@ class LiveSessionStore:
                     "client_key, phase, blocked, revision FROM sessions WHERE session_id=?",
                     (outer.session_id,),
                 ).fetchone()
-                if (
-                    row is None
-                    and connection.execute(
-                        "SELECT 1 FROM expired WHERE session_id=?", (outer.session_id,)
-                    ).fetchone()
-                ):
+                if row is None and _session_expired(connection, outer.session_id):
                     raise SessionExpiredError("session expired")  # noqa: TRY301
                 if row is None or row[5] == "RESERVED":
                     raise LiveSessionStoreError("no committed accept for session")  # noqa: TRY301
@@ -1151,10 +1238,12 @@ class LiveSessionStore:
         try:
             with self._write() as connection:
                 newest = connection.execute("SELECT MAX(created_at) FROM epochs").fetchone()[0]
-                if newest is not None and now < newest:
+                if now < _epoch_watermark(connection) or (newest is not None and now < newest):
                     raise LiveSessionStoreError("clock is behind the newest epoch")  # noqa: TRY301
+                _retire_epochs(connection, now)
                 if newest is None or now >= newest + period:
                     xonly, sealed = self._new_epoch_key(now)
+                    connection.execute("INSERT INTO epoch_key_history VALUES (?)", (xonly,))
                     connection.execute(
                         "INSERT INTO epochs VALUES (?, ?, ?, ?)",
                         (xonly, sealed, now, now + period + retention),
@@ -1192,11 +1281,13 @@ class LiveSessionStore:
             raise LiveSessionStoreError("epoch key custody not verifiable")
         return xonly, sealed
 
-    def open_epoch_frame(self, outer_event: bytes, *, now: int, transport: Context) -> bytes:
+    def open_epoch_frame(
+        self, outer_event: bytes, *, now: int, transport: Context
+    ) -> EpochInitiation:
         """Decode a gift-wrapped handshake_init sent to an unretired epoch inbox.
 
         Returns exact canonical init bytes whose envelope sender is the seal
-        author. The sender is still a stranger: pass the bytes to ``reserve``,
+        author, plus its recipient epoch. Pass this result to ``reserve``,
         which applies every init rule. Refusals are uniform and redacted.
         """
         try:
@@ -1205,7 +1296,7 @@ class LiveSessionStore:
                 row = connection.execute(
                     "SELECT secret_age, created_at FROM epochs "
                     "WHERE epoch_key=? AND retire_after > ?",
-                    (recipient, now),
+                    (recipient, max(now, _epoch_watermark(connection))),
                 ).fetchone()
             if row is None:
                 raise LiveSessionStoreError("frame for unknown or retired epoch")  # noqa: TRY301
@@ -1236,22 +1327,23 @@ class LiveSessionStore:
             raise
         except Exception:  # noqa: BLE001 - uniform, redacted refusal (RS-006)
             raise LiveSessionStoreError("epoch frame refused") from None
-        return candidate.envelope_bytes
+        return EpochInitiation(candidate.envelope_bytes, recipient)
 
     def expire_idle(self, *, now: int, idle_timeout: int) -> int:
-        """Expire idle pre-economic sessions into permanent compact tombstones.
+        """Expire idle pre-economic sessions without discarding replay protection.
 
         A session idle for ``idle_timeout`` (reserved, accepted, or confirmed
         with nothing after the confirm) loses its key, messages, and conflict
-        evidence (SQLite ``secure_delete``). Its ID stays in ``expired``
-        forever, so any later init or confirm for it gets
-        ``SessionExpiredError``, never a second accept (RS-001 stable replay).
-        Tombstones count against ``max_tombstones``. Returns how many expired.
+        evidence (SQLite ``secure_delete``). Legacy IDs stay in ``expired``
+        forever. Epoch-bound IDs stay in ``epoch_admissions`` until their
+        recipient epoch has durably retired. Accepted contracts never enter
+        this deletion path. Returns how many sessions expired.
         """
         if not (type(now) is int and type(idle_timeout) is int and idle_timeout > 0):
             raise LiveSessionStoreError("expiry schedule unsupported")
         try:
             with self._write() as connection:
+                _retire_epochs(connection, now)
                 idle = [
                     (row[0],)
                     for row in connection.execute(
@@ -1260,14 +1352,21 @@ class LiveSessionStore:
                         (now - idle_timeout,),
                     )
                 ]
-                connection.executemany(
-                    "INSERT INTO expired VALUES (?, ?)", [(sid, now) for (sid,) in idle]
-                )
+                for (sid,) in idle:
+                    marked = connection.execute(
+                        "UPDATE epoch_admissions SET expired=1 WHERE session_id=?", (sid,)
+                    ).rowcount
+                    if not marked:
+                        connection.execute("INSERT INTO expired VALUES (?, ?)", (sid, now))
                 for table in ("inbox", "outbox", "conflicts", "contract_keys", "sessions"):
                     connection.executemany(
                         f"DELETE FROM {table} WHERE session_id=?",  # noqa: S608 - fixed names
                         idle,
                     )
+                connection.execute(
+                    "DELETE FROM epoch_admissions WHERE expired=1 AND retire_after <= ?",
+                    (_epoch_watermark(connection),),
+                )
         except LiveSessionStoreError:
             raise
         except Exception:  # noqa: BLE001 - never echo storage details
@@ -1280,7 +1379,7 @@ class LiveSessionStore:
             with self._write() as connection:
                 rows = connection.execute(
                     "SELECT epoch_key FROM epochs WHERE retire_after > ? ORDER BY created_at DESC",
-                    (now,),
+                    (max(now, _epoch_watermark(connection)),),
                 ).fetchall()
         except LiveSessionStoreError:
             raise
@@ -1341,12 +1440,7 @@ class LiveSessionStore:
                     "FROM sessions WHERE session_id=?",
                     (outer.session_id,),
                 ).fetchone()
-                if (
-                    row is None
-                    and connection.execute(
-                        "SELECT 1 FROM expired WHERE session_id=?", (outer.session_id,)
-                    ).fetchone()
-                ):
+                if row is None and _session_expired(connection, outer.session_id):
                     raise SessionExpiredError("session expired")  # noqa: TRY301
                 if row is None or row[2] not in OPEN_PHASES:
                     raise LiveSessionStoreError("no confirmed session")  # noqa: TRY301
@@ -1834,18 +1928,19 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
     (version,) = connection.execute("PRAGMA user_version").fetchone()
     if connection.execute("PRAGMA application_id").fetchone() != (
         APPLICATION_ID,
-    ) or version not in ((5, SCHEMA_VERSION) if allow_v5 else (SCHEMA_VERSION,)):
+    ) or version not in ((5, 6, SCHEMA_VERSION) if allow_v5 else (SCHEMA_VERSION,)):
         raise LiveSessionStoreError("live session store version unsupported")
-    tables = {
-        name: definition
+    objects = {
+        (kind, name): definition
         for kind, name, definition in connection.execute(
             "SELECT type, name, sql FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'"
         )
-        if kind == "table"
     }
-    schema = SCHEMA_V5 if version == 5 else SCHEMA  # noqa: PLR2004 - exact legacy format
-    expected = {statement.split()[2]: statement for statement in schema}
-    if tables != expected:
+    schema = {5: SCHEMA_V5, 6: SCHEMA_V6, SCHEMA_VERSION: SCHEMA}[version]
+    expected = {("table", statement.split()[2]): statement for statement in schema}
+    if version == SCHEMA_VERSION:
+        expected.update({("index", sql.split()[2]): sql for sql in ADMISSION_INDEXES})
+    if objects != expected:
         raise LiveSessionStoreError("live session store schema incompatible")
     if connection.execute("PRAGMA quick_check").fetchone() != ("ok",):
         raise LiveSessionStoreError("live session store integrity unavailable")
@@ -1859,8 +1954,60 @@ def _upgrade_v5(connection: sqlite3.Connection) -> None:
     transition can create that affirmative marker, before any send occurs.
     """
     connection.execute(PAYMENT_DISPATCH_SCHEMA)
+
+
+def _upgrade_v6(connection: sqlite3.Connection) -> None:
+    """Add empty epoch custody explicitly, without reclassifying any old session."""
+    connection.execute(EPOCH_ADMISSION_SCHEMA)
+    connection.execute(EPOCH_RETIREMENT_SCHEMA)
+    connection.execute(EPOCH_KEY_HISTORY_SCHEMA)
+    # v5/v6 kept every epoch row, including retired ones. Preserve that complete
+    # public-key history before any v7 secret retirement becomes possible.
+    connection.execute("INSERT INTO epoch_key_history SELECT epoch_key FROM epochs")
+    for statement in ADMISSION_INDEXES:
+        connection.execute(statement)
+    # Explicit migration proves only that no epoch retirement has been recorded
+    # under this format. It never converts old sessions to the new admission lane.
+    connection.execute("INSERT INTO epoch_retirement VALUES (1, 0)")
     connection.execute("UPDATE meta SET schema_version=?", (SCHEMA_VERSION,))
     connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+
+def _epoch_watermark(connection: sqlite3.Connection) -> int:
+    rows = connection.execute("SELECT retired_through FROM epoch_retirement").fetchall()
+    if len(rows) != 1 or type(rows[0][0]) is not int or rows[0][0] < 0:
+        raise LiveSessionStoreError("epoch retirement custody unavailable")
+    return int(rows[0][0])
+
+
+def _retire_epochs(connection: sqlite3.Connection, now: int) -> None:
+    """Retire affirmative expired epochs and persist the barrier before pruning.
+
+    Caller owns the transaction. Neither an absent row nor the watermark alone
+    permits deleting session history. Session deletion still requires idle,
+    pre-economic state; only its epoch-tagged tombstone can later be pruned.
+    """
+    watermark = _epoch_watermark(connection)
+    if type(now) is not int or now < watermark:
+        raise LiveSessionStoreError("clock is behind retired epochs")
+    (expired_through,) = connection.execute(
+        "SELECT MAX(retire_after) FROM epochs WHERE retire_after <= ?", (now,)
+    ).fetchone()
+    if expired_through is not None and expired_through > watermark:
+        watermark = expired_through
+        connection.execute("UPDATE epoch_retirement SET retired_through=?", (watermark,))
+    connection.execute("DELETE FROM epochs WHERE retire_after <= ?", (watermark,))
+
+
+def _session_expired(connection: sqlite3.Connection, session_id: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM expired WHERE session_id=? UNION ALL "
+            "SELECT 1 FROM epoch_admissions WHERE session_id=? AND expired=1 LIMIT 1",
+            (session_id, session_id),
+        ).fetchone()
+        is not None
+    )
 
 
 class _TokenBucket:

@@ -308,10 +308,24 @@ reservations, or legacy replay history. An optional extension without the
 required feature remains legacy admission. Existing installations gain no
 epoch-retirement authority from missing migration or ingress metadata.
 
-Implementation staging: the core defines the binding and validation primitive.
-Live activation additionally requires provider epoch custody/retirement, explicit
-store migration, and client feature negotiation; the primitive alone enables
-none of those actions.
+Before pruning any epoch-bound replay record, a provider MUST durably require
+this feature for all new handshakes. It MUST NOT later return to unrestricted
+legacy admission in the same namespace: an arbitrary legacy session ID could
+otherwise recreate a pruned epoch-bound ID. Existing legacy records continue
+to replay under their original semantics. Per-epoch tombstone limits MAY refuse
+new sessions until retirement frees capacity; they MUST NOT delete replay
+protection early to make room.
+
+Retirement MUST NOT make a formerly used epoch key eligible for reuse. Providers
+retain a public epoch-key history across rotations and upgrades. Unlike
+temporary session tombstones, this history grows with provider-controlled key
+rotations and is not bounded total storage. Retired epoch secret keys need not
+remain available.
+
+Implementation staging: the core defines the binding and validation primitive;
+provider v7 stores support explicit epoch custody/retirement and policy migration.
+Default live activation still requires client feature negotiation and signed
+capability advertisement. None of these primitives enable that rollout implicitly.
 
 ## 8. Message authentication, ordering, and effects
 
