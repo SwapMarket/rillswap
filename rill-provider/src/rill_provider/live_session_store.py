@@ -1849,13 +1849,17 @@ class LiveSessionStore:
         claim_txid: str | None = None,
         claim_fee_sat: int | None = None,
         claim_height: int | None = None,
+        failed_by_payer: str | None = None,
         observation: dict[str, Any] | None = None,
     ) -> None:
         """Move one swap forward and record its observation in one transaction.
 
         ``PAID`` to ``CLAIMING`` records the claim as attempt 0 (with its fee
         and the tip it was built at). ``CLAIMING`` to ``CLAIMED`` must name a
-        recorded attempt, which becomes the mirrored claim.
+        recorded attempt, which becomes the mirrored claim. ``FAILED`` with
+        ``failed_by_payer`` (the node public key that attested the terminal
+        failure) also releases a dispatched reservation when that key is the
+        dispatch record's bound payer; any other failure keeps capacity.
 
         Raises ``StaleSwapError`` unless the swap is still in ``from_state``,
         so a crash or a concurrent tick can never apply a transition twice.
@@ -1897,7 +1901,14 @@ class LiveSessionStore:
                         (session_id, offer.terms.contract_terms.invoice_binding.payment_hash),
                     )
                 if to_state in ("FAILED", "CLAIMED"):
-                    _release_terminal(connection, session_id, to_state, now)
+                    _release_terminal(
+                        connection,
+                        session_id,
+                        to_state,
+                        now,
+                        failed_by_payer=failed_by_payer,
+                        network=self._network,
+                    )
                 if observation is not None:
                     self._record_observation(connection, session_id, observation, signer, now)
         except LiveSessionStoreError:
@@ -2446,21 +2457,27 @@ def _upgrade_v8(connection: sqlite3.Connection) -> None:
     )
 
 
-def _release_terminal(
+def _release_terminal(  # noqa: PLR0913 - explicit terminal evidence
     connection: sqlite3.Connection,
     session_id: str,
     to_state: str,
     now: int | None,
     confirmations: int | None = None,
+    *,
+    failed_by_payer: str | None = None,
+    network: NetworkIdentity | None = None,
 ) -> bool:
     """Release a terminal swap's reservation when its history proves closure.
 
-    FAILED releases only an UNSENT reservation: every dispatch marks its
+    FAILED releases an UNSENT reservation: every dispatch marks its
     reservation DISPATCHED in the same transaction, and FAILED is terminal,
-    so UNSENT proves no payment was or can be sent. A dispatched, migrated
-    UNKNOWN, or failed-after-dispatch reservation keeps its capacity.
-    CLAIMED (entered only at signed claim depth) releases a DISPATCHED or
-    UNKNOWN reservation: the claim proves the provider recovered its funds.
+    so UNSENT proves no payment was or can be sent. A DISPATCHED reservation
+    is released only when the failure was attested by the dispatch record's
+    own bound payer (``failed_by_payer``): that node reports no HTLC of the
+    sole authorized attempt in flight. A migrated UNKNOWN reservation or a
+    failure without attributable payer keeps its capacity. CLAIMED (entered
+    only at signed claim depth) releases a DISPATCHED or UNKNOWN
+    reservation: the claim proves the provider recovered its funds.
     """
     (offer, claim_txid) = connection.execute(
         "SELECT terms_offer, claim_txid FROM swaps WHERE session_id=?", (session_id,)
@@ -2469,6 +2486,22 @@ def _release_terminal(
     if to_state == "FAILED":
         evidence = _release_evidence("failed-before-dispatch", failed_at=int(now or 0))
         allowed = ("UNSENT", "UNSENT")
+        row = connection.execute(
+            "SELECT request FROM payment_dispatch WHERE session_id=? AND state='SUBMITTED'",
+            (session_id,),
+        ).fetchone()
+        payer = (
+            bound_payer(row[0], payment_hash=terms.invoice_binding.payment_hash, network=network)
+            if row is not None and network is not None
+            else None
+        )
+        if failed_by_payer is not None and payer is not None:
+            if payer.node_pubkey != failed_by_payer:
+                raise LiveSessionStoreError("failure attributed to another payer")
+            evidence = _release_evidence(
+                "failed-after-dispatch", failed_at=int(now or 0), payer=payer.node_pubkey
+            )
+            allowed = ("UNSENT", "DISPATCHED")
     else:
         if type(claim_txid) is not str:
             raise LiveSessionStoreError("claim evidence unavailable")

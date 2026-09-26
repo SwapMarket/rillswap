@@ -297,7 +297,15 @@ class SettlementEngine:
             if outcome is None:
                 return self._move(item, "FAILED", now, observation={"kind": "payment_failed"})
             if outcome.status == "FAILED":
-                return self._move(item, "FAILED", now, observation={"kind": "payment_failed"})
+                # Attributed to the dispatch's own payer, so the reservation
+                # can be released; the store checks the attribution itself.
+                return self._move(
+                    item,
+                    "FAILED",
+                    now,
+                    failed_by_payer=outcome.payer,
+                    observation={"kind": "payment_failed"},
+                )
             if outcome.status != "SUCCEEDED" or outcome.preimage is None:
                 return item.state
             self._move(

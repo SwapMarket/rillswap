@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import time
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -64,6 +64,9 @@ class PaymentOutcome:
 
     status: Status
     preimage: str | None = None
+    # Node that attested this outcome on the same channel, when bound: only a
+    # FAILED from the dispatch's own payer is terminal for that dispatch.
+    payer: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,7 +401,10 @@ class LndPaymentSender:
         with self._connect() as calls:
             if payer is not None:
                 self._attest(calls, deadline, expected=payer)
-            return calls.track(request, payment_hash, min(5.0, deadline - time.monotonic()))
+            outcome = calls.track(request, payment_hash, min(5.0, deadline - time.monotonic()))
+        if payer is None:
+            return outcome
+        return replace(outcome, payer=payer.node_pubkey)
 
 
 class _Calls:

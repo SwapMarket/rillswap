@@ -157,7 +157,7 @@ def test_bound_tracking_attests_first_on_the_same_channel(
     client, channel = _sender(tmp_path, monkeypatch, [_payment(3)])
     opened = _count_channels(monkeypatch, channel)
     payer = PaymentAuthority(PAYER, NETWORK)
-    assert client.track(HASH, payer=payer) == PaymentOutcome("FAILED")
+    assert client.track(HASH, payer=payer) == PaymentOutcome("FAILED", payer=PAYER)
     assert opened == [0]
     assert [method for method, _ in channel.calls] == [sender.INFO_METHOD, sender.TRACK_METHOD]
     with pytest.raises(LndProtocolError, match="bound dispatch"):
@@ -253,3 +253,40 @@ def test_payer_attestation_failure_preserves_all_custody(harness: Harness) -> No
         assert _financial_rows(store) == before
         assert store.settlement_work(session_id=session)[0].state == "PAYING"
         lightning.send.assert_not_called()
+
+
+def _reservation(store: Any) -> tuple[str, bytes | None]:  # noqa: ANN401
+    return store._connection.execute(  # noqa: SLF001
+        "SELECT state, release_evidence FROM economic_reservations"
+    ).fetchone()
+
+
+@pytest.mark.parametrize(
+    ("attested_by", "state"),
+    [(PAYER, "RELEASED"), (None, "DISPATCHED")],
+)
+def test_only_a_failure_attested_by_the_bound_payer_releases_capacity(
+    harness: Harness, attested_by: str | None, state: str
+) -> None:
+    payer = PaymentAuthority(PAYER, harness.network)
+    with harness.acquire() as store:
+        session = _submit(store, harness, encode_dispatch(_request(_hash(harness)), payer))
+        engine, _lightning = _engine(store, harness, PaymentOutcome("FAILED", payer=attested_by))
+        assert asyncio.run(engine.tick(now=1002)) == {session: "FAILED"}
+        reserved, evidence = _reservation(store)
+        assert reserved == state
+        if evidence is not None:
+            assert b'"reason":"failed-after-dispatch"' in evidence
+        # The grant stays consumed and the hash stays reserved forever.
+        dispatch = store._connection.execute("SELECT state FROM payment_dispatch")  # noqa: SLF001
+        assert dispatch.fetchone() == ("SUBMITTED",)
+
+
+def test_a_failure_attributed_to_another_node_is_refused(harness: Harness) -> None:
+    payer = PaymentAuthority(PAYER, harness.network)
+    with harness.acquire() as store:
+        session = _submit(store, harness, encode_dispatch(_request(_hash(harness)), payer))
+        engine, _lightning = _engine(store, harness, PaymentOutcome("FAILED", payer=OTHER))
+        assert asyncio.run(engine.tick(now=1002)) == {}
+        assert store.settlement_work(session_id=session)[0].state == "PAYING"
+        assert _reservation(store)[0] == "DISPATCHED"

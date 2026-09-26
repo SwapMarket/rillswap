@@ -202,6 +202,13 @@ one as a backstop. Releases, each atomic with the fact that justifies it:
   reservation is still `UNSENT`. Every dispatch marks its reservation in the
   same transaction, so `UNSENT` proves no payment was sent, and `FAILED` has no
   outgoing transition.
+- `failed-after-dispatch`: a transition to `FAILED` while the reservation is
+  `DISPATCHED`, only when the terminal failure was attested by the dispatch
+  record's own bound payer (the LND node that sent the sole authorized
+  attempt reports the payment `FAILED`, with no HTLC in flight). The dispatch
+  grant stays consumed and the payment hash stays reserved forever. A failure
+  without attributable payer, or one reported by another node, keeps the
+  capacity, and a mismatched attribution is refused.
 - `claim-confirmed`: `CLAIMING` to `CLAIMED`, entered only at the signed
   `settlement_confirmations`. Historical `CLAIMED` rows (for example migrated
   `UNKNOWN`) release only after the engine freshly observes the retained claim

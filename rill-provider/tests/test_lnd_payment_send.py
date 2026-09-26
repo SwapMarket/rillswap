@@ -437,7 +437,7 @@ def test_failed_attempt_reconciles_payment_level_state(
     client, channel = _sender(tmp_path, monkeypatch, [_payment(1)])
     payment = _prepare(client)
     channel.unary_responses[sender.SEND_METHOD] = lightning_pb2.HTLCAttempt(status="FAILED")
-    assert client.send(payment) == sender.PaymentOutcome("IN_FLIGHT")
+    assert client.send(payment) == sender.PaymentOutcome("IN_FLIGHT", payer=PAYER)
     assert channel.calls[-1][0] == sender.TRACK_METHOD
 
 
