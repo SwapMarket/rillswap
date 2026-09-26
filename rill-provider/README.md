@@ -414,9 +414,22 @@ Settlement steps:
 - **Claim.** A verified preimage records `PAID` and sends a `payment_settled`
   observation. The engine then builds the unilateral claim-leaf spend, signed
   inside the store by the sealed contract key. Its exact bytes are recorded
-  as `CLAIMING` with a `claim_broadcast` observation, then broadcast. The
-  engine rebroadcasts until `settlement_confirmations`, then records
-  `CLAIMED`.
+  as `CLAIMING` with a `claim_broadcast` observation and as claim attempt 0
+  (fee and tip height), then broadcast.
+- **Claim fee escalation.** The client can refund after `refund_lock_height`,
+  so an unconfirmed claim is replaced (opt-in RBF, fresh signature) on a
+  schedule rising linearly from the first fee at its first-seen height to the
+  signed `max_claim_fee_sat` six blocks before that height, and held at the
+  maximum from then on. A replacement needs a new block and must beat the
+  latest fee by 1 sat/vB (BIP125). Every attempt is recorded before its
+  broadcast and kept forever, because any of them may confirm; the attempt
+  that reaches `settlement_confirmations` is recorded as `CLAIMED`. A mined
+  attempt is never replaced. At most 32 attempts exist, and the last is
+  reserved for the maximum fee. Core transport errors never trigger a bump;
+  a recorded claim that fails validation isolates only that swap with an
+  error log. Not yet handled: detecting that the client's refund won, reorgs
+  below `settlement_confirmations`, and feerate estimation (the first fee is
+  `claim_fee_sat`).
 
 Cooperative MuSig2 claims are not negotiated yet.
 
@@ -428,6 +441,12 @@ rill-provider provision-identity --out id.age --recipient age1... \
 rill-provider provision-store --config provider.json
 rill-provider serve --config provider.json           # until SIGINT/SIGTERM
 ```
+
+A v8 store upgrades to v9 automatically when `serve` (or any command) opens
+it: the additive `claim_attempts` table is created and each `CLAIMING` swap's
+retained claim becomes attempt 0 with an unknown fee and height, which the
+engine validates and observes before any bump. Older binaries refuse a v9
+store, so a binary rollback after this upgrade is not possible.
 
 Upgrading an authoritative v5, v6, or v7 installation is an explicit offline operation:
 

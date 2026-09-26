@@ -34,14 +34,17 @@ from typing import TYPE_CHECKING, Protocol
 from rill_core.settlement.unilateral import (
     FundingOutput,
     UnilateralAuthorization,
+    ValidatedUnilateralSpend,
     build_unilateral_spend,
     finalize_unilateral_spend,
+    validate_unilateral_spend,
 )
 from rill_core.wire.canonical import canonicalize, parse_model_json
 from rill_core.wire.messages import Envelope
 from rill_core.wire.settlement_messages import FundingBindingPayload
 
-from rill_provider.live_session_store import StaleSwapError
+from rill_provider.core_tx_bytes import CoreTransactionUnknownError
+from rill_provider.live_session_store import MAX_CLAIM_ATTEMPTS, StaleSwapError
 from rill_provider.lnd_invoice_decode import InvoiceRejectedError
 from rill_provider.lnd_payment_observation import LndNotSyncedError, LndUnavailableError
 from rill_provider.settlement_policy import SettlementCrypto, offered_terms
@@ -81,6 +84,8 @@ class ChainBackend(Protocol):
 
 
 CLAIM_PAGE = 16  # historical claims checked per tick
+CLAIM_URGENCY_BLOCKS = 6  # claim at the signed maximum fee this far before refund
+INCREMENTAL_RELAY_SAT_VB = 1  # BIP125 rule 4 at Core's default incremental relay fee
 READINESS_SYNC_ATTEMPTS = 10  # offer preflight waits at most about this many seconds
 READINESS_SYNC_DELAY = 1.0
 
@@ -304,27 +309,108 @@ class SettlementEngine:
             )
             return await self._advance(_with_state(item, "PAID", preimage=outcome.preimage), now)
         if item.state == "PAID" and item.preimage is not None:
-            raw, txid = self._claim(item, terms, binding)
+            tip = await asyncio.to_thread(self._chain.tip_height)
+            fee = min(self._settings.claim_fee_sat, int(terms.max_claim_fee_sat))
+            spend = self._claim(item, terms, binding, fee)
             self._move(
                 item,
                 "CLAIMING",
                 now,
-                claim_tx=raw,
-                claim_txid=txid,
-                observation={"kind": "claim_broadcast", "claim_txid": txid},
+                claim_tx=spend.raw_transaction,
+                claim_txid=spend.txid,
+                claim_fee_sat=spend.fee_sat,
+                claim_height=tip,
+                observation={"kind": "claim_broadcast", "claim_txid": spend.txid},
             )
             return await self._advance(
-                _with_state(item, "CLAIMING", claim_tx=raw, claim_txid=txid), now
+                _with_state(
+                    item, "CLAIMING", claim_tx=spend.raw_transaction, claim_txid=spend.txid
+                ),
+                now,
             )
-        if item.state == "CLAIMING" and item.claim_tx is not None and item.claim_txid is not None:
-            txid = item.claim_txid
+        if item.state == "CLAIMING":
+            return await self._claiming(item, terms, binding, now)
+        return item.state
+
+    async def _claiming(  # noqa: PLR0911, PLR0912 - one ordered escalation step
+        self, item: SettlementItem, terms: ContractTerms, binding: FundingBinding, now: int
+    ) -> str:
+        """Confirm any recorded claim, else rebroadcast and bump the fee on schedule.
+
+        Every attempt is recorded before it is broadcast, and every attempt is
+        checked because any of them may confirm. A transport or index failure is
+        not evidence, so it ends the step without bumping.
+        """
+        attempts = self._store.claim_attempts(item.session_id)
+        if not attempts:
+            LOG.error("claiming swap has no recorded claim; operator attention required")
+            return item.state
+        tip = await asyncio.to_thread(self._chain.tip_height)
+        authorization = self._authorization(terms, binding)
+        sizes: dict[int, int] = {}
+        for attempt in attempts:
             try:
-                await asyncio.to_thread(self._chain.broadcast, item.claim_tx, txid)
-            except Exception:  # noqa: BLE001 - e.g. already in mempool; confirmations decide
-                LOG.info("claim rebroadcast not accepted; checking confirmations")
-            depth = await asyncio.to_thread(self._chain.confirmations, txid)
+                checked = validate_unilateral_spend(
+                    attempt.raw, authorization, verifier=self._crypto
+                )
+            except Exception:  # noqa: BLE001 - isolate this swap, never broadcast it
+                LOG.error("recorded claim failed validation; operator attention required")  # noqa: TRY400 - no details
+                return item.state
+            if checked.txid != attempt.txid:
+                LOG.error("recorded claim ID mismatch; operator attention required")
+                return item.state
+            sizes[attempt.attempt] = checked.vsize
+            if attempt.fee_sat is None or attempt.first_seen_height is None:
+                self._store.observe_claim_attempt(
+                    item.session_id, attempt.attempt, fee_sat=checked.fee_sat, height=tip
+                )
+        attempts = self._store.claim_attempts(item.session_id)
+        latest = attempts[-1]
+        try:  # harmless if an older attempt is mined: Core rejects the conflict
+            await asyncio.to_thread(self._chain.broadcast, latest.raw, latest.txid)
+        except Exception:  # noqa: BLE001 - e.g. replacement policy; the next bump retries
+            LOG.info("claim broadcast not accepted; checking confirmations")
+        for attempt in reversed(attempts):
+            try:
+                depth = await asyncio.to_thread(self._chain.confirmations, attempt.txid)
+            except CoreTransactionUnknownError:
+                continue  # never broadcast, evicted, or replaced
             if depth >= terms.settlement_confirmations:
-                return self._move(item, "CLAIMED", now)
+                return self._move(
+                    item, "CLAIMED", now, claim_tx=attempt.raw, claim_txid=attempt.txid
+                )
+            if depth >= 1:
+                return item.state  # mined; wait for depth, never replace
+        fee = claim_fee_target(
+            initial=attempts[0].fee_sat,
+            maximum=int(terms.max_claim_fee_sat),
+            anchor=attempts[0].first_seen_height,
+            deadline=terms.refund_lock_height,
+            tip=tip,
+            latest_fee=latest.fee_sat,
+            latest_height=latest.first_seen_height,
+            vsize=sizes[latest.attempt],
+            attempts=len(attempts),
+        )
+        if fee is None:
+            return item.state
+        try:
+            spend = self._claim(item, terms, binding, fee)
+        except Exception:  # noqa: BLE001 - e.g. dust bound; keep the recorded attempts
+            LOG.warning("claim fee bump could not be built")
+            return item.state
+        self._store.record_claim_attempt(
+            item.session_id,
+            attempt=latest.attempt + 1,
+            txid=spend.txid,
+            raw=spend.raw_transaction,
+            fee_sat=spend.fee_sat,
+            height=tip,
+        )
+        try:
+            await asyncio.to_thread(self._chain.broadcast, spend.raw_transaction, spend.txid)
+        except Exception:  # noqa: BLE001 - recorded; rebroadcast next tick
+            LOG.info("claim replacement not accepted yet")
         return item.state
 
     async def _pay(  # noqa: PLR0911 - explicit exposure guards before the sole send
@@ -391,27 +477,72 @@ class SettlementEngine:
             return outcome
         return await asyncio.to_thread(self._lightning.send, payment)
 
-    def _claim(
-        self, item: SettlementItem, terms: ContractTerms, binding: FundingBinding
-    ) -> tuple[bytes, str]:
+    def _authorization(
+        self, terms: ContractTerms, binding: FundingBinding
+    ) -> UnilateralAuthorization:
         funding = FundingOutput(
             txid=bytes.fromhex(binding.funding_txid),
             output_index=binding.contract_vout,
             value_sat=int(binding.contract_value_sat),
             script_pubkey=bytes.fromhex(binding.contract_script_pubkey),
         )
-        authorization = UnilateralAuthorization.from_terms(
-            terms, funding, "claim", keys=self._crypto
-        )
-        fee = min(self._settings.claim_fee_sat, int(terms.max_claim_fee_sat))
+        return UnilateralAuthorization.from_terms(terms, funding, "claim", keys=self._crypto)
+
+    def _claim(
+        self, item: SettlementItem, terms: ContractTerms, binding: FundingBinding, fee: int
+    ) -> ValidatedUnilateralSpend:
+        authorization = self._authorization(terms, binding)
         plan = build_unilateral_spend(
             authorization, fee_sat=fee, claim_preimage=bytes.fromhex(item.preimage or "")
         )
         signature = self._store.sign_with_contract_key(
             item.session_id, plan.signature_hash, self._crypto
         )
-        spend = finalize_unilateral_spend(plan, signature, verifier=self._crypto)
-        return spend.raw_transaction, spend.txid
+        return finalize_unilateral_spend(plan, signature, verifier=self._crypto)
+
+
+def claim_fee_target(  # noqa: PLR0913 - explicit schedule inputs
+    *,
+    initial: int | None,
+    maximum: int,
+    anchor: int | None,
+    deadline: int,
+    tip: int,
+    latest_fee: int | None,
+    latest_height: int | None,
+    vsize: int,
+    attempts: int,
+) -> int | None:
+    """Return the next claim fee, or ``None`` when no replacement is due.
+
+    The fee rises linearly from the first attempt's fee at its immutable
+    first-seen height to ``maximum`` at ``deadline - CLAIM_URGENCY_BLOCKS``
+    (the client can refund after ``deadline``), and is ``maximum`` from then
+    on. A replacement needs a new block since the latest attempt (except at
+    urgency) and must beat the latest fee by the BIP125 incremental relay fee.
+    The last attempt of the budget is reserved for ``maximum``. Unknown fees or
+    heights never trigger a bump.
+    """
+    if (
+        initial is None
+        or anchor is None
+        or latest_fee is None
+        or latest_height is None
+        or attempts >= MAX_CLAIM_ATTEMPTS
+    ):
+        return None
+    urgent = deadline - CLAIM_URGENCY_BLOCKS
+    if tip >= urgent:
+        target = maximum
+    elif tip <= latest_height or attempts == MAX_CLAIM_ATTEMPTS - 1:
+        return None  # wait for a block; the final slot is kept for the maximum
+    else:
+        span = max(1, urgent - anchor)
+        target = initial + (maximum - initial) * max(0, tip - anchor) // span
+    target = min(target, maximum)
+    if target < latest_fee + vsize * INCREMENTAL_RELAY_SAT_VB:
+        return None
+    return target
 
 
 def _with_state(item: SettlementItem, state: str, **changes: object) -> SettlementItem:

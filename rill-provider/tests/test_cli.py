@@ -131,6 +131,7 @@ def test_explicit_migration_does_not_start_the_service(
     assert main(["provision-store", "--config", str(config)]) == 0
     database = tmp_path / "store" / "live.sqlite"
     with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE claim_attempts")
         connection.execute("DROP TABLE economic_reservations")
         connection.execute("DROP TABLE epoch_admissions")
         connection.execute("DROP TABLE epoch_retirement")
@@ -147,7 +148,7 @@ def test_explicit_migration_does_not_start_the_service(
     assert main(["migrate-store", "--config", str(config)]) == 0
     assert main(["migrate-store", "--config", str(config)]) == 0
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (8,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (9,)
         assert connection.execute("SELECT * FROM payment_dispatch").fetchall() == []
         assert connection.execute("SELECT * FROM epoch_admissions").fetchall() == []
         assert connection.execute("SELECT retired_through FROM epoch_retirement").fetchall() == [

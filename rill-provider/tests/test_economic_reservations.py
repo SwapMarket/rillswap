@@ -125,6 +125,7 @@ def test_dispatch_without_an_open_reservation_keeps_the_grant(
 
 def _as_v7(path: Path) -> None:
     with sqlite3.connect(path) as connection:
+        connection.execute("DROP TABLE claim_attempts")
         connection.execute("DROP TABLE economic_reservations")
         connection.execute("UPDATE meta SET schema_version=7")
         connection.execute("PRAGMA user_version=7")
@@ -154,7 +155,7 @@ def test_v7_upgrade_is_explicit_and_backfills_conservatively(harness: Harness) -
         session, state, evidence = ledger[tombstoned]
         assert (session, state) == ("dd" * 32, "RELEASED")
         assert evidence == b'{"reason":"expired-offer","source":"migration","version":1}'
-        assert store._connection.execute("PRAGMA user_version").fetchone() == (8,)  # noqa: SLF001
+        assert store._connection.execute("PRAGMA user_version").fetchone() == (9,)  # noqa: SLF001
     with harness.acquire() as store:  # idempotent: no further migration
         assert len(_ledger(store)) == 4
 
@@ -348,9 +349,23 @@ def test_confirmed_claim_releases_the_dispatched_reservation(
 ) -> None:
     with harness.acquire() as store:
         session = _insert_funded_swap(store, harness, "CLAIMING")
-        store._connection.execute("UPDATE swaps SET claim_txid=?", ("77" * 32,))  # noqa: SLF001
+        store._connection.execute(  # noqa: SLF001
+            "UPDATE swaps SET claim_tx=?, claim_txid=?", (b"claim", "77" * 32)
+        )
+        store._connection.execute(  # noqa: SLF001
+            "INSERT INTO claim_attempts VALUES (?, 0, ?, ?, 100, 10)",
+            (session, "77" * 32, b"claim"),
+        )
         _set_reservation(store, before)
-        _advance(store, session, "CLAIMING", "CLAIMED")
+        store.advance_swap(
+            session,
+            from_state="CLAIMING",
+            to_state="CLAIMED",
+            signer=None,  # type: ignore[arg-type]
+            now=1500,
+            claim_tx=b"claim",
+            claim_txid="77" * 32,
+        )
         _session, state, evidence = _ledger(store)[_hash(harness)]
         assert state == after
         if after == "RELEASED":

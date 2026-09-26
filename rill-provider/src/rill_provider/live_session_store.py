@@ -70,7 +70,7 @@ if TYPE_CHECKING:
     from rill_provider.provider_identity import ProviderIdentity
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
-SCHEMA_VERSION = 8  # v5-v7 require explicit upgrade; v1-v4 are refused unchanged.
+SCHEMA_VERSION = 9  # v8 upgrades on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
 CONTRACT_KEY_RECORD_KIND = "rillswap-provider-contract-key"
 OPEN_PHASES = ("CONFIRMED", "ACCEPTED")  # sessions that may still send requests
 SWAP_TRANSITIONS = frozenset(
@@ -200,7 +200,20 @@ ECONOMIC_RESERVATION_SCHEMA = (
     "('UNKNOWN', 'UNSENT', 'DISPATCHED', 'RELEASED')), release_evidence BLOB, "
     "CHECK ((state = 'RELEASED') = (release_evidence IS NOT NULL)))"
 )
-SCHEMA = (*SCHEMA_V7, ECONOMIC_RESERVATION_SCHEMA)
+SCHEMA_V8 = (*SCHEMA_V7, ECONOMIC_RESERVATION_SCHEMA)
+# Every signed claim a CLAIMING swap may have broadcast, kept forever: any of
+# them can confirm. swaps.claim_tx/claim_txid mirror the latest attempt until
+# CLAIMED, then the attempt that confirmed. NULL fee or height means a
+# migrated attempt not yet validated or observed; neither authorizes a bump.
+CLAIM_ATTEMPT_SCHEMA = (
+    "CREATE TABLE claim_attempts (session_id TEXT NOT NULL, "
+    "attempt INTEGER NOT NULL CHECK (attempt >= 0), txid TEXT NOT NULL UNIQUE, "
+    "raw BLOB NOT NULL, fee_sat INTEGER CHECK (fee_sat >= 0), "
+    "first_seen_height INTEGER CHECK (first_seen_height > 0), "
+    "PRIMARY KEY (session_id, attempt))"
+)
+SCHEMA = (*SCHEMA_V8, CLAIM_ATTEMPT_SCHEMA)
+MAX_CLAIM_ATTEMPTS = 32
 ADMISSION_INDEXES = (
     "CREATE INDEX epoch_admissions_expiry ON epoch_admissions (expired, retire_after)",
 )
@@ -358,6 +371,17 @@ class SettlementItem:
     payment_dispatch: str = "UNKNOWN"
     # Provenance of a committed version 1 dispatch record, never send permission.
     payment_payer: PaymentAuthority | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimAttempt:
+    """One recorded signed claim; ``None`` fee or height is not yet observed."""
+
+    attempt: int
+    txid: str
+    raw: bytes
+    fee_sat: int | None
+    first_seen_height: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -652,6 +676,11 @@ class LiveSessionStore:
                 _upgrade_v6(connection)
             if version in (5, 6, 7):
                 _upgrade_v7(connection)
+            if version in (5, 6, 7, 8):
+                _upgrade_v8(connection)
+            if version != SCHEMA_VERSION:
+                connection.execute("UPDATE meta SET schema_version=?", (SCHEMA_VERSION,))
+                connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             _epoch_watermark(connection)
             if connection.execute(
                 "SELECT 1 FROM epochs e LEFT JOIN epoch_key_history h "
@@ -1818,9 +1847,15 @@ class LiveSessionStore:
         preimage: str | None = None,
         claim_tx: bytes | None = None,
         claim_txid: str | None = None,
+        claim_fee_sat: int | None = None,
+        claim_height: int | None = None,
         observation: dict[str, Any] | None = None,
     ) -> None:
         """Move one swap forward and record its observation in one transaction.
+
+        ``PAID`` to ``CLAIMING`` records the claim as attempt 0 (with its fee
+        and the tip it was built at). ``CLAIMING`` to ``CLAIMED`` must name a
+        recorded attempt, which becomes the mirrored claim.
 
         Raises ``StaleSwapError`` unless the swap is still in ``from_state``,
         so a crash or a concurrent tick can never apply a transition twice.
@@ -1828,8 +1863,15 @@ class LiveSessionStore:
         """
         if (from_state, to_state) not in SWAP_TRANSITIONS:
             raise LiveSessionStoreError("swap transition unsupported")
+        if to_state in ("CLAIMING", "CLAIMED") and (claim_tx is None or claim_txid is None):
+            raise LiveSessionStoreError("claim transition needs the exact claim")
         try:
             with self._write() as connection:
+                if to_state == "CLAIMED" and connection.execute(
+                    "SELECT raw FROM claim_attempts WHERE session_id=? AND txid=?",
+                    (session_id, claim_txid),
+                ).fetchone() != (claim_tx,):
+                    raise LiveSessionStoreError("claim is not a recorded attempt")  # noqa: TRY301
                 updated = connection.execute(
                     "UPDATE swaps SET state=?, preimage=COALESCE(?, preimage), "
                     "claim_tx=COALESCE(?, claim_tx), claim_txid=COALESCE(?, claim_txid), "
@@ -1838,6 +1880,11 @@ class LiveSessionStore:
                 ).rowcount
                 if updated != 1:
                     raise StaleSwapError("swap state changed")  # noqa: TRY301
+                if to_state == "CLAIMING":
+                    connection.execute(
+                        "INSERT INTO claim_attempts VALUES (?, 0, ?, ?, ?, ?)",
+                        (session_id, claim_txid, claim_tx, claim_fee_sat, claim_height),
+                    )
                 if (from_state, to_state) == ("FUNDING_SEEN", "PAYING"):
                     (offer_bytes,) = connection.execute(
                         "SELECT terms_offer FROM swaps WHERE session_id=?", (session_id,)
@@ -1857,6 +1904,80 @@ class LiveSessionStore:
             raise
         except Exception:  # noqa: BLE001 - never echo storage or crypto details
             raise LiveSessionStoreError("swap transition refused") from None
+
+    def claim_attempts(self, session_id: str) -> tuple[ClaimAttempt, ...]:
+        """Return every recorded claim attempt of one CLAIMING swap, oldest first."""
+        try:
+            with self._write() as connection:
+                rows = connection.execute(
+                    "SELECT a.attempt, a.txid, a.raw, a.fee_sat, a.first_seen_height "
+                    "FROM claim_attempts a JOIN swaps w ON w.session_id=a.session_id "
+                    "WHERE a.session_id=? AND w.state='CLAIMING' ORDER BY a.attempt",
+                    (session_id,),
+                ).fetchall()
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("claim attempts unavailable") from None
+        return tuple(ClaimAttempt(*row) for row in rows)
+
+    def observe_claim_attempt(
+        self, session_id: str, attempt: int, *, fee_sat: int, height: int
+    ) -> None:
+        """Fill a migrated attempt's validated fee and first-seen height, once.
+
+        Values already recorded are never overwritten, so a restart cannot move
+        the escalation anchor.
+        """
+        try:
+            with self._write() as connection:
+                connection.execute(
+                    "UPDATE claim_attempts SET fee_sat=COALESCE(fee_sat, ?), "
+                    "first_seen_height=COALESCE(first_seen_height, ?) "
+                    "WHERE session_id=? AND attempt=? AND session_id IN "
+                    "(SELECT session_id FROM swaps WHERE state='CLAIMING')",
+                    (fee_sat, height, session_id, attempt),
+                )
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("claim attempt update refused") from None
+
+    def record_claim_attempt(  # noqa: PLR0913 - one replacement's explicit parts
+        self,
+        session_id: str,
+        *,
+        attempt: int,
+        txid: str,
+        raw: bytes,
+        fee_sat: int,
+        height: int,
+    ) -> None:
+        """Durably add the next fee-bumped claim before it is broadcast.
+
+        Raises ``StaleSwapError`` unless the swap is CLAIMING and ``attempt``
+        directly follows the latest recorded one, so a concurrent or repeated
+        tick cannot fork the history. Earlier attempts are kept: any may confirm.
+        """
+        if not 0 < attempt < MAX_CLAIM_ATTEMPTS:
+            raise LiveSessionStoreError("claim attempt budget exhausted")
+        try:
+            with self._write() as connection:
+                (latest,) = connection.execute(
+                    "SELECT MAX(a.attempt) FROM claim_attempts a JOIN swaps w "
+                    "ON w.session_id=a.session_id WHERE a.session_id=? AND w.state='CLAIMING'",
+                    (session_id,),
+                ).fetchone()
+                if latest != attempt - 1:
+                    raise StaleSwapError("claim attempts changed")  # noqa: TRY301
+                connection.execute(
+                    "INSERT INTO claim_attempts VALUES (?, ?, ?, ?, ?, ?)",
+                    (session_id, attempt, txid, raw, fee_sat, height),
+                )
+                connection.execute(
+                    "UPDATE swaps SET claim_tx=?, claim_txid=? WHERE session_id=?",
+                    (raw, txid, session_id),
+                )
+        except (LiveSessionStoreError, StaleSwapError):
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("claim attempt refused") from None
 
     def unfunded_swaps(self) -> list[tuple[str, bytes]]:
         """Return (session_id, terms_offer) for accepted swaps still awaiting funding."""
@@ -2220,7 +2341,7 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
     (version,) = connection.execute("PRAGMA user_version").fetchone()
     if connection.execute("PRAGMA application_id").fetchone() != (
         APPLICATION_ID,
-    ) or version not in ((5, 6, 7, SCHEMA_VERSION) if allow_v5 else (SCHEMA_VERSION,)):
+    ) or version not in ((5, 6, 7, 8, SCHEMA_VERSION) if allow_v5 else (8, SCHEMA_VERSION)):
         raise LiveSessionStoreError("live session store version unsupported")
     objects = {
         (kind, name): definition
@@ -2228,8 +2349,14 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
             "SELECT type, name, sql FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'"
         )
     }
-    schema = {5: SCHEMA_V5, 6: SCHEMA_V6, 7: SCHEMA_V7, SCHEMA_VERSION: SCHEMA}[version]
-    indexes = {7: ADMISSION_INDEXES, SCHEMA_VERSION: (*ADMISSION_INDEXES, *RESERVATION_INDEXES)}
+    schema = {5: SCHEMA_V5, 6: SCHEMA_V6, 7: SCHEMA_V7, 8: SCHEMA_V8, SCHEMA_VERSION: SCHEMA}[
+        version
+    ]
+    indexes = {
+        7: ADMISSION_INDEXES,
+        8: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
+        SCHEMA_VERSION: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
+    }
     expected = {("table", statement.split()[2]): statement for statement in schema}
     expected.update({("index", sql.split()[2]): sql for sql in indexes.get(version, ())})
     if objects != expected:
@@ -2300,8 +2427,23 @@ def _upgrade_v7(connection: sqlite3.Connection) -> None:
         "LEFT JOIN sessions s ON s.session_id=h.session_id",
         (_release_evidence("expired-offer", source="migration"),),
     )
-    connection.execute("UPDATE meta SET schema_version=?", (SCHEMA_VERSION,))
-    connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+
+def _upgrade_v8(connection: sqlite3.Connection) -> None:
+    """Record each CLAIMING swap's retained claim as its attempt 0.
+
+    Additive and cheap, so it runs on ordinary acquire. Fee and first-seen
+    height stay NULL: the engine validates the bytes and records the height it
+    first observes before any fee bump. A CLAIMING swap without exact claim
+    bytes gets no attempt, so the engine isolates it for the operator instead
+    of inventing one; other swaps keep settling. CLAIMED swaps keep their
+    confirmed claim_txid and need no attempt history.
+    """
+    connection.execute(CLAIM_ATTEMPT_SCHEMA)
+    connection.execute(
+        "INSERT INTO claim_attempts SELECT session_id, 0, claim_txid, claim_tx, NULL, NULL "
+        "FROM swaps WHERE state='CLAIMING' AND claim_tx IS NOT NULL AND claim_txid IS NOT NULL"
+    )
 
 
 def _release_terminal(

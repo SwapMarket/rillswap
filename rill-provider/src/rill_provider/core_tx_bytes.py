@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from rill_core.wire.messages import ContractTerms
 
 RPC_VERIFY_ALREADY_IN_CHAIN = -27
+RPC_INVALID_ADDRESS_OR_KEY = -5  # getrawtransaction: not in mempool or txindex
 MAX_COOKIE_BYTES = 512
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_TRANSACTION_HEX_BYTES = 200_000
@@ -339,11 +340,18 @@ class CoreTransactionReader:
     def confirmations(self, txid: str) -> int:
         """Return best-chain confirmations of a transaction (0 in mempool).
 
-        Needs ``txindex=1`` for confirmed transactions; raises if unknown.
+        Needs ``txindex=1`` for confirmed transactions. Raises
+        ``CoreTransactionUnknownError`` when Core has neither a mempool nor an
+        indexed copy (e.g. never broadcast or evicted); other failures are not
+        evidence about the transaction at all.
         """
         try:
             with self._client() as client:
                 result = self._rpc(client, "getrawtransaction", [txid, True], 1)
+        except CoreRpcError as error:
+            if error.code == RPC_INVALID_ADDRESS_OR_KEY:
+                raise CoreTransactionUnknownError(error.code) from None
+            raise
         except httpx.HTTPError:
             raise CoreUnavailableError("Core RPC transport unavailable") from None
         count = result.get("confirmations", 0) if isinstance(result, dict) else None
@@ -424,6 +432,10 @@ class CoreRpcError(CoreUnavailableError):
         """Keep the code, never the (possibly data-bearing) message."""
         super().__init__("Core RPC result unavailable; no absence claim")
         self.code = code
+
+
+class CoreTransactionUnknownError(CoreRpcError):
+    """Core has no mempool or indexed copy of the transaction right now."""
 
 
 def _transaction_bytes(raw_hex: object) -> bytes:
