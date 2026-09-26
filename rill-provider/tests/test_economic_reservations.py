@@ -449,3 +449,74 @@ def test_engine_fails_unfunded_swaps_only_past_the_payment_deadline(
             assert result == {}
             assert (state, reservation) == ("ACCEPTED", "UNSENT")
             assert len(store.pending_outbox()) == outbox
+
+
+def test_claim_sweep_pages_fairly_past_unconfirmable_claims() -> None:
+    import asyncio  # noqa: PLC0415
+    from unittest.mock import Mock  # noqa: PLC0415
+
+    from rill_provider.settlement_engine import CLAIM_PAGE, SettlementEngine  # noqa: PLC0415
+
+    claims = [(f"{index:064x}", f"{index:064x}", 3) for index in range(CLAIM_PAGE + 1)]
+    released: list[str] = []
+
+    class Store:
+        def settlement_work(self) -> list[object]:
+            return []
+
+        def unfunded_swaps(self) -> list[object]:
+            return []
+
+        def unreleased_claims(self, *, after: str, limit: int) -> list[tuple[str, str, int]]:
+            return [claim for claim in claims if claim[0] > after][:limit]
+
+        def release_claim(self, session_id: str, _txid: str, *, confirmations: int) -> bool:
+            released.append(session_id)
+            return confirmations >= 3
+
+    chain = Mock()
+    last = claims[-1][1]
+
+    def confirmations(txid: str) -> int:
+        if txid != last:
+            raise RuntimeError("reorged or missing claim")
+        return 3
+
+    chain.confirmations.side_effect = confirmations
+    engine = SettlementEngine(Store(), chain, Mock(), Mock())  # type: ignore[arg-type]
+    asyncio.run(engine.tick(now=1))  # first page: all unconfirmable, none released
+    assert released == []
+    asyncio.run(engine.tick(now=1))  # the cursor reaches the seventeenth claim
+    assert released == [claims[-1][0]]
+    asyncio.run(engine.tick(now=1))  # short page wrapped: back to the start
+    assert chain.confirmations.call_count == 2 * CLAIM_PAGE + 1
+
+
+def test_store_claim_listing_honors_the_cursor(harness: Harness) -> None:
+    with harness.acquire() as store:
+        session = _insert_funded_swap(store, harness, "CLAIMED")
+        store._connection.execute("UPDATE swaps SET claim_txid=?", ("77" * 32,))  # noqa: SLF001
+        _set_reservation(store, "UNKNOWN")
+        assert [row[0] for row in store.unreleased_claims(after="")] == [session]
+        assert store.unreleased_claims(after=session) == []
+
+
+def test_blocked_unfunded_swap_is_still_closed(harness: Harness) -> None:
+    import asyncio  # noqa: PLC0415
+    from unittest.mock import Mock  # noqa: PLC0415
+
+    from test_payment_reconciliation import Signer  # noqa: PLC0415
+
+    from rill_provider.settlement_engine import SettlementEngine  # noqa: PLC0415
+
+    expires_at = int(harness.source["contract_terms"]["invoice_binding"]["expires_at"])
+    with harness.acquire() as store:
+        session = _insert_funded_swap(store, harness, "ACCEPTED")
+        store._connection.execute("UPDATE sessions SET blocked=1")  # noqa: SLF001
+        engine = SettlementEngine(store, Mock(), Mock(), Signer(harness))
+        assert asyncio.run(engine.tick(now=expires_at)) == {session: "FAILED"}
+        assert _ledger(store)[_hash(harness)][1] == "RELEASED"
+        (conflicts,) = store._connection.execute(  # noqa: SLF001
+            "SELECT blocked FROM sessions"
+        ).fetchone()
+        assert conflicts == 1  # conflict evidence and blocking are preserved

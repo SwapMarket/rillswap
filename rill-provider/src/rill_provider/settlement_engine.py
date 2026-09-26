@@ -79,6 +79,9 @@ class ChainBackend(Protocol):
         ...
 
 
+CLAIM_PAGE = 16  # historical claims checked per tick
+
+
 class LightningBackend(Protocol):
     """The provider's own LND (``RegtestLndPaymentSender``)."""
 
@@ -135,6 +138,7 @@ class SettlementEngine:
         self._lightning = lightning
         self._crypto = crypto
         self._settings = settings or EngineSettings()
+        self._claim_cursor = ""  # fair paging of the historical claim sweep
 
     async def tick(self, now: int) -> dict[str, str]:
         """Advance each swap at most through its available steps; return new states."""
@@ -196,8 +200,14 @@ class SettlementEngine:
         return closed
 
     async def _release_claims(self) -> None:
-        """Release historical claimed reservations on fresh claim-depth evidence."""
-        for session_id, txid, _required in self._store.unreleased_claims():
+        """Release historical claimed reservations on fresh claim-depth evidence.
+
+        One bounded page per tick; the cursor wraps after a short page, so rows
+        that never confirm (or keep failing) cannot starve later claims.
+        """
+        page = self._store.unreleased_claims(after=self._claim_cursor, limit=CLAIM_PAGE)
+        self._claim_cursor = page[-1][0] if len(page) == CLAIM_PAGE else ""
+        for session_id, txid, _required in page:
             try:
                 depth = await asyncio.to_thread(self._chain.confirmations, txid)
                 self._store.release_claim(session_id, txid, confirmations=depth)

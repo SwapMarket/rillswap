@@ -205,13 +205,19 @@ one as a backstop. Releases, each atomic with the fact that justifies it:
 - `claim-confirmed`: `CLAIMING` to `CLAIMED`, entered only at the signed
   `settlement_confirmations`. Historical `CLAIMED` rows (for example migrated
   `UNKNOWN`) release only after the engine freshly observes the retained claim
-  txid at that depth. This accepts Bitcoin's depth-based reorganization risk.
+  txid at that depth. The sweep checks one page of 16 per tick and wraps, so
+  claims that never confirm cannot starve later ones. This accepts Bitcoin's depth-based reorganization risk.
 
-The engine also fails an accepted swap that is still unfunded once the invoice
+The engine also fails an accepted swap with no admitted funding binding (the
+client may still have broadcast; `ACCEPTED` does not prove "never funded
+on-chain") once the invoice
 has expired or the fresh tip leaves no room for the final CLTV delta (the same
 guard used before paying a funded swap). The transition is terminal and signs a
 `payment_failed` observation, and a later funding binding is refused. Without a
-fresh tip only invoice expiry closes it.
+fresh tip only invoice expiry closes it. Blocked sessions are closed too; their
+conflict evidence is kept. Both deadline guards trust the host clock: a forward
+clock jump can irreversibly close valid accepted swaps, so run NTP-synchronized
+hosts and alert on clock steps.
 
 Capacity stays held by `DISPATCHED` swaps that fail after dispatch (including
 bound tracked failures), `UNKNOWN` rows that never reach `CLAIMED`, and

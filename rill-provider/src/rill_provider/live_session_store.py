@@ -1872,11 +1872,13 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - never echo storage details
             raise LiveSessionStoreError("swap listing refused") from None
 
-    def unreleased_claims(self, *, limit: int = 16) -> list[tuple[str, str, int]]:
+    def unreleased_claims(self, *, after: str = "", limit: int = 16) -> list[tuple[str, str, int]]:
         """Return (session_id, claim_txid, required depth) for claimed, unreleased swaps.
 
         These are historical rows (for example migrated UNKNOWN reservations).
         Only a fresh chain observation passed to release_claim can close them.
+        Pages by session ID after ``after`` so unconfirmable rows cannot starve
+        later ones; callers wrap around when a page is short.
         """
         try:
             with self._write() as connection:
@@ -1884,8 +1886,9 @@ class LiveSessionStore:
                     "SELECT w.session_id, w.claim_txid, w.terms_offer FROM swaps w "
                     "JOIN economic_reservations r ON r.session_id=w.session_id "
                     "WHERE w.state='CLAIMED' AND w.claim_txid IS NOT NULL "
-                    "AND r.state IN ('DISPATCHED', 'UNKNOWN') ORDER BY w.session_id LIMIT ?",
-                    (limit,),
+                    "AND r.state IN ('DISPATCHED', 'UNKNOWN') AND w.session_id > ? "
+                    "ORDER BY w.session_id LIMIT ?",
+                    (after, limit),
                 ).fetchall()
                 return [
                     (sid, txid, _offer_terms(offer).settlement_confirmations)
