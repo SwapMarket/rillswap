@@ -5,7 +5,33 @@ independent recovery executable.
 
 Status: pre-release and not suitable for real funds.
 
-## Live swap: `rill swap btc-to-ln` (regtest only)
+## Provider directory: `rill providers list`
+
+Anyone can run a provider: publishing a signed kind-39417 announcement is the
+only requirement, and no allowlist or registry exists. This read-only command
+queries every `--relay` concurrently with no author filter and prints JSON with
+each provider whose announcement verifies (event and application signatures,
+the complete `--network` identity, the `btc-to-ln/v1` profile, an unexpired
+window). It keeps each provider's highest revision across relays, reports
+`relays_seen`, and marks a provider `equivocating` (with no terms) when two
+different advertisements share its latest revision. It fails only if no relay
+answers.
+
+```sh
+rill providers list --network signet.json \
+  --crypto-library /absolute/path/to/librill_crypto.so \
+  --relay wss://relay-one.example --relay wss://relay-two.example
+```
+
+A listing is discovery evidence only. It proves neither liquidity, solvency,
+availability, nor honesty, and relays can withhold events or be flooded (each
+relay's query stops after 4096 events, so use several independent relays).
+Choosing a provider stays an explicit `--provider` argument to `swap`.
+
+## Live swap: `rill swap btc-to-ln`
+
+Supported networks: regtest, signet, and testnet4. Mainnet wallet funding is
+refused in code until release acceptance.
 
 This command pays a Lightning invoice from your Bitcoin Core wallet through
 one provider, reached over a Nostr relay. It runs these steps in order:
@@ -47,8 +73,8 @@ The client currently reuses `rill-provider`'s Nostr transport modules.
 Discovery observes a bounded query window and selects the highest valid
 announcement revision it receives, rather than trusting arrival order. Equal
 revision conflicts and event floods are refused. A relay can still withhold
-newer announcements; persistent rollback protection and multi-relay provider
-listing remain required before public deployment.
+newer announcements; persistent rollback protection remains required before
+public deployment. Use `rill providers list` across several relays to compare.
 
 The live wallet verifies Core's actual chain and genesis before every wallet
 effect, including signing and broadcast, and refuses incomplete or initial-sync

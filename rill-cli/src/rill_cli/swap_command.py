@@ -1,4 +1,4 @@
-"""``rill swap btc-to-ln``: one live regtest swap through a provider."""
+"""``rill swap btc-to-ln``: one live swap through a provider."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 def add_parser(categories: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Register ``swap btc-to-ln``."""
-    swap = categories.add_parser("swap", help="live regtest swaps (moves real regtest funds)")
+    swap = categories.add_parser("swap", help="live swaps (moves real funds)")
     kinds = swap.add_subparsers(dest="command", required=True)
     command = kinds.add_parser("btc-to-ln", help="pay a Lightning invoice with on-chain BTC")
     command.add_argument("--network", required=True, help="complete trusted network JSON file")

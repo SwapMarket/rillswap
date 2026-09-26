@@ -18,7 +18,7 @@ from rill_core.settlement import FundingOutput, UnilateralAuthorization, validat
 from rill_core.wire.types import NetworkIdentity
 from rill_crypto import Context
 
-from rill_cli import swap_command
+from rill_cli import provider_directory, swap_command
 from rill_cli.age_container import (
     MAX_CIPHERTEXT_BYTES,
     MAX_PLAINTEXT_BYTES,
@@ -75,6 +75,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     recover = parser.add_subparsers(dest="category", required=True)
     swap_command.add_parser(recover)
+    provider_directory.add_parser(recover)
     recovery = recover.add_parser("recover", help="encrypted recovery files (no chain or payments)")
     commands = recovery.add_subparsers(dest="command", required=True)
     for name, help_text in (
@@ -578,11 +579,26 @@ def _swap(args: argparse.Namespace) -> int:
     return 0
 
 
+def _providers(args: argparse.Namespace) -> int:
+    try:
+        result = provider_directory.run(args, _network(args.network))
+    except provider_directory.RelayQueryError:
+        sys.stderr.write("Provider listing failed: no relay answered.\n")
+        return 5
+    except Exception:  # noqa: BLE001 - must not print native/library errors
+        sys.stderr.write("Provider listing failed.\n")
+        return 2
+    sys.stdout.write(result + "\n")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911 - distinct failure exit codes
     """Run explicit recovery commands only; sanitize errors and private input."""
     args = _parser().parse_args(argv)
     if args.category == "swap":
         return _swap(args)
+    if args.category == "providers":
+        return _providers(args)
     try:
         result = _run(args)
     except RecoveryPublicationUncertainError:

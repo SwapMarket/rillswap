@@ -5,8 +5,13 @@ Status: pre-release draft
 Version: `0.1.0-pre.1`
 
 Discovery returns authenticated advertisements, not trusted liquidity,
-solvency, routing, availability, or reputation evidence. Manual import of a
-provider identity and endpoint is mandatory.
+solvency, routing, availability, or reputation evidence. Discovery is
+permissionless: a client MAY list every valid announcement on its selected
+network from any number of relays without an author allowlist, keeping each
+identity's highest revision and excluding an identity with conflicting
+advertisements at its latest revision. Selecting a provider for a swap remains
+an explicit user choice of one identity, and manual import of a provider
+identity and endpoint remains supported.
 
 An advertisement contains the protocol and binding versions, provider
 identity key, complete supported network identities, profiles and directions,
