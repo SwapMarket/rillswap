@@ -42,6 +42,7 @@ from rill_core.wire.settlement_messages import FundingBindingPayload
 
 from rill_provider.live_session_store import StaleSwapError
 from rill_provider.lnd_invoice_decode import InvoiceRejectedError
+from rill_provider.lnd_payment_observation import LndUnavailableError
 from rill_provider.settlement_policy import SettlementCrypto, offered_terms
 
 if TYPE_CHECKING:
@@ -233,6 +234,12 @@ class SettlementEngine:
         """Return the payment outcome, or None when it must never be sent."""
         invoice = terms.invoice_binding
         outcome = await asyncio.to_thread(self._lightning.track, invoice.payment_hash)
+        if outcome.status == "FAILED":
+            # The configured node is not bound to the historical payer. Its
+            # failed record cannot terminate tracking of another node's attempt.
+            # Unlike this lookup, send() reports FAILED only after affirmative
+            # failure of the sole newly authorized attempt in that call.
+            raise LndUnavailableError("tracked failure lacks bound payer authority")
         if outcome.status != "UNKNOWN":
             return outcome
         # PAYING is a durable intent, not durable chain evidence. After an

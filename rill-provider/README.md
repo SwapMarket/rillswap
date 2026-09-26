@@ -456,9 +456,18 @@ so another configured node's failed record cannot prove the original payment
 failed. Missing records are never resend permission. This command grants no
 refund, retry, deletion, or economic-capacity release authority. Existing v7
 installations need no migration and perform no reconciliation automatically;
-v5/v6 still require explicit migration. Historical payer binding, definitive
-failure recovery (including the normal engine's current failure handling),
-and economic-capacity release remain production gates.
+v5/v6 still require explicit migration.
+
+Normal settlement also defers a tracked `FAILED` result without changing the
+swap or its grant, because the configured node is not bound to the original
+payer. A later matching witness remains recoverable. This applies to existing
+v7 `PAYING` swaps without migration; previously terminal `FAILED` rows are not
+automatically reopened. Legitimate failures after a lost response can therefore
+remain `PAYING` indefinitely. The raw tracking adapter still reports its node's
+status accurately. A failed response for the sole newly authorized attempt,
+or local no-send checks with an affirmative unused grant, retain their existing
+terminal behavior. Historical payer binding, definitive failure recovery, and
+economic-capacity release remain production gates.
 
 `provider.json` is strict JSON (`operator_config.OperatorConfig`, unknown
 fields refused). It sets the network identity, the identity key printed
