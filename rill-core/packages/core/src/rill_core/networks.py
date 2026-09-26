@@ -8,6 +8,8 @@ backends and apply their own release gates before any financial effect.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from rill_core.errors import ValidationError
 from rill_core.wire.types import NetworkIdentity
 
@@ -47,3 +49,58 @@ def require_supported_network(network: NetworkIdentity) -> None:
         or (network.name != "regtest" and network.deployment_namespace is not None)
     ):
         raise ValidationError("unsupported Bitcoin network identity")
+
+# Mainnet funding is a release decision, not configuration. It stays disabled
+# until explicit security and release acceptance changes this constant in code.
+MAINNET_FUNDING_ENABLED = False
+
+
+@dataclass(frozen=True, slots=True)
+class BackendNames:
+    """How local backends name one supported identity (never proof of it)."""
+
+    invoice_prefix: str  # BOLT11 human-readable part before the amount
+    core_chain: str  # Bitcoin Core getblockchaininfo "chain"
+    lnd_network: str  # LND GetInfo chains[0].network
+
+
+_BACKEND_NAMES = {
+    "mainnet": BackendNames("lnbc", "main", "mainnet"),
+    "testnet4": BackendNames("lntb", "testnet4", "testnet4"),
+    "signet": BackendNames("lntbs", "signet", "signet"),
+    "regtest": BackendNames("lnbcrt", "regtest", "regtest"),
+}
+
+
+def backend_names(network: NetworkIdentity) -> BackendNames:
+    """Return backend labels for a supported identity; refuse anything else.
+
+    Labels are necessary, not sufficient: adapters must still check genesis
+    (Core) or accept LND's label as its only attestation, as documented.
+    """
+    require_supported_network(network)
+    return _BACKEND_NAMES[network.name]
+
+
+def invoice_matches_network(bolt11: str, network: NetworkIdentity) -> bool:
+    """Whether a BOLT11 string uses exactly this network's prefix.
+
+    The next character (an amount digit or the bech32 separator ``1``)
+    separates ``lntb`` (testnet) from ``lntbs`` (signet) and ``lnbc`` from
+    ``lnbcrt``. Testnet3 and testnet4 share ``lntb``; the backend's own chain
+    check must separate them.
+    """
+    prefix = backend_names(network).invoice_prefix
+    return (
+        type(bolt11) is str
+        and bolt11.startswith(prefix)
+        and len(bolt11) > len(prefix)
+        and bolt11[len(prefix)] in "123456789"
+    )
+
+
+def require_funding_release(network: NetworkIdentity) -> None:
+    """Refuse any financial effect on a network that is not release-accepted."""
+    require_supported_network(network)
+    if network.name == "mainnet" and not MAINNET_FUNDING_ENABLED:
+        raise ValidationError("mainnet funding is not release-accepted")

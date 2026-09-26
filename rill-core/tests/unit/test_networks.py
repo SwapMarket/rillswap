@@ -84,3 +84,48 @@ def test_funding_rejects_spoofed_public_genesis_before_crypto() -> None:
     terms = terms.model_copy(update={"network_identity": network})
     with pytest.raises(ValidationError, match="unsupported Bitcoin network identity"):
         authorize_funding_transaction(raw, terms, plan, keys=keys)
+
+
+@pytest.mark.parametrize(
+    ("name", "prefix", "core", "lnd"),
+    [
+        ("mainnet", "lnbc", "main", "mainnet"),
+        ("signet", "lntbs", "signet", "signet"),
+        ("testnet4", "lntb", "testnet4", "testnet4"),
+        ("regtest-rillswap-e2e-v1", "lnbcrt", "regtest", "regtest"),
+    ],
+)
+def test_backend_names_are_exact_per_network(name: str, prefix: str, core: str, lnd: str) -> None:
+    from rill_core.networks import BackendNames, backend_names  # noqa: PLC0415
+
+    assert backend_names(_network(name)) == BackendNames(prefix, core, lnd)
+
+
+def test_invoice_prefix_never_confuses_overlapping_networks() -> None:
+    from rill_core.networks import invoice_matches_network  # noqa: PLC0415
+
+    signet, testnet4 = _network("signet"), _network("testnet4")
+    mainnet, regtest = _network("mainnet"), _network("regtest-rillswap-e2e-v1")
+    assert invoice_matches_network("lntb500u1pexample", testnet4)
+    assert not invoice_matches_network("lntbs500u1pexample", testnet4)
+    assert invoice_matches_network("lntbs500u1pexample", signet)
+    assert not invoice_matches_network("lntb500u1pexample", signet)
+    assert invoice_matches_network("lnbc500u1pexample", mainnet)
+    assert not invoice_matches_network("lnbcrt500u1pexample", mainnet)
+    assert invoice_matches_network("lnbcrt500u1pexample", regtest)
+    assert not invoice_matches_network("lnbc500u1pexample", regtest)
+    for bad in ("", "lnbc", "LNBC500u1p", 5):
+        assert not invoice_matches_network(bad, mainnet)  # type: ignore[arg-type]
+
+
+def test_mainnet_funding_is_gated_in_code() -> None:
+    from rill_core import networks  # noqa: PLC0415
+
+    assert networks.MAINNET_FUNDING_ENABLED is False
+    with pytest.raises(ValidationError, match="release-accepted"):
+        networks.require_funding_release(_network("mainnet"))
+    for name in ("signet", "testnet4", "regtest-rillswap-e2e-v1"):
+        networks.require_funding_release(_network(name))
+    legacy = _network("signet").model_copy(update={"name": "testnet3"})
+    with pytest.raises(ValidationError):
+        networks.require_funding_release(legacy)
