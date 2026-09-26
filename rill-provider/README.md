@@ -290,19 +290,34 @@ recorded before its external effect:
   still leave the invoice's final CLTV. The swap is then recorded as `PAYING`,
   or as `FAILED` with a `payment_failed` observation.
 - **Payment.** LND `TrackPaymentV2` runs first, so a restart never sends
-  twice. `SendPaymentV2` runs only when LND has no payment for the hash and a
-  durable `UNSENT` dispatch grant exists, with
-  `cltv_limit = E_out - tip` and a routing fee capped by the success fee.
+  twice. Read-only `DecodePayReq` and `QueryRoutes` prepare a single route only
+  when LND has no payment for the hash and a durable `UNSENT` dispatch grant
+  exists. The decoded invoice must equal its signed binding. The route's
+  absolute `total_time_lock` must not exceed `E_out`; a relative query limit
+  is only a search hint, never authorization. Amount, destination, hop expiries,
+  and routing fees are checked, with fees capped by the success fee.
   Before a new send, the engine rechecks the bound output and its confirmations,
   invoice expiry, and session conflict state. A persisted `PAYING` intent alone
   never proves that funding remains valid. Missing or insufficient funding
   defers a new payment, while existing LND attempts continue to be reconciled.
-  The dispatch grant is consumed and its request recorded before submission.
+  The dispatch grant is consumed and its exact `SendToRouteV2` request recorded
+  before submission. The sender checks current LND sync/network/height and
+  invoice expiry again, then sends those bytes once without automatic route
+  retries. Blocks arriving between Core/LND samples cannot increase the saved
+  route's absolute expiry. RPC failure is ambiguous, not payment failure.
   Conflict blocking and dispatch authorization are ordered in the same store
   transaction. A lost response never restores a grant: missing or `SUBMITTED`
   state permits reconciliation only, not another send. This can leave an
   interrupted swap stalled if the request never reached LND; it does not prove
   payment failure or immediate refund safety.
+  Supported invoices are fixed whole-satoshi, nonblinded BOLT11 invoices with
+  a payment secret and TLV onion support. Private route hints are preserved;
+  the final hop carries the payment-secret MPP record for the full amount.
+  Required MPP, AMP, metadata features, unknown features, and legacy invoices
+  without payment secrets are rejected during quote decoding, before fundable
+  terms. Optional route-blinding capability is allowed on ordinary invoices,
+  but actual blinded paths are not. This deliberately favors refusal over
+  accepting funds for invoices this single-path sender cannot safely fulfill.
 - **Claim.** A verified preimage records `PAID` and sends a `payment_settled`
   observation. The engine then builds the unilateral claim-leaf spend, signed
   inside the store by the sealed contract key. Its exact bytes are recorded
@@ -340,6 +355,14 @@ LND but cannot start another payment merely because tracking returns not found.
 An existing `FUNDING_SEEN` swap can obtain a new grant only through its normal
 checked transition to `PAYING`. Keys, preimages, contracts, and payment-hash
 reservations are retained. This migration is not restored-snapshot reconciliation.
+Existing v6 stores need no migration for explicit routes: consumed grants
+remain consumed, including older relative-send records. New dispatch records
+identify `SendToRouteV2` and retain the exact protobuf bytes as hex; no saved
+request, old or new, is automatically replayed.
+Previously accepted but unsent invoices outside the newly supported routing
+subset fail before dispatch if tracking establishes no existing payment and
+the store has an explicit unsent grant. Unknown or consumed grants still permit
+reconciliation only. Neither case shortens the client's on-chain refund delay.
 
 `provider.json` is strict JSON (`operator_config.OperatorConfig`, unknown
 fields refused). It sets the network identity, the identity key printed

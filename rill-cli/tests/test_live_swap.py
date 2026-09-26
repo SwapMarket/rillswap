@@ -106,7 +106,7 @@ def test_native_live_swap_settles_through_the_provider(tmp_path: Path) -> None: 
         AuthorityDeclaration,
         LiveSessionStore,
     )
-    from rill_provider.lnd_payment_send import PaymentOutcome  # noqa: PLC0415
+    from rill_provider.lnd_payment_send import PaymentOutcome, PreparedPayment  # noqa: PLC0415
     from rill_provider.provider_identity import ProviderIdentity  # noqa: PLC0415
     from rill_provider.quote_policy import QuoteSchedule  # noqa: PLC0415
     from rill_provider.relay_client import RelayConnection  # noqa: PLC0415
@@ -169,8 +169,22 @@ def test_native_live_swap_settles_through_the_provider(tmp_path: Path) -> None: 
         chain.broadcast = lambda raw, txid: chain.broadcasts.append(raw) or txid
         chain.confirmations = lambda _txid: 0
 
-        def send(bolt11: str, **bounds: Any) -> PaymentOutcome:  # noqa: ANN401
-            sent.append({"invoice": bolt11, **bounds})
+        prepared: list[dict[str, Any]] = []
+
+        def prepare(bolt11: str, **bounds: Any) -> PreparedPayment:  # noqa: ANN401
+            prepared.append({"invoice": bolt11, **bounds})
+            invoice = bounds["invoice_binding"]
+            return PreparedPayment(
+                b"route",
+                invoice.payment_hash,
+                invoice.expires_at,
+                bounds["max_expiry_height"],
+                invoice.min_final_cltv_delta,
+            )
+
+        def send(payment: PreparedPayment) -> PaymentOutcome:
+            assert payment.request == b"route"
+            sent.append(prepared.pop())
             return PaymentOutcome("SUCCEEDED", PREIMAGE)
 
         lightning = SimpleNamespace(
@@ -178,6 +192,7 @@ def test_native_live_swap_settles_through_the_provider(tmp_path: Path) -> None: 
                 PaymentOutcome("SUCCEEDED", PREIMAGE) if sent else PaymentOutcome("UNKNOWN")
             ),
             send=send,
+            prepare=prepare,
         )
 
         def write_recovery(document: bytes, previous: bytes | None) -> None:

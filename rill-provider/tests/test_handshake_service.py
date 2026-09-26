@@ -424,7 +424,7 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: P
     from test_quote_policy import BINDING, CONTRACT, FIRM, FIRM_SCHEDULE  # noqa: PLC0415
 
     from rill_provider._nip59_send import _wrap_envelope  # noqa: PLC0415
-    from rill_provider.lnd_payment_send import PaymentOutcome  # noqa: PLC0415
+    from rill_provider.lnd_payment_send import PaymentOutcome, PreparedPayment  # noqa: PLC0415
     from rill_provider.provider_identity import ProviderIdentity  # noqa: PLC0415
     from rill_provider.settlement_engine import SettlementEngine  # noqa: PLC0415
 
@@ -620,11 +620,24 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: P
         def track(_payment_hash: str) -> PaymentOutcome:
             return PaymentOutcome("SUCCEEDED", preimage) if sent else PaymentOutcome("UNKNOWN")
 
-        def send(bolt11: str, **bounds: Any) -> PaymentOutcome:  # noqa: ANN401
-            sent.append({"invoice": bolt11, **bounds})
+        prepared: list[dict[str, Any]] = []
+
+        def prepare(bolt11: str, **bounds: Any) -> PreparedPayment:  # noqa: ANN401
+            prepared.append({"invoice": bolt11, **bounds})
+            return PreparedPayment(
+                b"route",
+                BINDING.payment_hash,
+                BINDING.expires_at,
+                994,
+                BINDING.min_final_cltv_delta,
+            )
+
+        def send(payment: PreparedPayment) -> PaymentOutcome:
+            assert payment.request == b"route"
+            sent.append(prepared.pop())
             return PaymentOutcome("SUCCEEDED", preimage)
 
-        lightning = SimpleNamespace(track=track, send=send)
+        lightning = SimpleNamespace(track=track, prepare=prepare, send=send)
         engine = SettlementEngine(store, chain, lightning, crypto)
         later = BINDING.created_at + 10
         assert asyncio.run(engine.tick(later)) == {}  # one confirmation is not enough
@@ -636,9 +649,9 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: P
         assert sent == [
             {
                 "invoice": FIRM["invoice"],
-                "payment_hash": BINDING.payment_hash,
+                "invoice_binding": terms.invoice_binding,
                 "fee_limit_sat": int(terms.economics.success_fee_sat),
-                "cltv_limit": 144,  # signed E_out 994 minus tip 850
+                "max_expiry_height": 994,
             }
         ]
         ((raw_claim, claim_txid),) = chain.broadcasts

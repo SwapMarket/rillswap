@@ -36,6 +36,8 @@ def _payreq(**changes: Any) -> lightning_pb2.PayReq:  # noqa: ANN401
         "timestamp": 1_700_000_000,
         "expiry": 3600,
         "cltv_expiry": 40,
+        "payment_addr": b"s" * 32,
+        "features": {8: {}, 14: {}, 17: {}, 25: {}},
     }
     return lightning_pb2.PayReq(**(fields | changes))
 
@@ -113,6 +115,19 @@ def test_decoded_invoice_becomes_exact_binding(
         _payreq(cltv_expiry=0),
         _payreq(destination="02" + "11" * 32),
         _payreq(payment_hash="ab"),
+        _payreq(payment_addr=b""),
+        _payreq(payment_addr=b"s" * 31),
+        _payreq(features={}),
+        _payreq(features={8: {}, 9: {}, 14: {}}),
+        _payreq(features={8: {}, 14: {}, 15: {}}),
+        _payreq(features={8: {}, 14: {}, 16: {}}),
+        _payreq(features={8: {}, 14: {}, 30: {}}),
+        _payreq(features={8: {}, 14: {}, 31: {}}),
+        _payreq(features={8: {}, 14: {}, 48: {}}),
+        _payreq(features={8: {}, 14: {}, 49: {}}),
+        _payreq(features={8: {}, 14: {}, 100: {}}),
+        _payreq(features={8: {}, 14: {}, 101: {}}),
+        _payreq(blinded_paths=[{}]),
     ],
 )
 def test_unbindable_invoices_are_rejected(

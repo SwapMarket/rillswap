@@ -6,10 +6,11 @@ Every consequential step is recorded before its external effect:
   on our own node, and the signed ``max_outgoing_htlc_expiry_height`` must
   still leave the invoice's final CLTV. Then ``PAYING`` is recorded (or
   ``FAILED`` with a ``payment_failed`` observation).
-- ``PAYING``: ``track`` first, so a restart never sends twice; ``send`` only
-  when LND has no payment for the hash. The ``cltv_limit`` bounds the
-  absolute expiry by the signed height. Success records ``PAID`` with the
-  verified preimage and a ``payment_settled`` observation atomically.
+- ``PAYING``: reconcile first. An affirmative ``UNSENT`` grant plus fresh
+  funding permits read-only route preparation. Commit the exact request and
+  consume the grant before sending once. The route's absolute expiry cannot
+  exceed the signed height. Success records ``PAID`` with the verified
+  preimage and a ``payment_settled`` observation atomically.
 - ``PAID``: build and sign the unilateral claim (claim leaf, preimage,
   sealed contract key), record its exact bytes as ``CLAIMING`` with a
   ``claim_broadcast`` observation, then broadcast.
@@ -40,15 +41,16 @@ from rill_core.wire.messages import Envelope
 from rill_core.wire.settlement_messages import FundingBindingPayload
 
 from rill_provider.live_session_store import StaleSwapError
+from rill_provider.lnd_invoice_decode import InvoiceRejectedError
 from rill_provider.settlement_policy import SettlementCrypto, offered_terms
 
 if TYPE_CHECKING:
     from rill_core.settlement.taproot import TaprootKeyOperations
-    from rill_core.wire.messages import ContractTerms, FundingBinding
+    from rill_core.wire.messages import ContractTerms, FundingBinding, InvoiceBinding
 
     from rill_provider.core_tx_bytes import CandidateFundingOutpoint
     from rill_provider.live_session_store import LiveSessionStore, SettlementItem
-    from rill_provider.lnd_payment_send import PaymentOutcome
+    from rill_provider.lnd_payment_send import PaymentOutcome, PreparedPayment
 
 LOG = logging.getLogger(__name__)
 
@@ -82,10 +84,19 @@ class LightningBackend(Protocol):
         """Return the payment status by hash."""
         ...
 
-    def send(
-        self, bolt11: str, *, payment_hash: str, fee_limit_sat: int, cltv_limit: int
-    ) -> PaymentOutcome:
-        """Pay once, bounded."""
+    def prepare(
+        self,
+        bolt11: str,
+        *,
+        invoice_binding: InvoiceBinding,
+        fee_limit_sat: int,
+        max_expiry_height: int,
+    ) -> PreparedPayment:
+        """Prepare exact, absolute-bounded dispatch bytes without paying."""
+        ...
+
+    def send(self, payment: PreparedPayment) -> PaymentOutcome:
+        """Submit the exact committed request once."""
         ...
 
 
@@ -239,29 +250,27 @@ class SettlementEngine:
         ):
             return None
         tip = await asyncio.to_thread(self._chain.tip_height)
-        cltv_limit = expiry_height - tip
-        if cltv_limit <= invoice.min_final_cltv_delta:
+        if expiry_height - tip <= invoice.min_final_cltv_delta:
             return None
         fee_limit = min(self._settings.max_routing_fee_sat, int(terms.economics.success_fee_sat))
-        request = canonicalize(
-            {
-                "method": "SendPaymentV2",
-                "invoice": item.invoice,
-                "payment_hash": invoice.payment_hash,
-                "fee_limit_sat": fee_limit,
-                "cltv_limit": cltv_limit,
-            }
-        )
-        if not self._store.commit_payment_dispatch(item.session_id, invoice.payment_hash, request):
-            return outcome
-        return await asyncio.to_thread(
-            lambda: self._lightning.send(
-                item.invoice,
-                payment_hash=invoice.payment_hash,
-                fee_limit_sat=fee_limit,
-                cltv_limit=cltv_limit,
+        try:
+            payment = await asyncio.to_thread(
+                lambda: self._lightning.prepare(
+                    item.invoice,
+                    invoice_binding=invoice,
+                    fee_limit_sat=fee_limit,
+                    max_expiry_height=expiry_height,
+                )
             )
-        )
+        except InvoiceRejectedError:
+            # An older accepted invoice can be outside the supported routing
+            # subset. No dispatch grant has been consumed or request sent.
+            return None
+        if not self._store.commit_payment_dispatch(
+            item.session_id, invoice.payment_hash, payment.dispatch_record
+        ):
+            return outcome
+        return await asyncio.to_thread(self._lightning.send, payment)
 
     def _claim(
         self, item: SettlementItem, terms: ContractTerms, binding: FundingBinding

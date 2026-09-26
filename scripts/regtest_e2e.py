@@ -9,8 +9,8 @@ package installed), after building the native library:
 It creates disposable containers on a private Docker network, labeled
 ``org.rillswap.e2e=<run>``. Everything is removed afterwards unless
 ``--keep``. Nothing touches other containers or host wallets. It exits
-non-zero unless the user's invoice is SETTLED and the provider's claim reaches
-``CLAIMED``.
+non-zero unless the user's invoice is SETTLED, the provider's claim reaches
+``CLAIMED``, and the sole LND attempt matches the committed absolute-bounded route.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ import hmac
 import json
 import os
 import secrets
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -313,6 +314,62 @@ def provider_config(
     return path
 
 
+def wait_chain_ready(
+    stack: Stack, stop: threading.Event, *, timeout: float = 60
+) -> bool:
+    """Give both polling backends time to process this exact tip before mining.
+
+    GetInfo's height alone is not readiness: its wallet, graph, and blockbeat
+    consumers must all catch up. Only this harness mines its disposable chain.
+    """
+    tip = stack.cli("getbestblockhash").strip()
+    deadline = time.monotonic() + timeout
+    while not stop.is_set():
+        infos = [stack.lncli(role, "getinfo") for role in ("provider", "user")]
+        if all(info["synced_to_chain"] and info["block_hash"] == tip for info in infos):
+            return True
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "disposable LND nodes did not synchronize to the mined tip"
+            )
+        stop.wait(0.25)
+    return False
+
+
+def check_absolute_payment(stack: Stack, work: Path) -> None:
+    """Compare the real LND attempt against signed terms and dispatch custody."""
+    from rill_provider._lnd_proto.routerrpc import router_pb2  # noqa: PLC0415
+
+    with sqlite3.connect(
+        (work / "provider-store/live.sqlite").as_uri() + "?mode=ro", uri=True
+    ) as connection:
+        (row,) = connection.execute(
+            "SELECT p.payment_hash, p.state, p.request, s.terms_offer "
+            "FROM payment_dispatch p JOIN swaps s ON s.session_id=p.session_id"
+        ).fetchall()
+    payment_hash, state, record_bytes, offer_bytes = row
+    record = json.loads(record_bytes)
+    terms = json.loads(offer_bytes)["payload"]["terms"]["contract_terms"]
+    assert state == "SUBMITTED" and record["method"] == "SendToRouteV2"
+    request = router_pb2.SendToRouteRequest.FromString(
+        bytes.fromhex(record["request_hex"])
+    )
+    (payment,) = stack.lncli("provider", "listpayments", "--include_incomplete")[
+        "payments"
+    ]
+    (attempt,) = payment["htlcs"]
+    assert payment["payment_hash"] == payment_hash == request.payment_hash.hex()
+    assert payment["status"] == attempt["status"] == "SUCCEEDED"
+    expiry = int(attempt["route"]["total_time_lock"])
+    assert expiry == request.route.total_time_lock
+    assert expiry <= terms["timing_policy"]["max_outgoing_htlc_expiry_height"]
+    assert (
+        int(attempt["route"]["total_fees_msat"])
+        <= int(terms["economics"]["success_fee_sat"]) * 1000
+    )
+    log("one LND attempt verified against committed route and signed absolute expiry")
+
+
 def main() -> int:  # noqa: PLR0915 - one ordered scenario
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--crypto-library", required=True)
@@ -418,10 +475,15 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
         private(work / "user-age.key", str(user_age) + "\n")
 
         def keep_mining() -> None:
-            while not stop_mining.wait(3):
+            while not stop_mining.is_set():
                 try:
+                    if not wait_chain_ready(stack, stop_mining) or stop_mining.wait(3):
+                        return
                     mine(stack, 1, miner)
                 except Exception:  # noqa: BLE001 - best effort block production
+                    log(
+                        "disposable mining stopped: node readiness or mining unavailable"
+                    )
                     return
 
         threading.Thread(target=keep_mining, daemon=True).start()
@@ -480,6 +542,8 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
             time.sleep(2)
         log(f"provider claim {'CLAIMED' if claimed else 'NOT confirmed'}")
         ok = swap.returncode == 0 and state == "SETTLED" and claimed
+        if ok:
+            check_absolute_payment(stack, work)
         log("PASS" if ok else f"FAIL (logs in {work})")
         return 0 if ok else 1
     finally:

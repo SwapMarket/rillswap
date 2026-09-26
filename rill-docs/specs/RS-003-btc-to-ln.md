@@ -163,6 +163,9 @@ contract hash.
   inform only. The client still verifies the preimage and the chain itself.
 
 Version one uses the unilateral claim leaf. Cooperative MuSig2 claims are
-optional and not yet negotiated. A provider using LND `SendPaymentV2` bounds
-the absolute HTLC expiry with `cltv_limit` so that it never exceeds
-`timing_policy.max_outgoing_htlc_expiry_height`.
+optional and not yet negotiated. The provider prepares an explicit LND route
+and checks its absolute `total_time_lock` against
+`timing_policy.max_outgoing_htlc_expiry_height`. A relative `cltv_limit` alone
+does not enforce this invariant when Core and LND sample different heights.
+The exact `SendToRouteV2` request is durably recorded before one-shot submission;
+missing dispatch state or an ambiguous RPC response never authorizes a resend.

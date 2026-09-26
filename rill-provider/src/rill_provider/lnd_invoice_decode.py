@@ -3,7 +3,8 @@
 LND verifies the invoice signature and refuses invoices for another network;
 this adapter maps the result onto the RS-001 ``InvoiceBinding``. Decoding is
 read-only (``DecodePayReq`` needs only ``offchain:read``) and grants nothing:
-the caller still applies amount, expiry, and CLTV policy.
+unsupported routing features are rejected before returning a fundable binding,
+and the caller still applies amount, expiry, and CLTV policy.
 """
 
 from __future__ import annotations
@@ -37,8 +38,12 @@ if TYPE_CHECKING:
 DECODE_METHOD = "/lnrpc.Lightning/DecodePayReq"
 MAX_INVOICE_CHARS = 2048
 HASH_HEX = 64
+PAYMENT_SECRET_BYTES = 32
 REJECTED = (grpc.StatusCode.UNKNOWN, grpc.StatusCode.INVALID_ARGUMENT)  # LND decode errors
 REGTEST_PREFIX = "lnbcrt"
+# Classic, single-path payment-secret invoices. Optional route-blinding support
+# is advertised by ordinary LND invoices too; actual blinded paths are refused.
+PAYMENT_FEATURES = frozenset({8, 9, 14, 15, 17, 25})
 TRANSIENT = (
     grpc.StatusCode.UNAVAILABLE,
     grpc.StatusCode.DEADLINE_EXCEEDED,
@@ -55,6 +60,15 @@ def binding_from_payreq(bolt11: str, payreq: lightning_pb2.PayReq) -> InvoiceBin
     """Map a decoded ``PayReq`` onto an ``InvoiceBinding`` or refuse it."""
     if not isinstance(payreq, lightning_pb2.PayReq):
         raise LndProtocolError("LND decode returned an unexpected message")
+    features = set(payreq.features)
+    if not (
+        features <= PAYMENT_FEATURES
+        and len(features & {8, 9}) == 1
+        and len(features & {14, 15}) == 1
+        and len(payreq.payment_addr) == PAYMENT_SECRET_BYTES
+        and not payreq.blinded_paths
+    ):
+        raise InvoiceRejectedError("invoice routing features unsupported")
     if payreq.num_msat <= 0 or payreq.num_msat % 1000 or payreq.expiry <= 0:
         raise InvoiceRejectedError("invoice must fix a whole-satoshi amount and an expiry")
     if len(payreq.payment_hash) != HASH_HEX or payreq.cltv_expiry <= 0:
