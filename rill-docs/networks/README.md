@@ -9,6 +9,18 @@ deployment. Every other regtest lab must select and persist a distinct
 deployment namespace. Runtime regtest consensus overrides require a different
 consensus profile and fixture.
 
+The active implementation targets are default signet, testnet4, mainnet, and
+namespaced regtest. The testnet3 definition remains for inspection of historical
+records, not as an enabled live network. Custom signets are outside this rollout.
+
+Offline contract support does not authorize funded operation. Mainnet funding
+must remain disabled until explicit security and release acceptance, and public
+test networks need end-to-end validation before being advertised as operational.
+Backend checks must compare Core's chain and genesis, its `signet_challenge` on
+signet, and LND's actual chain identity. The shared testnet3/testnet4 invoice
+prefix alone is not sufficient network evidence. Missing or unknown evidence
+must refuse new financial actions, not trigger scans or migrations.
+
 Sources:
 
 * <https://github.com/bitcoin/bitcoin/blob/v30.0/src/kernel/chainparams.cpp>

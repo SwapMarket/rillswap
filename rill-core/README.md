@@ -144,6 +144,20 @@ input path: parse untrusted wire data through strict models first. Recovery
 inspection reuses only the binding-history invariant; its self-declared
 provider key still does not establish independent provider provenance.
 
+### Network capability versus release permission
+
+Offline funding-byte checks and unilateral transaction construction support
+default signet, testnet4, mainnet, and explicitly namespaced default regtest.
+The execution policy checks the complete pinned identity, including genesis,
+consensus profile, and the default signet challenge. Legacy testnet3 and custom
+signets remain parseable wire identities but are not enabled for these actions.
+
+This is offline library support, not permission to fund or broadcast on a public
+network. Live provider/CLI adapters remain regtest-only pending their own backend
+attestation, recovery, privacy, and release gates. In particular, mainnet funding
+is not enabled. Existing serialized regtest records and scripts are unchanged;
+no migration, scan, or automatic state transition is performed.
+
 Run local tests with `.venv/bin/pytest -q`. For the native crypto contract test,
 install the sibling `rill-crypto/python` package in the test environment, build
 its pinned native library, and run:

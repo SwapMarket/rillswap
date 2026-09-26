@@ -14,8 +14,8 @@ from typing import TYPE_CHECKING
 
 from rill_core.domain.amounts import MAX_SATS
 from rill_core.errors import ValidationError
+from rill_core.networks import SUPPORTED_CONSENSUS_PROFILES, require_supported_network
 from rill_core.settlement.taproot import TaprootKeyOperations, reconstruct_taproot_contract
-from rill_core.settlement.unilateral import SUPPORTED_CONSENSUS_PROFILE
 from rill_core.wire.hashes import contract_hash
 from rill_core.wire.messages import FundingBinding
 
@@ -166,8 +166,9 @@ def authorize_funding_transaction(  # noqa: PLR0912
     The plan's input values/scripts and the terms' signatures must be verified
     by the caller before using this result to permit an irreversible action.
     """
-    if terms.network_identity.consensus_profile != SUPPORTED_CONSENSUS_PROFILE:
+    if terms.network_identity.consensus_profile not in SUPPORTED_CONSENSUS_PROFILES:
         raise ValidationError("unsupported funding consensus profile")
+    require_supported_network(terms.network_identity)
     if not isinstance(plan, FundingPlan):
         raise ValidationError("funding requires an explicit approved plan")
     contract = reconstruct_taproot_contract(terms, keys=keys)
@@ -252,8 +253,9 @@ def check_funding_binding_transaction(
     """
     if not isinstance(binding, FundingBinding):
         raise ValidationError("funding byte check requires a parsed binding")
-    if terms.network_identity.consensus_profile != SUPPORTED_CONSENSUS_PROFILE:
+    if terms.network_identity.consensus_profile not in SUPPORTED_CONSENSUS_PROFILES:
         raise ValidationError("unsupported funding consensus profile")
+    require_supported_network(terms.network_identity)
     contract = reconstruct_taproot_contract(terms, keys=keys)
     if (
         binding.contract_hash != contract_hash(terms).hex()

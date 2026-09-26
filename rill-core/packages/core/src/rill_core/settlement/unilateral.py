@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal, Protocol
 
 from rill_core.domain.amounts import MAX_SATS
 from rill_core.errors import ValidationError
+from rill_core.networks import SUPPORTED_CONSENSUS_PROFILES, require_supported_network
 from rill_core.settlement.taproot import TaprootKeyOperations, reconstruct_taproot_contract
 from rill_core.wire.hashes import tagged_hash
 
@@ -16,7 +17,6 @@ if TYPE_CHECKING:
 
 type UnilateralPath = Literal["claim", "refund"]
 
-SUPPORTED_CONSENSUS_PROFILE = "bitcoin-core-v30.0-regtest-default"
 TRANSACTION_VERSION = 2
 INPUT_SEQUENCE = 0xFFFFFFFD
 SIGHASH_DEFAULT = 0
@@ -107,8 +107,8 @@ class UnilateralAuthorization:
         keys: TaprootKeyOperations,
     ) -> UnilateralAuthorization:
         """Reconstruct and bind authenticated terms to trusted live prevout data."""
-        if terms.network_identity.consensus_profile != SUPPORTED_CONSENSUS_PROFILE:
-            raise ValidationError("unsupported settlement consensus profile")
+        _require_supported_profile(terms.network_identity.consensus_profile)
+        require_supported_network(terms.network_identity)
         if path not in ("claim", "refund"):
             raise ValidationError("unilateral path must be claim or refund")
         contract = reconstruct_taproot_contract(terms, keys=keys)
@@ -478,7 +478,7 @@ def _dust_threshold(script_pubkey: bytes) -> int:
 
 
 def _require_supported_profile(consensus_profile: str) -> None:
-    if consensus_profile != SUPPORTED_CONSENSUS_PROFILE:
+    if consensus_profile not in SUPPORTED_CONSENSUS_PROFILES:
         raise ValidationError("unsupported settlement consensus profile")
 
 
