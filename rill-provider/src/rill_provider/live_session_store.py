@@ -101,6 +101,7 @@ COMPRESSED_KEY_BYTES = 33
 KEY_RECORD_KIND = "rill-provider/live-session-key/v1"
 EPOCH_RECORD_KIND = "rill-provider/epoch-inbox-key/v1"
 MAX_ADVERTISED_EPOCHS = 4  # RS-005 epoch_inbox_xonly_keys maximum
+MAX_INSPECTION_PAGE = 1000
 SCHEMA_V5 = (
     (
         "CREATE TABLE meta (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
@@ -337,6 +338,31 @@ class SettlementItem:
     claim_tx: bytes | None
     claim_txid: str | None
     payment_dispatch: str = "UNKNOWN"
+
+
+@dataclass(frozen=True, slots=True)
+class SwapInspection:
+    """Offline custody summary, never live chain evidence or dispatch authority."""
+
+    session_id: str
+    contract_hash: str
+    state: str
+    session_present: bool
+    blocked: bool | None
+    dispatch_state: str
+    dispatch_recorded: bool
+    funding_binding_recorded: bool
+    preimage_recorded: bool
+    claim_recorded: bool
+    claim_txid: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SwapInspectionPage:
+    """Bounded keyset page; cursor does not claim a snapshot across invocations."""
+
+    swaps: tuple[SwapInspection, ...]
+    next_after: str | None
 
 
 class StaleSwapError(LiveSessionStoreError):
@@ -1912,6 +1938,97 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - never echo storage details
             raise LiveSessionStoreError("outbox unavailable") from None
         return tuple(OutboxEntry(*row) for row in rows)
+
+    def inspect_swaps(
+        self, *, session_id: str | None = None, after: str | None = None, limit: int = 100
+    ) -> SwapInspectionPage:
+        """Return bounded, secret-free retained state under the exclusive owner.
+
+        This neither runs settlement nor interprets absent payment records as
+        authority. Index-ordered pagination avoids rescanning past pages. No
+        invoice, preimage, key, route, or exact dispatch request is returned.
+        """
+        if (
+            type(limit) is not int
+            or not 1 <= limit <= MAX_INSPECTION_PAGE
+            or (session_id is not None and after is not None)
+            or any(
+                value is not None and (type(value) is not str or HEX32.fullmatch(value) is None)
+                for value in (session_id, after)
+            )
+        ):
+            raise LiveSessionStoreError("swap inspection bounds unsupported")
+        predicate = "w.session_id = ?" if session_id is not None else "w.session_id > ?"
+        try:
+            with self._write() as connection:
+                rows = connection.execute(
+                    "SELECT w.session_id, w.contract_hash, w.state, s.session_id IS NOT NULL, "
+                    "s.blocked, COALESCE(p.state, 'UNKNOWN'), p.request IS NOT NULL, "
+                    "w.funding_binding IS NOT NULL, w.preimage IS NOT NULL, "
+                    "w.claim_tx IS NOT NULL, w.claim_txid "
+                    "FROM swaps w LEFT JOIN sessions s ON s.session_id=w.session_id "
+                    "LEFT JOIN payment_dispatch p ON p.session_id=w.session_id WHERE "
+                    + predicate
+                    + " ORDER BY w.session_id LIMIT ?",
+                    (session_id if session_id is not None else after or "", limit + 1),
+                ).fetchall()
+            result = []
+            for row in rows[:limit]:
+                (
+                    sid,
+                    contract,
+                    state,
+                    present,
+                    blocked,
+                    dispatch,
+                    request,
+                    funding,
+                    preimage,
+                    claim,
+                    txid,
+                ) = row
+                if not (
+                    type(sid) is str
+                    and HEX32.fullmatch(sid)
+                    and type(contract) is str
+                    and HEX32.fullmatch(contract)
+                    and (txid is None or (type(txid) is str and HEX32.fullmatch(txid)))
+                    and state
+                    in {
+                        "ACCEPTED",
+                        "FUNDING_SEEN",
+                        "PAYING",
+                        "PAID",
+                        "FAILED",
+                        "CLAIMING",
+                        "CLAIMED",
+                    }
+                    and dispatch in {"UNKNOWN", "UNSENT", "SUBMITTED"}
+                    and blocked in (None, 0, 1)
+                ):
+                    raise LiveSessionStoreError("swap inspection state unsupported")  # noqa: TRY301
+                result.append(
+                    SwapInspection(
+                        sid,
+                        contract,
+                        state,
+                        bool(present),
+                        None if blocked is None else bool(blocked),
+                        dispatch,
+                        bool(request),
+                        bool(funding),
+                        bool(preimage),
+                        bool(claim),
+                        txid,
+                    )
+                )
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo retained financial or custody material
+            raise LiveSessionStoreError("swap inspection unavailable") from None
+        return SwapInspectionPage(
+            tuple(result), result[-1].session_id if len(rows) > limit else None
+        )
 
 
 def _configure(connection: sqlite3.Connection) -> None:

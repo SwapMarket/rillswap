@@ -397,6 +397,37 @@ subset fail before dispatch if tracking establishes no existing payment and
 the store has an explicit unsent grant. Unknown or consumed grants still permit
 reconciliation only. Neither case shortens the client's on-chain refund delay.
 
+For bounded offline inspection, stop the service and run:
+
+```sh
+rill-provider inspect-swaps --config provider.json --limit 100
+rill-provider inspect-swaps --config provider.json --session-id <session-id>
+rill-provider inspect-swaps --config provider.json --after <next_after>
+```
+
+This takes the same authoritative owner lock and validates namespace, custody,
+schema, and file identity. Acquisition advances only the owner generation; the
+command does not run settlement, load the provider signing identity, connect to
+Core/LND/relays, migrate a store, or change swap and dispatch records. An old,
+partial, copied, or currently owned store is refused, not repaired.
+
+Output is `rillswap/provider-swap-inspection/v1` JSON with
+`action_authority: "none"`, a bounded `swaps` page, and an exclusive `next_after`
+cursor (null at the end). Limits are 1 to 1000, default 100. Pagination uses the
+session-ID index; separate invocations are not a shared snapshot. An empty page
+does not prove that no external payment exists. Missing session rows are shown,
+not silently omitted. Ownership verification still includes the existing whole
+database integrity check; the page limit bounds output, not total startup cost.
+
+The summary includes stored state, conflict blocking, dispatch state, public
+contract/claim identifiers, and presence flags for recovery material. It never
+prints invoices, payment hashes, preimages, secret keys, route details, or exact
+dispatch bytes. Presence flags do not validate that material. `UNKNOWN` dispatch
+state is not evidence of an unsent payment, and `UNSENT` still requires every
+live funding, deadline, and conflict check. This command never grants resend,
+refund, deletion, or admission-capacity authority. Safe active reconciliation
+and economic-capacity release remain separate work.
+
 `provider.json` is strict JSON (`operator_config.OperatorConfig`, unknown
 fields refused). It sets the network identity, the identity key printed
 above, the identity and store paths, the age `custody_recipient`, the

@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import signal
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -76,6 +78,32 @@ def _migrate_store(config: OperatorConfig, crypto: Context, custody: str) -> Non
         upgrade_from_v5=True,
     ):
         pass
+
+
+def _inspect_swaps(
+    config: OperatorConfig, crypto: Context, custody: str, args: argparse.Namespace
+) -> None:
+    """Inspect the authoritative store offline, never construct live backends."""
+    with LiveSessionStore.acquire(
+        config.store_path,
+        config.network,
+        config.provider_identity_xonly,
+        config.handshake_policy(),
+        crypto=crypto,
+        custody_identity=custody,
+        public_keys=crypto,
+    ) as store:
+        page = store.inspect_swaps(session_id=args.session_id, after=args.after, limit=args.limit)
+    print(  # noqa: T201 - explicit operator output, no secret material
+        json.dumps(
+            {
+                "format": "rillswap/provider-swap-inspection/v1",
+                "action_authority": "none",
+                **asdict(page),
+            },
+            sort_keys=True,
+        )
+    )
 
 
 def _chain_tip(config: OperatorConfig) -> Callable[[], int] | None:
@@ -179,6 +207,14 @@ def _parser() -> argparse.ArgumentParser:
     ):
         command = commands.add_parser(name, help=text)
         command.add_argument("--config", type=Path, required=True)
+    inspection = commands.add_parser(
+        "inspect-swaps", help="inspect bounded retained swap state offline"
+    )
+    inspection.add_argument("--config", type=Path, required=True)
+    cursor = inspection.add_mutually_exclusive_group()
+    cursor.add_argument("--session-id", help="inspect one exact session ID")
+    cursor.add_argument("--after", help="resume after this session ID (exclusive)")
+    inspection.add_argument("--limit", type=int, default=100, help="page size, 1 to 1000")
     parser.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING"))
     return parser
 
@@ -197,6 +233,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         with _context(config.native_crypto_library) as crypto:
             if args.command == "migrate-store":
                 _migrate_store(config, crypto, custody)
+            elif args.command == "inspect-swaps":
+                _inspect_swaps(config, crypto, custody, args)
             else:
                 asyncio.run(_serve(config, crypto, custody))
     except (OperatorConfigError, LiveSessionStoreError, ProviderIdentityError) as error:
