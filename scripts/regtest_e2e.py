@@ -24,6 +24,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import subprocess
@@ -60,6 +61,19 @@ def send(self, *args, **kwargs):
         Path(sys.argv[2]).write_text('settled before local commit')
         os._exit(73)
     return outcome
+LndPaymentSender.send = send
+raise SystemExit(main(['serve', '--config', sys.argv[1]]))
+"""
+
+# Subprocess-only fault injection: the provider's sender reports the sole
+# authorized attempt as FAILED by its own payer without sending it, so the
+# swap fails after dispatch and the client must refund on chain.
+NEVER_PAY = """
+import sys
+from rill_provider.cli import main
+from rill_provider.lnd_payment_send import LndPaymentSender, PaymentOutcome
+def send(self, payment):
+    return PaymentOutcome('FAILED', payer=payment.payer.node_pubkey)
 LndPaymentSender.send = send
 raise SystemExit(main(['serve', '--config', sys.argv[1]]))
 """
@@ -415,6 +429,125 @@ def check_absolute_payment(stack: Stack, work: Path) -> None:
     log("one LND attempt verified against committed route and signed absolute expiry")
 
 
+def refund_after_unpaid(  # noqa: PLR0913 - explicit scenario inputs
+    stack: Stack,
+    args: argparse.Namespace,
+    work: Path,
+    swap: subprocess.CompletedProcess[str],
+    config: Path,
+    miner: str,
+    invoice_state: str,
+    stop_mining: threading.Event,
+) -> bool:
+    """The provider failed after dispatch; the client refunds with fee escalation.
+
+    Takes over block production: the background miner waits for both LND
+    nodes per block and gives up after a minute, which a bulk mine past the
+    lock height would trip.
+    """
+    if swap.returncode == 0 or invoice_state == "SETTLED":
+        log("swap unexpectedly succeeded")
+        return False
+    attempt = re.search(r"attempt ([0-9a-f]{64}) revision (\d+)", swap.stderr)
+    lock = re.search(r"refund after block (\d+)", swap.stderr)
+    if attempt is None or lock is None:
+        log("client did not report its funding attempt or refund lock height")
+        return False
+    deadline = time.monotonic() + 120
+    while b"moved to FAILED" not in (work / "provider.log").read_bytes():
+        if time.monotonic() > deadline:
+            log("provider never recorded the failed payment")
+            return False
+        time.sleep(2)
+    store = sqlite3.connect(
+        f"file:{work / 'provider-store' / 'live.sqlite'}?mode=ro", uri=True
+    )
+    with store:
+        reservations = store.execute(
+            "SELECT state, release_evidence FROM economic_reservations"
+        ).fetchall()
+    store.close()
+    log(f"provider reservations after failure: {reservations}")
+    if not (
+        len(reservations) == 1
+        and reservations[0][0] == "RELEASED"
+        and b'"reason":"failed-after-dispatch"' in reservations[0][1]
+    ):
+        log("the payer-attested failure did not release the reservation")
+        return False
+    lock_height = int(lock.group(1))
+    stop_mining.set()
+    time.sleep(4)  # let the background miner finish its current block
+    height = int(stack.cli("getblockcount"))
+    if height <= lock_height:
+        mine(stack, lock_height + 1 - height, miner)
+        wait_synced(stack)
+    log(f"past refund lock height {lock_height}; running rill recover watch-refund")
+    watch_stdout = (work / "watch.stdout").open("wb")
+    watch_stderr = (work / "watch.stderr").open("wb")
+    watch = subprocess.Popen(  # noqa: S603
+        [
+            str(CLI / "rill"),
+            "recover",
+            "watch-refund",
+            "--network",
+            str(work / "network.json"),
+            "--crypto-library",
+            args.crypto_library,
+            "--funding-attempt-id",
+            attempt.group(1),
+            "--binding-revision",
+            attempt.group(2),
+            "--rpc-cookie",
+            str(work / "core.cookie"),
+            "--rpc-port",
+            str(stack.host_port(stack.core, 18443)),
+            "--identity",
+            str(work / "user-age.key"),
+            "--lnd-port",
+            str(stack.host_port(stack.lnd["user"], 10009)),
+            "--lnd-tls-cert",
+            str(work / "user-tls.cert"),
+            "--lnd-invoice-macaroon",
+            str(work / "user-admin.macaroon"),
+            "--intent-dir",
+            str(work),
+            "--initial-fee-sat",
+            "300",
+            "--max-fee-sat",
+            "3000",
+            "--escalate-blocks",
+            "3",
+            "--poll-seconds",
+            "2",
+            str(work / "user-recovery.age.funded"),
+        ],
+        stdout=watch_stdout,
+        stderr=watch_stderr,
+    )
+    deadline = time.monotonic() + 300
+    while watch.poll() is None:  # one block per poll interval so bumps are exercised
+        if time.monotonic() > deadline:
+            watch.kill()
+            log("watch-refund did not finish; see watch.stderr")
+            return False
+        time.sleep(3)
+        mine(stack, 1, miner)
+    watch_stdout.close()
+    watch_stderr.close()
+    sys.stderr.write((work / "watch.stderr").read_text())
+    stdout = (work / "watch.stdout").read_text()
+    log(f"watch-refund exit {watch.returncode}: {stdout.strip()}")
+    if watch.returncode != 0:
+        return False
+    outcome = json.loads(stdout)
+    if outcome["outcome"] != "refund_confirmed" or not outcome["attempts"]:
+        return False
+    refund = json.loads(stack.cli("getrawtransaction", outcome["refund_txid"], "true"))
+    log(f"refund {outcome['refund_txid'][:16]} confirmations {refund['confirmations']}")
+    return int(refund["confirmations"]) >= 1
+
+
 def reconcile_after_crash(stack: Stack, config: Path, payment_hash: str) -> None:
     """Exercise the real command with offchain:read and verify retained custody."""
     work = stack.work
@@ -488,6 +621,11 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
         "--keep", action="store_true", help="keep containers for inspection"
     )
     parser.add_argument("--timeout", type=int, default=600, help="whole swap seconds")
+    parser.add_argument(
+        "--unpaid-refund",
+        action="store_true",
+        help="the provider fails after dispatch; the client refunds with watch-refund",
+    )
     parser.add_argument(
         "--reconcile-after-settle",
         action="store_true",
@@ -573,11 +711,17 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
             str(config),
         ]
         marker = work / "settled-before-commit"
-        initial_command = (
-            [str(CLI / "python"), "-c", CRASH_AFTER_SETTLE, str(config), str(marker)]
-            if args.reconcile_after_settle
-            else provider_command
-        )
+        initial_command = provider_command
+        if args.reconcile_after_settle:
+            initial_command = [
+                str(CLI / "python"),
+                "-c",
+                CRASH_AFTER_SETTLE,
+                str(config),
+                str(marker),
+            ]
+        elif args.unpaid_refund:
+            initial_command = [str(CLI / "python"), "-c", NEVER_PAY, str(config)]
         provider = subprocess.Popen(  # noqa: S603
             initial_command,
             stdout=provider_log,
@@ -681,6 +825,12 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
         log(f"client exit {swap.returncode}: {swap.stdout.strip()}")
         state = stack.lncli("user", "lookupinvoice", payment_hash)["state"]
         log(f"user invoice {state}")
+        if args.unpaid_refund:
+            ok = refund_after_unpaid(
+                stack, args, work, swap, config, miner, state, stop_mining
+            )
+            log("PASS" if ok else f"FAIL (logs in {work})")
+            return 0 if ok else 1
         deadline = time.monotonic() + 180
         claimed = False
         while time.monotonic() < deadline and not claimed:

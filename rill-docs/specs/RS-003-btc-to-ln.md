@@ -172,3 +172,22 @@ and checks its absolute `total_time_lock` against
 does not enforce this invariant when Core and LND sample different heights.
 The exact `SendToRouteV2` request is durably recorded before one-shot submission;
 missing dispatch state or an ambiguous RPC response never authorizes a resend.
+
+After paying, the provider claims unilaterally and MUST keep the claim
+confirmable against the client's refund: an unconfirmed claim is replaced
+(opt-in RBF, new signature) on a schedule that reaches its maximum before
+`refund_lock_height`. The maximum is `max_claim_fee_sat` or, if lower, the
+largest fee that keeps the claim output above the dust floor. Every attempt is
+recorded before broadcast and kept, because any of them may confirm; a mined
+attempt is never replaced. Transport or index failures are not evidence and
+never trigger a replacement.
+
+Both parties resolve a contract output that is spent by the other branch only
+on affirmative active-chain evidence, never on the absence of a lookup result.
+The provider treats its claim as lost only when the funding is at
+`funding_confirmations` on the active chain, the tip is past
+`refund_lock_height`, no recorded attempt is mined, and the output has been
+absent for `refund_resolution_confirmations` blocks built on a block hash that
+is still on the active chain. The client treats its refund as superseded the
+same way in reverse, and stops refunding once its own node reports the
+invoice settled.

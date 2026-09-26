@@ -10,7 +10,7 @@ Every irreversible step is preceded by a durable recovery record: the terms
 recovery file exists before acceptance, and the snapshot with the signed
 binding exists before the funding transaction is broadcast. If the provider
 never pays, the user refunds after ``refund_lock_height`` with
-``rill recover sign-refund``/``broadcast-refund``.
+``rill recover watch-refund`` (or ``sign-refund``/``broadcast-refund``).
 """
 
 from __future__ import annotations
@@ -659,9 +659,10 @@ async def run_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
         approved_noncontract_outputs=funded.other_outputs,
     )
     authorized = authorize_funding_transaction(funded.raw_transaction, terms, plan, keys=crypto)
+    attempt_id = secrets.token_hex(32)
     binding = FundingBinding(
         contract_hash=offer.terms.contract_hash,
-        funding_attempt_id=secrets.token_hex(32),
+        funding_attempt_id=attempt_id,
         binding_revision=0,
         funder_role="client",
         lineage_anchor_txid=funded.inputs[0].txid.hex(),
@@ -681,7 +682,10 @@ async def run_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
         funding=((binding, binding_signature),),
     )
     await asyncio.to_thread(write_recovery, successor, document)
-    report(f"funded recovery snapshot written (funding {authorized.txid})")
+    report(
+        f"funded recovery snapshot written (funding {authorized.txid}, "
+        f"attempt {attempt_id} revision 0)"
+    )
     bound = session.envelope(
         "funding_binding",
         {
@@ -700,7 +704,8 @@ async def run_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
 
     refund_hint = (
         f"funds are committed; refund after block {terms.refund_lock_height} with "
-        "`rill recover sign-refund` and `broadcast-refund` on the funded recovery file"
+        f"`rill recover watch-refund --funding-attempt-id {attempt_id} --binding-revision 0` "
+        "on the funded recovery file"
     )
     while True:
         try:
