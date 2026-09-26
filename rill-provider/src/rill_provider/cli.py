@@ -13,6 +13,7 @@ import json
 import logging
 import signal
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -21,6 +22,7 @@ from rill_provider.core_tx_bytes import RegtestCoreTransactionReader
 from rill_provider.handshake_service import HandshakeService
 from rill_provider.live_session_store import LiveSessionStore, LiveSessionStoreError
 from rill_provider.lnd_invoice_decode import RegtestLndInvoiceDecoder
+from rill_provider.lnd_payment_observation import LndObservationError
 from rill_provider.lnd_payment_send import RegtestLndPaymentSender
 from rill_provider.operator_config import (
     OperatorConfig,
@@ -28,6 +30,7 @@ from rill_provider.operator_config import (
     load_config,
     read_custody_identity,
 )
+from rill_provider.payment_reconciliation import reconcile_payment
 from rill_provider.provider_identity import ProviderIdentity, ProviderIdentityError
 from rill_provider.settlement_engine import SettlementEngine
 
@@ -100,6 +103,46 @@ def _inspect_swaps(
                 "format": "rillswap/provider-swap-inspection/v1",
                 "action_authority": "none",
                 **asdict(page),
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _reconcile_payment(
+    config: OperatorConfig, crypto: Context, custody: str, args: argparse.Namespace
+) -> None:
+    """Track one payment with read credentials; never run settlement or claims."""
+    lnd = config.lnd
+    if lnd is None:
+        raise OperatorConfigError("payment reconciliation requires configured LND")
+    with LiveSessionStore.acquire(
+        config.store_path,
+        config.network,
+        config.provider_identity_xonly,
+        config.handshake_policy(),
+        crypto=crypto,
+        custody_identity=custody,
+        public_keys=crypto,
+    ) as store:
+        try:
+            tracker = RegtestLndPaymentSender(
+                host="127.0.0.1",
+                port=lnd.port,
+                tls_certificate_path=lnd.tls_certificate,
+                macaroon_path=lnd.macaroon,
+                network=config.network,
+            )
+        except ValueError:
+            raise OperatorConfigError("payment reconciliation requires a regtest network") from None
+        result = reconcile_payment(
+            store, tracker, crypto, session_id=args.session_id, now=int(time.time())
+        )
+    print(  # noqa: T201 - explicit redacted operator output
+        json.dumps(
+            {
+                "format": "rillswap/provider-payment-reconciliation/v1",
+                **asdict(result),
             },
             sort_keys=True,
         )
@@ -215,6 +258,11 @@ def _parser() -> argparse.ArgumentParser:
     cursor.add_argument("--session-id", help="inspect one exact session ID")
     cursor.add_argument("--after", help="resume after this session ID (exclusive)")
     inspection.add_argument("--limit", type=int, default=100, help="page size, 1 to 1000")
+    reconciliation = commands.add_parser(
+        "reconcile-payment", help="track one PAYING swap without sending"
+    )
+    reconciliation.add_argument("--config", type=Path, required=True)
+    reconciliation.add_argument("--session-id", required=True)
     parser.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING"))
     return parser
 
@@ -235,9 +283,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _migrate_store(config, crypto, custody)
             elif args.command == "inspect-swaps":
                 _inspect_swaps(config, crypto, custody, args)
+            elif args.command == "reconcile-payment":
+                _reconcile_payment(config, crypto, custody, args)
             else:
                 asyncio.run(_serve(config, crypto, custody))
-    except (OperatorConfigError, LiveSessionStoreError, ProviderIdentityError) as error:
+    except (
+        OperatorConfigError,
+        LiveSessionStoreError,
+        ProviderIdentityError,
+        LndObservationError,
+    ) as error:
         print(f"rill-provider: {error}", file=sys.stderr)  # noqa: T201
         return REFUSED
     return 0

@@ -1695,20 +1695,31 @@ class LiveSessionStore:
             raise LiveSessionStoreError("request not admissible")
         return "new"
 
-    def settlement_work(self) -> tuple[SettlementItem, ...]:
-        """Return funded swaps not yet claimed or failed, oldest first."""
+    def settlement_work(self, *, session_id: str | None = None) -> tuple[SettlementItem, ...]:
+        """Return funded work, optionally restricted to one exact retained session."""
+        if session_id is not None and (
+            type(session_id) is not str or HEX32.fullmatch(session_id) is None
+        ):
+            raise LiveSessionStoreError("settlement session ID unsupported")
+        selected = "AND w.session_id=? " if session_id is not None else ""
+        parameters = (
+            (FIRST_REQUEST_SEQUENCE, session_id)
+            if session_id is not None
+            else (FIRST_REQUEST_SEQUENCE,)
+        )
         try:
             with self._write() as connection:
                 rows = connection.execute(
-                    "SELECT w.session_id, w.state, s.blocked, w.terms_offer, w.funding_binding, "
+                    "SELECT w.session_id, w.state, s.blocked, w.terms_offer, w.funding_binding, "  # noqa: S608 - only static SQL fragments; bound session ID
                     "i.canonical_bytes, w.preimage, w.claim_tx, w.claim_txid, "
                     "COALESCE(p.state, 'UNKNOWN') FROM swaps w "
                     "JOIN sessions s ON s.session_id = w.session_id "
                     "LEFT JOIN payment_dispatch p ON p.session_id = w.session_id "
                     "JOIN inbox i ON i.session_id = w.session_id AND i.sender_key = s.client_key "
                     "AND i.seq = ? WHERE w.state IN ('FUNDING_SEEN', 'PAYING', 'PAID', 'CLAIMING') "
-                    "ORDER BY w.updated_at, w.session_id",
-                    (FIRST_REQUEST_SEQUENCE,),
+                    + selected
+                    + "ORDER BY w.updated_at, w.session_id",
+                    parameters,
                 ).fetchall()
                 items = tuple(
                     SettlementItem(

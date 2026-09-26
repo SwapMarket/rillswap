@@ -11,6 +11,8 @@ It creates disposable containers on a private Docker network, labeled
 ``--keep``. Nothing touches other containers or host wallets. It exits
 non-zero unless the user's invoice is SETTLED, the provider's claim reaches
 ``CLAIMED``, and the sole LND attempt matches the committed absolute-bounded route.
+Use ``--reconcile-after-settle`` to inject a provider crash after LND succeeds,
+recover the witness with an offchain:read macaroon, and resume the normal claim.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +44,25 @@ NETWORK_FIXTURE = (
 )
 RPC_USER, RPC_PASSWORD = "lnd", "disposable-regtest-only"
 CLI = ROOT / "rill-cli" / ".venv" / "bin"
+
+# Subprocess-only fault injection. Exit after the real external success but
+# before the engine can persist PAID. No recovery hook enters production code.
+CRASH_AFTER_SETTLE = """
+import os
+import sys
+from pathlib import Path
+from rill_provider.cli import main
+from rill_provider.lnd_payment_send import RegtestLndPaymentSender
+original = RegtestLndPaymentSender.send
+def send(self, *args, **kwargs):
+    outcome = original(self, *args, **kwargs)
+    if outcome.status == 'SUCCEEDED':
+        Path(sys.argv[2]).write_text('settled before local commit')
+        os._exit(73)
+    return outcome
+RegtestLndPaymentSender.send = send
+raise SystemExit(main(['serve', '--config', sys.argv[1]]))
+"""
 
 
 def log(line: str) -> None:
@@ -380,6 +402,67 @@ def check_absolute_payment(stack: Stack, work: Path) -> None:
     log("one LND attempt verified against committed route and signed absolute expiry")
 
 
+def reconcile_after_crash(stack: Stack, config: Path, payment_hash: str) -> None:
+    """Exercise the real command with offchain:read and verify retained custody."""
+    work = stack.work
+    assert stack.lncli("user", "lookupinvoice", payment_hash)["state"] == "SETTLED"
+    with sqlite3.connect(
+        (work / "provider-store/live.sqlite").as_uri() + "?mode=ro", uri=True
+    ) as connection:
+        (session, state, dispatch, request) = connection.execute(
+            "SELECT s.session_id, s.state, p.state, p.request FROM swaps s "
+            "JOIN payment_dispatch p ON p.session_id=s.session_id"
+        ).fetchone()
+    assert state == "PAYING" and dispatch == "SUBMITTED"
+    stack.lncli(
+        "provider",
+        "bakemacaroon",
+        "--save_to",
+        "/root/reconcile-read.macaroon",
+        "offchain:read",
+    )
+    read_macaroon = stack.copy_out(
+        stack.lnd["provider"],
+        "/root/reconcile-read.macaroon",
+        "reconcile-read.macaroon",
+        private=True,
+    )
+    document = json.loads(config.read_text())
+    document["lnd"]["macaroon"] = str(read_macaroon)
+    document["lnd"].pop("payment_macaroon")
+    reconciliation_config = private(work / "reconcile.json", json.dumps(document))
+    result = subprocess.run(
+        [
+            str(CLI / "rill-provider"),
+            "reconcile-payment",
+            "--config",
+            str(reconciliation_config),
+            "--session-id",
+            session,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    assert not result.stderr
+    assert json.loads(result.stdout) == {
+        "format": "rillswap/provider-payment-reconciliation/v1",
+        "session_id": session,
+        "payment_status": "SUCCEEDED",
+        "swap_state": "PAID",
+        "state_changed": True,
+    }
+    with sqlite3.connect(
+        (work / "provider-store/live.sqlite").as_uri() + "?mode=ro", uri=True
+    ) as connection:
+        assert connection.execute("SELECT state FROM swaps").fetchone() == ("PAID",)
+        assert connection.execute(
+            "SELECT state, request FROM payment_dispatch"
+        ).fetchone() == (dispatch, request)
+    log("crash-recovered witness using offchain:read only; dispatch bytes unchanged")
+
+
 def main() -> int:  # noqa: PLR0915 - one ordered scenario
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--crypto-library", required=True)
@@ -392,12 +475,19 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
         "--keep", action="store_true", help="keep containers for inspection"
     )
     parser.add_argument("--timeout", type=int, default=600, help="whole swap seconds")
+    parser.add_argument(
+        "--reconcile-after-settle",
+        action="store_true",
+        help="crash after LND settles, reconcile with read credentials, then resume",
+    )
     args = parser.parse_args()
     work = ROOT / "tmp" / f"e2e-{time.strftime('%Y%m%dT%H%M%S')}"
     work.mkdir(parents=True, mode=0o700)
     stack = Stack(work)
     stop_mining = threading.Event()
     provider: subprocess.Popen[bytes] | None = None
+    client: subprocess.Popen[bytes] | None = None
+    files = ExitStack()
     relay_stop: threading.Event | None = None
     try:
         log(f"starting containers (run {stack.run_id}, work {work})")
@@ -462,9 +552,21 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
             [str(CLI / "rill-provider"), "provision-store", "--config", str(config)],
             check=True,
         )  # noqa: S603
-        provider_log = (work / "provider.log").open("wb")
+        provider_log = files.enter_context((work / "provider.log").open("wb"))
+        provider_command = [
+            str(CLI / "rill-provider"),
+            "serve",
+            "--config",
+            str(config),
+        ]
+        marker = work / "settled-before-commit"
+        initial_command = (
+            [str(CLI / "python"), "-c", CRASH_AFTER_SETTLE, str(config), str(marker)]
+            if args.reconcile_after_settle
+            else provider_command
+        )
         provider = subprocess.Popen(  # noqa: S603
-            [str(CLI / "rill-provider"), "serve", "--config", str(config)],
+            initial_command,
             stdout=provider_log,
             stderr=subprocess.STDOUT,
         )
@@ -503,7 +605,9 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
 
         threading.Thread(target=keep_mining, daemon=True).start()
         log("running rill swap btc-to-ln")
-        swap = subprocess.run(  # noqa: S603
+        client_stdout = files.enter_context((work / "client.stdout").open("wb"))
+        client_stderr = files.enter_context((work / "client.stderr").open("wb"))
+        client = subprocess.Popen(  # noqa: S603
             [
                 str(CLI / "rill"),
                 "swap",
@@ -541,10 +645,24 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
                 "--settle-timeout",
                 str(args.timeout),
             ],
-            capture_output=True,
-            text=True,
-            timeout=args.timeout + 120,
-            check=False,
+            stdout=client_stdout,
+            stderr=client_stderr,
+        )
+        if args.reconcile_after_settle:
+            if provider.wait(timeout=args.timeout) != 73 or not marker.exists():
+                raise RuntimeError(
+                    "provider did not reach the deterministic settled crash"
+                )
+            reconcile_after_crash(stack, config, payment_hash)
+            provider = subprocess.Popen(
+                provider_command, stdout=provider_log, stderr=subprocess.STDOUT
+            )
+        client.wait(timeout=args.timeout + 120)
+        swap = subprocess.CompletedProcess(
+            client.args,
+            client.returncode,
+            (work / "client.stdout").read_text(),
+            (work / "client.stderr").read_text(),
         )
         sys.stderr.write(swap.stderr)
         log(f"client exit {swap.returncode}: {swap.stdout.strip()}")
@@ -563,12 +681,17 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
         return 0 if ok else 1
     finally:
         stop_mining.set()
+        if client is not None and client.poll() is None:
+            client.kill()
+            client.wait(10)
         if provider is not None:
             provider.terminate()
             try:
                 provider.wait(10)
             except subprocess.TimeoutExpired:
                 provider.kill()
+                provider.wait(10)
+        files.close()
         if relay_stop is not None:
             relay_stop.set()
         if args.keep:

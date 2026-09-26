@@ -425,8 +425,40 @@ prints invoices, payment hashes, preimages, secret keys, route details, or exact
 dispatch bytes. Presence flags do not validate that material. `UNKNOWN` dispatch
 state is not evidence of an unsent payment, and `UNSENT` still requires every
 live funding, deadline, and conflict check. This command never grants resend,
-refund, deletion, or admission-capacity authority. Safe active reconciliation
-and economic-capacity release remain separate work.
+refund, deletion, or admission-capacity authority.
+
+For bounded payment-witness reconciliation, stop the service and run:
+
+```sh
+rill-provider reconcile-payment --config provider.json --session-id <session-id>
+```
+
+This explicitly queries `TrackPaymentV2` for one retained `PAYING` swap, using
+the configured LND read macaroon (not `payment_macaroon`). It is currently
+loopback/regtest-only. It takes the same authoritative owner lock, never runs
+the service, never prepares or submits a payment, and never connects to Core or
+relays. The tracking RPC has a five-second deadline; an active payment may time
+out instead of returning `IN_FLIGHT`. Backend errors fail closed, without
+changing payment state. Store acquisition still performs the full integrity
+check and advances the owner generation.
+
+A reported success is independently checked against the retained contract's
+payment hash. A matching preimage is atomically retained with `PAID` and the
+signed peer observation, so normal settlement can resume the claim path after
+restart. It proves a usable hashlock witness, not which payer settled the
+invoice. The redacted `rillswap/provider-payment-reconciliation/v1` JSON result
+contains only `session_id`, `payment_status`, `swap_state`, and `state_changed`.
+It does not print the preimage, invoice, payment hash, credentials, or route.
+
+`UNKNOWN`, `IN_FLIGHT`, and even a backend-reported `FAILED` preserve `PAYING`
+and every dispatch record. The store has no binding to the original LND payer,
+so another configured node's failed record cannot prove the original payment
+failed. Missing records are never resend permission. This command grants no
+refund, retry, deletion, or economic-capacity release authority. Existing v7
+installations need no migration and perform no reconciliation automatically;
+v5/v6 still require explicit migration. Historical payer binding, definitive
+failure recovery (including the normal engine's current failure handling),
+and economic-capacity release remain production gates.
 
 `provider.json` is strict JSON (`operator_config.OperatorConfig`, unknown
 fields refused). It sets the network identity, the identity key printed
