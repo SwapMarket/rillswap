@@ -209,6 +209,9 @@ one as a backstop. Releases, each atomic with the fact that justifies it:
   grant stays consumed and the payment hash stays reserved forever. A failure
   without attributable payer, or one reported by another node, keeps the
   capacity, and a mismatched attribution is refused.
+- `claim-lost`: `CLAIMING` to `LOST`, after the contract output has been
+  spent on the confirmed chain by something other than a recorded attempt for
+  `refund_resolution_confirmations` blocks (see lost claims below).
 - `claim-confirmed`: `CLAIMING` to `CLAIMED`, entered only at the signed
   `settlement_confirmations`. Historical `CLAIMED` rows (for example migrated
   `UNKNOWN`) release only after the engine freshly observes the retained claim
@@ -444,9 +447,18 @@ Settlement steps:
   and a "transaction not found" answer counts as absence (bump allowed) only
   while Core reports `txindex` synced (`getindexinfo`);
   a recorded claim that fails validation isolates only that swap with an
-  error log. Not yet handled: detecting that the client's refund won, reorgs
-  below `settlement_confirmations`, and feerate estimation (the first fee is
-  `claim_fee_sat`).
+  error log. A mined attempt that a reorganization returns to the mempool is
+  simply unconfirmed again and keeps escalating; a reorganization deeper than
+  `settlement_confirmations` after `CLAIMED` is accepted risk.
+- **Lost claims.** When no recorded attempt is mined and the contract output
+  is gone from the confirmed chain (`gettxout` without mempool), something
+  else spent it: the client's refund. The engine logs an error, records the
+  tip of that first sighting (`outpoint_spent_height`), stops bumping, and
+  moves the swap to the terminal `LOST` state once the spend has held for the
+  signed `refund_resolution_confirmations` blocks. The output reappearing
+  (reorganization) or one of our attempts showing depth clears the sighting.
+  `LOST` releases the economic reservation as `claim-lost`: the Lightning
+  payment is gone and nothing further can happen to the swap.
 
 Cooperative MuSig2 claims are not negotiated yet.
 
@@ -459,11 +471,14 @@ rill-provider provision-store --config provider.json
 rill-provider serve --config provider.json           # until SIGINT/SIGTERM
 ```
 
-A v8 store upgrades to v9 automatically when `serve` (or any command) opens
-it: the additive `claim_attempts` table is created and each `CLAIMING` swap's
+A v8 or v9 store upgrades to v10 automatically when `serve` (or any command)
+opens it. v9 adds the `claim_attempts` table, and each `CLAIMING` swap's
 retained claim becomes attempt 0 with an unknown fee and height, which the
-engine validates and observes before any bump. Older binaries refuse a v9
-store, so a binary rollback after this upgrade is not possible.
+engine validates and observes before any bump. v10 rebuilds `swaps` with the
+terminal `LOST` state and a NULL `outpoint_spent_height` on every existing
+row, so no swap changes state and lost-claim observation starts from scratch.
+Older binaries refuse a v9 or v10 store, so a binary rollback after this
+upgrade is not possible.
 
 Upgrading an authoritative v5, v6, or v7 installation is an explicit offline operation:
 

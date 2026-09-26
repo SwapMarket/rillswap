@@ -337,6 +337,27 @@ class CoreTransactionReader:
             raise CoreProtocolError("Core reported another transaction ID")
         return txid
 
+    def outpoint_unspent(self, txid: str, vout: int) -> bool:
+        """Whether ``txid:vout`` is unspent on the confirmed chain (mempool ignored).
+
+        ``False`` means Core answered that the confirmed chain has no such
+        unspent output: spent, or never existed. Transport failure raises.
+        """
+        if not (type(txid) is str and len(txid) == HASH_HEX_LENGTH and type(vout) is int):
+            raise ValueError("outpoint must be a txid and index")
+        try:
+            with self._client() as client:
+                output = self._rpc(client, "gettxout", [txid, vout, False], 1)
+        except CoreRpcError:
+            raise CoreUnavailableError("Core outpoint status unavailable") from None
+        except httpx.HTTPError:
+            raise CoreUnavailableError("Core RPC transport unavailable") from None
+        if output is None:
+            return False
+        if not isinstance(output, dict):
+            raise CoreProtocolError("Core outpoint status is inconsistent")
+        return True
+
     def confirmations(self, txid: str) -> int:
         """Return best-chain confirmations of a transaction (0 in mempool).
 

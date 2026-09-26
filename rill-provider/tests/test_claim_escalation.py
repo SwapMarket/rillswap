@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
 
 import pytest
-from test_live_session_store import Harness
+from test_live_session_store import Harness, swaps_as_v9
 from test_payment_dispatch_store import _insert_funded_swap
 from test_settlement_engine import BINDING, ITEM, TERMS
 
@@ -90,6 +90,7 @@ def _claiming(store: live.LiveSessionStore, harness: Harness, *, raw: bytes | No
 
 def _as_v8(path: Any) -> None:  # noqa: ANN401
     with sqlite3.connect(path) as connection:
+        swaps_as_v9(connection)
         connection.execute("DROP TABLE claim_attempts")
         connection.execute("UPDATE meta SET schema_version=8")
         connection.execute("PRAGMA user_version=8")
@@ -100,11 +101,41 @@ def test_v8_upgrades_on_ordinary_acquire_with_unobserved_attempt_zero(harness: H
         session = _claiming(store, harness)
     _as_v8(harness.path)
     with harness.acquire() as store:
-        assert store._connection.execute("PRAGMA user_version").fetchone() == (9,)  # noqa: SLF001
+        assert store._connection.execute("PRAGMA user_version").fetchone() == (10,)  # noqa: SLF001
         assert store.claim_attempts(session) == (ClaimAttempt(0, "a0" * 32, b"c0", None, None),)
         store.observe_claim_attempt(session, 0, fee_sat=300, height=990)
         store.observe_claim_attempt(session, 0, fee_sat=1, height=1)  # a restart cannot move it
         assert store.claim_attempts(session) == (ClaimAttempt(0, "a0" * 32, b"c0", 300, 990),)
+
+
+def test_v9_upgrades_on_ordinary_acquire_keeping_every_swap_row(harness: Harness) -> None:
+    with harness.acquire() as store:
+        session = _claiming(store, harness)
+        store._connection.execute(  # noqa: SLF001
+            "INSERT INTO claim_attempts VALUES (?, 0, ?, ?, 300, 990)", (session, "a0" * 32, b"c0")
+        )
+        before = store._connection.execute(  # noqa: SLF001
+            "SELECT session_id, contract_hash, terms_offer, terms_accept, state, "
+            "funding_binding, preimage, claim_txid, claim_tx, updated_at FROM swaps"
+        ).fetchall()
+    with sqlite3.connect(harness.path) as connection:
+        swaps_as_v9(connection)
+        connection.execute("UPDATE meta SET schema_version=9")
+        connection.execute("PRAGMA user_version=9")
+    with harness.acquire() as store:
+        assert store._connection.execute("PRAGMA user_version").fetchone() == (10,)  # noqa: SLF001
+        rows = store._connection.execute("SELECT * FROM swaps").fetchall()  # noqa: SLF001
+        assert [row[:-1] for row in rows] == before
+        assert [row[-1] for row in rows] == [None]  # observation starts from scratch
+        assert store.claim_attempts(session) == (ClaimAttempt(0, "a0" * 32, b"c0", 300, 990),)
+        with pytest.raises(live.LiveSessionStoreError, match="loss evidence"):
+            store.advance_swap(  # LOST is reachable only through an observed spend
+                session,
+                from_state="CLAIMING",
+                to_state="LOST",
+                signer=None,  # type: ignore[arg-type]
+                now=1,
+            )
 
 
 def test_upgrade_isolates_a_claiming_swap_without_claim_bytes(harness: Harness) -> None:
@@ -331,3 +362,51 @@ def test_a_full_schedule_always_reaches_the_maximum() -> None:
     assert fees[-1] == 5_000
     assert all(b - a >= 150 for a, b in pairwise(fees))
     assert attempts <= MAX_CLAIM_ATTEMPTS
+
+
+def _lost_engine(
+    monkeypatch: pytest.MonkeyPatch, tip: int, *, unspent: bool, depths: dict[str, int]
+) -> tuple[SettlementEngine, _Store, Mock]:
+    attempts = [ClaimAttempt(0, "a0" * 32, b"c0", 300, 900)]
+    engine, store, chain = _engine(monkeypatch, attempts, depths, tip)
+    chain.outpoint_unspent.return_value = unspent
+    store.spent: list[int | None] = []  # type: ignore[attr-defined]
+    store.observe_outpoint_spent = lambda _s, height: store.spent.append(height)  # type: ignore[attr-defined]
+    return engine, store, chain
+
+
+def _run_at(engine: SettlementEngine, spent_height: int | None) -> str:
+    item = replace(ITEM, state="CLAIMING", outpoint_spent_height=spent_height)
+    return asyncio.run(engine._claiming(item, TERMS, BINDING, 1500))  # noqa: SLF001
+
+
+def test_a_spent_contract_output_with_no_mined_attempt_is_lost_after_resolution_depth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, store, _chain = _lost_engine(monkeypatch, 1105, unspent=False, depths={})
+    assert _run_at(engine, None) == "CLAIMING"  # first sighting: anchor, no bump
+    assert (store.spent, len(store.attempts), store.moves) == ([1105], 1, [])
+    resolution = TERMS.refund_resolution_confirmations
+    engine, store, _chain = _lost_engine(
+        monkeypatch, 1105 + resolution - 2, unspent=False, depths={}
+    )
+    assert _run_at(engine, 1105) == "CLAIMING"  # still within the resolution wait
+    assert store.moves == []
+    engine, store, _chain = _lost_engine(
+        monkeypatch, 1105 + resolution - 1, unspent=False, depths={}
+    )
+    _run_at(engine, 1105)
+    assert store.moves[0]["to_state"] == "LOST"
+    assert len(store.attempts) == 1  # never bumped against a spent output
+
+
+def test_a_sighting_is_cleared_when_the_output_returns_or_an_attempt_is_mined(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, store, chain = _lost_engine(monkeypatch, 1110, unspent=True, depths={"a0" * 32: 0})
+    assert _run_at(engine, 1105) == "CLAIMING"
+    assert (store.spent, store.moves) == ([None], [])  # unspent again: the wait restarts
+    chain.broadcast.assert_called_once()  # and the claim keeps being pushed
+    engine, store, _chain = _lost_engine(monkeypatch, 1110, unspent=False, depths={"a0" * 32: 1})
+    assert _run_at(engine, 1105) == "CLAIMING"
+    assert (store.spent, store.moves) == ([None], [])  # our own mined claim spent it

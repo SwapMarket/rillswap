@@ -9,7 +9,7 @@ from unittest.mock import Mock
 
 import pytest
 from rill_core.wire.canonical import canonicalize
-from test_live_session_store import Harness
+from test_live_session_store import Harness, swaps_as_v9
 
 from rill_provider import live_session_store as live
 
@@ -42,7 +42,7 @@ def _insert_funded_swap(store: live.LiveSessionStore, harness: Harness, state: s
     )
     # Database fixture for the durable transition boundary, not wire admission.
     store._connection.execute(  # noqa: SLF001
-        "INSERT INTO swaps VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)",
+        "INSERT INTO swaps VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL)",
         (
             reservation.session_id,
             source["contract_hash"],
@@ -77,6 +77,7 @@ def _as_v5(path: Path) -> None:
 
 def _as_v6(path: Path) -> None:
     with sqlite3.connect(path) as connection:
+        swaps_as_v9(connection)
         connection.execute("DROP TABLE claim_attempts")
         connection.execute("DROP TABLE economic_reservations")
         connection.execute("DROP TABLE epoch_admissions")
@@ -184,7 +185,7 @@ def test_upgrade_is_explicit_and_never_backfills_send_permission(
         assert store._connection.execute("SELECT * FROM payment_dispatch").fetchall() == []  # noqa: SLF001
         assert not store.commit_payment_dispatch(session, _hash(harness), b"request")
     with harness.acquire() as store:
-        assert store._connection.execute("PRAGMA user_version").fetchone() == (9,)  # noqa: SLF001
+        assert store._connection.execute("PRAGMA user_version").fetchone() == (10,)  # noqa: SLF001
         assert not store.commit_payment_dispatch(session, _hash(harness), b"request")
 
 

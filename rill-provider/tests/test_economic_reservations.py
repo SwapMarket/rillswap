@@ -8,7 +8,7 @@ import sqlite3
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from test_live_session_store import Harness, _other_init
+from test_live_session_store import Harness, _other_init, swaps_as_v9
 from test_payment_dispatch_store import _hash, _insert_funded_swap
 from test_payment_reconciliation import _paying
 from test_quote_policy import FIRM, _firm
@@ -125,6 +125,7 @@ def test_dispatch_without_an_open_reservation_keeps_the_grant(
 
 def _as_v7(path: Path) -> None:
     with sqlite3.connect(path) as connection:
+        swaps_as_v9(connection)
         connection.execute("DROP TABLE claim_attempts")
         connection.execute("DROP TABLE economic_reservations")
         connection.execute("UPDATE meta SET schema_version=7")
@@ -155,7 +156,7 @@ def test_v7_upgrade_is_explicit_and_backfills_conservatively(harness: Harness) -
         session, state, evidence = ledger[tombstoned]
         assert (session, state) == ("dd" * 32, "RELEASED")
         assert evidence == b'{"reason":"expired-offer","source":"migration","version":1}'
-        assert store._connection.execute("PRAGMA user_version").fetchone() == (9,)  # noqa: SLF001
+        assert store._connection.execute("PRAGMA user_version").fetchone() == (10,)  # noqa: SLF001
     with harness.acquire() as store:  # idempotent: no further migration
         assert len(_ledger(store)) == 4
 
@@ -538,3 +539,39 @@ def test_blocked_unfunded_swap_is_still_closed(harness: Harness) -> None:
             "SELECT blocked FROM sessions"
         ).fetchone()
         assert conflicts == 1  # conflict evidence and blocking are preserved
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [("DISPATCHED", "RELEASED"), ("UNKNOWN", "RELEASED"), ("UNSENT", "UNSENT")],
+)
+def test_a_lost_claim_releases_the_realized_exposure(
+    harness: Harness, before: str, after: str
+) -> None:
+    with harness.acquire() as store:
+        session = _insert_funded_swap(store, harness, "CLAIMING")
+        _set_reservation(store, before)
+        with pytest.raises(live.LiveSessionStoreError, match="loss evidence"):
+            _advance(store, session, "CLAIMING", "LOST")  # no observed spend: refused
+        assert _swap(store) == ("CLAIMING", None)
+        store.observe_outpoint_spent(session, 1200)
+        store.observe_outpoint_spent(session, 1300)  # the first observation anchors
+        assert _swap(store) == ("CLAIMING", 1200)
+        store.observe_outpoint_spent(session, None)  # reorged back: unspent again
+        assert _swap(store) == ("CLAIMING", None)
+        store.observe_outpoint_spent(session, 1250)
+        _advance(store, session, "CLAIMING", "LOST")
+        _session, state, evidence = _ledger(store)[_hash(harness)]
+        assert state == after
+        if after == "RELEASED":
+            assert evidence == (
+                b'{"outpoint_spent_height":1250,"reason":"claim-lost",'
+                b'"required_confirmations":4,"version":1}'
+            )
+        assert _swap(store) == ("LOST", 1250)
+
+
+def _swap(store: live.LiveSessionStore) -> tuple[str, int | None]:
+    return store._connection.execute(  # noqa: SLF001
+        "SELECT state, outpoint_spent_height FROM swaps"
+    ).fetchone()

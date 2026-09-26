@@ -832,3 +832,19 @@ def test_unknown_transaction_is_absence_evidence_only_with_a_synced_txindex(
         with pytest.raises(expected):
             reader.confirmations("ab" * 32)
     assert [r["method"] for r in requests] == ["getrawtransaction", "getindexinfo"]
+
+
+def test_outpoint_unspent_reads_the_confirmed_chain_only(tmp_path: Path) -> None:
+    _, _, network = _context()
+    requests: list[dict[str, Any]] = []
+    with _server(_rpc_reply({"value": 1, "confirmations": 3}), requests) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        assert reader.outpoint_unspent("ab" * 32, 1) is True
+    assert (requests[0]["method"], requests[0]["params"]) == ("gettxout", ["ab" * 32, 1, False])
+    with _server(_rpc_reply(None), []) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        assert reader.outpoint_unspent("ab" * 32, 1) is False
+    with _server(_rpc_reply(error={"code": -1, "message": "help"}), []) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        with pytest.raises(CoreUnavailableError):
+            reader.outpoint_unspent("ab" * 32, 1)

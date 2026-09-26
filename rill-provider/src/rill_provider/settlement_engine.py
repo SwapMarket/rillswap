@@ -83,6 +83,10 @@ class ChainBackend(Protocol):
         """Return best-chain confirmations (0 in mempool) or raise."""
         ...
 
+    def outpoint_unspent(self, txid: str, vout: int) -> bool:
+        """Whether the output is unspent on the confirmed chain (mempool ignored)."""
+        ...
+
 
 CLAIM_PAGE = 16  # historical claims checked per tick
 CLAIM_URGENCY_BLOCKS = 6  # claim at the signed maximum fee this far before refund
@@ -393,7 +397,26 @@ class SettlementEngine:
                     item, "CLAIMED", now, claim_tx=attempt.raw, claim_txid=attempt.txid
                 )
             if depth >= 1:
+                if item.outpoint_spent_height is not None:
+                    self._store.observe_outpoint_spent(item.session_id, None)
                 return item.state  # mined; wait for depth, never replace
+        # No recorded attempt is mined. If the contract output is gone from the
+        # confirmed chain anyway, the client's refund spent it: the claim is
+        # lost once that spend has held for refund_resolution_confirmations.
+        unspent = await asyncio.to_thread(
+            self._chain.outpoint_unspent, binding.funding_txid, binding.contract_vout
+        )
+        if not unspent:
+            if item.outpoint_spent_height is None:
+                LOG.error("contract output spent by another transaction; claim may be lost")
+                self._store.observe_outpoint_spent(item.session_id, tip)
+                return item.state
+            if tip - item.outpoint_spent_height + 1 >= terms.refund_resolution_confirmations:
+                LOG.error("claim lost: the refund resolved; operator attention required")
+                return self._move(item, "LOST", now)
+            return item.state
+        if item.outpoint_spent_height is not None:
+            self._store.observe_outpoint_spent(item.session_id, None)  # reorged back
         fee = claim_fee_target(
             initial=attempts[0].fee_sat,
             maximum=max_spendable_fee(authorization),

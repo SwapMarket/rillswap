@@ -70,7 +70,7 @@ if TYPE_CHECKING:
     from rill_provider.provider_identity import ProviderIdentity
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
-SCHEMA_VERSION = 9  # v8 upgrades on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
+SCHEMA_VERSION = 10  # v8-v9 upgrade on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
 CONTRACT_KEY_RECORD_KIND = "rillswap-provider-contract-key"
 OPEN_PHASES = ("CONFIRMED", "ACCEPTED")  # sessions that may still send requests
 SWAP_TRANSITIONS = frozenset(
@@ -82,6 +82,7 @@ SWAP_TRANSITIONS = frozenset(
         ("PAYING", "FAILED"),
         ("PAID", "CLAIMING"),
         ("CLAIMING", "CLAIMED"),
+        ("CLAIMING", "LOST"),  # the client's refund spent the contract; no claim confirmed
     }
 )
 CLIENT_REQUEST_TYPES = ("quote_request", "terms_accept", "funding_binding")
@@ -106,6 +107,26 @@ KEY_RECORD_KIND = "rill-provider/live-session-key/v1"
 EPOCH_RECORD_KIND = "rill-provider/epoch-inbox-key/v1"
 MAX_ADVERTISED_EPOCHS = 4  # RS-005 epoch_inbox_xonly_keys maximum
 MAX_INSPECTION_PAGE = 1000
+SWAPS_V9_SCHEMA = (
+    "CREATE TABLE swaps (session_id TEXT PRIMARY KEY, contract_hash TEXT NOT NULL UNIQUE, "
+    "terms_offer BLOB NOT NULL, terms_accept BLOB NOT NULL, state TEXT NOT NULL CHECK "
+    "(state IN ('ACCEPTED', 'FUNDING_SEEN', 'PAYING', 'PAID', 'FAILED', 'CLAIMING', "
+    "'CLAIMED')), funding_binding BLOB, preimage TEXT, claim_txid TEXT, claim_tx BLOB, "
+    "updated_at INTEGER NOT NULL)"
+)
+# v10: LOST is terminal for a CLAIMING swap whose contract output was spent on
+# the confirmed chain by something other than a recorded claim attempt (the
+# client's refund) and stayed spent for refund_resolution_confirmations
+# blocks. outpoint_spent_height is the tip at which that spend was first
+# observed; NULL while the output is unspent or a recorded attempt is mined.
+SWAPS_SCHEMA = (
+    "CREATE TABLE swaps (session_id TEXT PRIMARY KEY, contract_hash TEXT NOT NULL UNIQUE, "
+    "terms_offer BLOB NOT NULL, terms_accept BLOB NOT NULL, state TEXT NOT NULL CHECK "
+    "(state IN ('ACCEPTED', 'FUNDING_SEEN', 'PAYING', 'PAID', 'FAILED', 'CLAIMING', "
+    "'CLAIMED', 'LOST')), funding_binding BLOB, preimage TEXT, claim_txid TEXT, claim_tx BLOB, "
+    "updated_at INTEGER NOT NULL, outpoint_spent_height INTEGER "
+    "CHECK (outpoint_spent_height > 0))"
+)
 SCHEMA_V5 = (
     (
         "CREATE TABLE meta (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
@@ -158,13 +179,7 @@ SCHEMA_V5 = (
         "compressed_key TEXT NOT NULL UNIQUE, secret_age BLOB NOT NULL)"
     ),
     # Accepted contracts are never idle-expired (RS-003 acceptance).
-    (
-        "CREATE TABLE swaps (session_id TEXT PRIMARY KEY, contract_hash TEXT NOT NULL UNIQUE, "
-        "terms_offer BLOB NOT NULL, terms_accept BLOB NOT NULL, state TEXT NOT NULL CHECK "
-        "(state IN ('ACCEPTED', 'FUNDING_SEEN', 'PAYING', 'PAID', 'FAILED', 'CLAIMING', "
-        "'CLAIMED')), funding_binding BLOB, preimage TEXT, claim_txid TEXT, claim_tx BLOB, "
-        "updated_at INTEGER NOT NULL)"
-    ),
+    SWAPS_V9_SCHEMA,
     # Never deleted: a payment hash is offered at most once, forever (RS-003).
     (
         "CREATE TABLE payment_hashes (payment_hash TEXT PRIMARY KEY, "
@@ -212,7 +227,10 @@ CLAIM_ATTEMPT_SCHEMA = (
     "first_seen_height INTEGER CHECK (first_seen_height > 0), "
     "PRIMARY KEY (session_id, attempt))"
 )
-SCHEMA = (*SCHEMA_V8, CLAIM_ATTEMPT_SCHEMA)
+SCHEMA_V9 = (*SCHEMA_V8, CLAIM_ATTEMPT_SCHEMA)
+SCHEMA = tuple(
+    SWAPS_SCHEMA if statement is SWAPS_V9_SCHEMA else statement for statement in SCHEMA_V9
+)
 MAX_CLAIM_ATTEMPTS = 32
 ADMISSION_INDEXES = (
     "CREATE INDEX epoch_admissions_expiry ON epoch_admissions (expired, retire_after)",
@@ -371,6 +389,8 @@ class SettlementItem:
     payment_dispatch: str = "UNKNOWN"
     # Provenance of a committed version 1 dispatch record, never send permission.
     payment_payer: PaymentAuthority | None = None
+    # Tip at which the contract output was first seen spent by a non-attempt.
+    outpoint_spent_height: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -678,6 +698,8 @@ class LiveSessionStore:
                 _upgrade_v7(connection)
             if version in (5, 6, 7, 8):
                 _upgrade_v8(connection)
+            if version in (5, 6, 7, 8, 9):
+                _upgrade_v9(connection)
             if version != SCHEMA_VERSION:
                 connection.execute("UPDATE meta SET schema_version=?", (SCHEMA_VERSION,))
                 connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -1790,7 +1812,8 @@ class LiveSessionStore:
                 rows = connection.execute(
                     "SELECT w.session_id, w.state, s.blocked, w.terms_offer, w.funding_binding, "  # noqa: S608 - only static SQL fragments; bound session ID
                     "i.canonical_bytes, w.preimage, w.claim_tx, w.claim_txid, "
-                    "COALESCE(p.state, 'UNKNOWN'), p.payment_hash, p.request FROM swaps w "
+                    "COALESCE(p.state, 'UNKNOWN'), p.payment_hash, p.request, "
+                    "w.outpoint_spent_height FROM swaps w "
                     "JOIN sessions s ON s.session_id = w.session_id "
                     "LEFT JOIN payment_dispatch p ON p.session_id = w.session_id "
                     "JOIN inbox i ON i.session_id = w.session_id AND i.sender_key = s.client_key "
@@ -1814,6 +1837,7 @@ class LiveSessionStore:
                         bound_payer(record, payment_hash=hashed, network=self._network)
                         if payment_dispatch == "SUBMITTED"
                         else None,
+                        spent_height,
                     )
                     for (
                         session_id,
@@ -1828,6 +1852,7 @@ class LiveSessionStore:
                         payment_dispatch,
                         hashed,
                         record,
+                        spent_height,
                     ) in rows
                 )
         except LiveSessionStoreError:
@@ -1900,7 +1925,7 @@ class LiveSessionStore:
                         "INSERT INTO payment_dispatch VALUES (?, ?, 'UNSENT', NULL)",
                         (session_id, offer.terms.contract_terms.invoice_binding.payment_hash),
                     )
-                if to_state in ("FAILED", "CLAIMED"):
+                if to_state in ("FAILED", "CLAIMED", "LOST"):
                     _release_terminal(
                         connection,
                         session_id,
@@ -2232,6 +2257,34 @@ class LiveSessionStore:
             raise LiveSessionStoreError("session mailboxes unavailable") from None
         return tuple(row[0] for row in rows)
 
+    def observe_outpoint_spent(self, session_id: str, tip_height: int | None) -> None:
+        """Record the tip at which a CLAIMING swap's contract output was seen spent.
+
+        ``None`` clears it (the output is unspent again, or a recorded attempt
+        is mined). A recorded height is never moved earlier or later: the
+        first observation anchors the loss resolution wait.
+        """
+        if tip_height is not None and (type(tip_height) is not int or tip_height <= 0):
+            raise LiveSessionStoreError("spent height must be a positive block height")
+        try:
+            with self._write() as connection:
+                if tip_height is None:
+                    connection.execute(
+                        "UPDATE swaps SET outpoint_spent_height=NULL "
+                        "WHERE session_id=? AND state='CLAIMING'",
+                        (session_id,),
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE swaps SET outpoint_spent_height=COALESCE(outpoint_spent_height, ?) "
+                        "WHERE session_id=? AND state='CLAIMING'",
+                        (tip_height, session_id),
+                    )
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("spent observation refused") from None
+
     def firm_capacity_available(self) -> bool:
         """Whether any session could still receive a firm offer (global count only).
 
@@ -2326,6 +2379,7 @@ class LiveSessionStore:
                         "FAILED",
                         "CLAIMING",
                         "CLAIMED",
+                        "LOST",
                     }
                     and dispatch in {"UNKNOWN", "UNSENT", "SUBMITTED"}
                     and blocked in (None, 0, 1)
@@ -2369,7 +2423,7 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
     (version,) = connection.execute("PRAGMA user_version").fetchone()
     if connection.execute("PRAGMA application_id").fetchone() != (
         APPLICATION_ID,
-    ) or version not in ((5, 6, 7, 8, SCHEMA_VERSION) if allow_v5 else (8, SCHEMA_VERSION)):
+    ) or version not in ((5, 6, 7, 8, 9, SCHEMA_VERSION) if allow_v5 else (8, 9, SCHEMA_VERSION)):
         raise LiveSessionStoreError("live session store version unsupported")
     objects = {
         (kind, name): definition
@@ -2377,12 +2431,18 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
             "SELECT type, name, sql FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'"
         )
     }
-    schema = {5: SCHEMA_V5, 6: SCHEMA_V6, 7: SCHEMA_V7, 8: SCHEMA_V8, SCHEMA_VERSION: SCHEMA}[
-        version
-    ]
+    schema = {
+        5: SCHEMA_V5,
+        6: SCHEMA_V6,
+        7: SCHEMA_V7,
+        8: SCHEMA_V8,
+        9: SCHEMA_V9,
+        SCHEMA_VERSION: SCHEMA,
+    }[version]
     indexes = {
         7: ADMISSION_INDEXES,
         8: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
+        9: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
         SCHEMA_VERSION: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
     }
     expected = {("table", statement.split()[2]): statement for statement in schema}
@@ -2474,6 +2534,23 @@ def _upgrade_v8(connection: sqlite3.Connection) -> None:
     )
 
 
+def _upgrade_v9(connection: sqlite3.Connection) -> None:
+    """Rebuild ``swaps`` with the LOST state and the outpoint-spent height.
+
+    Additive: every row is copied unchanged with a NULL spent height, so no
+    swap changes state and the engine starts observing from scratch. The
+    table is rebuilt because SQLite cannot alter a CHECK constraint; nothing
+    references ``swaps`` by foreign key.
+    """
+    connection.execute("ALTER TABLE swaps RENAME TO swaps_v9")
+    connection.execute(SWAPS_SCHEMA)
+    connection.execute(
+        "INSERT INTO swaps SELECT session_id, contract_hash, terms_offer, terms_accept, state, "
+        "funding_binding, preimage, claim_txid, claim_tx, updated_at, NULL FROM swaps_v9"
+    )
+    connection.execute("DROP TABLE swaps_v9")
+
+
 def _release_terminal(  # noqa: PLR0913 - explicit terminal evidence
     connection: sqlite3.Connection,
     session_id: str,
@@ -2494,7 +2571,9 @@ def _release_terminal(  # noqa: PLR0913 - explicit terminal evidence
     sole authorized attempt in flight. A migrated UNKNOWN reservation or a
     failure without attributable payer keeps its capacity. CLAIMED (entered
     only at signed claim depth) releases a DISPATCHED or UNKNOWN
-    reservation: the claim proves the provider recovered its funds.
+    reservation: the claim proves the provider recovered its funds. LOST
+    releases the same: the exposure was realized as a loss and nothing
+    further can happen to it.
     """
     (offer, claim_txid) = connection.execute(
         "SELECT terms_offer, claim_txid FROM swaps WHERE session_id=?", (session_id,)
@@ -2519,6 +2598,18 @@ def _release_terminal(  # noqa: PLR0913 - explicit terminal evidence
                 "failed-after-dispatch", failed_at=int(now or 0), payer=payer.node_pubkey
             )
             allowed = ("UNSENT", "DISPATCHED")
+    elif to_state == "LOST":
+        (spent_height,) = connection.execute(
+            "SELECT outpoint_spent_height FROM swaps WHERE session_id=?", (session_id,)
+        ).fetchone()
+        if type(spent_height) is not int:
+            raise LiveSessionStoreError("loss evidence unavailable")
+        evidence = _release_evidence(
+            "claim-lost",
+            outpoint_spent_height=spent_height,
+            required_confirmations=terms.refund_resolution_confirmations,
+        )
+        allowed = ("DISPATCHED", "UNKNOWN")
     else:
         if type(claim_txid) is not str:
             raise LiveSessionStoreError("claim evidence unavailable")
@@ -2751,7 +2842,7 @@ def _apply_effect(
         ).fetchone():
             raise LiveSessionStoreError("offer reservation is closed")
         connection.execute(
-            "INSERT INTO swaps VALUES (?, ?, ?, ?, 'ACCEPTED', NULL, NULL, NULL, NULL, ?)",
+            "INSERT INTO swaps VALUES (?, ?, ?, ?, 'ACCEPTED', NULL, NULL, NULL, NULL, ?, NULL)",
             (request.session_id, effect.contract_hash, replied[0], document, now),
         )
         connection.execute(

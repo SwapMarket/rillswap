@@ -616,6 +616,7 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: P
         )
         chain.broadcast = lambda raw, txid: chain.broadcasts.append((raw, txid)) or txid
         chain.confirmations = lambda _txid: chain.claim_depth
+        chain.outpoint_unspent = lambda _txid, _vout: True
         sent: list[dict[str, Any]] = []
 
         def track(_payment_hash: str) -> PaymentOutcome:

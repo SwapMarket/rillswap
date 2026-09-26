@@ -178,6 +178,17 @@ class PinnedCrypto:
             raise ValueError("signature not permitted")
 
 
+def swaps_as_v9(connection: sqlite3.Connection) -> None:
+    """Rebuild ``swaps`` as v9 (no LOST state, no spent height) for legacy fixtures."""
+    connection.execute("ALTER TABLE swaps RENAME TO swaps_v10")
+    connection.execute(live.SWAPS_V9_SCHEMA)
+    connection.execute(
+        "INSERT INTO swaps SELECT session_id, contract_hash, terms_offer, terms_accept, state, "
+        "funding_binding, preimage, claim_txid, claim_tx, updated_at FROM swaps_v10"
+    )
+    connection.execute("DROP TABLE swaps_v10")
+
+
 class Harness:
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self.source, self.envelopes = _envelopes()
