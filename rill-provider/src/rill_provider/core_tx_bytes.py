@@ -358,6 +358,21 @@ class CoreTransactionReader:
             raise CoreProtocolError("Core outpoint status is inconsistent")
         return True
 
+    def block_hash(self, height: int) -> str:
+        """Return the active-chain block hash at ``height``; failures raise."""
+        if type(height) is not int or height < 0:
+            raise ValueError("block height must be a non-negative integer")
+        try:
+            with self._client() as client:
+                result = self._rpc(client, "getblockhash", [height], 1)
+        except CoreRpcError:
+            raise CoreUnavailableError("Core block hash unavailable") from None
+        except httpx.HTTPError:
+            raise CoreUnavailableError("Core RPC transport unavailable") from None
+        if not _hash(result):
+            raise CoreProtocolError("Core block hash is malformed")
+        return str(result)
+
     def confirmations(self, txid: str) -> int:
         """Return best-chain confirmations of a transaction (0 in mempool).
 

@@ -87,6 +87,10 @@ class ChainBackend(Protocol):
         """Whether the output is unspent on the confirmed chain (mempool ignored)."""
         ...
 
+    def block_hash(self, height: int) -> str:
+        """Return the active-chain block hash at ``height`` or raise."""
+        ...
+
 
 CLAIM_PAGE = 16  # historical claims checked per tick
 CLAIM_URGENCY_BLOCKS = 6  # claim at the signed maximum fee this far before refund
@@ -407,14 +411,7 @@ class SettlementEngine:
             self._chain.outpoint_unspent, binding.funding_txid, binding.contract_vout
         )
         if not unspent:
-            if item.outpoint_spent_height is None:
-                LOG.error("contract output spent by another transaction; claim may be lost")
-                self._store.observe_outpoint_spent(item.session_id, tip)
-                return item.state
-            if tip - item.outpoint_spent_height + 1 >= terms.refund_resolution_confirmations:
-                LOG.error("claim lost: the refund resolved; operator attention required")
-                return self._move(item, "LOST", now)
-            return item.state
+            return await self._maybe_lost(item, terms, binding, tip, now)
         if item.outpoint_spent_height is not None:
             self._store.observe_outpoint_spent(item.session_id, None)  # reorged back
         fee = claim_fee_target(
@@ -512,6 +509,48 @@ class SettlementEngine:
         ):
             return outcome
         return await asyncio.to_thread(self._lightning.send, payment)
+
+    async def _maybe_lost(
+        self,
+        item: SettlementItem,
+        terms: ContractTerms,
+        binding: FundingBinding,
+        tip: int,
+        now: int,
+    ) -> str:
+        """Close a claim as LOST only on anchored, still-active-chain evidence.
+
+        A missing output is not proof of a refund: the funding itself may be
+        reorged out. So the funding must be confirmed on the active chain at
+        the signed depth and the refund must be possible (tip past the lock
+        height). The first sighting is anchored to the tip block hash; the
+        anchor must still be on the active chain when the wait ends, otherwise
+        the spend may have been reorged and the wait restarts.
+        """
+        try:
+            funding_depth = await asyncio.to_thread(self._chain.confirmations, binding.funding_txid)
+        except CoreTransactionUnknownError:
+            funding_depth = 0
+        if funding_depth < terms.funding_confirmations or tip <= terms.refund_lock_height:
+            LOG.warning("contract output missing while funding is unconfirmed; waiting")
+            if item.outpoint_spent_height is not None:
+                self._store.observe_outpoint_spent(item.session_id, None)
+            return item.state
+        if item.outpoint_spent_height is None or item.outpoint_spent_block is None:
+            LOG.error("contract output spent by another transaction; claim may be lost")
+            anchor = await asyncio.to_thread(self._chain.block_hash, tip)
+            self._store.observe_outpoint_spent(item.session_id, tip, anchor)
+            return item.state
+        seen_height = item.outpoint_spent_height
+        active = await asyncio.to_thread(self._chain.block_hash, seen_height)
+        if tip < seen_height or active != item.outpoint_spent_block:
+            LOG.warning("lost-claim anchor left the active chain; restarting the wait")
+            self._store.observe_outpoint_spent(item.session_id, None)
+            return item.state
+        if tip - seen_height + 1 >= terms.refund_resolution_confirmations:
+            LOG.error("claim lost: the refund resolved; operator attention required")
+            return self._move(item, "LOST", now)
+        return item.state
 
     def _authorization(
         self, terms: ContractTerms, binding: FundingBinding

@@ -42,7 +42,7 @@ def _insert_funded_swap(store: live.LiveSessionStore, harness: Harness, state: s
     )
     # Database fixture for the durable transition boundary, not wire admission.
     store._connection.execute(  # noqa: SLF001
-        "INSERT INTO swaps VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL)",
+        "INSERT INTO swaps VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL)",
         (
             reservation.session_id,
             source["contract_hash"],

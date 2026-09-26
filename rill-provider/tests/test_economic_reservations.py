@@ -553,25 +553,27 @@ def test_a_lost_claim_releases_the_realized_exposure(
         _set_reservation(store, before)
         with pytest.raises(live.LiveSessionStoreError, match="loss evidence"):
             _advance(store, session, "CLAIMING", "LOST")  # no observed spend: refused
-        assert _swap(store) == ("CLAIMING", None)
-        store.observe_outpoint_spent(session, 1200)
-        store.observe_outpoint_spent(session, 1300)  # the first observation anchors
-        assert _swap(store) == ("CLAIMING", 1200)
+        assert _swap(store) == ("CLAIMING", None, None)
+        with pytest.raises(live.LiveSessionStoreError, match="anchor"):
+            store.observe_outpoint_spent(session, 1200)  # a height alone is no anchor
+        store.observe_outpoint_spent(session, 1200, "b1" * 32)
+        store.observe_outpoint_spent(session, 1300, "b2" * 32)  # the first observation anchors
+        assert _swap(store) == ("CLAIMING", 1200, "b1" * 32)
         store.observe_outpoint_spent(session, None)  # reorged back: unspent again
-        assert _swap(store) == ("CLAIMING", None)
-        store.observe_outpoint_spent(session, 1250)
+        assert _swap(store) == ("CLAIMING", None, None)
+        store.observe_outpoint_spent(session, 1250, "b3" * 32)
         _advance(store, session, "CLAIMING", "LOST")
         _session, state, evidence = _ledger(store)[_hash(harness)]
         assert state == after
         if after == "RELEASED":
             assert evidence == (
-                b'{"outpoint_spent_height":1250,"reason":"claim-lost",'
-                b'"required_confirmations":4,"version":1}'
+                b'{"outpoint_spent_block":"' + b"b3" * 32 + b'","outpoint_spent_height":1250,'
+                b'"reason":"claim-lost","required_confirmations":4,"version":1}'
             )
-        assert _swap(store) == ("LOST", 1250)
+        assert _swap(store) == ("LOST", 1250, "b3" * 32)
 
 
-def _swap(store: live.LiveSessionStore) -> tuple[str, int | None]:
+def _swap(store: live.LiveSessionStore) -> tuple[str, int | None, str | None]:
     return store._connection.execute(  # noqa: SLF001
-        "SELECT state, outpoint_spent_height FROM swaps"
+        "SELECT state, outpoint_spent_height, outpoint_spent_block FROM swaps"
     ).fetchone()

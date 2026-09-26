@@ -125,8 +125,8 @@ def test_v9_upgrades_on_ordinary_acquire_keeping_every_swap_row(harness: Harness
     with harness.acquire() as store:
         assert store._connection.execute("PRAGMA user_version").fetchone() == (10,)  # noqa: SLF001
         rows = store._connection.execute("SELECT * FROM swaps").fetchall()  # noqa: SLF001
-        assert [row[:-1] for row in rows] == before
-        assert [row[-1] for row in rows] == [None]  # observation starts from scratch
+        assert [row[:-2] for row in rows] == before
+        assert [row[-2:] for row in rows] == [(None, None)]  # observation starts from scratch
         assert store.claim_attempts(session) == (ClaimAttempt(0, "a0" * 32, b"c0", 300, 990),)
         with pytest.raises(live.LiveSessionStoreError, match="loss evidence"):
             store.advance_swap(  # LOST is reachable only through an observed spend
@@ -364,49 +364,94 @@ def test_a_full_schedule_always_reaches_the_maximum() -> None:
     assert attempts <= MAX_CLAIM_ATTEMPTS
 
 
-def _lost_engine(
-    monkeypatch: pytest.MonkeyPatch, tip: int, *, unspent: bool, depths: dict[str, int]
+def _lost_engine(  # noqa: PLR0913 - explicit chain facts
+    monkeypatch: pytest.MonkeyPatch,
+    tip: int,
+    *,
+    unspent: bool,
+    depths: dict[str, int],
+    funding_depth: int = 6,
+    blocks: dict[int, str] | None = None,
 ) -> tuple[SettlementEngine, _Store, Mock]:
     attempts = [ClaimAttempt(0, "a0" * 32, b"c0", 300, 900)]
+    if funding_depth:
+        depths = depths | {BINDING.funding_txid: funding_depth}
     engine, store, chain = _engine(monkeypatch, attempts, depths, tip)
     chain.outpoint_unspent.return_value = unspent
-    store.spent: list[int | None] = []  # type: ignore[attr-defined]
-    store.observe_outpoint_spent = lambda _s, height: store.spent.append(height)  # type: ignore[attr-defined]
+    chain.block_hash.side_effect = lambda height: (blocks or {}).get(height, f"{height:064x}")
+    store.spent: list[tuple[int, str] | None] = []  # type: ignore[attr-defined]
+    store.observe_outpoint_spent = lambda _s, height, block=None: store.spent.append(  # type: ignore[attr-defined]
+        None if height is None else (height, block)
+    )
     return engine, store, chain
 
 
-def _run_at(engine: SettlementEngine, spent_height: int | None) -> str:
-    item = replace(ITEM, state="CLAIMING", outpoint_spent_height=spent_height)
+def _run_at(engine: SettlementEngine, anchor: tuple[int, str] | None) -> str:
+    height, block = anchor if anchor is not None else (None, None)
+    item = replace(ITEM, state="CLAIMING", outpoint_spent_height=height, outpoint_spent_block=block)
     return asyncio.run(engine._claiming(item, TERMS, BINDING, 1500))  # noqa: SLF001
 
 
-def test_a_spent_contract_output_with_no_mined_attempt_is_lost_after_resolution_depth(
+ANCHOR = (1105, f"{1105:064x}")
+
+
+def test_a_spent_output_is_lost_only_after_an_anchored_resolution_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine, store, _chain = _lost_engine(monkeypatch, 1105, unspent=False, depths={})
-    assert _run_at(engine, None) == "CLAIMING"  # first sighting: anchor, no bump
-    assert (store.spent, len(store.attempts), store.moves) == ([1105], 1, [])
+    assert _run_at(engine, None) == "CLAIMING"  # first sighting: anchor to the tip block
+    assert (store.spent, len(store.attempts), store.moves) == ([ANCHOR], 1, [])
     resolution = TERMS.refund_resolution_confirmations
     engine, store, _chain = _lost_engine(
         monkeypatch, 1105 + resolution - 2, unspent=False, depths={}
     )
-    assert _run_at(engine, 1105) == "CLAIMING"  # still within the resolution wait
-    assert store.moves == []
+    assert _run_at(engine, ANCHOR) == "CLAIMING"  # still within the resolution wait
+    assert (store.spent, store.moves) == ([], [])
     engine, store, _chain = _lost_engine(
         monkeypatch, 1105 + resolution - 1, unspent=False, depths={}
     )
-    _run_at(engine, 1105)
+    _run_at(engine, ANCHOR)
     assert store.moves[0]["to_state"] == "LOST"
     assert len(store.attempts) == 1  # never bumped against a spent output
+
+
+@pytest.mark.parametrize(
+    ("tip", "funding_depth"),
+    [(1105, 0), (1105, TERMS.funding_confirmations - 1), (TERMS.refund_lock_height, 6)],
+)
+def test_a_missing_output_is_not_a_refund_while_funding_is_unconfirmed_or_early(
+    monkeypatch: pytest.MonkeyPatch, tip: int, funding_depth: int
+) -> None:
+    engine, store, _chain = _lost_engine(
+        monkeypatch, tip, unspent=False, depths={}, funding_depth=funding_depth
+    )
+    assert _run_at(engine, None) == "CLAIMING"
+    assert (store.spent, store.moves) == ([], [])  # no anchor, no loss
+    assert _run_at(engine, ANCHOR) == "CLAIMING"
+    assert (store.spent, store.moves) == ([None], [])  # an old anchor is dropped
+
+
+def test_an_anchor_that_left_the_active_chain_restarts_the_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolution = TERMS.refund_resolution_confirmations
+    engine, store, _chain = _lost_engine(
+        monkeypatch, 1105 + resolution, unspent=False, depths={}, blocks={1105: "ee" * 32}
+    )
+    assert _run_at(engine, ANCHOR) == "CLAIMING"
+    assert (store.spent, store.moves) == ([None], [])
+    engine, store, _chain = _lost_engine(monkeypatch, 1104, unspent=False, depths={})
+    assert _run_at(engine, ANCHOR) == "CLAIMING"  # tip behind the anchor
+    assert (store.spent, store.moves) == ([None], [])
 
 
 def test_a_sighting_is_cleared_when_the_output_returns_or_an_attempt_is_mined(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine, store, chain = _lost_engine(monkeypatch, 1110, unspent=True, depths={"a0" * 32: 0})
-    assert _run_at(engine, 1105) == "CLAIMING"
+    assert _run_at(engine, ANCHOR) == "CLAIMING"
     assert (store.spent, store.moves) == ([None], [])  # unspent again: the wait restarts
     chain.broadcast.assert_called_once()  # and the claim keeps being pushed
     engine, store, _chain = _lost_engine(monkeypatch, 1110, unspent=False, depths={"a0" * 32: 1})
-    assert _run_at(engine, 1105) == "CLAIMING"
+    assert _run_at(engine, ANCHOR) == "CLAIMING"
     assert (store.spent, store.moves) == ([None], [])  # our own mined claim spent it

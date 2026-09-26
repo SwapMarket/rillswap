@@ -848,3 +848,20 @@ def test_outpoint_unspent_reads_the_confirmed_chain_only(tmp_path: Path) -> None
         reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
         with pytest.raises(CoreUnavailableError):
             reader.outpoint_unspent("ab" * 32, 1)
+
+
+def test_block_hash_reads_the_active_chain(tmp_path: Path) -> None:
+    _, _, network = _context()
+    requests: list[dict[str, Any]] = []
+    with _server(_rpc_reply("ab" * 32), requests) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        assert reader.block_hash(7) == "ab" * 32
+    assert (requests[0]["method"], requests[0]["params"]) == ("getblockhash", [7])
+    with _server(_rpc_reply(error={"code": -8, "message": "out of range"}), []) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        with pytest.raises(CoreUnavailableError):
+            reader.block_hash(7)
+    with _server(_rpc_reply("zz"), []) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        with pytest.raises(CoreProtocolError):
+            reader.block_hash(7)

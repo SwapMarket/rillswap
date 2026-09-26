@@ -117,15 +117,17 @@ SWAPS_V9_SCHEMA = (
 # v10: LOST is terminal for a CLAIMING swap whose contract output was spent on
 # the confirmed chain by something other than a recorded claim attempt (the
 # client's refund) and stayed spent for refund_resolution_confirmations
-# blocks. outpoint_spent_height is the tip at which that spend was first
-# observed; NULL while the output is unspent or a recorded attempt is mined.
+# blocks. outpoint_spent_height/block are the tip height and hash at which
+# that spend was first observed (the anchor must stay on the active chain);
+# NULL while the output is unspent or a recorded attempt is mined.
 SWAPS_SCHEMA = (
     "CREATE TABLE swaps (session_id TEXT PRIMARY KEY, contract_hash TEXT NOT NULL UNIQUE, "
     "terms_offer BLOB NOT NULL, terms_accept BLOB NOT NULL, state TEXT NOT NULL CHECK "
     "(state IN ('ACCEPTED', 'FUNDING_SEEN', 'PAYING', 'PAID', 'FAILED', 'CLAIMING', "
     "'CLAIMED', 'LOST')), funding_binding BLOB, preimage TEXT, claim_txid TEXT, claim_tx BLOB, "
     "updated_at INTEGER NOT NULL, outpoint_spent_height INTEGER "
-    "CHECK (outpoint_spent_height > 0))"
+    "CHECK (outpoint_spent_height > 0), outpoint_spent_block TEXT "
+    "CHECK ((outpoint_spent_block IS NULL) = (outpoint_spent_height IS NULL)))"
 )
 SCHEMA_V5 = (
     (
@@ -389,8 +391,10 @@ class SettlementItem:
     payment_dispatch: str = "UNKNOWN"
     # Provenance of a committed version 1 dispatch record, never send permission.
     payment_payer: PaymentAuthority | None = None
-    # Tip at which the contract output was first seen spent by a non-attempt.
+    # Tip (height, hash) at which the contract output was first seen spent by
+    # a non-attempt; the hash anchors the wait to the active chain.
     outpoint_spent_height: int | None = None
+    outpoint_spent_block: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1813,7 +1817,7 @@ class LiveSessionStore:
                     "SELECT w.session_id, w.state, s.blocked, w.terms_offer, w.funding_binding, "  # noqa: S608 - only static SQL fragments; bound session ID
                     "i.canonical_bytes, w.preimage, w.claim_tx, w.claim_txid, "
                     "COALESCE(p.state, 'UNKNOWN'), p.payment_hash, p.request, "
-                    "w.outpoint_spent_height FROM swaps w "
+                    "w.outpoint_spent_height, w.outpoint_spent_block FROM swaps w "
                     "JOIN sessions s ON s.session_id = w.session_id "
                     "LEFT JOIN payment_dispatch p ON p.session_id = w.session_id "
                     "JOIN inbox i ON i.session_id = w.session_id AND i.sender_key = s.client_key "
@@ -1838,6 +1842,7 @@ class LiveSessionStore:
                         if payment_dispatch == "SUBMITTED"
                         else None,
                         spent_height,
+                        spent_block,
                     )
                     for (
                         session_id,
@@ -1853,6 +1858,7 @@ class LiveSessionStore:
                         hashed,
                         record,
                         spent_height,
+                        spent_block,
                     ) in rows
                 )
         except LiveSessionStoreError:
@@ -2257,28 +2263,37 @@ class LiveSessionStore:
             raise LiveSessionStoreError("session mailboxes unavailable") from None
         return tuple(row[0] for row in rows)
 
-    def observe_outpoint_spent(self, session_id: str, tip_height: int | None) -> None:
-        """Record the tip at which a CLAIMING swap's contract output was seen spent.
+    def observe_outpoint_spent(
+        self, session_id: str, tip_height: int | None, block_hash: str | None = None
+    ) -> None:
+        """Record the tip (height and hash) at which a CLAIMING swap's output was seen spent.
 
-        ``None`` clears it (the output is unspent again, or a recorded attempt
-        is mined). A recorded height is never moved earlier or later: the
-        first observation anchors the loss resolution wait.
+        ``None`` clears it (the output is unspent again, a recorded attempt is
+        mined, or the anchor block left the active chain). A recorded anchor
+        is never replaced: the first observation anchors the resolution wait.
         """
-        if tip_height is not None and (type(tip_height) is not int or tip_height <= 0):
-            raise LiveSessionStoreError("spent height must be a positive block height")
+        if tip_height is not None and (
+            type(tip_height) is not int
+            or tip_height <= 0
+            or type(block_hash) is not str
+            or not HEX32.fullmatch(block_hash)
+        ):
+            raise LiveSessionStoreError("spent anchor must be a positive height and block hash")
         try:
             with self._write() as connection:
                 if tip_height is None:
                     connection.execute(
-                        "UPDATE swaps SET outpoint_spent_height=NULL "
+                        "UPDATE swaps SET outpoint_spent_height=NULL, outpoint_spent_block=NULL "
                         "WHERE session_id=? AND state='CLAIMING'",
                         (session_id,),
                     )
                 else:
                     connection.execute(
-                        "UPDATE swaps SET outpoint_spent_height=COALESCE(outpoint_spent_height, ?) "
+                        "UPDATE swaps SET "
+                        "outpoint_spent_height=COALESCE(outpoint_spent_height, ?), "
+                        "outpoint_spent_block=COALESCE(outpoint_spent_block, ?) "
                         "WHERE session_id=? AND state='CLAIMING'",
-                        (tip_height, session_id),
+                        (tip_height, block_hash, session_id),
                     )
         except LiveSessionStoreError:
             raise
@@ -2546,7 +2561,8 @@ def _upgrade_v9(connection: sqlite3.Connection) -> None:
     connection.execute(SWAPS_SCHEMA)
     connection.execute(
         "INSERT INTO swaps SELECT session_id, contract_hash, terms_offer, terms_accept, state, "
-        "funding_binding, preimage, claim_txid, claim_tx, updated_at, NULL FROM swaps_v9"
+        "funding_binding, preimage, claim_txid, claim_tx, updated_at, NULL, NULL "
+        "FROM swaps_v9"
     )
     connection.execute("DROP TABLE swaps_v9")
 
@@ -2599,14 +2615,16 @@ def _release_terminal(  # noqa: PLR0913 - explicit terminal evidence
             )
             allowed = ("UNSENT", "DISPATCHED")
     elif to_state == "LOST":
-        (spent_height,) = connection.execute(
-            "SELECT outpoint_spent_height FROM swaps WHERE session_id=?", (session_id,)
+        (spent_height, spent_block) = connection.execute(
+            "SELECT outpoint_spent_height, outpoint_spent_block FROM swaps WHERE session_id=?",
+            (session_id,),
         ).fetchone()
-        if type(spent_height) is not int:
+        if type(spent_height) is not int or type(spent_block) is not str:
             raise LiveSessionStoreError("loss evidence unavailable")
         evidence = _release_evidence(
             "claim-lost",
             outpoint_spent_height=spent_height,
+            outpoint_spent_block=spent_block,
             required_confirmations=terms.refund_resolution_confirmations,
         )
         allowed = ("DISPATCHED", "UNKNOWN")
@@ -2842,7 +2860,8 @@ def _apply_effect(
         ).fetchone():
             raise LiveSessionStoreError("offer reservation is closed")
         connection.execute(
-            "INSERT INTO swaps VALUES (?, ?, ?, ?, 'ACCEPTED', NULL, NULL, NULL, NULL, ?, NULL)",
+            "INSERT INTO swaps VALUES (?, ?, ?, ?, 'ACCEPTED', NULL, NULL, NULL, NULL, ?, "
+            "NULL, NULL)",
             (request.session_id, effect.contract_hash, replied[0], document, now),
         )
         connection.execute(

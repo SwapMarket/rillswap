@@ -452,13 +452,18 @@ Settlement steps:
   `settlement_confirmations` after `CLAIMED` is accepted risk.
 - **Lost claims.** When no recorded attempt is mined and the contract output
   is gone from the confirmed chain (`gettxout` without mempool), something
-  else spent it: the client's refund. The engine logs an error, records the
-  tip of that first sighting (`outpoint_spent_height`), stops bumping, and
-  moves the swap to the terminal `LOST` state once the spend has held for the
-  signed `refund_resolution_confirmations` blocks. The output reappearing
-  (reorganization) or one of our attempts showing depth clears the sighting.
-  `LOST` releases the economic reservation as `claim-lost`: the Lightning
-  payment is gone and nothing further can happen to the swap.
+  else may have spent it: the client's refund. A missing output alone proves
+  nothing (the funding itself may have been reorganized out), so the engine
+  first requires the funding transaction at the signed `funding_confirmations`
+  on the active chain and the tip past `refund_lock_height`. It then logs an
+  error, anchors the first sighting to the tip height and block hash
+  (`outpoint_spent_height`, `outpoint_spent_block`), stops bumping, and moves
+  the swap to the terminal `LOST` state once `refund_resolution_confirmations`
+  blocks have built on an anchor that is still on the active chain. The
+  anchor block leaving the chain, the output reappearing, the funding losing
+  depth, or one of our attempts showing depth clears the sighting and the
+  wait restarts. `LOST` releases the economic reservation as `claim-lost`:
+  the Lightning payment is gone and nothing further can happen to the swap.
 
 Cooperative MuSig2 claims are not negotiated yet.
 
@@ -475,8 +480,8 @@ A v8 or v9 store upgrades to v10 automatically when `serve` (or any command)
 opens it. v9 adds the `claim_attempts` table, and each `CLAIMING` swap's
 retained claim becomes attempt 0 with an unknown fee and height, which the
 engine validates and observes before any bump. v10 rebuilds `swaps` with the
-terminal `LOST` state and a NULL `outpoint_spent_height` on every existing
-row, so no swap changes state and lost-claim observation starts from scratch.
+terminal `LOST` state and NULL `outpoint_spent_height`/`outpoint_spent_block`
+on every existing row, so no swap changes state and lost-claim observation starts from scratch.
 Older binaries refuse a v9 or v10 store, so a binary rollback after this
 upgrade is not possible.
 
