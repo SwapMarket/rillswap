@@ -121,6 +121,7 @@ def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
         LiveSessionStore,
     )
     from rill_provider.lnd_payment_send import PaymentOutcome, PreparedPayment  # noqa: PLC0415
+    from rill_provider.payment_dispatch_record import PaymentAuthority  # noqa: PLC0415
     from rill_provider.provider_identity import ProviderIdentity  # noqa: PLC0415
     from rill_provider.quote_policy import QuoteSchedule  # noqa: PLC0415
     from rill_provider.relay_client import RelayConnection  # noqa: PLC0415
@@ -194,6 +195,7 @@ def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
                 invoice.expires_at,
                 bounds["max_expiry_height"],
                 invoice.min_final_cltv_delta,
+                PaymentAuthority("02" + "11" * 32, NETWORK),  # attested LND payer
             )
 
         def send(payment: PreparedPayment) -> PaymentOutcome:
@@ -202,7 +204,7 @@ def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
             return PaymentOutcome("SUCCEEDED", PREIMAGE)
 
         lightning = SimpleNamespace(
-            track=lambda _h: (
+            track=lambda _h, **_payer: (
                 PaymentOutcome("SUCCEEDED", PREIMAGE) if sent else PaymentOutcome("UNKNOWN")
             ),
             send=send,
