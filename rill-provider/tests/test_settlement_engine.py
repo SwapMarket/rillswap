@@ -50,6 +50,7 @@ ITEM = SettlementItem(
     preimage=None,
     claim_tx=None,
     claim_txid=None,
+    payment_dispatch="UNSENT",
 )
 
 
@@ -83,13 +84,21 @@ def test_restart_does_not_send_when_funding_is_spent_or_unavailable() -> None:
 @pytest.mark.parametrize(
     "outcome", [PaymentOutcome("IN_FLIGHT"), PaymentOutcome("SUCCEEDED", "42" * 32)]
 )
+@pytest.mark.parametrize("dispatch", ["UNSENT", "UNKNOWN", "SUBMITTED"])
 def test_existing_payment_is_reconciled_even_if_blocked_or_funding_lost(
     outcome: PaymentOutcome,
+    dispatch: str,
 ) -> None:
     engine, chain, lightning = _backends(outcome)
     chain.observe_candidate_outpoint.side_effect = ValueError("funding lost")
     result = asyncio.run(
-        engine._pay(replace(ITEM, blocked=True), TERMS, BINDING, 1070, DOCUMENT["created_at"])  # noqa: SLF001
+        engine._pay(  # noqa: SLF001
+            replace(ITEM, blocked=True, payment_dispatch=dispatch),
+            TERMS,
+            BINDING,
+            1070,
+            DOCUMENT["created_at"],
+        )
     )
     assert result == outcome
     chain.observe_candidate_outpoint.assert_not_called()
@@ -122,3 +131,24 @@ def test_restart_sends_only_after_current_funding_check() -> None:
     lightning.send.assert_called_once_with(
         INVOICE, payment_hash=TERMS.invoice_binding.payment_hash, fee_limit_sat=1000, cltv_limit=70
     )
+
+
+@pytest.mark.parametrize("dispatch", ["UNKNOWN", "SUBMITTED", "unrecognized"])
+def test_missing_or_consumed_grant_never_resubmits(dispatch: str) -> None:
+    engine, chain, lightning = _backends(PaymentOutcome("UNKNOWN"))
+    result = asyncio.run(
+        engine._pay(  # noqa: SLF001 - the exposure boundary
+            replace(ITEM, payment_dispatch=dispatch), TERMS, BINDING, 1070, DOCUMENT["created_at"]
+        )
+    )
+    assert result == PaymentOutcome("UNKNOWN")
+    chain.observe_candidate_outpoint.assert_not_called()
+    lightning.send.assert_not_called()
+
+
+def test_conflict_before_dispatch_commit_prevents_send(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, _, lightning = _backends(PaymentOutcome("UNKNOWN"))
+    monkeypatch.setattr(engine._store, "commit_payment_dispatch", Mock(return_value=False))  # noqa: SLF001
+    result = asyncio.run(engine._pay(ITEM, TERMS, BINDING, 1070, DOCUMENT["created_at"]))  # noqa: SLF001
+    assert result == PaymentOutcome("UNKNOWN")
+    lightning.send.assert_not_called()

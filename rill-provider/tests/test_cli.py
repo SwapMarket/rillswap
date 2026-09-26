@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -15,6 +16,7 @@ import pytest
 from fake_relay import FakeRelay
 from pyrage import x25519  # type: ignore[import-untyped]
 
+from rill_provider import cli
 from rill_provider.cli import REFUSED, main
 from rill_provider.operator_config import (
     OperatorConfigError,
@@ -114,6 +116,33 @@ def test_provision_store_is_explicit_and_never_overwrites(
     assert capsys.readouterr().err.startswith("rill-provider: ")
     (tmp_path / "custody.key").chmod(0o644)
     assert main(["serve", "--config", str(config)]) == REFUSED
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
+)
+def test_explicit_migration_does_not_start_the_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    assert main(["provision-store", "--config", str(config)]) == 0
+    database = tmp_path / "store" / "live.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE payment_dispatch")
+        connection.execute("UPDATE meta SET schema_version=5")
+        connection.execute("PRAGMA user_version=5")
+
+    async def refuse_service(*_args: object) -> None:
+        pytest.fail("migration must not run the network service")
+
+    monkeypatch.setattr(cli, "_serve", refuse_service)
+    assert main(["migrate-store", "--config", str(config)]) == 0
+    assert main(["migrate-store", "--config", str(config)]) == 0
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (6,)
+        assert connection.execute("SELECT * FROM payment_dispatch").fetchall() == []
 
 
 @pytest.mark.native_crypto

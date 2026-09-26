@@ -49,6 +49,7 @@ from rill_core.wire.messages import (
     HandshakeAcceptPayload,
     HandshakeInit,
 )
+from rill_core.wire.quotes import TermsOfferPayload
 from rill_core.wire.types import NetworkIdentity
 
 from rill_provider._nip59_receive import _decode_gift_wrap_candidate
@@ -67,7 +68,7 @@ if TYPE_CHECKING:
     from rill_provider.provider_identity import ProviderIdentity
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
-SCHEMA_VERSION = 5  # v1-v4 (unreleased development formats) are refused unchanged.
+SCHEMA_VERSION = 6  # v5 requires explicit upgrade; v1-v4 are refused unchanged.
 CONTRACT_KEY_RECORD_KIND = "rillswap-provider-contract-key"
 OPEN_PHASES = ("CONFIRMED", "ACCEPTED")  # sessions that may still send requests
 SWAP_TRANSITIONS = frozenset(
@@ -100,7 +101,7 @@ COMPRESSED_KEY_BYTES = 33
 KEY_RECORD_KIND = "rill-provider/live-session-key/v1"
 EPOCH_RECORD_KIND = "rill-provider/epoch-inbox-key/v1"
 MAX_ADVERTISED_EPOCHS = 4  # RS-005 epoch_inbox_xonly_keys maximum
-SCHEMA = (
+SCHEMA_V5 = (
     (
         "CREATE TABLE meta (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
         "schema_version INTEGER NOT NULL, store_uuid TEXT NOT NULL, network_jcs BLOB NOT NULL, "
@@ -165,6 +166,12 @@ SCHEMA = (
         "session_id TEXT NOT NULL, reserved_at INTEGER NOT NULL)"
     ),
 )
+PAYMENT_DISPATCH_SCHEMA = (
+    "CREATE TABLE payment_dispatch (session_id TEXT PRIMARY KEY, "
+    "payment_hash TEXT NOT NULL UNIQUE, "
+    "state TEXT NOT NULL CHECK (state IN ('UNSENT', 'SUBMITTED')), request BLOB)"
+)
+SCHEMA = (*SCHEMA_V5, PAYMENT_DISPATCH_SCHEMA)
 
 
 class LiveSessionStoreError(ValueError):
@@ -303,6 +310,7 @@ class SettlementItem:
     preimage: str | None
     claim_tx: bytes | None
     claim_txid: str | None
+    payment_dispatch: str = "UNKNOWN"
 
 
 class StaleSwapError(LiveSessionStoreError):
@@ -485,11 +493,14 @@ class LiveSessionStore:
         max_sessions: int = DEFAULT_MAX_SESSIONS,
         max_tombstones: int = DEFAULT_MAX_TOMBSTONES,
         new_sessions_per_minute: int = DEFAULT_NEW_SESSIONS_PER_MINUTE,
+        upgrade_from_v5: bool = False,
     ) -> Self:
         """Take lifetime exclusive ownership; refuse any unknown or copied state.
 
         ``max_sessions`` caps retained sessions so strangers cannot grow the
         store without bound; ``expire_unconfirmed`` reclaims capacity.
+        ``upgrade_from_v5=True`` explicitly authorizes an additive, transactional
+        schema upgrade. It does not backfill permission to send old payments.
         """
         if not all(
             type(limit) is int and limit >= 1
@@ -523,7 +534,7 @@ class LiveSessionStore:
                 location.as_uri() + "?mode=rw", uri=True, isolation_level=None
             )
             connection.execute("PRAGMA busy_timeout=5000")
-            _check_schema(connection)  # before any pragma that could modify a foreign file
+            version = _check_schema(connection, allow_v5=upgrade_from_v5 is True)
             _configure(connection)
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -531,7 +542,7 @@ class LiveSessionStore:
                 "db_inode, lock_inode, generation, store_uuid, authority_jcs, custody_recipient "
                 "FROM meta"
             ).fetchall()
-            if len(row) != 1 or row[0][:4] != (SCHEMA_VERSION, network_jcs, identity, policy_jcs):
+            if len(row) != 1 or row[0][:4] != (version, network_jcs, identity, policy_jcs):
                 raise LiveSessionStoreError("store namespace or policy mismatch")  # noqa: TRY301
             _check_provisioning(row[0][7], row[0][8])
             if row[0][9] != str(unlocking.to_public()):
@@ -540,6 +551,8 @@ class LiveSessionStore:
                 raise LiveSessionStoreError(  # noqa: TRY301 - copied or restored file
                     "store files are not the provisioned authoritative copy"
                 )
+            if version == 5:  # noqa: PLR2004 - the only explicitly supported prior schema
+                _upgrade_v5(connection)
             generation = row[0][6] + 1
             connection.execute("UPDATE meta SET generation=?", (generation,))
             connection.execute("COMMIT")
@@ -1568,8 +1581,10 @@ class LiveSessionStore:
             with self._write() as connection:
                 rows = connection.execute(
                     "SELECT w.session_id, w.state, s.blocked, w.terms_offer, w.funding_binding, "
-                    "i.canonical_bytes, w.preimage, w.claim_tx, w.claim_txid FROM swaps w "
+                    "i.canonical_bytes, w.preimage, w.claim_tx, w.claim_txid, "
+                    "COALESCE(p.state, 'UNKNOWN') FROM swaps w "
                     "JOIN sessions s ON s.session_id = w.session_id "
+                    "LEFT JOIN payment_dispatch p ON p.session_id = w.session_id "
                     "JOIN inbox i ON i.session_id = w.session_id AND i.sender_key = s.client_key "
                     "AND i.seq = ? WHERE w.state IN ('FUNDING_SEEN', 'PAYING', 'PAID', 'CLAIMING') "
                     "ORDER BY w.updated_at, w.session_id",
@@ -1586,6 +1601,7 @@ class LiveSessionStore:
                         preimage,
                         claim_tx,
                         claim_txid,
+                        payment_dispatch,
                     )
                     for (
                         session_id,
@@ -1597,6 +1613,7 @@ class LiveSessionStore:
                         preimage,
                         claim_tx,
                         claim_txid,
+                        payment_dispatch,
                     ) in rows
                 )
         except LiveSessionStoreError:
@@ -1636,12 +1653,53 @@ class LiveSessionStore:
                 ).rowcount
                 if updated != 1:
                     raise StaleSwapError("swap state changed")  # noqa: TRY301
+                if (from_state, to_state) == ("FUNDING_SEEN", "PAYING"):
+                    (offer_bytes,) = connection.execute(
+                        "SELECT terms_offer FROM swaps WHERE session_id=?", (session_id,)
+                    ).fetchone()
+                    offer = parse_model_json(
+                        TermsOfferPayload, canonicalize(_canonical_envelope(offer_bytes).payload)
+                    )
+                    connection.execute(
+                        "INSERT INTO payment_dispatch VALUES (?, ?, 'UNSENT', NULL)",
+                        (session_id, offer.terms.contract_terms.invoice_binding.payment_hash),
+                    )
                 if observation is not None:
                     self._record_observation(connection, session_id, observation, signer, now)
         except LiveSessionStoreError:
             raise
         except Exception:  # noqa: BLE001 - never echo storage or crypto details
             raise LiveSessionStoreError("swap transition refused") from None
+
+    def commit_payment_dispatch(self, session_id: str, payment_hash: str, request: bytes) -> bool:
+        """Durably consume one explicit UNSENT grant before its external effect.
+
+        Missing state is never permission to send. This transaction also orders
+        authorization against conflict blocking: a blocked session cannot gain
+        a new grant. A later conflict cannot undo an already committed dispatch.
+        Lost responses and interrupted callers must reconcile, never recreate
+        the grant or resubmit the saved request automatically.
+        """
+        if type(request) is not bytes or not 0 < len(request) <= MAX_DOCUMENT_BYTES:
+            raise LiveSessionStoreError("payment request size unsupported")
+        try:
+            with self._write() as connection:
+                return (
+                    connection.execute(
+                        "UPDATE payment_dispatch SET state='SUBMITTED', request=? "
+                        "WHERE session_id=? AND payment_hash=? AND state='UNSENT' "
+                        "AND EXISTS (SELECT 1 FROM swaps w JOIN sessions s "
+                        "ON s.session_id=w.session_id "
+                        "WHERE w.session_id=payment_dispatch.session_id "
+                        "AND w.state='PAYING' AND s.blocked=0)",
+                        (request, session_id, payment_hash),
+                    ).rowcount
+                    == 1
+                )
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo routing or payment details
+            raise LiveSessionStoreError("payment dispatch refused") from None
 
     def _record_observation(
         self,
@@ -1772,10 +1830,11 @@ def _configure(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA secure_delete=ON")  # expired sealed keys leave no old pages
 
 
-def _check_schema(connection: sqlite3.Connection) -> None:
+def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> int:
+    (version,) = connection.execute("PRAGMA user_version").fetchone()
     if connection.execute("PRAGMA application_id").fetchone() != (
         APPLICATION_ID,
-    ) or connection.execute("PRAGMA user_version").fetchone() != (SCHEMA_VERSION,):
+    ) or version not in ((5, SCHEMA_VERSION) if allow_v5 else (SCHEMA_VERSION,)):
         raise LiveSessionStoreError("live session store version unsupported")
     tables = {
         name: definition
@@ -1784,11 +1843,24 @@ def _check_schema(connection: sqlite3.Connection) -> None:
         )
         if kind == "table"
     }
-    expected = {statement.split()[2]: statement for statement in SCHEMA}
+    schema = SCHEMA_V5 if version == 5 else SCHEMA  # noqa: PLR2004 - exact legacy format
+    expected = {statement.split()[2]: statement for statement in schema}
     if tables != expected:
         raise LiveSessionStoreError("live session store schema incompatible")
     if connection.execute("PRAGMA quick_check").fetchone() != ("ok",):
         raise LiveSessionStoreError("live session store integrity unavailable")
+    return int(version)
+
+
+def _upgrade_v5(connection: sqlite3.Connection) -> None:
+    """Add dispatch custody inside the verified owner's existing transaction.
+
+    No old swap is labeled UNSENT. Only a future FUNDING_SEEN to PAYING
+    transition can create that affirmative marker, before any send occurs.
+    """
+    connection.execute(PAYMENT_DISPATCH_SCHEMA)
+    connection.execute("UPDATE meta SET schema_version=?", (SCHEMA_VERSION,))
+    connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
 class _TokenBucket:

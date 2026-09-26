@@ -1,10 +1,10 @@
 """Pay and track one BTC to LN invoice with the provider's regtest LND.
 
-The caller must durably record the payment intent (swap state ``PAYING``)
-before ``send``. LND refuses a second payment for a hash that is in flight or
-succeeded, and ``track`` is always tried first after a restart, so one intent
-never becomes two payments. ``cltv_limit`` bounds the absolute HTLC expiry
-by the signed ``max_outgoing_htlc_expiry_height`` (RS-003).
+The caller must durably consume a one-shot dispatch grant before ``send``.
+Tracking an unknown hash is not sufficient authorization to send again after
+an ambiguous submission. The current relative ``cltv_limit`` does not enforce
+the signed absolute HTLC expiry when Core and LND sample different heights;
+absolute-route enforcement remains a release blocker.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ type Status = Literal["SUCCEEDED", "FAILED", "IN_FLIGHT", "UNKNOWN"]
 
 @dataclass(frozen=True, slots=True)
 class PaymentOutcome:
-    """``UNKNOWN`` means LND has no payment for the hash (never sent)."""
+    """``UNKNOWN`` means tracking found no record, not proof of no prior send."""
 
     status: Status
     preimage: str | None = None
@@ -127,7 +127,7 @@ class RegtestLndPaymentSender:
         )
 
     def track(self, payment_hash: str) -> PaymentOutcome:
-        """Return the current status of a payment by hash (``UNKNOWN`` if never sent)."""
+        """Return current status (``UNKNOWN`` if LND reports no payment record)."""
         request = router_pb2.TrackPaymentRequest(
             payment_hash=bytes.fromhex(payment_hash), no_inflight_updates=True
         )

@@ -75,7 +75,7 @@ absent, partial, old, or restored state grants no key allocation or action
 authority.
 
 `live_session_store.LiveSessionStore` is the **authoritative** handshake
-session store (SQLite `RLS1` v5; unreleased v1-v4 files are refused unchanged), and the only provider store whose rows may
+session store (SQLite `RLS1` v6; v5 requires explicit migration and unreleased v1-v4 files are refused unchanged), and the only provider store whose rows may
 permit exposing an accept or admitting a confirm. It must be created
 explicitly with `LiveSessionStore.provision(...)` and an
 `AuthorityDeclaration`, in which the operator attests that the volume is
@@ -290,13 +290,19 @@ recorded before its external effect:
   still leave the invoice's final CLTV. The swap is then recorded as `PAYING`,
   or as `FAILED` with a `payment_failed` observation.
 - **Payment.** LND `TrackPaymentV2` runs first, so a restart never sends
-  twice. `SendPaymentV2` runs only when LND has no payment for the hash, with
+  twice. `SendPaymentV2` runs only when LND has no payment for the hash and a
+  durable `UNSENT` dispatch grant exists, with
   `cltv_limit = E_out - tip` and a routing fee capped by the success fee.
   Before a new send, the engine rechecks the bound output and its confirmations,
   invoice expiry, and session conflict state. A persisted `PAYING` intent alone
   never proves that funding remains valid. Missing or insufficient funding
   defers a new payment, while existing LND attempts continue to be reconciled.
-  Blocked (conflicting) sessions never start a payment.
+  The dispatch grant is consumed and its request recorded before submission.
+  Conflict blocking and dispatch authorization are ordered in the same store
+  transaction. A lost response never restores a grant: missing or `SUBMITTED`
+  state permits reconciliation only, not another send. This can leave an
+  interrupted swap stalled if the request never reached LND; it does not prove
+  payment failure or immediate refund safety.
 - **Claim.** A verified preimage records `PAID` and sends a `payment_settled`
   observation. The engine then builds the unilateral claim-leaf spend, signed
   inside the store by the sealed contract key. Its exact bytes are recorded
@@ -314,6 +320,26 @@ rill-provider provision-identity --out id.age --recipient age1... \
 rill-provider provision-store --config provider.json
 rill-provider serve --config provider.json           # until SIGINT/SIGTERM
 ```
+
+Upgrading an authoritative v5 installation is an explicit offline operation:
+
+```sh
+rill-provider migrate-store --config provider.json
+```
+
+Stop the old service first. This takes the existing exclusive owner lock,
+verifies the exact v5 schema, namespace, custody recipient, and original file
+inodes, then adds the dispatch table and updates the version in one transaction.
+It does not start relays, scan a chain, send payments, publish messages, or delete
+history. Interrupted upgrades roll back; `serve` never migrates automatically.
+Missing, partial, copied, foreign, and unsupported older stores remain refused.
+An already-current store is safe to pass to this command again.
+
+No old swap is backfilled as `UNSENT`. Existing `PAYING` swaps reconcile with
+LND but cannot start another payment merely because tracking returns not found.
+An existing `FUNDING_SEEN` swap can obtain a new grant only through its normal
+checked transition to `PAYING`. Keys, preimages, contracts, and payment-hash
+reservations are retained. This migration is not restored-snapshot reconciliation.
 
 `provider.json` is strict JSON (`operator_config.OperatorConfig`, unknown
 fields refused). It sets the network identity, the identity key printed

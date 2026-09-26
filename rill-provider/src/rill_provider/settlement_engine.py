@@ -170,7 +170,7 @@ class SettlementEngine:
             ):
                 return self._move(item, "FAILED", now, observation={"kind": "payment_failed"})
             self._move(item, "PAYING", now)
-            return await self._advance(_with_state(item, "PAYING"), now)
+            return await self._advance(_with_state(item, "PAYING", payment_dispatch="UNSENT"), now)
         if item.state == "PAYING":
             outcome = await self._pay(item, terms, binding, expiry_height, now)
             if outcome is None:
@@ -211,7 +211,7 @@ class SettlementEngine:
                 return self._move(item, "CLAIMED", now)
         return item.state
 
-    async def _pay(
+    async def _pay(  # noqa: PLR0911 - explicit exposure guards before the sole send
         self,
         item: SettlementItem,
         terms: ContractTerms,
@@ -227,7 +227,7 @@ class SettlementEngine:
         # PAYING is a durable intent, not durable chain evidence. After an
         # interrupted attempt, reconcile LND first, but never start a new
         # payment against a stale confirmation or newly blocked session.
-        if item.blocked:
+        if item.blocked or item.payment_dispatch != "UNSENT":
             return outcome
         seen = await asyncio.to_thread(
             self._chain.observe_candidate_outpoint, binding, terms, keys=self._crypto
@@ -243,6 +243,17 @@ class SettlementEngine:
         if cltv_limit <= invoice.min_final_cltv_delta:
             return None
         fee_limit = min(self._settings.max_routing_fee_sat, int(terms.economics.success_fee_sat))
+        request = canonicalize(
+            {
+                "method": "SendPaymentV2",
+                "invoice": item.invoice,
+                "payment_hash": invoice.payment_hash,
+                "fee_limit_sat": fee_limit,
+                "cltv_limit": cltv_limit,
+            }
+        )
+        if not self._store.commit_payment_dispatch(item.session_id, invoice.payment_hash, request):
+            return outcome
         return await asyncio.to_thread(
             lambda: self._lightning.send(
                 item.invoice,
