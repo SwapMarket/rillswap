@@ -44,6 +44,11 @@ Exit codes:
   assuming nothing was committed.
 
 The client currently reuses `rill-provider`'s Nostr transport modules.
+Discovery observes a bounded query window and selects the highest valid
+announcement revision it receives, rather than trusting arrival order. Equal
+revision conflicts and event floods are refused. A relay can still withhold
+newer announcements; persistent rollback protection and multi-relay provider
+listing remain required before public deployment.
 
 The live wallet verifies Core's actual chain and genesis before every wallet
 effect, including signing and broadcast, and refuses incomplete or initial-sync

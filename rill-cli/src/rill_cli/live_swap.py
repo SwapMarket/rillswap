@@ -23,6 +23,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
+from rill_core.domain.chain import MAX_EXACT_JSON_INTEGER
 from rill_core.settlement import (
     FundingPlan,
     authorize_funding_transaction,
@@ -73,6 +74,7 @@ ENCRYPTION_SUITES = ("noise-xk-secp256k1-chachapoly-sha256/v1",)
 CAPABILITIES = ("core/v1", "recovery/v1")
 NIP59_BACKDATE_SECONDS = 2 * 24 * 60 * 60
 GIFT_WRAP_KIND = 1059
+MAX_DISCOVERY_EVENTS = 256
 
 
 class SwapError(RuntimeError):
@@ -141,6 +143,10 @@ def verify_announcement(
         raise SwapError("announcement from another key or kind")
     wrapper = json.loads(event.content)
     advertisement = wrapper["advertisement"]
+    if type(advertisement.get("revision")) is not int or not (
+        0 <= advertisement["revision"] <= MAX_EXACT_JSON_INTEGER
+    ):
+        raise SwapError("announcement does not offer an exact bounded revision")
     crypto.schnorr_verify(
         bytes.fromhex(identity),
         tagged_hash(ADVERTISEMENT_TAG, canonicalize(advertisement)),
@@ -166,21 +172,32 @@ async def discover(  # noqa: PLR0913 - explicit trust inputs
     now: int,
     timeout: float = 10.0,  # noqa: ASYNC109
 ) -> dict[str, Any]:
-    """Return the newest valid announcement of ``identity`` on the relay."""
+    """Select the highest valid revision observed during a bounded relay query.
+
+    A relay can withhold announcements; this is not a proof of global freshness.
+    Refuse equivocation or a truncated flood rather than accepting the first ad.
+    """
     await connection.subscribe([{"kinds": [ANNOUNCEMENT_KIND], "authors": [identity]}])
     best: dict[str, Any] | None = None
+    seen = 0
     try:
         async with asyncio.timeout(timeout):
             async for raw in connection.events():
+                seen += 1
+                if seen > MAX_DISCOVERY_EVENTS:
+                    raise SwapError(
+                        "provider discovery event limit exceeded; nothing was committed"
+                    )
                 try:
                     found = verify_announcement(
                         raw, identity=identity, network=network, crypto=crypto, now=now
                     )
                 except Exception:  # noqa: BLE001, S112 - ignore invalid events
                     continue
+                if best is not None and found["revision"] == best["revision"] and found != best:
+                    raise SwapError("provider announced conflicting data at the same revision")
                 if best is None or found["revision"] > best["revision"]:
                     best = found
-                    break
     except TimeoutError:
         pass
     if best is None:
