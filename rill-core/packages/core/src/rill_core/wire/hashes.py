@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 from typing import TYPE_CHECKING, cast
 
+from pydantic import TypeAdapter
+
 from rill_core.wire.canonical import JsonValue, canonicalize
+from rill_core.wire.types import XOnlyKey
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -19,6 +22,11 @@ if TYPE_CHECKING:
         HandshakeInit,
         ProviderTerms,
     )
+    from rill_core.wire.types import NetworkIdentity
+
+EPOCH_SESSION_FEATURE = "epoch-bound-session/v1"
+EPOCH_SESSION_EXTENSION = "rillswap/epoch-bound-session"
+_XONLY_KEY: TypeAdapter[str] = TypeAdapter(XOnlyKey)
 
 
 def tagged_hash(tag: str, message: bytes) -> bytes:
@@ -36,6 +44,33 @@ def canonical_model(model: BaseModel, *, exclude: set[str] | None = None) -> byt
 def contract_hash(terms: ContractTerms) -> bytes:
     """Hash complete contract terms with the version-one domain."""
     return tagged_hash("RillSwap/contract/v1", canonical_model(terms))
+
+
+def epoch_bound_session_id(
+    network: NetworkIdentity,
+    provider_identity: str,
+    epoch_inbox_key: str,
+    client_session_key: str,
+) -> bytes:
+    """Bind a new admission lane to one provider epoch and fresh client key.
+
+    This proves context binding, not that the epoch is active or belongs to the
+    provider. Live admission must separately authenticate the recipient epoch
+    and durably enforce its retirement. No existing session ID is reinterpreted.
+    """
+    keys = tuple(
+        _XONLY_KEY.validate_python(key, strict=True)
+        for key in (provider_identity, epoch_inbox_key, client_session_key)
+    )
+    if len(set(keys)) != len(keys):
+        raise ValueError("epoch admission role keys must be distinct")
+    context: JsonValue = {
+        "network_identity": cast("JsonValue", network.model_dump(mode="json")),
+        "provider_identity_xonly_key": keys[0],
+        "epoch_inbox_xonly_key": keys[1],
+        "client_session_xonly_key": keys[2],
+    }
+    return tagged_hash("RillSwap/epoch-bound-session/v1", canonicalize(context))
 
 
 def handshake_init_hash(initiation: HandshakeInit) -> bytes:

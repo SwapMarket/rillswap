@@ -8,7 +8,13 @@ from pydantic import Field, model_validator
 
 from rill_core.domain.amounts import MAX_SATS
 from rill_core.wire.canonical import JsonValue  # noqa: TC001
-from rill_core.wire.hashes import contract_hash, handshake_init_hash
+from rill_core.wire.hashes import (
+    EPOCH_SESSION_EXTENSION,
+    EPOCH_SESSION_FEATURE,
+    contract_hash,
+    epoch_bound_session_id,
+    handshake_init_hash,
+)
 from rill_core.wire.types import (
     CompressedKey,
     ExactInteger,
@@ -373,6 +379,19 @@ class HandshakeInit(StrictModel):
     required_features: tuple[Identifier, ...]
     extensions: dict[str, JsonValue]
 
+    @property
+    def epoch_inbox_xonly_key(self) -> str | None:
+        """Return the feature-bound epoch, never infer one for legacy inits."""
+        if EPOCH_SESSION_FEATURE not in self.required_features:
+            return None
+        binding = self.extensions.get(EPOCH_SESSION_EXTENSION)
+        if not isinstance(binding, dict) or set(binding) != {"epoch_inbox_xonly_key"}:
+            raise ValueError("epoch-bound session requires its exact epoch extension")
+        key = binding["epoch_inbox_xonly_key"]
+        if not isinstance(key, str):
+            raise ValueError("epoch inbox key must be a string")  # noqa: TRY004 - Pydantic validator
+        return key
+
     @model_validator(mode="after")
     def validate_lists(self) -> HandshakeInit:
         """Validate preference-ordered negotiation lists and canonical features."""
@@ -387,6 +406,18 @@ class HandshakeInit(StrictModel):
             raise ValueError("session_id and client_challenge must be independent")
         if self.client_session_xonly_key == self.expected_provider_identity_xonly_key:
             raise ValueError("client session and provider identity keys must be distinct")
+        epoch = self.epoch_inbox_xonly_key
+        if (
+            epoch is not None
+            and self.session_id
+            != epoch_bound_session_id(
+                self.network_identity,
+                self.expected_provider_identity_xonly_key,
+                epoch,
+                self.client_session_xonly_key,
+            ).hex()
+        ):
+            raise ValueError("session_id does not bind the declared provider epoch")
         return self
 
 
@@ -473,6 +504,14 @@ class HandshakeAccept(StrictModel):
         required = set(initiation.required_features) | set(self.required_features)
         if not required.issubset(supported_features):
             raise ValueError("handshake requires an unknown feature")
+        if EPOCH_SESSION_FEATURE in required:
+            if not (
+                EPOCH_SESSION_FEATURE in initiation.required_features
+                and EPOCH_SESSION_FEATURE in self.required_features
+            ):
+                raise ValueError("epoch-bound admission must be jointly negotiated")
+            if self.provider_session_xonly_key == initiation.epoch_inbox_xonly_key:
+                raise ValueError("provider session and epoch inbox keys must be distinct")
 
 
 class HandshakeAcceptPayload(StrictModel):

@@ -237,8 +237,9 @@ deposit, never a replacement or automatic additional claim.
 `network_identity`, `session_id`, `client_challenge`,
 `client_session_xonly_key`, `expected_provider_identity_xonly_key`,
 `requested_encryption_suites`, `requested_capabilities`, `required_features`,
-and `extensions`. Session ID and challenge are independent random 32-byte
-values. `handshake_init_hash` is the handshake-init tagged hash of this object.
+and `extensions`. Unless the epoch-bound feature below is negotiated, session
+ID and challenge are independent random 32-byte values. `handshake_init_hash`
+is the handshake-init tagged hash of this object.
 
 `HandshakeAcceptV1` contains exactly `handshake_init_hash`, `protocol`,
 `wire_version`, `profile_id`, `network_identity`, `session_id`,
@@ -264,6 +265,53 @@ envelope tag. No economic message is valid before confirmation.
 Negotiation fails on network mismatch, reused challenge, unsupported suite or
 profile, downgrade, unknown required feature, bad signature, or expired
 advertisement. Session and contract keys MUST be distinct.
+
+### 7.1. Optional epoch-bound admission
+
+`epoch-bound-session/v1` is a required handshake feature for a separate,
+finite-lifetime admission lane. It does not change the closed handshake wire
+shape or reinterpret legacy records. Both initiation and acceptance MUST list
+the feature in `required_features`; neither party may introduce or drop it
+unilaterally. An initiation selecting this feature MUST
+carry `extensions["rillswap/epoch-bound-session"]` with exactly
+`{"epoch_inbox_xonly_key": <recipient epoch x-only key>}`. The client MUST use
+a fresh session key and an independent random client challenge.
+
+Its session ID is the lowercase hex encoding of:
+
+```text
+TaggedHash("RillSwap/epoch-bound-session/v1", JCS({
+  "network_identity": <complete NetworkIdentityV1>,
+  "provider_identity_xonly_key": <expected provider identity>,
+  "epoch_inbox_xonly_key": <recipient epoch key>,
+  "client_session_xonly_key": <fresh client session key>
+}))
+```
+
+The three keys MUST be distinct, canonical secp256k1 x-only keys. The provider's
+selected session key MUST also differ from the retiring epoch key. This static
+binding is not evidence that the epoch is active or belongs to the provider.
+Before reserving any new challenge, a live provider MUST authenticate the actual
+recipient epoch, require it to equal the declared epoch, and establish that it
+has not durably retired. Missing provenance never authorizes this lane.
+
+Within an admissible epoch, exact initiation replays MUST reuse the recorded
+result. A provider MUST NOT discard that replay protection merely because the
+session is idle while the epoch remains admissible. Once the epoch is durably
+retired, a provider MAY expire idle pre-economic sessions without lifetime
+session-ID tombstones. Retired epochs MUST NOT reopen after a clock rollback;
+rewrapping the old initiation for another epoch MUST be refused. Expired
+pre-economic transcripts are refused, never issued another accept.
+
+This exception does not permit retiring accepted contracts, payment-hash
+reservations, or legacy replay history. An optional extension without the
+required feature remains legacy admission. Existing installations gain no
+epoch-retirement authority from missing migration or ingress metadata.
+
+Implementation staging: the core defines the binding and validation primitive.
+Live activation additionally requires provider epoch custody/retirement, explicit
+store migration, and client feature negotiation; the primitive alone enables
+none of those actions.
 
 ## 8. Message authentication, ordering, and effects
 
