@@ -66,6 +66,8 @@ def answer_client_request(
     if request.message_type == "quote_request":
         if request.in_reply_to is not None or request.contract_hash is not None:
             return _error("request_unacceptable", "quote requests start an exchange")
+        if context.swap is not None:  # one swap per session; no new offers after it
+            return _error("unsupported_request", "session already has a swap")
         return answer_quote(request, prior, context, terms)
     if request.message_type == "terms_accept":
         return answer_acceptance(request, context, now=terms.now, crypto=crypto)

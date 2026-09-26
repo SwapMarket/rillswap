@@ -38,9 +38,6 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
 
 def _paying(store: live.LiveSessionStore, harness: Harness, dispatch: str | None) -> str:
     session = _insert_funded_swap(store, harness, "FUNDING_SEEN")
-    store._connection.execute(  # noqa: SLF001
-        "INSERT INTO payment_hashes VALUES (?, ?, ?)", (_hash(harness), session, 1000)
-    )
     request = copy.deepcopy(harness.envelopes[2])
     request.update(message_type="quote_request", sequence=2, payload=FIRM | {"extensions": {}})
     # Database-boundary fixture, preserving the real retained envelope and grant paths.

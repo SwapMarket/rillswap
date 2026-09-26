@@ -21,6 +21,7 @@ from rill_core.wire.types import (
 from rill_provider.handshake_service import ServicePolicy
 from rill_provider.handshake_store import HandshakePolicy
 from rill_provider.live_session_store import (
+    DEFAULT_MAX_ACTIVE_RESERVATIONS,
     DEFAULT_MAX_SESSIONS,
     DEFAULT_MAX_TOMBSTONES,
     DEFAULT_NEW_SESSIONS_PER_MINUTE,
@@ -130,6 +131,8 @@ class OperatorConfig(_Strict):
     max_sessions: int = Field(default=DEFAULT_MAX_SESSIONS, ge=1)
     max_tombstones: int = Field(default=DEFAULT_MAX_TOMBSTONES, ge=1)
     new_sessions_per_minute: int = Field(default=DEFAULT_NEW_SESSIONS_PER_MINUTE, ge=1)
+    # Unreleased firm offers plus accepted swaps; bounds concurrent financial exposure.
+    max_active_reservations: int = Field(default=DEFAULT_MAX_ACTIVE_RESERVATIONS, ge=1)
 
     @field_validator("provider_destination_script")
     @classmethod

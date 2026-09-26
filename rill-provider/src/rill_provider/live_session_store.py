@@ -69,7 +69,7 @@ if TYPE_CHECKING:
     from rill_provider.provider_identity import ProviderIdentity
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
-SCHEMA_VERSION = 7  # v5/v6 require explicit upgrade; v1-v4 are refused unchanged.
+SCHEMA_VERSION = 8  # v5-v7 require explicit upgrade; v1-v4 are refused unchanged.
 CONTRACT_KEY_RECORD_KIND = "rillswap-provider-contract-key"
 OPEN_PHASES = ("CONFIRMED", "ACCEPTED")  # sessions that may still send requests
 SWAP_TRANSITIONS = frozenset(
@@ -91,6 +91,7 @@ FIRST_REQUEST_SEQUENCE = 2  # RS-001: first client message after the confirm
 MAX_REQUESTS_PER_SESSION = 16  # further requests are refused unanswered
 DEFAULT_MAX_SESSIONS = 1000  # live (unexpired) sessions
 DEFAULT_MAX_TOMBSTONES = 1_000_000  # permanent expired-session IDs (~100 bytes each)
+DEFAULT_MAX_ACTIVE_RESERVATIONS = 4  # unreleased firm offers and swaps (financial exposure)
 DEFAULT_NEW_SESSIONS_PER_MINUTE = 60  # global admission rate; known sessions exempt
 MAX_DOCUMENT_BYTES = 65_536
 MAX_CHALLENGE_TRIES = 4
@@ -183,14 +184,26 @@ EPOCH_RETIREMENT_SCHEMA = (
     "retired_through INTEGER NOT NULL CHECK (retired_through >= 0))"
 )
 EPOCH_KEY_HISTORY_SCHEMA = "CREATE TABLE epoch_key_history (epoch_key TEXT PRIMARY KEY)"
-SCHEMA = (
+SCHEMA_V7 = (
     *SCHEMA_V6,
     EPOCH_ADMISSION_SCHEMA,
     EPOCH_RETIREMENT_SCHEMA,
     EPOCH_KEY_HISTORY_SCHEMA,
 )
+# One row per payment-hash reservation, kept forever. Only RELEASED rows stop
+# counting against financial capacity, and only with versioned closure evidence.
+ECONOMIC_RESERVATION_SCHEMA = (
+    "CREATE TABLE economic_reservations (payment_hash TEXT PRIMARY KEY, "
+    "session_id TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN "
+    "('UNKNOWN', 'UNSENT', 'DISPATCHED', 'RELEASED')), release_evidence BLOB, "
+    "CHECK ((state = 'RELEASED') = (release_evidence IS NOT NULL)))"
+)
+SCHEMA = (*SCHEMA_V7, ECONOMIC_RESERVATION_SCHEMA)
 ADMISSION_INDEXES = (
     "CREATE INDEX epoch_admissions_expiry ON epoch_admissions (expired, retire_after)",
+)
+RESERVATION_INDEXES = (
+    "CREATE INDEX economic_reservations_state ON economic_reservations (state, session_id)",
 )
 
 
@@ -309,6 +322,8 @@ class RequestContext:
     is_payment_hash_reserved: Callable[[str], bool]
     replied_to: Envelope | None = None  # our outbox message named by in_reply_to
     swap: SwapRecord | None = None
+    # False when a new firm offer would exceed unreleased economic capacity.
+    economic_capacity_available: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -450,6 +465,7 @@ class LiveSessionStore:
         max_sessions: int,
         max_tombstones: int,
         new_sessions_per_minute: int,
+        max_active_reservations: int,
     ) -> None:
         """Use provision() or acquire(); never construct directly."""
         self.path = path
@@ -465,6 +481,7 @@ class LiveSessionStore:
         self._public_keys = public_keys
         self._max_sessions = max_sessions
         self._max_tombstones = max_tombstones
+        self._max_active_reservations = max_active_reservations
         self._admission = _TokenBucket(new_sessions_per_minute)
         self._pid = os.getpid()
 
@@ -507,7 +524,7 @@ class LiveSessionStore:
                 connection.execute("BEGIN IMMEDIATE")
                 for statement in SCHEMA:
                     connection.execute(statement)
-                for statement in ADMISSION_INDEXES:
+                for statement in (*ADMISSION_INDEXES, *RESERVATION_INDEXES):
                     connection.execute(statement)
                 connection.execute("INSERT INTO epoch_retirement VALUES (1, 0)")
                 connection.execute(
@@ -551,19 +568,27 @@ class LiveSessionStore:
         max_sessions: int = DEFAULT_MAX_SESSIONS,
         max_tombstones: int = DEFAULT_MAX_TOMBSTONES,
         new_sessions_per_minute: int = DEFAULT_NEW_SESSIONS_PER_MINUTE,
+        max_active_reservations: int = DEFAULT_MAX_ACTIVE_RESERVATIONS,
         upgrade_from_v5: bool = False,
     ) -> Self:
         """Take lifetime exclusive ownership; refuse any unknown or copied state.
 
-        ``max_sessions`` caps retained sessions. ``expire_idle`` reclaims
-        pre-economic capacity; accepted-contract quota policy is unchanged.
-        The historical ``upgrade_from_v5=True`` spelling authorizes supported
-        v5/v6 schema upgrades and adding the epoch-bound admission feature.
+        ``max_sessions`` caps pre-acceptance sessions, which ``expire_idle``
+        reclaims. ``max_active_reservations`` caps unreleased economic
+        reservations (firm offers and accepted swaps); only evidenced closure
+        releases one. The historical ``upgrade_from_v5=True`` spelling
+        authorizes supported v5-v7 schema upgrades and adding the epoch-bound
+        admission feature.
         No old payment or handshake gains new authority from the migration.
         """
         if not all(
             type(limit) is int and limit >= 1
-            for limit in (max_sessions, max_tombstones, new_sessions_per_minute)
+            for limit in (
+                max_sessions,
+                max_tombstones,
+                new_sessions_per_minute,
+                max_active_reservations,
+            )
         ):
             raise LiveSessionStoreError("session capacity unsupported")
         network_jcs, identity = _expected(network, provider_identity)
@@ -623,6 +648,8 @@ class LiveSessionStore:
                 _upgrade_v5(connection)
             if version in (5, 6):
                 _upgrade_v6(connection)
+            if version in (5, 6, 7):
+                _upgrade_v7(connection)
             _epoch_watermark(connection)
             if connection.execute(
                 "SELECT 1 FROM epochs e LEFT JOIN epoch_key_history h "
@@ -648,6 +675,7 @@ class LiveSessionStore:
                 max_sessions=max_sessions,
                 max_tombstones=max_tombstones,
                 new_sessions_per_minute=new_sessions_per_minute,
+                max_active_reservations=max_active_reservations,
             )
         except LiveSessionStoreError:
             _discard(connection, lock_fd)
@@ -814,7 +842,12 @@ class LiveSessionStore:
                     blocked = False
                     if self.requires_epoch_bound_sessions and epoch is None:
                         raise LiveSessionStoreError("new session requires epoch-bound admission")  # noqa: TRY301
-                    (live,) = connection.execute("SELECT COUNT(*) FROM sessions").fetchone()
+                    # Accepted sessions are retained forever but hold economic
+                    # reservations instead; only pre-acceptance sessions count here.
+                    (live,) = connection.execute(
+                        "SELECT COUNT(*) FROM sessions WHERE phase IN "
+                        "('RESERVED', 'ACCEPT_COMMITTED', 'CONFIRMED')"
+                    ).fetchone()
                     if epoch is None:
                         (dead,) = connection.execute("SELECT COUNT(*) FROM expired").fetchone()
                     else:
@@ -1381,6 +1414,13 @@ class LiveSessionStore:
                         (now - idle_timeout,),
                     )
                 ]
+                # Release before deletion: an idle session's open offer can never
+                # be accepted again. Its payment hash stays reserved forever.
+                connection.executemany(
+                    "UPDATE economic_reservations SET state='RELEASED', release_evidence=? "
+                    "WHERE session_id=? AND state='UNSENT'",
+                    [(_release_evidence("expired-offer", expired_at=now), sid) for (sid,) in idle],
+                )
                 for (sid,) in idle:
                     marked = connection.execute(
                         "UPDATE epoch_admissions SET expired=1 WHERE session_id=?", (sid,)
@@ -1533,6 +1573,9 @@ class LiveSessionStore:
                         provider_contract_key=self._contract_key(connection, outer.session_id),
                         replied_to=None if replied is None else _canonical_envelope(replied[0]),
                         swap=_swap(connection, outer.session_id),
+                        economic_capacity_available=self._economic_capacity(
+                            connection, outer.session_id
+                        ),
                         is_payment_hash_reserved=lambda digest: (
                             connection.execute(
                                 "SELECT 1 FROM payment_hashes WHERE payment_hash=?", (digest,)
@@ -1548,6 +1591,7 @@ class LiveSessionStore:
                             "INSERT INTO payment_hashes VALUES (?, ?, ?)",
                             (reply.payment_hash, outer.session_id, now),
                         )
+                        self._reserve_offer(connection, outer.session_id, reply.payment_hash)
                     scalar, _ = self._unseal(connection, outer.session_id)
                     try:
                         response = self._signed_envelope(
@@ -1810,6 +1854,38 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - never echo storage or crypto details
             raise LiveSessionStoreError("swap transition refused") from None
 
+    def _economic_capacity(self, connection: sqlite3.Connection, session_id: str) -> bool:
+        """Whether one more firm offer in this session fits unreleased capacity."""
+        if connection.execute(
+            "SELECT 1 FROM economic_reservations WHERE session_id=?", (session_id,)
+        ).fetchone():
+            return False  # RS-003: at most one firm offer per session
+        (active,) = connection.execute(
+            "SELECT COUNT(*) FROM economic_reservations WHERE state <> 'RELEASED'"
+        ).fetchone()
+        return bool(active < self._max_active_reservations)
+
+    def _reserve_offer(
+        self, connection: sqlite3.Connection, session_id: str, payment_hash: str
+    ) -> None:
+        """Reserve capacity for a new firm offer, refusing anything over budget.
+
+        RS-003 allows one firm offer per session, and a session with a swap is
+        never offered again. The policy enforces both; this is the backstop.
+        """
+        if connection.execute(
+            "SELECT 1 FROM economic_reservations WHERE session_id=? UNION ALL "
+            "SELECT 1 FROM swaps WHERE session_id=?",
+            (session_id, session_id),
+        ).fetchone():
+            raise LiveSessionStoreError("session already has a firm offer")
+        if not self._economic_capacity(connection, session_id):
+            raise SessionCapacityError("economic capacity reached")
+        connection.execute(
+            "INSERT INTO economic_reservations VALUES (?, ?, 'UNSENT', NULL)",
+            (payment_hash, session_id),
+        )
+
     def commit_payment_dispatch(self, session_id: str, payment_hash: str, request: bytes) -> bool:
         """Durably consume one explicit UNSENT grant before its external effect.
 
@@ -1823,7 +1899,7 @@ class LiveSessionStore:
             raise LiveSessionStoreError("payment request size unsupported")
         try:
             with self._write() as connection:
-                return (
+                if (
                     connection.execute(
                         "UPDATE payment_dispatch SET state='SUBMITTED', request=? "
                         "WHERE session_id=? AND payment_hash=? AND state='UNSENT' "
@@ -1833,8 +1909,21 @@ class LiveSessionStore:
                         "AND w.state='PAYING' AND s.blocked=0)",
                         (request, session_id, payment_hash),
                     ).rowcount
-                    == 1
-                )
+                    != 1
+                ):
+                    return False
+                # Same transaction: a dispatch always marks its unreleased
+                # reservation. Missing or released reservations abort the grant.
+                if (
+                    connection.execute(
+                        "UPDATE economic_reservations SET state='DISPATCHED' "
+                        "WHERE payment_hash=? AND session_id=? AND state IN ('UNSENT', 'UNKNOWN')",
+                        (payment_hash, session_id),
+                    ).rowcount
+                    != 1
+                ):
+                    raise LiveSessionStoreError("economic reservation unavailable")  # noqa: TRY301
+                return True
         except LiveSessionStoreError:
             raise
         except Exception:  # noqa: BLE001 - never echo routing or payment details
@@ -2064,7 +2153,7 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
     (version,) = connection.execute("PRAGMA user_version").fetchone()
     if connection.execute("PRAGMA application_id").fetchone() != (
         APPLICATION_ID,
-    ) or version not in ((5, 6, SCHEMA_VERSION) if allow_v5 else (SCHEMA_VERSION,)):
+    ) or version not in ((5, 6, 7, SCHEMA_VERSION) if allow_v5 else (SCHEMA_VERSION,)):
         raise LiveSessionStoreError("live session store version unsupported")
     objects = {
         (kind, name): definition
@@ -2072,10 +2161,10 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
             "SELECT type, name, sql FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'"
         )
     }
-    schema = {5: SCHEMA_V5, 6: SCHEMA_V6, SCHEMA_VERSION: SCHEMA}[version]
+    schema = {5: SCHEMA_V5, 6: SCHEMA_V6, 7: SCHEMA_V7, SCHEMA_VERSION: SCHEMA}[version]
+    indexes = {7: ADMISSION_INDEXES, SCHEMA_VERSION: (*ADMISSION_INDEXES, *RESERVATION_INDEXES)}
     expected = {("table", statement.split()[2]): statement for statement in schema}
-    if version == SCHEMA_VERSION:
-        expected.update({("index", sql.split()[2]): sql for sql in ADMISSION_INDEXES})
+    expected.update({("index", sql.split()[2]): sql for sql in indexes.get(version, ())})
     if objects != expected:
         raise LiveSessionStoreError("live session store schema incompatible")
     if connection.execute("PRAGMA quick_check").fetchone() != ("ok",):
@@ -2105,8 +2194,59 @@ def _upgrade_v6(connection: sqlite3.Connection) -> None:
     # Explicit migration proves only that no epoch retirement has been recorded
     # under this format. It never converts old sessions to the new admission lane.
     connection.execute("INSERT INTO epoch_retirement VALUES (1, 0)")
+
+
+def _upgrade_v7(connection: sqlite3.Connection) -> None:
+    """Backfill the economic ledger from retained reservations, conservatively.
+
+    Every payment-hash reservation gets one row. A still-open offer (a
+    pre-acceptance session with no swap) becomes UNSENT, exactly like a new
+    offer, so idle expiry can close it. A tombstoned session with neither
+    session nor swap rows is an expired unaccepted offer that can never be
+    accepted; it is RELEASED with migration evidence. Everything else, notably
+    every accepted swap and every hash without affirmative provenance, is
+    UNKNOWN and keeps its capacity until later evidenced closure. A swap
+    without a reservation is inconsistent custody and refuses the upgrade.
+    """
+    connection.execute(ECONOMIC_RESERVATION_SCHEMA)
+    for statement in RESERVATION_INDEXES:
+        connection.execute(statement)
+    for session_id, offer in connection.execute("SELECT session_id, terms_offer FROM swaps"):
+        # The exact hash bound by the accepted offer, not any hash of the session.
+        accepted = _offered_payment_hash(offer)
+        if not connection.execute(
+            "SELECT 1 FROM payment_hashes WHERE payment_hash=? AND session_id=?",
+            (accepted, session_id),
+        ).fetchone():
+            raise LiveSessionStoreError("swap without payment-hash reservation")
+    connection.execute(
+        "INSERT INTO economic_reservations SELECT h.payment_hash, h.session_id, CASE "
+        "WHEN w.session_id IS NULL AND s.phase IN ('RESERVED', 'ACCEPT_COMMITTED', "
+        "'CONFIRMED') THEN 'UNSENT' "
+        "WHEN w.session_id IS NULL AND s.session_id IS NULL AND (h.session_id IN "
+        "(SELECT session_id FROM expired) OR h.session_id IN (SELECT session_id FROM "
+        "epoch_admissions WHERE expired=1)) THEN 'RELEASED' ELSE 'UNKNOWN' END, "
+        "CASE WHEN w.session_id IS NULL AND s.session_id IS NULL AND (h.session_id IN "
+        "(SELECT session_id FROM expired) OR h.session_id IN (SELECT session_id FROM "
+        "epoch_admissions WHERE expired=1)) THEN ? ELSE NULL END "
+        "FROM payment_hashes h LEFT JOIN swaps w ON w.session_id=h.session_id "
+        "LEFT JOIN sessions s ON s.session_id=h.session_id",
+        (_release_evidence("expired-offer", source="migration"),),
+    )
     connection.execute("UPDATE meta SET schema_version=?", (SCHEMA_VERSION,))
     connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+
+def _offered_payment_hash(offer: bytes) -> str:
+    """Return the payment hash bound by one retained canonical terms offer."""
+    return parse_model_json(
+        TermsOfferPayload, canonicalize(_canonical_envelope(offer).payload)
+    ).terms.contract_terms.invoice_binding.payment_hash
+
+
+def _release_evidence(reason: str, **facts: str | int) -> bytes:
+    """Versioned, canonical closure evidence for one RELEASED reservation."""
+    return canonicalize({"version": 1, "reason": reason, **facts})
 
 
 def _epoch_watermark(connection: sqlite3.Connection) -> int:
@@ -2294,6 +2434,13 @@ def _apply_effect(
     if isinstance(effect, AcceptSwap):
         if replied is None or request.contract_hash != effect.contract_hash:
             raise LiveSessionStoreError("acceptance not bound to an offer")
+        offered = _offered_payment_hash(replied[0])
+        if not connection.execute(
+            "SELECT 1 FROM economic_reservations WHERE payment_hash=? AND session_id=? "
+            "AND state IN ('UNSENT', 'UNKNOWN')",
+            (offered, request.session_id),
+        ).fetchone():
+            raise LiveSessionStoreError("offer reservation is closed")
         connection.execute(
             "INSERT INTO swaps VALUES (?, ?, ?, ?, 'ACCEPTED', NULL, NULL, NULL, NULL, ?)",
             (request.session_id, effect.contract_hash, replied[0], document, now),

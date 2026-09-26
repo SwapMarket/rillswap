@@ -75,7 +75,7 @@ absent, partial, old, or restored state grants no key allocation or action
 authority.
 
 `live_session_store.LiveSessionStore` is the **authoritative** handshake
-session store (SQLite `RLS1` v7; v5/v6 require explicit migration and unreleased v1-v4 files are refused unchanged), and the only provider store whose rows may
+session store (SQLite `RLS1` v8; v5-v7 require explicit migration and unreleased v1-v4 files are refused unchanged), and the only provider store whose rows may
 permit exposing an accept or admitting a confirm. It must be created
 explicitly with `LiveSessionStore.provision(...)` and an
 `AuthorityDeclaration`, in which the operator attests that the volume is
@@ -167,7 +167,9 @@ retire.
 
 Three limits apply to new sessions only. Replays of known sessions are
 never limited.
-- `acquire(..., max_sessions=1000)` caps live sessions.
+- `acquire(..., max_sessions=1000)` caps live pre-acceptance sessions
+  (`RESERVED`, `ACCEPT_COMMITTED`, `CONFIRMED`). Accepted sessions are retained
+  forever but no longer count here; they hold economic reservations instead.
 - `max_tombstones=1_000_000` caps permanent legacy expired-session IDs, or
   temporary epoch-bound tombstones independently when that mode is enabled.
 - `new_sessions_per_minute=60` is a global, in-memory token bucket.
@@ -176,6 +178,30 @@ Capacity is counted from the durable rows, so a restart does not reset it.
 A refused session raises `SessionCapacityError`. When the tombstones are
 full, new sessions stay refused until the operator acts. Strangers can still
 fill capacity, but only at the configured rate.
+
+Economic capacity is separate. Every firm offer atomically creates an
+`economic_reservations` row next to its permanent payment-hash reservation,
+before the offer is signed. `max_active_reservations` (default 4) caps rows that
+are not `RELEASED`, which bounds concurrent financial exposure. When full, a
+firm request gets `capacity_unavailable`, and the store refuses the offer even
+if a responder ignores that. States:
+
+- `UNSENT`: an open offer, or an accepted swap whose payment was never
+  dispatched. Acceptance requires an `UNSENT` or `UNKNOWN` reservation.
+- `DISPATCHED`: set in the same transaction that consumes the one-shot
+  dispatch grant. A missing or released reservation aborts the grant.
+- `UNKNOWN`: migrated history without affirmative provenance. It counts
+  against capacity until later evidenced closure.
+- `RELEASED`: only with canonical versioned `release_evidence`.
+
+A session holds at most one firm offer (RS-003), and the store refuses a second
+one as a backstop. The only release in this version is idle expiry of an open
+offer, recorded before its session is deleted (`expired-offer`). Accepted swaps,
+including `CLAIMED` and `FAILED`, keep their capacity for now: releasing them
+needs fresh claim-depth evidence or an explicit never-dispatched deadline
+closure, which are not implemented yet (production gate). Raise
+`max_active_reservations` to accept more exposure. Doing so does not resolve
+uncertainty, and freeing a slot does not replenish Lightning liquidity.
 
 `expire_idle(now=, idle_timeout=)` expires sessions that sit idle before any
 economic step: reserved, accepted, or confirmed with nothing after the
@@ -365,7 +391,7 @@ rill-provider provision-store --config provider.json
 rill-provider serve --config provider.json           # until SIGINT/SIGTERM
 ```
 
-Upgrading an authoritative v5/v6 installation is an explicit offline operation:
+Upgrading an authoritative v5, v6, or v7 installation is an explicit offline operation:
 
 ```sh
 rill-provider migrate-store --config provider.json
@@ -378,6 +404,15 @@ transaction. Existing epoch rows seed the public-key history; old sessions never
 gain epoch admission metadata. The initial retirement watermark is zero; later
 pruning requires an affirmative expired epoch record. A missing v7 watermark or
 table is corruption, not permission to reconstruct it.
+The v8 step backfills one economic reservation per retained payment hash:
+`UNSENT` for an offer whose session is still before acceptance, `RELEASED` with
+`{"reason":"expired-offer","source":"migration"}` evidence when the session was
+tombstoned and has no session or swap row, and `UNKNOWN` for everything else,
+including every accepted swap and any hash without a tombstone (absence proves
+nothing). A swap without a payment-hash reservation is inconsistent custody and
+refuses the whole upgrade. The check uses the exact hash bound by the
+retained accepted offer, not any hash of that session. Upgraded providers with many retained swaps can
+therefore start at or above `max_active_reservations`.
 It does not start relays, scan a chain, send payments, publish messages, or delete
 history. Interrupted upgrades roll back; `serve` never migrates automatically.
 Missing, partial, copied, foreign, and unsupported older stores remain refused.
@@ -456,9 +491,8 @@ It does not print the preimage, invoice, payment hash, credentials, or route.
 and every dispatch record. This command tracks without payer attestation, so
 another configured node's failed record cannot prove the original payment
 failed. Missing records are never resend permission. This command grants no
-refund, retry, deletion, or economic-capacity release authority. Existing v7
-installations need no migration and perform no reconciliation automatically;
-v5/v6 still require explicit migration.
+refund, retry, deletion, or economic-capacity release authority. It performs
+no reconciliation automatically.
 
 Payer binding: preparation, submission, the post-failure fallback lookup, and
 bound tracking each use one credential snapshot and one gRPC channel, and run
@@ -474,7 +508,7 @@ or economic-capacity release.
 Absent, legacy (unversioned or relative-send), partial, malformed, other-hash,
 or other-network records bind no payer. For them normal settlement still defers
 a tracked `FAILED` result without changing the swap or its grant, and a later
-matching witness remains recoverable. Existing v7 `PAYING` swaps need no
+matching witness remains recoverable. Existing `PAYING` swaps need no payer
 migration and are never upgraded to bound records; previously terminal `FAILED`
 rows are not automatically reopened. Legitimate failures of legacy dispatches
 after a lost response can therefore remain `PAYING` indefinitely. Definitive
@@ -487,7 +521,7 @@ above, the identity and store paths, the age `custody_recipient`, the
 attestation, the negotiated `handshake` selection, the public `terms`,
 `relay_urls`, the optional `bitcoin_core` (`port`, `cookie_file`) and `quote`
 settings, and optional schedules and limits (`max_sessions`,
-`max_tombstones`, `new_sessions_per_minute`; `handshake_timeout`, default 600 s of idleness before a
+`max_tombstones`, `new_sessions_per_minute`, `max_active_reservations`; `handshake_timeout`, default 600 s of idleness before a
 pre-economic session expires; `max_sends_per_tick`). Relative paths resolve from the
 config's directory. The config holds no secrets. The custody identity file
 must be a regular, owner-owned `0600` file with exactly one

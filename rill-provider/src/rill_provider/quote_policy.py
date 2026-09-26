@@ -192,7 +192,13 @@ def _firm(  # noqa: PLR0911 - one closed answer per rule
     if not any(low <= principal <= high for low, high in terms.amount_bands):
         return _error("amount_out_of_range", "amount outside announced bands")
     binding = terms.invoice
-    if tip is None or tip <= 0 or binding is None or binding == "unavailable":
+    if (
+        tip is None
+        or tip <= 0
+        or binding is None
+        or binding == "unavailable"
+        or not context.economic_capacity_available
+    ):
         return _error("capacity_unavailable", "firm quotes temporarily unavailable")
     if binding == "rejected":
         return _error("invoice_unacceptable", "invoice could not be decoded")
