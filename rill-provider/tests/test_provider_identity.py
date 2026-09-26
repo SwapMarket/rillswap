@@ -291,3 +291,70 @@ def test_native_provider_terms_signature_verifies_and_is_scoped(
         )
         with pytest.raises(ProviderIdentityError, match="identity"):
             signer.sign_provider_terms(foreign)
+
+
+PUBLIC_NETWORKS = ("mainnet", "signet", "testnet4")
+
+
+def _public(name: str) -> NetworkIdentity:
+    return NetworkIdentity.model_validate_json(
+        (ROOT / "rill-docs" / "networks" / f"{name}.json").read_bytes()
+    )
+
+
+@pytest.mark.parametrize("name", PUBLIC_NETWORKS)
+def test_public_networks_are_advertisable(name: str) -> None:
+    manual, _ = _vectors()
+    terms = _terms(manual["advertisement"], network=_public(name))
+    advertisement = identity._advertisement("bb" * 32, terms)  # noqa: SLF001
+    assert advertisement["network_identities"] == [_public(name).model_dump(mode="json")]
+    legacy = _public(name).model_copy(update={"name": "testnet3"})
+    with pytest.raises(ProviderIdentityError):
+        identity._advertisement("bb" * 32, _terms(manual["advertisement"], network=legacy))  # noqa: SLF001
+
+
+@pytest.mark.native_crypto
+@NATIVE
+@pytest.mark.parametrize("name", PUBLIC_NETWORKS)
+def test_native_public_announcement_tags_name_the_signed_network(tmp_path: Path, name: str) -> None:
+    from rill_crypto import Context  # noqa: PLC0415
+
+    manual, _ = _vectors()
+    with Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto:
+        path, custody, xonly = _provisioned(tmp_path, crypto)
+        signer = ProviderIdentity.load(
+            path, custody_identity=str(custody), expected_xonly_public_key=xonly, crypto=crypto
+        )
+        terms = _terms(manual["advertisement"], network=_public(name))
+        event = nip01._verify_signed_event(signer.build_announcement(terms), verifier=crypto)  # noqa: SLF001
+    assert [list(tag) for tag in event.tags] == [
+        ["rillswap", identity.BINDING_VERSION],
+        ["network", name],
+        ["d", identity.announcement_address(terms.network, terms.slot)],
+    ]
+
+
+@pytest.mark.web_nip59_interop
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_WEB_NIP59") != "1",
+    reason="explicit local web/native opt-in required",
+)
+@pytest.mark.parametrize("name", PUBLIC_NETWORKS)
+def test_public_announcement_passes_the_web_verifier(tmp_path: Path, name: str) -> None:
+    from rill_crypto import Context  # noqa: PLC0415
+
+    bun = shutil.which("bun")
+    assert bun is not None, "Bun required for web interop"
+    manual, _ = _vectors()
+    now = int(time.time())
+    with Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto:
+        path, custody, xonly = _provisioned(tmp_path, crypto)
+        signer = ProviderIdentity.load(
+            path, custody_identity=str(custody), expected_xonly_public_key=xonly, crypto=crypto
+        )
+        terms = _terms(
+            manual["advertisement"], network=_public(name), created_at=now, expires_at=now + 3600
+        )
+        network = _public(name).model_dump(mode="json")
+        verified = _web_verify(bun, signer.build_announcement(terms), xonly, network)
+    assert verified["addressD"] == identity.announcement_address(terms.network, terms.slot)

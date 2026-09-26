@@ -1,4 +1,4 @@
-/** Disconnected RS-005 private-regtest NIP-01 advertisement event verifier. */
+/** Disconnected RS-005 NIP-01 advertisement event verifier for one supported network. */
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import canonicalize from "canonicalize";
@@ -30,7 +30,7 @@ export interface AnnouncementCandidate extends Omit<ManualProviderCandidate, "so
 
 export class AnnouncementRefusedError extends Error {
   constructor() {
-    super("Private-regtest provider announcement refused");
+    super("Provider announcement refused");
     this.name = "AnnouncementRefusedError";
   }
 }
@@ -41,7 +41,11 @@ export class AnnouncementRefusedError extends Error {
  * 128 KiB before extracting this object. No subscription, cache, trust pin,
  * endpoint connection, or admission is installed here.
  */
-export function verifyPrivateRegtestAnnouncement(
+const SUPPORTED_NETWORK_TAGS: ReadonlySet<unknown> = new Set([
+  "mainnet", "signet", "testnet4", "regtest",
+]);
+
+export function verifyNostrProviderAnnouncement(
   rawEventJson: string,
   approvedIdentityXOnlyKey: string,
   independentlySelectedNetwork: unknown,
@@ -67,13 +71,13 @@ export function verifyPrivateRegtestAnnouncement(
       throw new AnnouncementRefusedError();
     }
     const tags = event.tags as unknown[];
-    const expected = [["rillswap", "nostr-experimental-1"], ["network", "regtest"]];
-    for (let i = 0; i < expected.length; i++) {
-      const tag = tags[i];
-      if (!Array.isArray(tag) || tag.length !== 2 ||
-          tag[0] !== expected[i]?.[0] || tag[1] !== expected[i]?.[1]) {
-        throw new AnnouncementRefusedError();
-      }
+    const namespaceTag = tags[0];
+    const networkTag = tags[1];
+    if (!Array.isArray(namespaceTag) || namespaceTag.length !== 2 ||
+        namespaceTag[0] !== "rillswap" || namespaceTag[1] !== "nostr-experimental-1" ||
+        !Array.isArray(networkTag) || networkTag.length !== 2 ||
+        networkTag[0] !== "network" || !SUPPORTED_NETWORK_TAGS.has(networkTag[1])) {
+      throw new AnnouncementRefusedError();
     }
     const addressTag = tags[2];
     if (!Array.isArray(addressTag) || addressTag.length !== 2 ||
@@ -99,7 +103,9 @@ export function verifyPrivateRegtestAnnouncement(
         advertisement.created_at !== event.created_at ||
         !Array.isArray(advertisement.network_identities) ||
         advertisement.network_identities.length !== 1 ||
-        (advertisement.network_identities[0] as Record<string, unknown>)?.name !== "regtest" ||
+        // The coarse public tag must name the one signed identity; the complete
+        // identity is still compared with the independently selected network.
+        (advertisement.network_identities[0] as Record<string, unknown>)?.name !== networkTag[1] ||
         !supportedExtensions(advertisement.extensions)) {
       throw new AnnouncementRefusedError();
     }

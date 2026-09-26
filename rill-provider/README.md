@@ -279,7 +279,7 @@ from `provider_identity.ProviderIdentity`, and then goes through
 one age-encrypted file. The file is created explicitly with `provision` and
 is never replaced. `load` checks the file against the configured identity
 key. The identity signs only digests that it derives itself: a typed accept
-that names this identity, or a private-regtest RS-005 announcement
+that names this identity, or a single-network RS-005 announcement
 (`build_announcement`, kind 39417). There is no raw-digest signing. The
 announcement `revision` equals `created_at`. The real web verifier accepts
 these announcements (opt-in interop test). Back up the identity file

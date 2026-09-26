@@ -1,5 +1,5 @@
 /** Test-only cross-component check: run the web verifier over one raw event. */
-import { verifyPrivateRegtestAnnouncement } from "../src/nostrProviderAnnouncement";
+import { verifyNostrProviderAnnouncement } from "../src/nostrProviderAnnouncement";
 
 try {
   const raw = await Bun.stdin.text();
@@ -9,7 +9,7 @@ try {
       (request.profile !== "btc-to-ln/v1" && request.profile !== "ln-to-btc/v1")) {
     throw new Error("invalid request");
   }
-  const candidate = verifyPrivateRegtestAnnouncement(
+  const candidate = verifyNostrProviderAnnouncement(
     request.event, request.identity, request.network, request.profile,
   );
   process.stdout.write(JSON.stringify({

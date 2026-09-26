@@ -4,7 +4,7 @@ The long-lived identity scalar lives in one explicitly provisioned,
 age-encrypted file. It is never created implicitly, never replaced, and never
 returned. Callers can only ask for signatures over digests this module derives
 itself from typed inputs: an RS-001 handshake accept for this identity, or a
-private-regtest RS-005 announcement. There is no raw-digest signing API.
+single-network RS-005 announcement. There is no raw-digest signing API.
 """
 
 from __future__ import annotations
@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, Any
 
 import pyrage  # type: ignore[import-untyped]
 from pyrage import x25519
+from rill_core.errors import ValidationError
+from rill_core.networks import require_supported_network
 from rill_core.wire.canonical import canonicalize
 from rill_core.wire.hashes import (
     EPOCH_SESSION_FEATURE,
@@ -54,7 +56,7 @@ class ProviderIdentityError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class AnnouncementTerms:
-    """Operator-chosen public terms for one private-regtest announcement."""
+    """Operator-chosen public terms for one single-network announcement."""
 
     network: NetworkIdentity
     profiles: tuple[str, ...]
@@ -173,7 +175,7 @@ class ProviderIdentity:
         return self._sign(provider_terms_hash(offer))
 
     def build_announcement(self, terms: AnnouncementTerms) -> bytes:
-        """Return one signed private-regtest kind-39417 event (RS-005).
+        """Return one signed kind-39417 event for one supported network (RS-005).
 
         ``revision`` equals ``created_at``, so it strictly increases across
         restarts without extra state as long as the clock does not go back.
@@ -191,7 +193,7 @@ class ProviderIdentity:
         content = wrapper.decode("utf-8")
         tags = [
             ["rillswap", BINDING_VERSION],
-            ["network", "regtest"],
+            ["network", terms.network.name],  # coarse public selector
             ["d", announcement_address(terms.network, terms.slot)],
         ]
         event_id = nip01._event_id(  # noqa: SLF001 - shared NIP-01 hash invariant
@@ -216,6 +218,14 @@ def announcement_address(network: NetworkIdentity, slot: str) -> str:
     ).hexdigest()
 
 
+def _supported(network: NetworkIdentity) -> bool:
+    try:
+        require_supported_network(network)
+    except ValidationError:
+        return False
+    return True
+
+
 def _advertisement(identity: str, terms: AnnouncementTerms) -> dict[str, Any]:
     endpoints = terms.transport_endpoints
     epochs = terms.epoch_inbox_xonly_keys
@@ -223,7 +233,7 @@ def _advertisement(identity: str, terms: AnnouncementTerms) -> dict[str, Any]:
     if not (
         type(terms.epoch_bound_sessions) is bool
         and type(terms.network) is NetworkIdentity
-        and terms.network.name == "regtest"
+        and _supported(terms.network)
         and 1 <= len(terms.profiles) <= 8  # noqa: PLR2004
         and len(set(terms.profiles)) == len(terms.profiles)
         and set(terms.profiles) <= {"btc-to-ln/v1", "ln-to-btc/v1"}

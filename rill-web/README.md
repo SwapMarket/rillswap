@@ -12,7 +12,7 @@ strict TypeScript/Vite static shell with relative asset paths. Chain-mode
 selection does not contact or verify a node; the provider-description field
 renders only inert pasted text. The manual signed-advertisement panel verifies
 either canonical PUBLIC application metadata or, when explicitly selected, a
-PUBLIC raw private-regtest signed NIP-01 event object against an independently
+PUBLIC raw signed NIP-01 kind-39417 event object for one supported network against an independently
 entered identity and locally defined network/profile. It holds a revision maximum in memory
 for this tab only. Endpoints remain inert plain text, not approved connections.
 There is no relay discovery, quote, contract verification, wallet, signer,

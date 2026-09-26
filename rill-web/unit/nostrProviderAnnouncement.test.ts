@@ -10,7 +10,7 @@ import { finalizeEvent, getPublicKey } from "nostr-tools";
 
 import {
   AnnouncementRefusedError,
-  verifyPrivateRegtestAnnouncement,
+  verifyNostrProviderAnnouncement,
 } from "../src/nostrProviderAnnouncement";
 import application from "./fixtures/manual-advertisement-regtest-v1.json";
 import vector from "./fixtures/nostr-announcement-regtest-v1.json";
@@ -46,7 +46,7 @@ function fixtureEvent(): {
 function accept(raw: string, identity = PUBLIC, network: unknown = NETWORK) {
   const clock = spyOn(Date, "now").mockReturnValue(1703021600 * 1000);
   try {
-    return verifyPrivateRegtestAnnouncement(raw, identity, network, "btc-to-ln/v1");
+    return verifyNostrProviderAnnouncement(raw, identity, network, "btc-to-ln/v1");
   } finally {
     clock.mockRestore();
   }
@@ -189,7 +189,7 @@ describe("private-regtest NIP-01 signed announcement", () => {
   });
 
   test("expires at now and bounds encoded raw event and decoded content", () => {
-    expect(() => verifyPrivateRegtestAnnouncement(
+    expect(() => verifyNostrProviderAnnouncement(
       JSON.stringify(fixtureEvent()), PUBLIC, NETWORK, "btc-to-ln/v1",
     )).toThrow(AnnouncementRefusedError);
     expect(() => accept(JSON.stringify(fixtureEvent()) + " ".repeat(128 * 1024)))
@@ -198,4 +198,40 @@ describe("private-regtest NIP-01 signed announcement", () => {
     expect(() => accept(JSON.stringify(reSign({ ...fixtureEvent(), content }))))
       .toThrow(AnnouncementRefusedError);
   });
+});
+
+describe("public-network announcements", () => {
+  function forNetwork(network: Record<string, unknown>, tag: string): string {
+    const wrapper = structuredClone(application);
+    (wrapper.advertisement as Record<string, unknown>).network_identities = [network];
+    reSignApplication(wrapper);
+    const address = createHash("sha256").update(jcs([
+      "rillswap", "nostr-experimental-1", network, wrapper.advertisement.slot,
+    ])).digest("hex");
+    const event = fixtureEvent();
+    event.content = jcs(wrapper);
+    event.tags = [["rillswap", "nostr-experimental-1"], ["network", tag], ["d", address]];
+    return JSON.stringify(reSign(event));
+  }
+
+  for (const name of ["signet", "testnet4", "mainnet"]) {
+    const network = JSON.parse(readFileSync(
+      resolve(import.meta.dir, `../src/networks/${name}.json`), "utf8",
+    )) as Record<string, unknown>;
+
+    test(`${name} announcements verify with their own coarse tag`, () => {
+      const candidate = accept(forNetwork(network, name), PUBLIC, network);
+      expect(candidate.source).toBe("signed-nip01-announcement");
+    });
+
+    test(`${name} announcements refuse a mismatched tag or selected network`, () => {
+      for (const other of ["regtest", "signet", "testnet4", "mainnet", "testnet3"]) {
+        if (other === name) continue;
+        expect(() => accept(forNetwork(network, other), PUBLIC, network))
+          .toThrow(AnnouncementRefusedError);
+      }
+      expect(() => accept(forNetwork(network, name), PUBLIC, NETWORK))
+        .toThrow(AnnouncementRefusedError);
+    });
+  }
 });

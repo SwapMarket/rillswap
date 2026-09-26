@@ -5,7 +5,7 @@ import signet from "./networks/signet.json";
 import testnet3 from "./networks/testnet3.json";
 import testnet4 from "./networks/testnet4.json";
 import { verifyManualProviderAdvertisement } from "./manualProviderAdvertisement";
-import { verifyPrivateRegtestAnnouncement } from "./nostrProviderAnnouncement";
+import { verifyNostrProviderAnnouncement } from "./nostrProviderAnnouncement";
 
 const NETWORKS = {
   mainnet, signet, testnet3, testnet4,
@@ -23,13 +23,13 @@ export function mountManualProviderImport(root: HTMLElement): void {
   const heading = document.createElement("h2");
   heading.textContent = "Manual signed provider advertisement (read-only)";
   const disclosure = document.createElement("p");
-  disclosure.textContent = "Only paste PUBLIC signed advertisement JSON or a private-regtest NIP-01 event object. Choose the network independently and enter a provider identity verified out of band. No endpoint is contacted, no key is saved, and valid signatures prove neither liquidity nor current authority.";
+  disclosure.textContent = "Only paste PUBLIC signed advertisement JSON or a signed NIP-01 kind-39417 event object. Choose the network independently and enter a provider identity verified out of band. No endpoint is contacted, no key is saved, and valid signatures prove neither liquidity nor current authority.";
 
   const format = document.createElement("select");
   format.id = "provider-advertisement-format";
   format.append(
     new Option("Application-signed advertisement (default)", "application"),
-    new Option("Private-regtest signed NIP-01 event object", "nostr-regtest"),
+    new Option("Signed NIP-01 announcement event object", "nostr-event"),
   );
 
   const identity = document.createElement("input");
@@ -68,8 +68,8 @@ export function mountManualProviderImport(root: HTMLElement): void {
   const observedRevisions = new Map<string, number>();
   format.addEventListener("change", () => {
     advertisement.value = "";
-    advertisement.maxLength = format.value === "nostr-regtest" ? 128 * 1024 : 64 * 1024;
-    advertisement.placeholder = format.value === "nostr-regtest"
+    advertisement.maxLength = format.value === "nostr-event" ? 128 * 1024 : 64 * 1024;
+    advertisement.placeholder = format.value === "nostr-event"
       ? "Raw signed kind-39417 event object JSON, not a relay EVENT frame"
       : "Canonical, signed public RS-005 advertisement JSON only";
     details.textContent = "";
@@ -84,8 +84,8 @@ export function mountManualProviderImport(root: HTMLElement): void {
       return;
     }
     try {
-      const candidate = format.value === "nostr-regtest"
-        ? verifyPrivateRegtestAnnouncement(
+      const candidate = format.value === "nostr-event"
+        ? verifyNostrProviderAnnouncement(
           advertisement.value, identity.value, selectedNetwork, profile.value,
         )
         : verifyManualProviderAdvertisement(

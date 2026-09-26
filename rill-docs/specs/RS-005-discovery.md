@@ -26,12 +26,13 @@ only the namespace, binding version, coarse network selector, and `d` value.
 They MUST NOT contain invoices, payment hashes, transaction IDs, contract or
 session IDs, exact per-swap amounts, or client identities.
 
-For the **private-regtest Nostr adapter** `nostr-experimental-1` only, an
+For the **Nostr adapter** `nostr-experimental-1` only, an
 announcement is a signed NIP-01 addressable kind-39417 event with exactly
 `id`, `pubkey`, `created_at`, `kind`, `tags`, `content`, `sig` and no duplicate
 JSON members. Its tags are **exactly, in order**
-`[["rillswap","nostr-experimental-1"],["network","regtest"],["d",D]]`, with
-no extra tag members, where `D` is the `d` digest above over the **one complete
+`[["rillswap","nostr-experimental-1"],["network",N],["d",D]]`, with
+no extra tag members, where `N` is the `name` of the one signed network
+identity and one of `mainnet`, `signet`, `testnet4`, or `regtest`, and `D` is the `d` digest above over the **one complete
 network identity** in the signed application advertisement. The `network` tag
 is public coarse routing metadata, never authorization for a specific genesis
 hash, consensus profile, or deployment namespace. The event's `content` is
@@ -46,7 +47,9 @@ portable relay subscription indexes. NIP-01 standardizes single-letter tag
 filters only; fetch by kind (or a known address's `d`) and verify locally.
 
 Only this Nostr adapter restricts the application advertisement to exactly
-one `network_identities` entry, whose `name` is `regtest`, and to empty
+one `network_identities` entry, which must be a supported execution identity
+(default mainnet, default signet, testnet4, or namespaced default regtest; not
+testnet3 or custom signets) whose `name` equals `N`, and to empty
 `extensions` or the exact epoch-admission requirement below. Produce separate signed advertisements for separate complete
 network identities; the schema and out-of-band manual application import
 remain compatible with multiple networks. The producer MUST strictly

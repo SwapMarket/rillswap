@@ -33,7 +33,7 @@ test("signed Nostr announcement verifier executes in Chromium without relay traf
   await page.goto("http://127.0.0.1:18765/");
   const candidate = await page.evaluate(async (rawEvent) => {
     const asset = "/nostr-announcement-test-only.js";
-    const { verifyPrivateRegtestAnnouncement } = await import(asset) as typeof import("../src/nostrProviderAnnouncement");
+    const { verifyNostrProviderAnnouncement } = await import(asset) as typeof import("../src/nostrProviderAnnouncement");
     const original = Date.now;
     Date.now = () => 1703021600 * 1000;
     try {
@@ -43,7 +43,7 @@ test("signed Nostr announcement verifier executes in Chromium without relay traf
         signet_challenge: null, consensus_profile: "bitcoin-core-v30.0-regtest-default",
         deployment_namespace: "rillswap-e2e-v1",
       };
-      return verifyPrivateRegtestAnnouncement(
+      return verifyNostrProviderAnnouncement(
         rawEvent,
         "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
         network, "btc-to-ln/v1",
@@ -73,7 +73,7 @@ test("explicit signed-event paste stays offline and respects independent selecti
   const details = page.locator("#manual-provider-details");
   const event = signedEvent();
   await expect(format).toHaveValue("application");
-  await format.selectOption("nostr-regtest");
+  await format.selectOption("nostr-event");
   await expect(text).toHaveJSProperty("maxLength", 128 * 1024);
   await text.fill(JSON.stringify(event));
   await verify.click();
@@ -131,7 +131,7 @@ test("explicit signed-event paste stays offline and respects independent selecti
   await text.fill(applicationBytes);
   await verify.click();
   await expect(status).toContainText("Application signature verified");
-  await format.selectOption("nostr-regtest");
+  await format.selectOption("nostr-event");
   await expect(text).toBeEmpty();
   await expect(text).toHaveJSProperty("maxLength", 128 * 1024);
   await text.fill(JSON.stringify(event));
