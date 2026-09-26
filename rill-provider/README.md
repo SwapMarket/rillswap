@@ -292,6 +292,10 @@ recorded before its external effect:
 - **Payment.** LND `TrackPaymentV2` runs first, so a restart never sends
   twice. `SendPaymentV2` runs only when LND has no payment for the hash, with
   `cltv_limit = E_out - tip` and a routing fee capped by the success fee.
+  Before a new send, the engine rechecks the bound output and its confirmations,
+  invoice expiry, and session conflict state. A persisted `PAYING` intent alone
+  never proves that funding remains valid. Missing or insufficient funding
+  defers a new payment, while existing LND attempts continue to be reconciled.
   Blocked (conflicting) sessions never start a payment.
 - **Claim.** A verified preimage records `PAID` and sends a `payment_settled`
   observation. The engine then builds the unilateral claim-leaf spend, signed

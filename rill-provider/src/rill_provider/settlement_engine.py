@@ -172,7 +172,7 @@ class SettlementEngine:
             self._move(item, "PAYING", now)
             return await self._advance(_with_state(item, "PAYING"), now)
         if item.state == "PAYING":
-            outcome = await self._pay(item, terms, expiry_height)
+            outcome = await self._pay(item, terms, binding, expiry_height, now)
             if outcome is None:
                 return self._move(item, "FAILED", now, observation={"kind": "payment_failed"})
             if outcome.status == "FAILED":
@@ -212,14 +212,31 @@ class SettlementEngine:
         return item.state
 
     async def _pay(
-        self, item: SettlementItem, terms: ContractTerms, expiry_height: int
+        self,
+        item: SettlementItem,
+        terms: ContractTerms,
+        binding: FundingBinding,
+        expiry_height: int,
+        now: int,
     ) -> PaymentOutcome | None:
         """Return the payment outcome, or None when it must never be sent."""
         invoice = terms.invoice_binding
         outcome = await asyncio.to_thread(self._lightning.track, invoice.payment_hash)
         if outcome.status != "UNKNOWN":
             return outcome
-        if hashlib.sha256(item.invoice.encode("ascii")).hexdigest() != invoice.bolt11_sha256:
+        # PAYING is a durable intent, not durable chain evidence. After an
+        # interrupted attempt, reconcile LND first, but never start a new
+        # payment against a stale confirmation or newly blocked session.
+        if item.blocked:
+            return outcome
+        seen = await asyncio.to_thread(
+            self._chain.observe_candidate_outpoint, binding, terms, keys=self._crypto
+        )
+        if seen.chain_only_confirmations < terms.funding_confirmations:
+            return outcome
+        if now >= invoice.expires_at or (
+            hashlib.sha256(item.invoice.encode("ascii")).hexdigest() != invoice.bolt11_sha256
+        ):
             return None
         tip = await asyncio.to_thread(self._chain.tip_height)
         cltv_limit = expiry_height - tip
