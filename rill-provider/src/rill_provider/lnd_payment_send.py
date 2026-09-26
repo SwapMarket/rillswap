@@ -10,13 +10,12 @@ from __future__ import annotations
 
 import hashlib
 import time
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import grpc
-from rill_core.wire.canonical import canonicalize
 from rill_core.wire.types import NetworkIdentity
 
 from rill_provider._lnd_proto import lightning_pb2
@@ -33,10 +32,11 @@ from rill_provider.lnd_payment_observation import (
     LndUnavailableError,
     _read_file,
 )
+from rill_provider.payment_dispatch_record import PaymentAuthority, encode_dispatch
 
 if TYPE_CHECKING:
     import os
-    from collections.abc import Callable, Iterator
+    from collections.abc import Iterator
 
     from rill_core.wire.messages import InvoiceBinding
 
@@ -76,11 +76,12 @@ class PreparedPayment:
     expires_at: int
     max_expiry_height: int
     min_final_cltv_delta: int
+    payer: PaymentAuthority
 
     @property
     def dispatch_record(self) -> bytes:
-        """Self-describing custody record, distinct from older relative sends."""
-        return canonicalize({"method": "SendToRouteV2", "request_hex": self.request.hex()})
+        """Versioned custody record naming the LND identity that prepared it."""
+        return encode_dispatch(self.request, self.payer)
 
 
 def _check_route(
@@ -167,6 +168,7 @@ class RegtestLndPaymentSender:
         self._target = f"[{host}]:{port}" if host == "::1" else f"{host}:{port}"
         self._certificate = Path(tls_certificate_path)
         self._macaroon = Path(macaroon_path)
+        self._network = network
 
     def prepare(
         self,
@@ -188,22 +190,43 @@ class RegtestLndPaymentSender:
         ):
             raise ValueError("payment bounds unsupported")
         deadline = time.monotonic() + 20
-        payreq = self._unary(
-            DECODE_METHOD,
-            lightning_pb2.PayReqString(pay_req=bolt11),
-            lightning_pb2.PayReq,
+        with self._connect() as calls:
+            payreq = calls.unary(
+                DECODE_METHOD,
+                lightning_pb2.PayReqString(pay_req=bolt11),
+                lightning_pb2.PayReq,
+                deadline,
+            )
+            if binding_from_payreq(bolt11, payreq) != invoice_binding:
+                raise LndProtocolError("decoded invoice differs from signed binding")
+            tip, payer = self._attest(calls, deadline, expected=None)
+            limit = max_expiry_height - tip
+            if (
+                time.time() >= invoice_binding.expires_at
+                or limit <= invoice_binding.min_final_cltv_delta
+            ):
+                raise LndProtocolError("payment authorization expired")
+            response = self._query(calls, payreq, fee_limit_sat, limit, deadline)
+        return self._plan(
+            response,
+            payreq,
+            invoice_binding,
+            fee_limit_sat,
+            max_expiry_height,
+            tip,
+            payer,
             deadline,
         )
-        if binding_from_payreq(bolt11, payreq) != invoice_binding:
-            raise LndProtocolError("decoded invoice differs from signed binding")
-        tip = self._tip(deadline)
-        limit = max_expiry_height - tip
-        if (
-            time.time() >= invoice_binding.expires_at
-            or limit <= invoice_binding.min_final_cltv_delta
-        ):
-            raise LndProtocolError("payment authorization expired")
-        response = self._unary(
+
+    @staticmethod
+    def _query(
+        calls: _Calls,
+        payreq: lightning_pb2.PayReq,
+        fee_limit_sat: int,
+        limit: int,
+        deadline: float,
+    ) -> lightning_pb2.QueryRoutesResponse:
+        return calls.unary(  # type: ignore[no-any-return]
             QUERY_METHOD,
             lightning_pb2.QueryRoutesRequest(
                 pub_key=payreq.destination,
@@ -217,6 +240,18 @@ class RegtestLndPaymentSender:
             lightning_pb2.QueryRoutesResponse,
             deadline,
         )
+
+    @staticmethod
+    def _plan(  # noqa: PLR0913, PLR0917 - one prepared plan's explicit parts
+        response: lightning_pb2.QueryRoutesResponse,
+        payreq: lightning_pb2.PayReq,
+        invoice_binding: InvoiceBinding,
+        fee_limit_sat: int,
+        max_expiry_height: int,
+        tip: int,
+        payer: PaymentAuthority,
+        deadline: float,
+    ) -> PreparedPayment:
         if len(response.routes) != 1:
             raise LndProtocolError("LND did not return one supported route")
         route = response.routes[0]
@@ -242,6 +277,7 @@ class RegtestLndPaymentSender:
             invoice_binding.expires_at,
             max_expiry_height,
             invoice_binding.min_final_cltv_delta,
+            payer,
         )
 
     def send(self, payment: PreparedPayment) -> PaymentOutcome:
@@ -253,25 +289,27 @@ class RegtestLndPaymentSender:
         """
         request = router_pb2.SendToRouteRequest.FromString(payment.request)
         deadline = time.monotonic() + 60
-        tip = self._tip(deadline)
-        if not (
-            request.payment_hash.hex() == payment.payment_hash
-            and not request.skip_temp_err
-            and 0 < len(request.route.hops) <= MAX_ROUTE_HOPS
-            and tip < request.route.total_time_lock <= payment.max_expiry_height
-            and all(tip < hop.expiry <= payment.max_expiry_height for hop in request.route.hops)
-            and payment.min_final_cltv_delta > 0
-            and request.route.hops[-1].expiry >= tip + payment.min_final_cltv_delta
-            and time.time() < payment.expires_at
-        ):
-            raise LndProtocolError("prepared payment is expired or inconsistent")
-        attempt = self._unary(
-            SEND_METHOD,
-            request,
-            lightning_pb2.HTLCAttempt,
-            deadline,
-            expires_at=payment.expires_at,
-        )
+        # Attest the bound payer on the channel that carries the submission.
+        with self._connect() as calls:
+            tip, _ = self._attest(calls, deadline, expected=payment.payer)
+            if not (
+                request.payment_hash.hex() == payment.payment_hash
+                and not request.skip_temp_err
+                and 0 < len(request.route.hops) <= MAX_ROUTE_HOPS
+                and tip < request.route.total_time_lock <= payment.max_expiry_height
+                and all(tip < hop.expiry <= payment.max_expiry_height for hop in request.route.hops)
+                and payment.min_final_cltv_delta > 0
+                and request.route.hops[-1].expiry >= tip + payment.min_final_cltv_delta
+                and time.time() < payment.expires_at
+            ):
+                raise LndProtocolError("prepared payment is expired or inconsistent")
+            attempt = calls.unary(
+                SEND_METHOD,
+                request,
+                lightning_pb2.HTLCAttempt,
+                deadline,
+                expires_at=payment.expires_at,
+            )
         if attempt.status == lightning_pb2.HTLCAttempt.SUCCEEDED:
             if (
                 len(attempt.preimage) != HASH_BYTES
@@ -282,11 +320,18 @@ class RegtestLndPaymentSender:
         # An attempt failure alone need not prove the whole payment failed.
         # Reconcile the payment-level record; never authorize another shard.
         if attempt.status == lightning_pb2.HTLCAttempt.FAILED:
-            return self.track(payment.payment_hash)
+            return self.track(payment.payment_hash, payer=payment.payer)
         return PaymentOutcome("IN_FLIGHT")
 
-    def _tip(self, deadline: float) -> int:
-        info = self._unary(
+    def _attest(
+        self, calls: _Calls, deadline: float, *, expected: PaymentAuthority | None
+    ) -> tuple[int, PaymentAuthority]:
+        """GetInfo on this channel: synced regtest tip and the payer identity.
+
+        A mismatch with a bound dispatch's payer refuses the call rather than
+        letting another node's history speak for the original payment.
+        """
+        info = calls.unary(
             INFO_METHOD, lightning_pb2.GetInfoRequest(), lightning_pb2.GetInfoResponse, deadline
         )
         if not (
@@ -297,9 +342,66 @@ class RegtestLndPaymentSender:
             and 0 < info.block_height <= MAX_BLOCK_HEIGHT
         ):
             raise LndProtocolError("LND chain is not synchronized regtest")
-        return int(info.block_height)
+        try:
+            payer = PaymentAuthority(info.identity_pubkey, self._network)
+        except (TypeError, ValueError):
+            raise LndProtocolError("LND identity unsupported") from None
+        if expected is not None and payer != expected:
+            raise LndProtocolError("LND payer differs from the bound dispatch")
+        return int(info.block_height), payer
 
-    def _unary(
+    @contextmanager
+    def _connect(self) -> Iterator[_Calls]:
+        """One credential snapshot and channel for a bound sequence of calls."""
+        certificate = _read_file(self._certificate, MAX_CERT_BYTES, private=False)
+        macaroon = _read_file(self._macaroon, MAX_MACAROON_BYTES, private=True)
+        channel: grpc.Channel | None = None
+        try:
+            try:
+                channel = grpc.secure_channel(
+                    self._target,
+                    grpc.ssl_channel_credentials(root_certificates=certificate),
+                    options=(
+                        ("grpc.max_receive_message_length", MAX_MESSAGE_BYTES),
+                        ("grpc.max_send_message_length", MAX_MESSAGE_BYTES),
+                        ("grpc.enable_retries", 0),
+                    ),
+                )
+            except Exception:  # noqa: BLE001 - never echo credential details
+                raise LndUnavailableError("LND payment call failed; outcome unknown") from None
+            yield _Calls(channel, macaroon)
+        finally:
+            if channel is not None:
+                with suppress(Exception):
+                    channel.close()
+
+    def track(self, payment_hash: str, *, payer: PaymentAuthority | None = None) -> PaymentOutcome:
+        """Return current status (``UNKNOWN`` if LND reports no payment record).
+
+        Without ``payer`` this reports whatever the configured node knows. With
+        a bound payer, GetInfo on the same channel must match it first, so a
+        negative result is attributable to the original payer.
+        """
+        request = router_pb2.TrackPaymentRequest(
+            payment_hash=bytes.fromhex(payment_hash), no_inflight_updates=True
+        )
+        if len(payment_hash) != 2 * HASH_BYTES:
+            raise ValueError("payment hash must be 32 bytes of hex")
+        deadline = time.monotonic() + 10
+        with self._connect() as calls:
+            if payer is not None:
+                self._attest(calls, deadline, expected=payer)
+            return calls.track(request, payment_hash, min(5.0, deadline - time.monotonic()))
+
+
+class _Calls:
+    """Calls over one channel and credential snapshot, with redacted errors."""
+
+    def __init__(self, channel: grpc.Channel, macaroon: bytes) -> None:
+        self._channel = channel
+        self._metadata = (("macaroon", macaroon.hex()),)
+
+    def unary(
         self,
         method: str,
         request: Any,  # noqa: ANN401 - pinned protobuf request
@@ -308,21 +410,9 @@ class RegtestLndPaymentSender:
         *,
         expires_at: int | None = None,
     ) -> Any:  # noqa: ANN401 - pinned protobuf response class
-        certificate = _read_file(self._certificate, MAX_CERT_BYTES, private=False)
-        macaroon = _read_file(self._macaroon, MAX_MACAROON_BYTES, private=True)
-        channel: grpc.Channel | None = None
         failure: LndObservationError | None = None
         try:
-            channel = grpc.secure_channel(
-                self._target,
-                grpc.ssl_channel_credentials(root_certificates=certificate),
-                options=(
-                    ("grpc.max_receive_message_length", MAX_MESSAGE_BYTES),
-                    ("grpc.max_send_message_length", MAX_MESSAGE_BYTES),
-                    ("grpc.enable_retries", 0),
-                ),
-            )
-            rpc = channel.unary_unary(
+            rpc = self._channel.unary_unary(
                 method,
                 request_serializer=type(request).SerializeToString,
                 response_deserializer=response_type.FromString,
@@ -332,99 +422,46 @@ class RegtestLndPaymentSender:
                 remaining = min(remaining, expires_at - time.time())
             if remaining <= 0:
                 raise LndUnavailableError("LND payment deadline elapsed")  # noqa: TRY301
-            return rpc(
-                request,
-                timeout=remaining,
-                metadata=(("macaroon", macaroon.hex()),),
-                wait_for_ready=False,
-            )
+            return rpc(request, timeout=remaining, metadata=self._metadata, wait_for_ready=False)
         except grpc.RpcError as error:
-            try:
-                code = error.code()
-            except Exception:  # noqa: BLE001 - upstream error may be malformed
-                code = grpc.StatusCode.UNAVAILABLE
-            if code in (grpc.StatusCode.UNAUTHENTICATED, grpc.StatusCode.PERMISSION_DENIED):
-                failure = LndAuthError("LND rejected payment credentials")
-            else:
-                failure = LndUnavailableError("LND payment call failed; outcome unknown")
+            failure = _rpc_failure(error)
         except LndObservationError:
             raise
         except Exception:  # noqa: BLE001 - never echo invoice, route, or credential details
             failure = LndUnavailableError("LND payment call failed; outcome unknown")
-        finally:
-            if channel is not None:
-                with suppress(Exception):
-                    channel.close()
-        raise failure if failure is not None else LndUnavailableError("LND payment failed")
+        raise failure
 
-    def track(self, payment_hash: str) -> PaymentOutcome:
-        """Return current status (``UNKNOWN`` if LND reports no payment record)."""
-        request = router_pb2.TrackPaymentRequest(
-            payment_hash=bytes.fromhex(payment_hash), no_inflight_updates=True
-        )
-        return self._stream(
-            TRACK_METHOD,
-            request,
-            router_pb2.TrackPaymentRequest.SerializeToString,
-            payment_hash,
-            5,
-        )
-
-    def _stream(
-        self,
-        method: str,
-        request: Any,  # noqa: ANN401 - pinned router tracking request
-        serializer: Callable[[Any], bytes],
-        payment_hash: str,
-        deadline: float,
+    def track(
+        self, request: router_pb2.TrackPaymentRequest, payment_hash: str, timeout: float
     ) -> PaymentOutcome:
-        if len(payment_hash) != 2 * HASH_BYTES:
-            raise ValueError("payment hash must be 32 bytes of hex")
-        certificate = _read_file(self._certificate, MAX_CERT_BYTES, private=False)
-        macaroon = _read_file(self._macaroon, MAX_MACAROON_BYTES, private=True)
-        channel: grpc.Channel | None = None
-        failure: LndObservationError | PaymentOutcome | None = None
+        if timeout <= 0:
+            raise LndUnavailableError("LND payment deadline elapsed")
         try:
-            channel = grpc.secure_channel(
-                self._target,
-                grpc.ssl_channel_credentials(root_certificates=certificate),
-                options=(
-                    ("grpc.max_receive_message_length", MAX_MESSAGE_BYTES),
-                    ("grpc.max_send_message_length", 8192),
-                    ("grpc.enable_retries", 0),
-                ),
-            )
-            rpc = channel.unary_stream(
-                method,
-                request_serializer=serializer,
+            rpc = self._channel.unary_stream(
+                TRACK_METHOD,
+                request_serializer=router_pb2.TrackPaymentRequest.SerializeToString,
                 response_deserializer=lightning_pb2.Payment.FromString,
             )
-            stream = rpc(
-                request,
-                timeout=deadline,
-                metadata=(("macaroon", macaroon.hex()),),
-                wait_for_ready=False,
-            )
+            stream = rpc(request, timeout=timeout, metadata=self._metadata, wait_for_ready=False)
             return _outcome(stream, payment_hash)
         except grpc.RpcError as error:
-            try:
-                code = error.code()
-            except Exception:  # noqa: BLE001 - upstream error may be malformed
-                code = grpc.StatusCode.UNAVAILABLE
-            if code in (grpc.StatusCode.UNAUTHENTICATED, grpc.StatusCode.PERMISSION_DENIED):
-                failure = LndAuthError("LND rejected payment credentials")
-            elif method == TRACK_METHOD and code == grpc.StatusCode.NOT_FOUND:
-                failure = PaymentOutcome("UNKNOWN")
-            else:
-                failure = LndUnavailableError("LND payment call failed; outcome unknown")
+            if _code(error) == grpc.StatusCode.NOT_FOUND:
+                return PaymentOutcome("UNKNOWN")
+            raise _rpc_failure(error) from None
         except LndObservationError:
             raise
         except Exception:  # noqa: BLE001 - never retain invoice or credential-bearing errors
-            failure = LndUnavailableError("LND payment call failed; outcome unknown")
-        finally:
-            if channel is not None:
-                with suppress(Exception):
-                    channel.close()
-        if isinstance(failure, PaymentOutcome):
-            return failure
-        raise failure if failure is not None else LndUnavailableError("LND payment failed")
+            raise LndUnavailableError("LND payment call failed; outcome unknown") from None
+
+
+def _code(error: grpc.RpcError) -> grpc.StatusCode:
+    try:
+        return error.code()
+    except Exception:  # noqa: BLE001 - upstream error may be malformed
+        return grpc.StatusCode.UNAVAILABLE
+
+
+def _rpc_failure(error: grpc.RpcError) -> LndObservationError:
+    if _code(error) in (grpc.StatusCode.UNAUTHENTICATED, grpc.StatusCode.PERMISSION_DENIED):
+        return LndAuthError("LND rejected payment credentials")
+    return LndUnavailableError("LND payment call failed; outcome unknown")

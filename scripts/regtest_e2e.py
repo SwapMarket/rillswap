@@ -383,6 +383,12 @@ def check_absolute_payment(stack: Stack, work: Path) -> None:
     assert json.loads(init_bytes)["payload"]["required_features"] == required_features
     assert admissions == (1 if required_features else 0)
     assert state == "SUBMITTED" and record["method"] == "SendToRouteV2"
+    assert record["version"] == 1
+    assert (
+        record["payer"]["node_pubkey"]
+        == stack.lncli("provider", "getinfo")["identity_pubkey"]
+    )
+    assert record["payer"]["network"] == json.loads((work / "network.json").read_text())
     request = router_pb2.SendToRouteRequest.FromString(
         bytes.fromhex(record["request_hex"])
     )

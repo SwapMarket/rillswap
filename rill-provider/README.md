@@ -390,8 +390,10 @@ checked transition to `PAYING`. Keys, preimages, contracts, and payment-hash
 reservations are retained. This migration is not restored-snapshot reconciliation.
 Existing v6 dispatch grants remain unchanged during migration. Consumed grants
 remain consumed, including older relative-send records. New dispatch records
-identify `SendToRouteV2` and retain the exact protobuf bytes as hex; no saved
-request, old or new, is automatically replayed.
+are version 1: they identify `SendToRouteV2`, retain the exact protobuf bytes as
+hex, and bind the payer (the LND `identity_pubkey` attested by `GetInfo` during
+preparation, plus the configured network identity). No saved request, old or
+new, is automatically replayed.
 Previously accepted but unsent invoices outside the newly supported routing
 subset fail before dispatch if tracking establishes no existing payment and
 the store has an explicit unsent grant. Unknown or consumed grants still permit
@@ -451,23 +453,32 @@ contains only `session_id`, `payment_status`, `swap_state`, and `state_changed`.
 It does not print the preimage, invoice, payment hash, credentials, or route.
 
 `UNKNOWN`, `IN_FLIGHT`, and even a backend-reported `FAILED` preserve `PAYING`
-and every dispatch record. The store has no binding to the original LND payer,
-so another configured node's failed record cannot prove the original payment
+and every dispatch record. This command tracks without payer attestation, so
+another configured node's failed record cannot prove the original payment
 failed. Missing records are never resend permission. This command grants no
 refund, retry, deletion, or economic-capacity release authority. Existing v7
 installations need no migration and perform no reconciliation automatically;
 v5/v6 still require explicit migration.
 
-Normal settlement also defers a tracked `FAILED` result without changing the
-swap or its grant, because the configured node is not bound to the original
-payer. A later matching witness remains recoverable. This applies to existing
-v7 `PAYING` swaps without migration; previously terminal `FAILED` rows are not
-automatically reopened. Legitimate failures after a lost response can therefore
-remain `PAYING` indefinitely. The raw tracking adapter still reports its node's
-status accurately. A failed response for the sole newly authorized attempt,
-or local no-send checks with an affirmative unused grant, retain their existing
-terminal behavior. Historical payer binding, definitive failure recovery, and
-economic-capacity release remain production gates.
+Payer binding: preparation, submission, the post-failure fallback lookup, and
+bound tracking each use one credential snapshot and one gRPC channel, and run
+`GetInfo` on that channel before the payment RPC. A different identity or
+network refuses the call (submission is not attempted, the consumed grant is
+not restored, and the swap stays `PAYING`). For a valid version 1 record,
+normal settlement tracks with this attestation, and a `FAILED` result from the
+matching payer becomes terminal `FAILED` under the same trusted-LND assumption
+as an immediate send failure. This is not rollback-safe evidence (a restored
+LND database with the same identity is indistinguishable) and grants no resend
+or economic-capacity release.
+
+Absent, legacy (unversioned or relative-send), partial, malformed, other-hash,
+or other-network records bind no payer. For them normal settlement still defers
+a tracked `FAILED` result without changing the swap or its grant, and a later
+matching witness remains recoverable. Existing v7 `PAYING` swaps need no
+migration and are never upgraded to bound records; previously terminal `FAILED`
+rows are not automatically reopened. Legitimate failures of legacy dispatches
+after a lost response can therefore remain `PAYING` indefinitely. Definitive
+failure recovery and economic-capacity release remain production gates.
 
 `provider.json` is strict JSON (`operator_config.OperatorConfig`, unknown
 fields refused). It sets the network identity, the identity key printed

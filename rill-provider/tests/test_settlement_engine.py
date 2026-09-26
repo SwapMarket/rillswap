@@ -15,6 +15,7 @@ from rill_core.wire.messages import ContractTerms, FundingBinding
 from rill_provider.live_session_store import SettlementItem
 from rill_provider.lnd_invoice_decode import InvoiceRejectedError
 from rill_provider.lnd_payment_send import PaymentOutcome, PreparedPayment
+from rill_provider.payment_dispatch_record import PaymentAuthority
 from rill_provider.settlement_engine import SettlementEngine
 
 INVOICE = "lnbcrt1fixture"
@@ -66,6 +67,7 @@ def _backends(outcome: PaymentOutcome) -> tuple[SettlementEngine, Mock, Mock]:
         TERMS.invoice_binding.expires_at,
         1070,
         TERMS.invoice_binding.min_final_cltv_delta,
+        PaymentAuthority("03" + "ab" * 32, TERMS.network_identity),
     )
     lightning.send.return_value = PaymentOutcome("IN_FLIGHT")
     return SettlementEngine(Mock(), chain, lightning, Mock()), chain, lightning

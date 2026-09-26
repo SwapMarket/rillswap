@@ -27,6 +27,7 @@ HASH = hashlib.sha256(bytes.fromhex(PREIMAGE)).hexdigest()
 INVOICE = "lnbcrt500u1pexample"
 PAYEE = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 NOW = 1_700_000_010
+PAYER = "03" + "ab" * 32
 AMOUNT_MSAT = 50_000_000
 
 
@@ -49,6 +50,7 @@ def _info(height: int = 1000) -> lightning_pb2.GetInfoResponse:
         block_height=height,
         synced_to_chain=True,
         chains=[{"chain": "bitcoin", "network": "regtest"}],
+        identity_pubkey=PAYER,
     )
 
 

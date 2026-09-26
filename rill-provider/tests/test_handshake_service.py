@@ -425,6 +425,7 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: P
 
     from rill_provider._nip59_send import _wrap_envelope  # noqa: PLC0415
     from rill_provider.lnd_payment_send import PaymentOutcome, PreparedPayment  # noqa: PLC0415
+    from rill_provider.payment_dispatch_record import PaymentAuthority  # noqa: PLC0415
     from rill_provider.provider_identity import ProviderIdentity  # noqa: PLC0415
     from rill_provider.settlement_engine import SettlementEngine  # noqa: PLC0415
 
@@ -630,6 +631,7 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: P
                 BINDING.expires_at,
                 994,
                 BINDING.min_final_cltv_delta,
+                PaymentAuthority("03" + "ab" * 32, terms.network_identity),
             )
 
         def send(payment: PreparedPayment) -> PaymentOutcome:

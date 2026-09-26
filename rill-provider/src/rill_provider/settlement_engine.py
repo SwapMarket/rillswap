@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from rill_provider.core_tx_bytes import CandidateFundingOutpoint
     from rill_provider.live_session_store import LiveSessionStore, SettlementItem
     from rill_provider.lnd_payment_send import PaymentOutcome, PreparedPayment
+    from rill_provider.payment_dispatch_record import PaymentAuthority
 
 LOG = logging.getLogger(__name__)
 
@@ -81,8 +82,8 @@ class ChainBackend(Protocol):
 class LightningBackend(Protocol):
     """The provider's own LND (``RegtestLndPaymentSender``)."""
 
-    def track(self, payment_hash: str) -> PaymentOutcome:
-        """Return the payment status by hash."""
+    def track(self, payment_hash: str, *, payer: PaymentAuthority | None = None) -> PaymentOutcome:
+        """Return the payment status by hash, attesting ``payer`` when bound."""
         ...
 
     def prepare(
@@ -233,12 +234,20 @@ class SettlementEngine:
     ) -> PaymentOutcome | None:
         """Return the payment outcome, or None when it must never be sent."""
         invoice = terms.invoice_binding
-        outcome = await asyncio.to_thread(self._lightning.track, invoice.payment_hash)
-        if outcome.status == "FAILED":
-            # The configured node is not bound to the historical payer. Its
-            # failed record cannot terminate tracking of another node's attempt.
-            # Unlike this lookup, send() reports FAILED only after affirmative
-            # failure of the sole newly authorized attempt in that call.
+        payer = item.payment_payer
+        if payer is None:
+            outcome = await asyncio.to_thread(self._lightning.track, invoice.payment_hash)
+        else:
+            # Same-channel GetInfo must match the dispatch's recorded payer.
+            outcome = await asyncio.to_thread(
+                lambda: self._lightning.track(invoice.payment_hash, payer=payer)
+            )
+        if outcome.status == "FAILED" and payer is None:
+            # Absent, legacy, or malformed provenance: the configured node is
+            # not bound to the historical payer, so its failed record cannot
+            # terminate tracking of another node's attempt. send() reports
+            # FAILED only after affirmative failure of the sole newly
+            # authorized attempt, re-tracked against that attempt's payer.
             raise LndUnavailableError("tracked failure lacks bound payer authority")
         if outcome.status != "UNKNOWN":
             return outcome

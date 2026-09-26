@@ -56,6 +56,7 @@ from rill_provider._nip59_receive import _decode_gift_wrap_candidate
 from rill_provider._nip59_send import _wrap_envelope
 from rill_provider.handshake_store import HandshakePolicy, _expected, _features, _require_policy
 from rill_provider.issuance_reservation import _policy_bytes
+from rill_provider.payment_dispatch_record import PaymentAuthority, bound_payer
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -338,6 +339,8 @@ class SettlementItem:
     claim_tx: bytes | None
     claim_txid: str | None
     payment_dispatch: str = "UNKNOWN"
+    # Provenance of a committed version 1 dispatch record, never send permission.
+    payment_payer: PaymentAuthority | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1712,7 +1715,7 @@ class LiveSessionStore:
                 rows = connection.execute(
                     "SELECT w.session_id, w.state, s.blocked, w.terms_offer, w.funding_binding, "  # noqa: S608 - only static SQL fragments; bound session ID
                     "i.canonical_bytes, w.preimage, w.claim_tx, w.claim_txid, "
-                    "COALESCE(p.state, 'UNKNOWN') FROM swaps w "
+                    "COALESCE(p.state, 'UNKNOWN'), p.payment_hash, p.request FROM swaps w "
                     "JOIN sessions s ON s.session_id = w.session_id "
                     "LEFT JOIN payment_dispatch p ON p.session_id = w.session_id "
                     "JOIN inbox i ON i.session_id = w.session_id AND i.sender_key = s.client_key "
@@ -1733,6 +1736,9 @@ class LiveSessionStore:
                         claim_tx,
                         claim_txid,
                         payment_dispatch,
+                        bound_payer(record, payment_hash=hashed, network=self._network)
+                        if payment_dispatch == "SUBMITTED"
+                        else None,
                     )
                     for (
                         session_id,
@@ -1745,6 +1751,8 @@ class LiveSessionStore:
                         claim_tx,
                         claim_txid,
                         payment_dispatch,
+                        hashed,
+                        record,
                     ) in rows
                 )
         except LiveSessionStoreError:
