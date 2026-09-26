@@ -50,6 +50,7 @@ def require_supported_network(network: NetworkIdentity) -> None:
     ):
         raise ValidationError("unsupported Bitcoin network identity")
 
+
 # Mainnet funding is a release decision, not configuration. It stays disabled
 # until explicit security and release acceptance changes this constant in code.
 MAINNET_FUNDING_ENABLED = False
