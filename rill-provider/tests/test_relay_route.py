@@ -128,6 +128,25 @@ def test_serving_refuses_an_unsafe_relay_route_at_startup(
         relay_proxy=proxy,
         allow_direct_relays=allow_direct,
         relay_urls=relays,
+        provider_destination_script=None,
+        lnd=None,
+        bitcoin_core=None,
     )
     with pytest.raises(OperatorConfigError, match=refusal):
+        asyncio.run(cli._serve(config, None, ""))  # type: ignore[arg-type]  # noqa: SLF001
+
+
+def test_public_firm_offers_refuse_to_start_without_settlement() -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from rill_provider import cli  # noqa: PLC0415
+    from rill_provider.operator_config import OperatorConfigError  # noqa: PLC0415
+
+    config: Any = SimpleNamespace(
+        network=_network("signet"),
+        provider_destination_script="0014" + "11" * 20,
+        lnd=SimpleNamespace(payment_macaroon=None),
+        bitcoin_core=object(),
+    )
+    with pytest.raises(OperatorConfigError, match="payment_macaroon"):
         asyncio.run(cli._serve(config, None, ""))  # type: ignore[arg-type]  # noqa: SLF001

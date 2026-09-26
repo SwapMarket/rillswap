@@ -362,7 +362,22 @@ answered with `ack`.
 
 With `lnd.payment_macaroon` (offchain read and write) and `bitcoin_core`
 configured, the service runs `SettlementEngine` once per tick. Every step is
-recorded before its external effect:
+recorded before its external effect.
+
+**Readiness admission.** With settlement configured, a firm offer is signed
+only after LND shows, at that moment, a route for the invoice within the
+exact fee limit and absolute expiry height the payment would later use
+(`QueryRoutes` through the payment macaroon; LND checks first-hop local
+balance, synchronization, and network). No route, no liquidity, or an
+unsynced node answers `capacity_unavailable`; nothing is recorded or
+dispatched, and the route is discarded. This is point-in-time evidence, not
+a liquidity reservation: size `max_active_reservations` so that many
+concurrent swaps at the top amount band fit your outbound capacity. On
+signet, testnet4, and mainnet, `serve` refuses to start with firm offers
+enabled (`provider_destination_script`) unless `lnd.payment_macaroon` and
+`bitcoin_core` configure settlement.
+
+Settlement steps:
 - **Funding.** The exact bound output needs `funding_confirmations` on our
   own node (`txindex=1`). The signed `max_outgoing_htlc_expiry_height` must
   still leave the invoice's final CLTV. The swap is then recorded as `PAYING`,

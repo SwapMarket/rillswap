@@ -28,6 +28,7 @@ from rill_provider.lnd_payment_observation import (
     MAX_MESSAGE_BYTES,
     MAX_PORT,
     LndAuthError,
+    LndNotSyncedError,
     LndObservationError,
     LndProtocolError,
     LndUnavailableError,
@@ -340,13 +341,14 @@ class LndPaymentSender:
             INFO_METHOD, lightning_pb2.GetInfoRequest(), lightning_pb2.GetInfoResponse, deadline
         )
         if not (
-            info.synced_to_chain
-            and len(info.chains) == 1
+            len(info.chains) == 1
             and info.chains[0].chain == "bitcoin"
             and info.chains[0].network == self._lnd_network
             and 0 < info.block_height <= MAX_BLOCK_HEIGHT
         ):
             raise LndProtocolError("LND chain is not the synchronized configured network")
+        if not info.synced_to_chain:  # transient: LND catches up after each new block
+            raise LndNotSyncedError("LND chain is not the synchronized configured network")
         try:
             payer = PaymentAuthority(info.identity_pubkey, self._network)
         except (TypeError, ValueError):

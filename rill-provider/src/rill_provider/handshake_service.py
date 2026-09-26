@@ -13,8 +13,10 @@ import json
 import logging
 import time
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol
+
+from rill_core.wire.messages import InvoiceBinding
 
 from rill_provider.live_session_store import (
     FIRST_REQUEST_SEQUENCE,
@@ -24,12 +26,14 @@ from rill_provider.live_session_store import (
     StaleOwnerError,
 )
 from rill_provider.lnd_invoice_decode import InvoiceRejectedError
+from rill_provider.lnd_payment_observation import LndObservationError
 from rill_provider.provider_identity import AnnouncementTerms
 from rill_provider.quote_policy import (
     FirmSigner,
     InvoiceOutcome,
     QuoteSchedule,
     QuoteTerms,
+    success_fee,
 )
 from rill_provider.relay_client import RelayConnection, RelayError
 from rill_provider.settlement_policy import answer_client_request
@@ -37,7 +41,6 @@ from rill_provider.settlement_policy import answer_client_request
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from rill_core.wire.messages import InvoiceBinding
     from rill_core.wire.types import NetworkIdentity
     from rill_crypto import Context
 
@@ -357,6 +360,43 @@ class HandshakeService:
             LOG.warning("invoice decoding unavailable; firm quote answered capacity_unavailable")
             return "unavailable"
 
+    async def _route_ready(self, document: bytes, terms: QuoteTerms) -> QuoteTerms:
+        """Offer firm terms only when settlement could pay this invoice now."""
+        binding, tip, settlement = terms.invoice, terms.tip_height, self._settlement
+        if (
+            terms.firm is None
+            or not isinstance(binding, InvoiceBinding)
+            or settlement is None
+            or tip is None
+        ):
+            return terms
+        principal = int(binding.amount_msat) // 1000
+        if not any(low <= principal <= high for low, high in terms.amount_bands):
+            return terms  # the quote rules refuse this without asking for a route
+        try:
+            await asyncio.to_thread(
+                lambda: settlement.route_ready(
+                    json.loads(document)["payload"]["invoice"],
+                    invoice_binding=binding,
+                    success_fee_sat=success_fee(terms, principal),
+                    max_expiry_height=tip + terms.schedule.outgoing_cltv_budget_blocks,
+                )
+            )
+        except InvoiceRejectedError:
+            return replace(terms, invoice="rejected")
+        except LndObservationError as error:  # fixed, non-secret adapter messages
+            LOG.warning(
+                "no payable route now (%s); firm quote answered capacity_unavailable", error
+            )
+            return replace(terms, invoice="unavailable")
+        except Exception as error:  # noqa: BLE001 - any readiness failure only defers
+            LOG.warning(
+                "route readiness failed (%s); firm quote answered capacity_unavailable",
+                type(error).__name__,
+            )
+            return replace(terms, invoice="unavailable")
+        return terms
+
     async def _answer(self, document: bytes, relays: Sequence[Relay], now: int) -> str:
         policy = self._policy
         invoice = await self._decode_invoice(document)
@@ -370,6 +410,7 @@ class HandshakeService:
             firm=self._firm_signer(),
             invoice=invoice,
         )
+        terms = await self._route_ready(document, terms)
         answer = self._store.answer_request(
             document,
             responder=lambda request, prior, context: answer_client_request(

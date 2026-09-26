@@ -108,6 +108,10 @@ class LndProtocolError(LndObservationError):
     """LND response did not match the requested payment or supported schema."""
 
 
+class LndNotSyncedError(LndProtocolError):
+    """LND is on the right network but not yet synchronized to its chain tip."""
+
+
 def _read_file(path: Path, limit: int, *, private: bool) -> bytes:
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)

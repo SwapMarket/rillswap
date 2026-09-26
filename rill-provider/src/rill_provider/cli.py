@@ -213,6 +213,14 @@ async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
         require_funding_release(config.network)
     except ValidationError:
         raise OperatorConfigError("network is not release-accepted for serving") from None
+    lnd = config.lnd
+    if (
+        config.network.name != "regtest"
+        and config.provider_destination_script is not None
+        and (lnd is None or lnd.payment_macaroon is None or config.bitcoin_core is None)
+    ):
+        # Firm offers invite funding; without settlement nothing would pay them.
+        raise OperatorConfigError("firm offers need lnd.payment_macaroon and bitcoin_core")
     try:
         proxy = require_relay_route(
             config.network, config.relay_proxy, allow_direct=config.allow_direct_relays

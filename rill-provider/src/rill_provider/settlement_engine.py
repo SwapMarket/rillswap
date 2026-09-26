@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
@@ -42,7 +43,7 @@ from rill_core.wire.settlement_messages import FundingBindingPayload
 
 from rill_provider.live_session_store import StaleSwapError
 from rill_provider.lnd_invoice_decode import InvoiceRejectedError
-from rill_provider.lnd_payment_observation import LndUnavailableError
+from rill_provider.lnd_payment_observation import LndNotSyncedError, LndUnavailableError
 from rill_provider.settlement_policy import SettlementCrypto, offered_terms
 
 if TYPE_CHECKING:
@@ -80,6 +81,8 @@ class ChainBackend(Protocol):
 
 
 CLAIM_PAGE = 16  # historical claims checked per tick
+READINESS_SYNC_ATTEMPTS = 10  # offer preflight waits at most about this many seconds
+READINESS_SYNC_DELAY = 1.0
 
 
 class LightningBackend(Protocol):
@@ -139,6 +142,43 @@ class SettlementEngine:
         self._crypto = crypto
         self._settings = settings or EngineSettings()
         self._claim_cursor = ""  # fair paging of the historical claim sweep
+
+    def _fee_limit(self, success_fee_sat: int) -> int:
+        """Routing fees may use at most the success fee and the operator cap."""
+        return min(self._settings.max_routing_fee_sat, success_fee_sat)
+
+    def route_ready(
+        self,
+        invoice: str,
+        *,
+        invoice_binding: InvoiceBinding,
+        success_fee_sat: int,
+        max_expiry_height: int,
+    ) -> None:
+        """Raise unless LND can route this invoice within the payment's own bounds now.
+
+        Blocking readiness evidence for a firm offer: the node is synced on this
+        network and one route exists with the fee limit and absolute expiry the
+        payment would use. LND checks first-hop local balance when routing, so
+        this also shows outbound liquidity at this moment (not a reservation).
+        The prepared route is discarded; nothing is recorded or dispatched.
+        LND reports itself unsynchronized for a moment after every block, so
+        that one condition is retried briefly instead of refusing the offer.
+        """
+        for attempt in range(READINESS_SYNC_ATTEMPTS):
+            try:
+                self._lightning.prepare(
+                    invoice,
+                    invoice_binding=invoice_binding,
+                    fee_limit_sat=self._fee_limit(success_fee_sat),
+                    max_expiry_height=max_expiry_height,
+                )
+            except LndNotSyncedError:
+                if attempt + 1 == READINESS_SYNC_ATTEMPTS:
+                    raise
+                time.sleep(READINESS_SYNC_DELAY)
+            else:
+                return
 
     async def tick(self, now: int) -> dict[str, str]:
         """Advance each swap at most through its available steps; return new states."""
@@ -331,7 +371,7 @@ class SettlementEngine:
         tip = await asyncio.to_thread(self._chain.tip_height)
         if expiry_height - tip <= invoice.min_final_cltv_delta:
             return None
-        fee_limit = min(self._settings.max_routing_fee_sat, int(terms.economics.success_fee_sat))
+        fee_limit = self._fee_limit(int(terms.economics.success_fee_sat))
         try:
             payment = await asyncio.to_thread(
                 lambda: self._lightning.prepare(
