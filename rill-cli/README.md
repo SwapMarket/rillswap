@@ -282,7 +282,8 @@ own LND (`--lnd-port`, `--lnd-tls-cert`, `--lnd-invoice-macaroon`, an
 SETTLED invoice** (the provider paid you; refunding would take their funds).
 Missing LND or Core evidence only waits. After the refund lock height, it
 signs the refund at `--initial-fee-sat`, rising linearly to `--max-fee-sat`
-(capped by the signed `max_refund_fee_sat`) over `--escalate-blocks`
+(capped by the signed `max_refund_fee_sat` and the dust floor of the
+refund output) over `--escalate-blocks`
 blocks, replacing the unconfirmed attempt by opt-in RBF when a new block has
 passed and the fee beats the previous one by 1 sat/vB. Every signed attempt
 is written to a create-only `refund-NN-<txid>.json` in `--intent-dir` before

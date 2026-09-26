@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from dataclasses import dataclass, replace
+from itertools import pairwise
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
@@ -225,6 +226,9 @@ def _engine(
 
     monkeypatch.setattr(settlement_engine, "validate_unilateral_spend", validate)
     monkeypatch.setattr(engine, "_authorization", lambda *_a: None)
+    monkeypatch.setattr(
+        settlement_engine, "max_spendable_fee", lambda _a: int(TERMS.max_claim_fee_sat)
+    )
 
     def claim(_item: object, _terms: object, _binding: object, fee: int) -> SimpleNamespace:
         return SimpleNamespace(raw_transaction=b"c%d" % fee, txid=f"{fee:064x}", fee_sat=fee)
@@ -303,3 +307,27 @@ def test_a_core_failure_is_not_evidence_and_never_bumps(monkeypatch: pytest.Monk
     with pytest.raises(RuntimeError):
         _run(engine)
     assert len(store.attempts) == 1
+
+
+def test_a_full_schedule_always_reaches_the_maximum() -> None:
+    # Reviewed regression: with max 5_000 the old schedule reached 4_924 and
+    # then could never afford the final replacement's 150 sat increment.
+    fee, height, attempts, fees = 1_000, 1_000, 1, []
+    for tip in range(1_001, 1_070):
+        target = claim_fee_target(
+            initial=1_000,
+            maximum=5_000,
+            anchor=1_000,
+            deadline=1_059,
+            tip=tip,
+            latest_fee=fee,
+            latest_height=height,
+            vsize=150,
+            attempts=attempts,
+        )
+        if target is not None:
+            fees.append(target)
+            fee, height, attempts = target, tip, attempts + 1
+    assert fees[-1] == 5_000
+    assert all(b - a >= 150 for a, b in pairwise(fees))
+    assert attempts <= MAX_CLAIM_ATTEMPTS

@@ -454,6 +454,17 @@ def _verify_signature(
         raise ValidationError("unilateral BIP340 signature is invalid") from error
 
 
+def max_spendable_fee(authorization: UnilateralAuthorization) -> int:
+    """Return the highest fee this spend can carry: the signed cap or the dust floor.
+
+    A fee schedule that targets the signed cap alone can select a transaction
+    that no build accepts once the remaining output would be dust.
+    """
+    _require_supported_profile(authorization.consensus_profile)
+    floor = _dust_threshold(authorization.destination_script)
+    return max(0, min(authorization.fee_cap_sat, authorization.funding.value_sat - floor))
+
+
 def _require_fee_and_output(
     authorization: UnilateralAuthorization,
     fee_sat: int,

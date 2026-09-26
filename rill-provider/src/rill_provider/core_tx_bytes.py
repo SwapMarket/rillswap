@@ -349,9 +349,19 @@ class CoreTransactionReader:
             with self._client() as client:
                 result = self._rpc(client, "getrawtransaction", [txid, True], 1)
         except CoreRpcError as error:
-            if error.code == RPC_INVALID_ADDRESS_OR_KEY:
-                raise CoreTransactionUnknownError(error.code) from None
-            raise
+            if error.code != RPC_INVALID_ADDRESS_OR_KEY:
+                raise
+            # Only a synced txindex turns "not found" into usable absence
+            # evidence; a disabled or catching-up index says nothing.
+            try:
+                with self._client() as client:
+                    indexes = self._rpc(client, "getindexinfo", ["txindex"], 2)
+            except (CoreRpcError, httpx.HTTPError):
+                raise CoreUnavailableError("Core index status unavailable") from None
+            index = indexes.get("txindex") if isinstance(indexes, dict) else None
+            if not (isinstance(index, dict) and index.get("synced") is True):
+                raise CoreUnavailableError("Core txindex is not synced; no absence claim") from None
+            raise CoreTransactionUnknownError(error.code) from None
         except httpx.HTTPError:
             raise CoreUnavailableError("Core RPC transport unavailable") from None
         count = result.get("confirmations", 0) if isinstance(result, dict) else None
@@ -369,6 +379,7 @@ class CoreTransactionReader:
         if method not in (
             "getblockchaininfo",
             "getblockhash",
+            "getindexinfo",
             "getrawtransaction",
             "gettxout",
             "sendrawtransaction",

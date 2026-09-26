@@ -426,13 +426,18 @@ Settlement steps:
 - **Claim fee escalation.** The client can refund after `refund_lock_height`,
   so an unconfirmed claim is replaced (opt-in RBF, fresh signature) on a
   schedule rising linearly from the first fee at its first-seen height to the
-  signed `max_claim_fee_sat` six blocks before that height, and held at the
-  maximum from then on. A replacement needs a new block and must beat the
-  latest fee by 1 sat/vB (BIP125). Every attempt is recorded before its
+  maximum six blocks before that height, and held at the maximum from then
+  on. The maximum is the signed `max_claim_fee_sat` or, if lower, the largest
+  fee that keeps the claim output above the dust floor. A replacement needs a
+  new block and must beat the latest fee by 1 sat/vB (BIP125); a target that
+  would leave less than one increment below the maximum jumps to the maximum
+  so the final replacement is always reachable. Every attempt is recorded before its
   broadcast and kept forever, because any of them may confirm; the attempt
   that reaches `settlement_confirmations` is recorded as `CLAIMED`. A mined
   attempt is never replaced. At most 32 attempts exist, and the last is
-  reserved for the maximum fee. Core transport errors never trigger a bump;
+  reserved for the maximum fee. Core transport errors never trigger a bump,
+  and a "transaction not found" answer counts as absence (bump allowed) only
+  while Core reports `txindex` synced (`getindexinfo`);
   a recorded claim that fails validation isolates only that swap with an
   error log. Not yet handled: detecting that the client's refund won, reorgs
   below `settlement_confirmations`, and feerate estimation (the first fee is

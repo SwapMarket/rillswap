@@ -14,7 +14,12 @@ from typing import TYPE_CHECKING
 
 from pyrage import x25519
 from rill_core.recovery import inspect_recovery_successor
-from rill_core.settlement import FundingOutput, UnilateralAuthorization, validate_unilateral_spend
+from rill_core.settlement import (
+    FundingOutput,
+    UnilateralAuthorization,
+    max_spendable_fee,
+    validate_unilateral_spend,
+)
 from rill_core.wire.types import NetworkIdentity
 from rill_crypto import Context
 from rill_provider.lnd_invoice_observation import LndInvoiceObserver
@@ -643,7 +648,7 @@ def _watch_refund(  # noqa: PLR0913 - explicit wiring of the collaborators
         contract_vout=binding.contract_vout,
         refund_lock_height=terms.refund_lock_height,
         initial_fee_sat=args.initial_fee_sat,
-        max_fee_sat=min(args.max_fee_sat, int(terms.max_refund_fee_sat)),
+        max_fee_sat=min(args.max_fee_sat, max_spendable_fee(authorization)),
         escalate_blocks=args.escalate_blocks,
         chain=chain,
         invoice_state=refund_watcher.lnd_invoice_state(

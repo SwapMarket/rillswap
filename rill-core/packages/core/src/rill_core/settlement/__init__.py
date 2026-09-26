@@ -28,6 +28,7 @@ from rill_core.settlement.unilateral import (
     ValidatedUnilateralSpend,
     build_unilateral_spend,
     finalize_unilateral_spend,
+    max_spendable_fee,
     validate_unilateral_spend,
 )
 
@@ -51,6 +52,7 @@ __all__ = [
     "build_unilateral_spend",
     "check_funding_binding_transaction",
     "finalize_unilateral_spend",
+    "max_spendable_fee",
     "reconstruct_taproot_contract",
     "validate_unilateral_spend",
     "verify_static_signed_funding_binding_history",

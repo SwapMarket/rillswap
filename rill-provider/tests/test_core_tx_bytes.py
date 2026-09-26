@@ -30,6 +30,7 @@ from rill_provider.core_tx_bytes import (
     CoreAuthError,
     CoreProtocolError,
     CoreTransactionReader,
+    CoreTransactionUnknownError,
     CoreUnavailableError,
 )
 
@@ -804,3 +805,30 @@ def test_confirmations_counts_mempool_as_zero(tmp_path: Path) -> None:
         reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
         with pytest.raises(CoreProtocolError):
             reader.confirmations(txid)
+
+
+@pytest.mark.parametrize(
+    ("index", "expected"),
+    [
+        ({"txindex": {"synced": True, "best_block_height": 10}}, CoreTransactionUnknownError),
+        ({"txindex": {"synced": False, "best_block_height": 3}}, CoreUnavailableError),
+        ({}, CoreUnavailableError),
+    ],
+)
+def test_unknown_transaction_is_absence_evidence_only_with_a_synced_txindex(
+    tmp_path: Path, index: dict[str, Any], expected: type[Exception]
+) -> None:
+    _, _, network = _context()
+    requests: list[dict[str, Any]] = []
+
+    def respond(payload: dict[str, Any]) -> tuple[int, bytes]:
+        if payload["method"] == "getrawtransaction":
+            return _rpc_reply(error={"code": -5, "message": "No such tx"})(payload)
+        assert payload["method"] == "getindexinfo"
+        return _rpc_reply(index)(payload)
+
+    with _server(respond, requests) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        with pytest.raises(expected):
+            reader.confirmations("ab" * 32)
+    assert [r["method"] for r in requests] == ["getrawtransaction", "getindexinfo"]

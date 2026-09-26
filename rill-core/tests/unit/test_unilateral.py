@@ -16,6 +16,7 @@ from rill_core.settlement import (
     UnilateralAuthorization,
     build_unilateral_spend,
     finalize_unilateral_spend,
+    max_spendable_fee,
     reconstruct_taproot_contract,
     validate_unilateral_spend,
 )
@@ -442,3 +443,29 @@ def test_raw_validation_is_strict_and_rechecks_authorization() -> None:
         with pytest.raises(ValidationError, match=rejection):
             validate_unilateral_spend(changed, authorization, verifier=verifier)
         assert len(verifier.calls) == valid_verifications, case_name
+
+
+def test_max_spendable_fee_is_the_signed_cap_or_the_dust_floor() -> None:
+    taproot_case, terms, funding = _first_context()
+    keys = _keys(terms, taproot_case)
+    claim = UnilateralAuthorization.from_terms(terms, funding, "claim", keys=keys)
+    valid_preimage = bytes.fromhex(taproot_case["claim_preimage"])
+    assert max_spendable_fee(claim) == claim.fee_cap_sat
+    build_unilateral_spend(claim, fee_sat=max_spendable_fee(claim), claim_preimage=valid_preimage)
+
+    data = copy.deepcopy(taproot_case["contract_terms"])
+    amount = 2_000  # below cap + dust floor: the signed cap is unreachable
+    data["economics"]["lightning_principal_sat"] = str(amount - 1_000)
+    data["economics"]["contract_amount_sat"] = str(amount)
+    data["invoice_binding"]["amount_msat"] = str((amount - 1_000) * 1_000)
+    data["max_claim_fee_sat"] = str(amount - 100)
+    small_terms = ContractTerms.model_validate_json(json.dumps(data))
+    small = replace(funding, value_sat=amount)
+    tight = UnilateralAuthorization.from_terms(
+        small_terms, small, "claim", keys=_keys(small_terms, taproot_case)
+    )
+    ceiling = max_spendable_fee(tight)
+    assert ceiling < tight.fee_cap_sat
+    build_unilateral_spend(tight, fee_sat=ceiling, claim_preimage=valid_preimage)
+    with pytest.raises(ValidationError, match="dust"):
+        build_unilateral_spend(tight, fee_sat=ceiling + 1, claim_preimage=valid_preimage)

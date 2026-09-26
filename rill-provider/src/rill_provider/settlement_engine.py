@@ -37,6 +37,7 @@ from rill_core.settlement.unilateral import (
     ValidatedUnilateralSpend,
     build_unilateral_spend,
     finalize_unilateral_spend,
+    max_spendable_fee,
     validate_unilateral_spend,
 )
 from rill_core.wire.canonical import canonicalize, parse_model_json
@@ -318,8 +319,8 @@ class SettlementEngine:
             return await self._advance(_with_state(item, "PAID", preimage=outcome.preimage), now)
         if item.state == "PAID" and item.preimage is not None:
             tip = await asyncio.to_thread(self._chain.tip_height)
-            fee = min(self._settings.claim_fee_sat, int(terms.max_claim_fee_sat))
-            spend = self._claim(item, terms, binding, fee)
+            ceiling = max_spendable_fee(self._authorization(terms, binding))
+            spend = self._claim(item, terms, binding, min(self._settings.claim_fee_sat, ceiling))
             self._move(
                 item,
                 "CLAIMING",
@@ -391,7 +392,7 @@ class SettlementEngine:
                 return item.state  # mined; wait for depth, never replace
         fee = claim_fee_target(
             initial=attempts[0].fee_sat,
-            maximum=int(terms.max_claim_fee_sat),
+            maximum=max_spendable_fee(authorization),
             anchor=attempts[0].first_seen_height,
             deadline=terms.refund_lock_height,
             tip=tip,
@@ -528,8 +529,10 @@ def claim_fee_target(  # noqa: PLR0913 - explicit schedule inputs
     (the client can refund after ``deadline``), and is ``maximum`` from then
     on. A replacement needs a new block since the latest attempt (except at
     urgency) and must beat the latest fee by the BIP125 incremental relay fee.
-    The last attempt of the budget is reserved for ``maximum``. Unknown fees or
-    heights never trigger a bump.
+    The last attempt of the budget is reserved for ``maximum``, and a target
+    that would leave less than one increment of headroom below ``maximum``
+    becomes ``maximum`` so the final replacement is always reachable. Unknown
+    fees or heights never trigger a bump.
     """
     if (
         initial is None
@@ -547,8 +550,11 @@ def claim_fee_target(  # noqa: PLR0913 - explicit schedule inputs
     else:
         span = max(1, urgent - anchor)
         target = initial + (maximum - initial) * max(0, tip - anchor) // span
+    increment = vsize * INCREMENTAL_RELAY_SAT_VB
     target = min(target, maximum)
-    if target < latest_fee + vsize * INCREMENTAL_RELAY_SAT_VB:
+    if maximum - target < increment:
+        target = maximum  # never strand the final replacement below the maximum
+    if target < latest_fee + increment:
         return None
     return target
 
