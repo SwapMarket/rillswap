@@ -43,3 +43,16 @@ describe("RS-001 tagged hashes match rill-core", () => {
     });
   }
 });
+
+test("epoch-bound session id matches the rill-core vector", async () => {
+  const { epochBoundSessionId } = await import("../src/swap/hashes");
+  const recovery = (await import("./fixtures/initial-btc-to-ln-v1.json")).default.verification_context;
+  const init = recovery.handshake_init;
+  const id = epochBoundSessionId(
+    init.network_identity,
+    init.expected_provider_identity_xonly_key,
+    recovery.handshake_accept.provider_session_xonly_key,
+    init.client_session_xonly_key,
+  );
+  expect(bytesToHex(id)).toBe("6abb41432e6c051dc91efba1426d2dbc2ec44e6dd174b086f229981121e6dcea");
+});
