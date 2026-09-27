@@ -30,6 +30,7 @@ from rill_core.settlement.unilateral import (
 )
 from rill_core.wire.canonical import JsonValue, canonicalize, parse_json_strict
 from rill_core.wire.hashes import (
+    COOPERATIVE_CLAIM_FEATURE,
     EPOCH_SESSION_FEATURE,
     client_acceptance_hash,
     contract_hash,
@@ -44,6 +45,7 @@ from rill_core.wire.messages import (
     HandshakeAccept,
     HandshakeInit,
     ProviderTerms,
+    require_supported_contract_features,
 )
 from rill_core.wire.types import (
     ExactInteger,
@@ -534,8 +536,10 @@ def _inspect(
         "handshake network",
     )
     _require(record.profile_id == terms.profile_id == initiation.profile_id, "profile")
-    _require(not terms.required_features, "unsupported contract feature")
-    acceptance.validate_against(initiation, supported_features=frozenset({EPOCH_SESSION_FEATURE}))
+    require_supported_contract_features(terms, initiation, acceptance)
+    acceptance.validate_against(
+        initiation, supported_features=frozenset({EPOCH_SESSION_FEATURE, COOPERATIVE_CLAIM_FEATURE})
+    )
     _require(context.client_session_xonly_key == initiation.client_session_xonly_key, "session")
     _require(context.provider_session_xonly_key == acceptance.provider_session_xonly_key, "session")
     _require(

@@ -18,6 +18,7 @@ from rill_core.errors import ValidationError
 from rill_core.settlement.taproot import TaprootKeyOperations, reconstruct_taproot_contract
 from rill_core.settlement.unilateral import SchnorrVerifier
 from rill_core.wire.hashes import (
+    COOPERATIVE_CLAIM_FEATURE,
     EPOCH_SESSION_FEATURE,
     client_acceptance_hash,
     contract_hash,
@@ -33,6 +34,7 @@ from rill_core.wire.messages import (
     HandshakeAccept,
     HandshakeInit,
     ProviderTerms,
+    require_supported_contract_features,
 )
 from rill_core.wire.types import NetworkIdentity, Signature64, XOnlyKey
 
@@ -162,9 +164,10 @@ def verify_static_signed_funding_binding_history(  # noqa: PLR0913 - explicit tr
             handshake_init.profile_id == handshake_accept.profile_id == terms.profile_id,
             "handshake profile differs",
         )
-        _require(not terms.required_features, "unsupported contract feature")
+        require_supported_contract_features(terms, handshake_init, handshake_accept)
         handshake_accept.validate_against(
-            handshake_init, supported_features=frozenset({EPOCH_SESSION_FEATURE})
+            handshake_init,
+            supported_features=frozenset({EPOCH_SESSION_FEATURE, COOPERATIVE_CLAIM_FEATURE}),
         )
         _require(
             expected_provider_identity

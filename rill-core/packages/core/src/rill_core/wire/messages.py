@@ -527,6 +527,24 @@ class HandshakeAcceptPayload(StrictModel):
     provider_identity_signature: Signature64
 
 
+def require_supported_contract_features(
+    terms: ContractTerms, initiation: HandshakeInit, acceptance: HandshakeAccept
+) -> None:
+    """Bind supported signed contract features to both handshake commitments.
+
+    The cooperative feature commits a *new* swap to attempt key-path claiming,
+    but never removes independent unilateral claim/refund. The absence of a
+    feature in accepted legacy terms remains authoritative for that swap.
+    """
+    if set(terms.required_features) - {COOPERATIVE_CLAIM_FEATURE}:
+        raise ValueError("unsupported contract feature")
+    cooperative = COOPERATIVE_CLAIM_FEATURE in terms.required_features
+    if cooperative != (
+        COOPERATIVE_CLAIM_FEATURE in initiation.required_features
+    ) or cooperative != (COOPERATIVE_CLAIM_FEATURE in acceptance.required_features):
+        raise ValueError("cooperative contract feature is not bound to both handshakes")
+
+
 class HandshakeConfirm(StrictModel):
     """Client session-key possession confirmation payload."""
 

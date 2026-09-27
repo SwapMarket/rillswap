@@ -26,6 +26,7 @@ from rill_core.settlement import (
 )
 from rill_core.wire.canonical import canonicalize, parse_json_strict
 from rill_core.wire.hashes import (
+    COOPERATIVE_CLAIM_FEATURE,
     client_acceptance_hash,
     contract_hash,
     funding_binding_hash,
@@ -1059,6 +1060,41 @@ def test_static_signed_context_checks_both_profiles_without_funding_authority(pr
     _signed_context(document, crypto)
     assert len(crypto.calls) == 5  # Three signed context objects plus two bindings.
     assert crypto.terms.network_identity == _network(document)
+
+
+@pytest.mark.parametrize("profile", ["btc-to-ln", "ln-to-btc"])
+def test_jointly_signed_cooperation_does_not_block_unilateral_recovery(
+    profile: str,
+) -> None:
+    """A cooperative-first contract still admits offline recovery for both roles."""
+    if profile == "btc-to-ln":
+        document = _source()
+        artifacts = _crypto(document).artifacts
+    else:
+        document, old_crypto = _ln_without_optional_feature()
+        artifacts = old_crypto.artifacts
+    context = document["verification_context"]
+    feature = [COOPERATIVE_CLAIM_FEATURE]
+    context["handshake_init"]["required_features"] = feature
+    context["handshake_accept"]["required_features"] = feature
+    init = HandshakeInit.model_validate_json(json.dumps(context["handshake_init"]))
+    context["handshake_accept"]["handshake_init_hash"] = handshake_init_hash(init).hex()
+    accept = HandshakeAccept.model_validate_json(json.dumps(context["handshake_accept"]))
+    context["handshake_hash"] = handshake_hash(init, accept).hex()
+    document["contract_terms"]["required_features"] = feature
+    terms = ContractTerms.model_validate_json(json.dumps(document["contract_terms"]))
+    document["contract_hash"] = contract_hash(terms).hex()
+    # FixtureCrypto pins the exact changed digests; no native signing is simulated.
+    for name in (
+        "provider_identity_signature",
+        "provider_terms_signature",
+        "client_acceptance_signature",
+    ):
+        context[name] = "11" * 64
+    crypto = FixtureCrypto(document, artifacts)
+    assert inspect_recovery_plaintext(_canonical(document), _network(document), crypto=crypto)
+    _add_history(document, crypto, 1)
+    _signed_context(document, crypto)
 
 
 @pytest.mark.parametrize(
