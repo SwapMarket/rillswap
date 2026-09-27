@@ -102,7 +102,7 @@ def test_v8_upgrades_on_ordinary_acquire_with_unobserved_attempt_zero(harness: H
         session = _claiming(store, harness)
     _as_v8(harness.path)
     with harness.acquire() as store:
-        assert store._connection.execute("PRAGMA user_version").fetchone() == (12,)  # noqa: SLF001
+        assert store._connection.execute("PRAGMA user_version").fetchone() == (13,)  # noqa: SLF001
         assert store.claim_attempts(session) == (ClaimAttempt(0, "a0" * 32, b"c0", None, None),)
         store.observe_claim_attempt(session, 0, fee_sat=300, height=990)
         store.observe_claim_attempt(session, 0, fee_sat=1, height=1)  # a restart cannot move it
@@ -125,7 +125,7 @@ def test_v9_upgrades_on_ordinary_acquire_keeping_every_swap_row(harness: Harness
         connection.execute("UPDATE meta SET schema_version=9")
         connection.execute("PRAGMA user_version=9")
     with harness.acquire() as store:
-        assert store._connection.execute("PRAGMA user_version").fetchone() == (12,)  # noqa: SLF001
+        assert store._connection.execute("PRAGMA user_version").fetchone() == (13,)  # noqa: SLF001
         rows = store._connection.execute("SELECT * FROM swaps").fetchall()  # noqa: SLF001
         assert [row[:-8] for row in rows] == before
         assert [row[-8:] for row in rows] == [(None,) * 8]  # observation starts from scratch

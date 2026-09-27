@@ -191,8 +191,15 @@ def swaps_as_v9(connection: sqlite3.Connection) -> None:
 
 def without_v12_cooperation(connection: sqlite3.Connection) -> None:
     """Restore an exact prior-release fixture, never discard signing evidence."""
+    without_v13_arbitration(connection)
     assert connection.execute("SELECT count(*) FROM cooperation_attempts").fetchone() == (0,)
     connection.execute("DROP TABLE cooperation_attempts")
+
+
+def without_v13_arbitration(connection: sqlite3.Connection) -> None:
+    """Restore exact v12 (or earlier), only if no arbitration history exists."""
+    assert connection.execute("SELECT count(*) FROM claim_arbitration").fetchone() == (0,)
+    connection.execute("DROP TABLE claim_arbitration")
 
 
 class Harness:

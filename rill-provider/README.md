@@ -523,7 +523,7 @@ rill-provider provision-store --config provider.json
 rill-provider serve --config provider.json           # until SIGINT/SIGTERM
 ```
 
-A v8, v9, v10, or v11 store upgrades to v12 automatically when `serve` (or any
+A v8, v9, v10, v11, or v12 store upgrades to v13 automatically when `serve` (or any
 command) opens it. v9 adds the `claim_attempts` table, and each `CLAIMING` swap's
 retained claim becomes attempt 0 with an unknown fee and height, which the
 engine validates and observes before any bump. v10 rebuilds `swaps` with the
@@ -539,8 +539,13 @@ attempt row never authorizes allocating a nonce, and an interrupted migration
 rolls back its schema and both version markers. Every unfinished cooperation
 burn is abandoned on the next store acquisition; its ID is never reissued, and
 no native nonce handle is reconstructed from persistent state. Older binaries
-refuse a v9,
-v10, v11, or v12 store, so a binary rollback after this upgrade is not possible.
+refuse a v9, v10, v11, or v12 store. v13 adds an **empty** claim-arbitration
+table; it does not backfill admission, delay a previously accepted swap's
+unilateral claim, sign, broadcast, or infer work from a missing row. Any
+unfinished future arbitration window is closed on reacquisition without
+restarting its deadline; retained fallback and completed bytes are preserved.
+There is no active cooperative scheduler yet. A binary rollback from v13 is
+not supported.
 
 Upgrading an authoritative v5, v6, or v7 installation is an explicit offline operation:
 

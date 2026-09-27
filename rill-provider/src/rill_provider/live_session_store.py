@@ -99,7 +99,7 @@ if TYPE_CHECKING:
     from rill_provider.provider_identity import ProviderIdentity
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
-SCHEMA_VERSION = 12  # v8-v11 upgrade on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
+SCHEMA_VERSION = 13  # v8-v12 upgrade on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
 CONTRACT_KEY_RECORD_KIND = "rillswap-provider-contract-key"
 OPEN_PHASES = ("CONFIRMED", "ACCEPTED")  # sessions that may still send requests
 SWAP_TRANSITIONS = frozenset(
@@ -334,7 +334,44 @@ COOPERATION_ATTEMPT_SCHEMA = (
     "(state='ABANDONED' AND partial_signature IS NULL)), "
     "CHECK (state='COMPLETE' OR partial_signature IS NULL))"
 )
-SCHEMA = (*SCHEMA_V11, COOPERATION_ATTEMPT_SCHEMA)
+SCHEMA_V12 = (*SCHEMA_V11, COOPERATION_ATTEMPT_SCHEMA)
+# Arbitration is distinct from nonce custody: an affirmative admission row
+# alone grants no waiting period or signing authority. A complete presigned
+# unilateral bundle is required before any future runtime can open a window.
+CLAIM_ARBITRATION_SCHEMA = (
+    "CREATE TABLE claim_arbitration (session_id TEXT PRIMARY KEY NOT NULL, "
+    "contract_hash TEXT NOT NULL CHECK (typeof(contract_hash)='text' AND "
+    "length(contract_hash)=64), version INTEGER NOT NULL CHECK "
+    "(typeof(version)='integer' AND version=1), state TEXT NOT NULL CHECK "
+    "(state IN ('ADMITTED','WAITING','CLOSED')), owner_generation INTEGER "
+    "CHECK (owner_generation IS NULL OR (typeof(owner_generation)='integer' AND "
+    "owner_generation>0)), prepared_at INTEGER CHECK (prepared_at IS NULL OR "
+    "(typeof(prepared_at)='integer' AND prepared_at>=0)), deadline_at INTEGER "
+    "CHECK (deadline_at IS NULL OR (typeof(deadline_at)='integer' AND "
+    "deadline_at>prepared_at)), deadline_height INTEGER CHECK "
+    "(deadline_height IS NULL OR (typeof(deadline_height)='integer' AND "
+    "deadline_height>0)), fallback_raw BLOB CHECK (fallback_raw IS NULL OR "
+    "(typeof(fallback_raw)='blob' AND length(fallback_raw)>0)), fallback_txid TEXT "
+    "CHECK (fallback_txid IS NULL OR (typeof(fallback_txid)='text' AND "
+    "length(fallback_txid)=64)), fallback_fee_sat INTEGER CHECK "
+    "(fallback_fee_sat IS NULL OR (typeof(fallback_fee_sat)='integer' AND "
+    "fallback_fee_sat>=0)), cooperative_raw BLOB CHECK (cooperative_raw IS NULL OR "
+    "(typeof(cooperative_raw)='blob' AND length(cooperative_raw)>0)), "
+    "cooperative_txid TEXT CHECK (cooperative_txid IS NULL OR "
+    "(typeof(cooperative_txid)='text' AND length(cooperative_txid)=64)), "
+    "CHECK ((owner_generation IS NULL)=(prepared_at IS NULL) AND "
+    "(owner_generation IS NULL)=(deadline_at IS NULL) AND "
+    "(owner_generation IS NULL)=(deadline_height IS NULL) AND "
+    "(owner_generation IS NULL)=(fallback_raw IS NULL) AND "
+    "(owner_generation IS NULL)=(fallback_txid IS NULL) AND "
+    "(owner_generation IS NULL)=(fallback_fee_sat IS NULL)), "
+    "CHECK ((cooperative_raw IS NULL)=(cooperative_txid IS NULL) AND "
+    "(cooperative_raw IS NULL OR owner_generation IS NOT NULL)), "
+    "CHECK ((state='ADMITTED' AND owner_generation IS NULL AND "
+    "cooperative_raw IS NULL) OR (state='WAITING' AND owner_generation IS NOT NULL "
+    "AND cooperative_raw IS NULL) OR state='CLOSED'))"
+)
+SCHEMA = (*SCHEMA_V12, CLAIM_ARBITRATION_SCHEMA)
 MAX_CLAIM_ATTEMPTS = 32
 COOPERATION_BUDGET_SECONDS = 30
 COOPERATION_OBSERVATION_MAX_AGE_SECONDS = 5
@@ -860,8 +897,10 @@ class LiveSessionStore:
                 _upgrade_v9(connection)
             if version in (5, 6, 7, 8, 9, 10):
                 _upgrade_v10(connection)
-            if version != SCHEMA_VERSION:
+            if version not in (12, SCHEMA_VERSION):
                 _upgrade_v11(connection)
+            if version != SCHEMA_VERSION:
+                _upgrade_v12(connection)
             if version != SCHEMA_VERSION:
                 connection.execute("UPDATE meta SET schema_version=?", (SCHEMA_VERSION,))
                 connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -878,6 +917,9 @@ class LiveSessionStore:
                 "UPDATE cooperation_attempts SET state='ABANDONED' "
                 "WHERE state IN ('BURNED','NONCE_READY','SIGNING')"
             )
+            # No process-local deadline worker or native handle survives owner
+            # change. Closing eligibility does not itself dispatch or spend.
+            connection.execute("UPDATE claim_arbitration SET state='CLOSED' WHERE state='WAITING'")
             connection.execute("UPDATE meta SET policy_jcs=?", (policy_jcs,))
             generation = row[0][6] + 1
             connection.execute("UPDATE meta SET generation=?", (generation,))
@@ -3848,7 +3890,9 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
     if connection.execute("PRAGMA application_id").fetchone() != (
         APPLICATION_ID,
     ) or version not in (
-        (5, 6, 7, 8, 9, 10, 11, SCHEMA_VERSION) if allow_v5 else (8, 9, 10, 11, SCHEMA_VERSION)
+        (5, 6, 7, 8, 9, 10, 11, 12, SCHEMA_VERSION)
+        if allow_v5
+        else (8, 9, 10, 11, 12, SCHEMA_VERSION)
     ):
         raise LiveSessionStoreError("live session store version unsupported")
     objects = {
@@ -3865,6 +3909,7 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
         9: SCHEMA_V9,
         10: SCHEMA_V10,
         11: SCHEMA_V11,
+        12: SCHEMA_V12,
         SCHEMA_VERSION: SCHEMA,
     }[version]
     indexes = {
@@ -3873,6 +3918,7 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
         9: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
         10: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
         11: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
+        12: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
         SCHEMA_VERSION: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
     }
     expected = {("table", statement.split()[2]): statement for statement in schema}
@@ -4014,6 +4060,15 @@ def _upgrade_v11(connection: sqlite3.Connection) -> None:
     connection.execute(COOPERATION_ATTEMPT_SCHEMA)
     for statement in COOPERATION_INDEXES:
         connection.execute(statement)
+
+
+def _upgrade_v12(connection: sqlite3.Connection) -> None:
+    """Add arbitration storage without granting any existing swap eligibility.
+
+    An absent row proves nothing. No row is backfilled, no claim is delayed,
+    and no transaction is published or signed by the migration.
+    """
+    connection.execute(CLAIM_ARBITRATION_SCHEMA)
 
 
 def _check_reverse_transition(

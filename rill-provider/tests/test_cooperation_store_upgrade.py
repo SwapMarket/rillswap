@@ -1,4 +1,4 @@
-"""V11 to v12 grants storage capability, never implicit nonce permission."""
+"""Historical upgrades grant storage capability, never implicit nonce permission."""
 
 from __future__ import annotations
 
@@ -40,9 +40,10 @@ def test_existing_sessions_survive_additive_upgrade_without_new_signing_grants(
     _as_v11(harness.path)
     with harness.acquire() as store:
         connection = store._connection  # noqa: SLF001 - exact upgrade evidence
-        assert connection.execute("PRAGMA user_version").fetchone() == (12,)
-        assert connection.execute("SELECT schema_version FROM meta").fetchone() == (12,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (13,)
+        assert connection.execute("SELECT schema_version FROM meta").fetchone() == (13,)
         assert connection.execute("SELECT * FROM cooperation_attempts").fetchall() == []
+        assert connection.execute("SELECT * FROM claim_arbitration").fetchall() == []
         assert (
             connection.execute(
                 "SELECT * FROM sessions WHERE session_id=?", (reserved.session_id,)
