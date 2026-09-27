@@ -7,18 +7,48 @@ reliable `file://` operation is not promised.
 
 Status: pre-release and not suitable for real funds.
 
-This is a **local-only development preview**, not a swap client. It bundles a
-strict TypeScript/Vite static shell with relative asset paths. Chain-mode
-selection does not contact or verify a node; the provider-description field
-renders only inert pasted text. The manual signed-advertisement panel verifies
-either canonical PUBLIC application metadata or, when explicitly selected, a
-PUBLIC raw signed NIP-01 kind-39417 event object for one supported network against an independently
-entered identity and locally defined network/profile. It holds a revision maximum in memory
-for this tab only. Endpoints remain inert plain text, not approved connections.
-There is no relay discovery, quote, contract verification, wallet, signer,
-swap, watcher, recovery import, or payment UI.
-No financial action exists even if a diagnostic succeeds. Never enter secrets
-or send funds to this preview.
+The site has two pages. `index.html` is a **local-only development preview**
+that makes no connection: chain-mode selection does not contact or verify a
+node; the provider-description field renders only inert pasted text; the
+manual signed-advertisement panel verifies either canonical PUBLIC application
+metadata or, when explicitly selected, a PUBLIC raw signed NIP-01 kind-39417
+event object for one supported network against an independently entered
+identity and locally defined network/profile, holding a revision maximum in
+memory for this tab only. Never enter secrets or send funds to this preview.
+
+`swap.html` is the **experimental BTC to LN swap client** (signet, testnet4,
+and regtest; mainnet is refused until release acceptance). `src/swap/` ports
+rill-cli's `run_swap`:
+
+- provider discovery on one relay (highest valid kind-39417 revision;
+  equivocation or a flood of more than 256 events is refused), the RS-001
+  handshake (epoch-bound when the signed announcement requires it), signed
+  envelopes, and strict NIP-59 receive rules ported from rill-provider;
+- BOLT11 decoding and rill-provider's invoice admission policy (the browser
+  has no Lightning node), wire schema validation with build-time generated
+  Ajv validators, and the ContractTerms/`check_terms_offer` rules;
+- Taproot contract reconstruction (ordered BIP327 KeyAgg) and RS-007 recovery
+  documents byte-identical to rill-cli's, encrypted to the user's age X25519
+  recipient;
+- funding from the user's own wallet: the user pastes a **finalized PSBT**
+  (native segwit inputs with `witness_utxo`, so the signed maximum funding fee
+  is checkable), the client requires exactly one contract output with the
+  exact amount and P2WPKH/P2TR other outputs, and the user broadcasts.
+
+There is no chain backend in the browser. The user enters the current block
+height; it sets the refund-height ceiling (`tip + max refund delay`) and the
+recovery scan birthday, so a wrong height can only lengthen the user's own
+lock or make offers fail. Keys exist only in the tab's memory. The terms
+recovery file must be downloaded before accepting terms, and the funded one
+before the funding binding is sent and before broadcast. If the provider does
+not pay, refund with `rill recover watch-refund` on the funded recovery file
+after the refund height; the browser does not refund. Nothing is stored in the
+browser, so an upgrade or reload reads, migrates, or resumes nothing; an
+interrupted swap continues only through the downloaded recovery file.
+
+The swap page's CSP allows `connect-src wss:` plus plain `ws://` to loopback
+(for a local regtest relay); `RelayConnection` enforces the same rule. The
+preview page keeps `connect-src 'none'`.
 
 The HTML contains a meta Content Security Policy that restricts later script,
 style, and connection loads. It is **not** an HTTP response-header policy:
@@ -37,15 +67,15 @@ no swap database, encrypted-record format, per-swap lock, or auto-migration to
 claim. A future release must establish those together before any commitment.
 Absence of a database proves nothing about prior browser use or safe funding.
 
-`src/nip59Transport.ts` is an **unused, disconnected private-regtest producer**,
-not a browser feature or relay publisher. Given an already application-validated
+`src/nip59Transport.ts` is the gift-wrap producer the swap client uses
+(`src/swap/session.ts` owns the keys, envelopes, and relay publishing). Given an already application-validated
 canonical RS-001 envelope, a caller-owned ephemeral session secret, and an
 independently selected recipient mailbox key, it constructs a NIP-59 gift wrap
 using pinned `nostr-tools`. It checks the canonical JSON bytes, envelope sender
 key, experimental binding, outer signature/recipient, and size cap. It does
 **not** validate the complete RS-001 schema/signature/transcript, choose or
 persist any key, contact a relay, establish session authority, or enable funds.
-The browser preview does not import or call it. Additional transport padding
+Additional transport padding
 requires a future binding; this one uses NIP-44's mandatory padding only.
 An installation upgrading from the prior version receives no listener, key,
 database read/migration, reprocessing, or swap action, regardless of absent,
@@ -87,13 +117,14 @@ exact ordered tags, address `d`, matching signer/timestamp, size and nesting
 bounds, and the single-regtest-network restriction. The manual-import panel
 calls it only after explicit selection of the private-regtest NIP-01 paste
 format and a verification click. Its default application-signed import mode
-is unchanged. It does not subscribe to a relay. A future relay caller
-must also cap the entire raw `EVENT` message to 128 KiB **before** extracting
-the event-object bytes. It returns a historical signed candidate, not globally
+is unchanged. It does not subscribe to a relay; the swap client's
+`src/swap/relay.ts` caps each raw relay message at 128 KiB **before**
+extracting the event-object bytes. It returns a historical signed candidate, not globally
 current revision, endpoint approval, session ownership, or financial
 authority. No new state is read or written during startup or upgrade.
 
-`src/recoveryAgeContainer.ts` is a third **unused, disconnected** boundary.
+`src/recoveryAgeContainer.ts` is the age boundary the swap client's
+`src/swap/recovery.ts` uses.
 Using pinned `age-encryption`, it accepts *caller-validated* canonical RS-007
 UTF-8 plaintext bytes and exactly one independently selected age X25519
 recipient, and returns bounded binary age v1 ciphertext. It does not inspect
@@ -127,6 +158,14 @@ bun run build
 bun run test
 python3 -m http.server 8080 --bind 127.0.0.1 --directory dist
 ```
+
+`bun test unit` runs the SDK unit tests, including parity against the
+rill-docs vectors, the BOLT11 specification examples, a Bitcoin Core regtest
+PSBT, and a gift wrap produced by rill-provider. From the repository root,
+`scripts/regtest_e2e.py --web --crypto-library <path>` runs a live regtest
+swap with `scripts/web-swap-e2e.ts` driving `runSwap` (Core's wallet stands in
+for the user's wallet) and then requires `rill recover inspect` to accept both
+browser-written recovery files.
 
 `bun run test` checks the same built bytes at `/` and `/repository/` on
 loopback. All runtime assets are local. Browser tests need a supported
