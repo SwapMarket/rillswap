@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -551,3 +552,60 @@ def test_committed_burn_cannot_publish_against_changed_facts(
             "SELECT state,local_nonce,nonce_response_id FROM cooperation_attempts"
         ).fetchone() == ("BURNED", None, None)
         assert store.pending_outbox() == ()
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
+)
+def test_pinned_native_provider_nonce_and_signed_proposal_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Native compatibility only; test-held scalar is not provider custody."""
+    from rill_crypto import Context  # noqa: PLC0415 - opt-in native dependency
+
+    harness = Harness(tmp_path, monkeypatch)
+    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.provision()
+    with (
+        Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
+        harness.acquire() as store,
+    ):
+        session, plan, _ = _featured_paid_swap(harness, store)
+        store._public_keys = crypto  # noqa: SLF001 - compare native to pinned artifacts
+        store._crypto = crypto  # noqa: SLF001 - BIP340 verifies native signed envelope
+        cooperation_id = b"\x91" * 32
+        store._burn_cooperative_claim(  # noqa: SLF001
+            session,
+            cooperation_id,
+            plan,
+            now=1000,
+            deadline_at=1020,
+            deadline_height=1100,
+        )
+        terms = live._offer_terms(  # noqa: SLF001 - fixture signed terms
+            store._connection.execute(  # noqa: SLF001
+                "SELECT terms_offer FROM swaps WHERE session_id=?", (session,)
+            ).fetchone()[0]
+        )
+        attempt, nonce = crypto.musig_begin(
+            secret_key=(5).to_bytes(32, "big"),  # fixture scalar, not production custody
+            user_public_key=bytes.fromhex(terms.client_contract_compressed_key),
+            provider_public_key=bytes.fromhex(terms.provider_contract_compressed_key),
+            tap_tweak=bytes.fromhex(harness.source["taproot_contract"]["tap_tweak"]),
+            message=plan.signature_hash,
+            cooperation_id=cooperation_id,
+        )
+        with attempt:
+            message_id = store._commit_cooperative_proposal_nonce(  # noqa: SLF001
+                session, cooperation_id, nonce, signer=crypto, now=1001
+            )
+        entry = next(item for item in store.pending_outbox() if item.message_id == message_id)
+        envelope = Envelope.model_validate_json(entry.canonical_bytes, strict=True)
+        assert envelope.payload["public_nonce"] == nonce.hex()
+        crypto.schnorr_verify(
+            bytes.fromhex(envelope.sender_session_key),
+            live.unsigned_envelope_hash(envelope),
+            bytes.fromhex(envelope.signature or ""),
+        )
