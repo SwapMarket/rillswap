@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import Mock
 
 import pytest
 from rill_provider._lnd_proto import lightning_pb2
 from rill_provider._lnd_proto.routerrpc import router_pb2
+from rill_provider.lnd_payment_observation import LndNotSyncedError, LndUnavailableError
 from rill_provider.lnd_payment_send import PaymentOutcome
 
+from rill_cli import hold_payment
 from rill_cli.hold_payment import HoldPaymentError, LndHoldPayer
 from rill_cli.live_swap import SwapError
 
@@ -54,3 +57,50 @@ def test_an_earlier_final_expiry_is_never_sent() -> None:
         _pay(payer)
     sender.send.assert_not_called()
     assert issubclass(HoldPaymentError, SwapError)  # reported as a stopped swap, nothing at risk
+
+
+def test_a_briefly_unsynced_lnd_is_retried_before_planning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(hold_payment, "POLL_SECONDS", 0.01)
+    payer, sender = _payer(1035)
+    planned = sender.prepare.return_value
+    sender.prepare.side_effect = [LndNotSyncedError("catching up"), planned]
+    assert _pay(payer) == "IN_FLIGHT"
+    assert sender.prepare.call_count == 2
+    sender.send.assert_called_once()
+
+
+def test_a_blocking_hold_send_returns_once_lnd_tracks_it_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(hold_payment, "POLL_SECONDS", 0.01)
+    payer, sender = _payer(1035)
+    release = threading.Event()
+    sender.send.side_effect = lambda _payment: release.wait(5) and PaymentOutcome("SUCCEEDED")
+    sender.track.return_value = PaymentOutcome("IN_FLIGHT")
+    try:
+        assert _pay(payer) == "IN_FLIGHT"  # SendToRouteV2 is still waiting on the hold
+    finally:
+        release.set()
+    sender.send.assert_called_once()
+
+
+def test_a_failed_send_that_lnd_never_recorded_sent_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(hold_payment, "POLL_SECONDS", 0.01)
+    payer, sender = _payer(1035)
+    sender.send.side_effect = LndUnavailableError("connection refused")
+    sender.track.return_value = PaymentOutcome("UNKNOWN")
+    with pytest.raises(LndUnavailableError):
+        _pay(payer)  # reported by the swap as "nothing is at risk"
+
+
+def test_an_untrackable_failed_send_is_ambiguous(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(hold_payment, "POLL_SECONDS", 0.01)
+    payer, sender = _payer(1035)
+    sender.send.side_effect = LndUnavailableError("deadline")
+    sender.track.side_effect = LndUnavailableError("down")
+    with pytest.raises(HoldPaymentError, match="outcome unknown"):
+        _pay(payer)
