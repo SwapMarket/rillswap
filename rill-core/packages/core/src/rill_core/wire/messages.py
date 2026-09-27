@@ -9,6 +9,7 @@ from pydantic import Field, model_validator
 from rill_core.domain.amounts import MAX_SATS
 from rill_core.wire.canonical import JsonValue  # noqa: TC001
 from rill_core.wire.hashes import (
+    COOPERATIVE_CLAIM_FEATURE,
     EPOCH_SESSION_EXTENSION,
     EPOCH_SESSION_FEATURE,
     contract_hash,
@@ -512,6 +513,11 @@ class HandshakeAccept(StrictModel):
                 raise ValueError("epoch-bound admission must be jointly negotiated")
             if self.provider_session_xonly_key == initiation.epoch_inbox_xonly_key:
                 raise ValueError("provider session and epoch inbox keys must be distinct")
+        if COOPERATIVE_CLAIM_FEATURE in required and not (
+            COOPERATIVE_CLAIM_FEATURE in initiation.required_features
+            and COOPERATIVE_CLAIM_FEATURE in self.required_features
+        ):
+            raise ValueError("cooperative claim must be jointly negotiated")
 
 
 class HandshakeAcceptPayload(StrictModel):
