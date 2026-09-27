@@ -85,6 +85,7 @@ if TYPE_CHECKING:
     from rill_core.wire.envelope_authentication import EnvelopeSchnorrVerifier
     from rill_core.wire.messages import ContractTerms
     from rill_crypto import Context
+    from rill_crypto.binding import MusigAttempt
 
     from rill_provider.handshake_custody_offline import CustodyPublicKeys
     from rill_provider.provider_identity import ProviderIdentity
@@ -641,6 +642,10 @@ class LiveSessionStore:
         self._max_active_reservations = max_active_reservations
         self._admission = _TokenBucket(new_sessions_per_minute)
         self._pid = os.getpid()
+        # Allocation IDs outlive failures for this owner. Native handles and
+        # the secret nonce itself never cross a process or storage boundary.
+        self._allocated_cooperation_ids: set[bytes] = set()
+        self._cooperation_handles: dict[bytes, MusigAttempt] = {}
 
     @staticmethod
     def provision(  # noqa: PLR0913 - independent provisioning facts explicit
@@ -869,7 +874,12 @@ class LiveSessionStore:
             if lock_fd is not None:
                 os.close(lock_fd)
             return
-        _discard(self._connection, -1 if lock_fd is None else lock_fd)
+        try:
+            for attempt in self._cooperation_handles.values():
+                attempt.close()
+        finally:
+            self._cooperation_handles.clear()
+            _discard(self._connection, -1 if lock_fd is None else lock_fd)
 
     def __enter__(self) -> Self:
         """Own the store for the block."""
@@ -1224,6 +1234,155 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - never echo nonce or stored state
             raise LiveSessionStoreError("cooperative nonce commit refused") from None
         return message_id
+
+    def _begin_and_commit_cooperative_proposal(  # noqa: PLR0912 - custody and burn checks share one transaction
+        self,
+        session_id: str,
+        cooperation_id: bytes,
+        *,
+        now: int,
+    ) -> str:
+        """Allocate one store-owned native handle after burn, then commit its nonce.
+
+        INTERNAL ONLY. The caller must already have durably burned the exact
+        claim, verified current chain state, and planned independent fallback.
+        The scalar stays inside the store; neither it nor the opaque signing
+        handle is returned. A failed begin/commit permanently prevents another
+        native allocation for this ID in this owner process. A new owner
+        abandons the BURNED row before it can allocate anything.
+        """
+        from rill_crypto import Context  # noqa: PLC0415 - native boundary is opt-in
+
+        if (
+            not isinstance(self._crypto, Context)
+            or self._public_keys is not self._crypto
+            or not isinstance(cooperation_id, bytes)
+            or len(cooperation_id) != 32  # noqa: PLR2004 - unique BIP327 ID
+            or type(now) is not int
+            or now < 0
+        ):
+            raise LiveSessionStoreError("native cooperative custody unavailable")
+        crypto = self._crypto
+        if cooperation_id in self._allocated_cooperation_ids:
+            raise LiveSessionStoreError("cooperative nonce allocation already attempted")
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT a.binding,a.owner_generation,a.created_at,a.deadline_at,a.state,"
+                    "s.phase,s.blocked,w.state,w.contract_hash,w.terms_offer,"
+                    "k.compressed_key,k.secret_age "
+                    "FROM cooperation_attempts a "
+                    "JOIN sessions s ON s.session_id=a.session_id "
+                    "JOIN swaps w ON w.session_id=a.session_id "
+                    "LEFT JOIN contract_keys k ON k.session_id=a.session_id "
+                    "WHERE a.session_id=? AND a.cooperation_id=?",
+                    (session_id, cooperation_id),
+                ).fetchone()
+                if row is None:
+                    raise LiveSessionStoreError("cooperative burn unavailable")  # noqa: TRY301
+                (
+                    binding_bytes,
+                    generation,
+                    created_at,
+                    deadline_at,
+                    state,
+                    phase,
+                    blocked,
+                    swap_state,
+                    recorded_hash,
+                    offer_bytes,
+                    compressed,
+                    sealed,
+                ) = row
+                binding = parse_json_strict(binding_bytes)
+                if not isinstance(binding, dict) or (
+                    cooperation_id in self._allocated_cooperation_ids
+                    or generation != self._generation
+                    or state != "BURNED"
+                    or phase != "ACCEPTED"
+                    or blocked
+                    or swap_state not in ("PAID", "CLAIMING")
+                    or not created_at <= now < deadline_at
+                    or binding.get("version") != 1
+                    or binding.get("cooperation_id") != cooperation_id.hex()
+                    or binding.get("session_id") != session_id
+                    or binding.get("deadline_at") != deadline_at
+                    or binding.get("contract_hash") != recorded_hash
+                    or binding.get("claimant") != "provider"
+                    or compressed != binding.get("provider_key")
+                    or sealed is None
+                    or COOPERATIVE_CLAIM_FEATURE not in self._policy.features
+                ):
+                    raise LiveSessionStoreError("cooperative nonce allocation unavailable")  # noqa: TRY301
+                terms = _offer_terms(offer_bytes)
+                if (
+                    contract_hash(terms).hex() != recorded_hash
+                    or COOPERATIVE_CLAIM_FEATURE not in terms.required_features
+                    or terms.client_contract_compressed_key != binding.get("user_key")
+                    or terms.provider_contract_compressed_key != compressed
+                    or terms.network_identity.model_dump(mode="json")
+                    != binding.get("network_identity")
+                ):
+                    raise LiveSessionStoreError("cooperative signer terms changed")  # noqa: TRY301
+                user_key = binding.get("user_key")
+                tweak = binding.get("tap_tweak")
+                message = binding.get("signature_hash")
+                if (
+                    not isinstance(user_key, str)
+                    or re.fullmatch(r"(02|03)[0-9a-f]{64}", user_key) is None
+                    or not isinstance(tweak, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", tweak) is None
+                    or not isinstance(message, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", message) is None
+                ):
+                    raise LiveSessionStoreError("cooperative signing context malformed")  # noqa: TRY301
+                plaintext = pyrage.decrypt(sealed, [self._custody_identity])
+                key_record = parse_json_strict(plaintext)
+                if not isinstance(key_record, dict):
+                    raise LiveSessionStoreError("cooperative contract custody differs")  # noqa: TRY301
+                scalar_hex = key_record.get("secret_scalar")
+                if (
+                    key_record.get("kind") != CONTRACT_KEY_RECORD_KIND
+                    or key_record.get("store_uuid") != self._store_uuid
+                    or key_record.get("session_id") != session_id
+                    or key_record.get("compressed_public_key") != compressed
+                    or not isinstance(scalar_hex, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", scalar_hex) is None
+                ):
+                    raise LiveSessionStoreError("cooperative contract custody differs")  # noqa: TRY301
+                scalar = bytes.fromhex(scalar_hex)
+                del plaintext, key_record, scalar_hex
+                try:
+                    if crypto.public_key(scalar).hex() != compressed:
+                        raise LiveSessionStoreError("cooperative contract key differs")
+                    # The burn committed in an earlier transaction. Never
+                    # remove this tombstone, including if native begin raises.
+                    self._allocated_cooperation_ids.add(cooperation_id)
+                    attempt, public_nonce = crypto.musig_begin(
+                        secret_key=scalar,
+                        user_public_key=bytes.fromhex(user_key),
+                        provider_public_key=bytes.fromhex(compressed),
+                        tap_tweak=bytes.fromhex(tweak),
+                        message=bytes.fromhex(message),
+                        cooperation_id=cooperation_id,
+                    )
+                    self._cooperation_handles[cooperation_id] = attempt
+                finally:
+                    del scalar
+            # The private storage primitive rechecks the current owner, state,
+            # funding, preimage and deadline in its own durable write. It may
+            # only publish the exact nonce bound to the live handle above.
+            return self._commit_cooperative_proposal_nonce(
+                session_id, cooperation_id, public_nonce, signer=crypto, now=now
+            )
+        except BaseException as error:
+            live = self._cooperation_handles.pop(cooperation_id, None)
+            if live is not None:
+                with suppress(Exception):
+                    live.close()
+            if isinstance(error, Exception) and not isinstance(error, LiveSessionStoreError):
+                raise LiveSessionStoreError("cooperative native proposal refused") from None
+            raise
 
     def _expectations(self) -> dict[str, object]:
         return {

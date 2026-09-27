@@ -6,8 +6,11 @@ import copy
 import hashlib
 import json
 import os
+import select
+import signal
+import sqlite3
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pyrage
 import pytest
@@ -68,6 +71,38 @@ class FixtureEnvelopeSigner:
         signature = b"\x77" * 64
         self.crypto.permitted.add((self.keys.public_key(secret_key)[1:], message, signature))
         return signature
+
+
+def _assert_fork_refuses_parent_nonce(store: live.LiveSessionStore, session: str) -> None:
+    """A child cannot allocate or close a parent's live store-owned handle."""
+    read_fd, write_fd = os.pipe()
+    try:
+        child = os.fork()
+        if child == 0:
+            os.close(read_fd)
+            try:
+                with pytest.raises(live.StaleOwnerError, match="inherited across fork"):
+                    store._begin_and_commit_cooperative_proposal(  # noqa: SLF001
+                        session, b"\xff" * 32, now=1002
+                    )
+                store.close()  # inherited descriptor copy only, not native handles
+                os.write(write_fd, b"refused")
+            except Exception:  # noqa: BLE001 - report every child failure to parent
+                os.write(write_fd, b"failed")
+            finally:
+                os._exit(0)  # child must never run inherited pytest teardown
+        os.close(write_fd)
+        readable, _, _ = select.select([read_fd], [], [], 2)
+        if not readable:
+            os.kill(child, signal.SIGKILL)
+            os.waitpid(child, 0)
+            pytest.fail("fork child blocked on inherited provider or native ownership")
+        result = os.read(read_fd, 32)
+        _, status = os.waitpid(child, 0)
+        assert result == b"refused"
+        assert os.WIFEXITED(status)
+    finally:
+        os.close(read_fd)
 
 
 def _featured_paid_swap(
@@ -609,3 +644,182 @@ def test_pinned_native_provider_nonce_and_signed_proposal_bytes(
             live.unsigned_envelope_hash(envelope),
             bytes.fromhex(envelope.signature or ""),
         )
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
+)
+@pytest.mark.parametrize("failure_stage", ["none", "begin", "sign", "funding"])
+def test_store_owned_native_nonce_never_exports_scalar_or_reallocates(  # noqa: PLR0915 - one native custody lifecycle per failure stage
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str
+) -> None:
+    """Synthetic retained terms, real age-sealed provider key and native nonce."""
+    from rill_crypto import Context  # noqa: PLC0415 - opt-in native dependency
+
+    harness = Harness(tmp_path, monkeypatch)
+    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.provision()
+    with (
+        Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
+        harness.acquire() as store,
+    ):
+        session, plan, _ = _featured_paid_swap(harness, store)
+        store._public_keys = crypto  # noqa: SLF001 - use real native key operations
+        store._crypto = crypto  # noqa: SLF001 - native envelope and nonce checks
+        monkeypatch.setattr(live, "_new_session_scalar", lambda: (5).to_bytes(32, "big"))
+        with store._write() as connection:  # noqa: SLF001 - materialize matching key custody
+            compressed = store._contract_key(connection, session)  # noqa: SLF001
+        assert compressed == harness.source["contract_terms"]["provider_contract_compressed_key"]
+        cooperation_id = b"\xa1" * 32
+        store._burn_cooperative_claim(  # noqa: SLF001
+            session,
+            cooperation_id,
+            plan,
+            now=1000,
+            deadline_at=1020,
+            deadline_height=1100,
+        )
+        if failure_stage == "begin":
+
+            def fail_begin(**_inputs: object) -> None:
+                raise OSError("test-only native begin interruption")
+
+            monkeypatch.setattr(crypto, "musig_begin", fail_begin)
+        elif failure_stage == "sign":
+
+            def fail_signing(_secret: bytes, _digest: bytes, _aux: bytes) -> bytes:
+                raise OSError("test-only signer interruption")
+
+            monkeypatch.setattr(crypto, "schnorr_sign", fail_signing)
+        elif failure_stage == "funding":
+            commit = store._commit_cooperative_proposal_nonce  # noqa: SLF001
+
+            def replace_funding_before_commit(*args: object, **kwargs: object) -> str:
+                store._connection.execute(  # noqa: SLF001 - synthetic between-phases race
+                    "UPDATE swaps SET funding_binding=NULL WHERE session_id=?", (session,)
+                )
+                return commit(*args, **kwargs)  # type: ignore[arg-type]
+
+            monkeypatch.setattr(
+                store, "_commit_cooperative_proposal_nonce", replace_funding_before_commit
+            )
+        if failure_stage != "none":
+            with pytest.raises(
+                live.LiveSessionStoreError,
+                match=r"native proposal refused|commit refused|unavailable",
+            ):
+                store._begin_and_commit_cooperative_proposal(  # noqa: SLF001
+                    session, cooperation_id, now=1001
+                )
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT state,local_nonce FROM cooperation_attempts"
+            ).fetchone() == ("BURNED", None)
+            assert store.pending_outbox() == ()
+            assert crypto._active_attempts == 0  # noqa: SLF001 - native handle disposed
+        else:
+            message_id = store._begin_and_commit_cooperative_proposal(  # noqa: SLF001
+                session, cooperation_id, now=1001
+            )
+            assert crypto._active_attempts == 1  # noqa: SLF001 - retained until store closes
+            (state, nonce, recorded_id) = store._connection.execute(  # noqa: SLF001
+                "SELECT state,local_nonce,nonce_response_id FROM cooperation_attempts"
+            ).fetchone()
+            assert state == "NONCE_READY"
+            assert recorded_id == message_id
+            crypto.musig_public_nonce_validate(nonce)
+            envelope = Envelope.model_validate_json(store.pending_outbox()[0].canonical_bytes)
+            assert envelope.payload["public_nonce"] == nonce.hex()
+            if hasattr(os, "fork"):
+                _assert_fork_refuses_parent_nonce(store, session)
+                assert crypto._active_attempts == 1  # noqa: SLF001 - parent retains custody
+        with pytest.raises(live.LiveSessionStoreError, match="already attempted"):
+            store._begin_and_commit_cooperative_proposal(  # noqa: SLF001
+                session, cooperation_id, now=1002
+            )
+        assert cooperation_id in store._allocated_cooperation_ids  # noqa: SLF001
+    assert crypto._active_attempts == 0  # noqa: SLF001 - store close disposed native handle
+    with harness.acquire() as store:
+        assert store._connection.execute(  # noqa: SLF001
+            "SELECT state FROM cooperation_attempts"
+        ).fetchone() == ("ABANDONED",)
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
+)
+@pytest.mark.parametrize("commit_reached_disk", [False, True])
+def test_uncertain_nonce_proposal_commit_releases_native_custody(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, commit_reached_disk: bool
+) -> None:
+    """Either SQLite outcome abandons the handle and never reopens allocation."""
+    from rill_crypto import Context  # noqa: PLC0415 - opt-in native dependency
+
+    harness = Harness(tmp_path, monkeypatch)
+    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.provision()
+    with (
+        Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
+        harness.acquire() as store,
+    ):
+        session, plan, _ = _featured_paid_swap(harness, store)
+        store._public_keys = crypto  # noqa: SLF001
+        store._crypto = crypto  # noqa: SLF001
+        monkeypatch.setattr(live, "_new_session_scalar", lambda: (5).to_bytes(32, "big"))
+        with store._write() as connection:  # noqa: SLF001
+            store._contract_key(connection, session)  # noqa: SLF001
+        cooperation_id = b"\xb1" * 32
+        store._burn_cooperative_claim(  # noqa: SLF001
+            session,
+            cooperation_id,
+            plan,
+            now=1000,
+            deadline_at=1020,
+            deadline_height=1100,
+        )
+
+        class UncertainCommit:
+            def __init__(self, delegate: sqlite3.Connection) -> None:
+                self.delegate = delegate
+                self.fired = False
+
+            def __getattr__(self, name: str) -> Any:  # noqa: ANN401 - SQLite proxy fixture
+                return getattr(self.delegate, name)
+
+            def execute(self, statement: str, *values: object) -> sqlite3.Cursor:
+                if (
+                    statement == "COMMIT"
+                    and not self.fired
+                    and self.delegate.execute(
+                        "SELECT state FROM cooperation_attempts WHERE cooperation_id=?",
+                        (cooperation_id,),
+                    ).fetchone()
+                    == ("NONCE_READY",)
+                ):
+                    self.fired = True
+                    if commit_reached_disk:
+                        self.delegate.execute(statement)
+                    raise sqlite3.OperationalError("unknown commit outcome")
+                return self.delegate.execute(statement, *values)
+
+        proxy = UncertainCommit(store._connection)  # noqa: SLF001
+        store._connection = proxy  # type: ignore[assignment]  # noqa: SLF001 - fault injection
+        with pytest.raises(live.StaleOwnerError, match="commit outcome uncertain"):
+            store._begin_and_commit_cooperative_proposal(  # noqa: SLF001
+                session, cooperation_id, now=1001
+            )
+        assert proxy.fired
+        assert crypto._active_attempts == 0  # noqa: SLF001 - closed despite unknown SQL result
+        assert cooperation_id in store._allocated_cooperation_ids  # noqa: SLF001
+        with pytest.raises(live.StaleOwnerError, match="closed"):
+            store._begin_and_commit_cooperative_proposal(  # noqa: SLF001
+                session, b"\xb2" * 32, now=1002
+            )
+    with harness.acquire() as reopened:
+        assert reopened._connection.execute(  # noqa: SLF001
+            "SELECT state FROM cooperation_attempts"
+        ).fetchone() == ("ABANDONED",)
+        assert len(reopened.pending_outbox()) == int(commit_reached_disk)
