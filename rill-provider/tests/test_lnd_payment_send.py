@@ -452,3 +452,16 @@ def test_successful_attempt_still_requires_hash_preimage_match(
     )
     with pytest.raises(LndProtocolError, match="preimage"):
         client.send(payment)
+
+
+def test_current_tracking_reports_a_held_payment_in_flight_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, channel = _sender(tmp_path, monkeypatch, [_payment(1), _payment(2, PREIMAGE)])
+    assert client.track(HASH, current=True) == sender.PaymentOutcome("IN_FLIGHT")
+    method, request = channel.calls[-1][:2]
+    assert method == sender.TRACK_METHOD
+    assert request.no_inflight_updates is False
+    client, channel = _sender(tmp_path, monkeypatch, [_payment(1), _payment(2, PREIMAGE)])
+    assert client.track(HASH) == sender.PaymentOutcome("SUCCEEDED", PREIMAGE)
+    assert channel.calls[-1][1].no_inflight_updates is True

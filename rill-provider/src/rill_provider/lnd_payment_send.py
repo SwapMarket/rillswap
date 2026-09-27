@@ -135,7 +135,9 @@ def _check_route(
         previous_expiry = hop.expiry
 
 
-def _outcome(stream: Iterator[lightning_pb2.Payment], payment_hash: str) -> PaymentOutcome:
+def _outcome(
+    stream: Iterator[lightning_pb2.Payment], payment_hash: str, *, current: bool = False
+) -> PaymentOutcome:
     last: PaymentOutcome = PaymentOutcome("IN_FLIGHT")
     for count, payment in enumerate(stream, start=1):
         if not isinstance(payment, lightning_pb2.Payment) or payment.payment_hash != payment_hash:
@@ -150,7 +152,7 @@ def _outcome(stream: Iterator[lightning_pb2.Payment], payment_hash: str) -> Paym
             return PaymentOutcome("SUCCEEDED", preimage)
         if payment.status == _FAILED:
             return PaymentOutcome("FAILED")
-        if count >= MAX_UPDATES:
+        if current or count >= MAX_UPDATES:
             break
     return last
 
@@ -397,15 +399,24 @@ class LndPaymentSender:
                 with suppress(Exception):
                     channel.close()
 
-    def track(self, payment_hash: str, *, payer: PaymentAuthority | None = None) -> PaymentOutcome:
+    def track(
+        self,
+        payment_hash: str,
+        *,
+        payer: PaymentAuthority | None = None,
+        current: bool = False,
+    ) -> PaymentOutcome:
         """Return current status (``UNKNOWN`` if LND reports no payment record).
 
         Without ``payer`` this reports whatever the configured node knows. With
         a bound payer, GetInfo on the same channel must match it first, so a
-        negative result is attributable to the original payer.
+        negative result is attributable to the original payer. By default an
+        in-flight payment is waited on briefly for a final state; ``current``
+        returns LND's first update instead, so a held payment reads
+        ``IN_FLIGHT`` at once.
         """
         request = router_pb2.TrackPaymentRequest(
-            payment_hash=bytes.fromhex(payment_hash), no_inflight_updates=True
+            payment_hash=bytes.fromhex(payment_hash), no_inflight_updates=not current
         )
         if len(payment_hash) != 2 * HASH_BYTES:
             raise ValueError("payment hash must be 32 bytes of hex")
@@ -413,7 +424,9 @@ class LndPaymentSender:
         with self._connect() as calls:
             if payer is not None:
                 self._attest(calls, deadline, expected=payer)
-            outcome = calls.track(request, payment_hash, min(5.0, deadline - time.monotonic()))
+            outcome = calls.track(
+                request, payment_hash, min(5.0, deadline - time.monotonic()), current=current
+            )
         if payer is None:
             return outcome
         return replace(outcome, payer=payer.node_pubkey)
@@ -457,7 +470,12 @@ class _Calls:
         raise failure
 
     def track(
-        self, request: router_pb2.TrackPaymentRequest, payment_hash: str, timeout: float
+        self,
+        request: router_pb2.TrackPaymentRequest,
+        payment_hash: str,
+        timeout: float,
+        *,
+        current: bool = False,
     ) -> PaymentOutcome:
         if timeout <= 0:
             raise LndUnavailableError("LND payment deadline elapsed")
@@ -468,7 +486,7 @@ class _Calls:
                 response_deserializer=lightning_pb2.Payment.FromString,
             )
             stream = rpc(request, timeout=timeout, metadata=self._metadata, wait_for_ready=False)
-            return _outcome(stream, payment_hash)
+            return _outcome(stream, payment_hash, current=current)
         except grpc.RpcError as error:
             if _code(error) == grpc.StatusCode.NOT_FOUND:
                 return PaymentOutcome("UNKNOWN")
