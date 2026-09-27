@@ -1,4 +1,4 @@
-"""BTC to LN acceptance, funding, and settlement payloads (RS-003).
+"""Acceptance, funding, and settlement payloads (RS-003, RS-004 observations).
 
 Structural models only. Signature checks and state rules belong to the
 receiver (RS-001 section 8, RS-003 "Acceptance, funding, and settlement").
@@ -13,7 +13,7 @@ from pydantic import Field, model_validator
 
 from rill_core.wire.canonical import canonicalize, parse_json_strict
 from rill_core.wire.messages import ClientAcceptance, FundingBinding  # noqa: TC001
-from rill_core.wire.types import Hex32, Signature64, StrictModel
+from rill_core.wire.types import ExactInteger, Hex32, ScriptHex, Signature64, StrictModel
 
 MIN_TRANSACTION_BYTES = 60
 MAX_TRANSACTION_BYTES = 100_000
@@ -72,17 +72,75 @@ class ClaimBroadcast(StrictModel):
     claim_txid: Hex32
 
 
-Observation = Annotated[
-    PaymentSettled | PaymentFailed | ClaimBroadcast, Field(discriminator="kind")
-]
-_OBSERVATIONS: dict[str, type[PaymentSettled | PaymentFailed | ClaimBroadcast]] = {
+class HoldAccepted(StrictModel):
+    """LN to BTC: every accepted HTLC of the hold invoice checked out (RS-004)."""
+
+    kind: Literal["hold_accepted"]
+
+
+class FundingBroadcast(StrictModel):
+    """LN to BTC: the provider funded the contract; the client verifies the output."""
+
+    kind: Literal["funding_broadcast"]
+    funding_txid: Hex32
+    contract_vout: ExactInteger
+    contract_value_sat: str
+    contract_script_pubkey: ScriptHex
+
+
+class HoldSettled(StrictModel):
+    """LN to BTC: the provider settled the hold with the claim's preimage."""
+
+    kind: Literal["hold_settled"]
+
+
+class SwapAborted(StrictModel):
+    """LN to BTC: nothing was funded; the hold is canceled or was never paid."""
+
+    kind: Literal["swap_aborted"]
+    reason: Annotated[str, Field(min_length=1, max_length=200)]
+
+
+class RefundBroadcast(StrictModel):
+    """LN to BTC: the provider broadcast its refund after the lock."""
+
+    kind: Literal["refund_broadcast"]
+    refund_txid: Hex32
+
+
+class RefundConfirmed(StrictModel):
+    """LN to BTC: the refund reached its signed depth; the hold is canceled."""
+
+    kind: Literal["refund_confirmed"]
+    refund_txid: Hex32
+
+
+AnyObservation = (
+    PaymentSettled
+    | PaymentFailed
+    | ClaimBroadcast
+    | HoldAccepted
+    | FundingBroadcast
+    | HoldSettled
+    | SwapAborted
+    | RefundBroadcast
+    | RefundConfirmed
+)
+Observation = Annotated[AnyObservation, Field(discriminator="kind")]
+_OBSERVATIONS: dict[str, type[AnyObservation]] = {
     "payment_settled": PaymentSettled,
     "payment_failed": PaymentFailed,
     "claim_broadcast": ClaimBroadcast,
+    "hold_accepted": HoldAccepted,
+    "funding_broadcast": FundingBroadcast,
+    "hold_settled": HoldSettled,
+    "swap_aborted": SwapAborted,
+    "refund_broadcast": RefundBroadcast,
+    "refund_confirmed": RefundConfirmed,
 }
 
 
-def parse_observation(document: bytes) -> PaymentSettled | PaymentFailed | ClaimBroadcast:
+def parse_observation(document: bytes) -> AnyObservation:
     """Strictly parse an observation payload, dispatching on ``kind``."""
     parsed = parse_json_strict(document)
     kind = parsed.get("kind") if isinstance(parsed, dict) else None
