@@ -292,3 +292,16 @@ def test_confirmed_output_reads_gettxout_with_mempool(
     answers["gettxout"] = {"value": "#0.00050000#", "scriptPubKey": {}, "confirmations": 1}
     with pytest.raises(WalletRpcError):
         wallet.confirmed_output("51" * 32, 1)
+
+
+def test_chain_only_spend_view_and_wallet_depth(
+    core: tuple[WalletRpc, list[dict[str, Any]]], answers: dict[str, Any]
+) -> None:
+    wallet, calls = core
+    answers["gettxout"] = None
+    assert wallet.unspent_on_chain("51" * 32, 1) is False
+    assert (calls[-1]["path"], calls[-1]["params"]) == ("/", ["51" * 32, 1, False])
+    answers["gettransaction"] = {"txid": "52" * 32, "confirmations": 3}
+    assert wallet.wallet_confirmations("52" * 32) == 3
+    assert calls[-1]["path"].startswith("/wallet/")
+    assert wallet.wallet_confirmations("53" * 32) is None  # another transaction answered

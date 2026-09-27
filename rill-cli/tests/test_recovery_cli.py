@@ -1120,3 +1120,84 @@ def test_two_direction_independent_go_age_interoperability(tmp_path: Path, direc
     inspected = _rill(["inspect", *common, str(from_go)])
     assert inspected.returncode == 0, inspected.stderr
     assert json.loads(inspected.stdout)["profile"] == f"{direction}/v1"
+
+
+@NATIVE_ONLY
+@pytest.mark.native_crypto
+def test_watch_claim_signs_from_the_recovery_file_until_the_claim_confirms(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import pyrage  # noqa: PLC0415
+    from rill_core.settlement import (  # noqa: PLC0415
+        FundingOutput,
+        UnilateralAuthorization,
+        validate_unilateral_spend,
+    )
+    from rill_core.wire.types import NetworkIdentity  # noqa: PLC0415
+
+    from rill_cli import main as cli_main  # noqa: PLC0415
+    from rill_cli import refund_watcher  # noqa: PLC0415
+
+    package, _ = _fixture("ln-to-btc")
+    package["funding_history"].append(_signed_binding(package, 0, str(NATIVE_LIBRARY)))
+    common, _, _ = _inputs(tmp_path, "ln-to-btc")
+    identity = x25519.Identity.from_str(Path(common[-1]).read_text().strip())
+    recovery = tmp_path / "selected.age"
+    recovery.write_bytes(pyrage.encrypt(canonicalize(package), [identity.to_public()]))
+    binding = FundingBinding.model_validate(package["funding_history"][0]["binding"])
+    sent: list[tuple[bytes, str]] = []
+
+    def collaborators(_reader: object, *, funding_txid: str, contract_vout: int) -> tuple:  # type: ignore[type-arg]
+        assert (funding_txid, contract_vout) == (binding.funding_txid, binding.contract_vout)
+        return (
+            lambda: refund_watcher.ChainView(1000, not sent),
+            lambda txid: (
+                2 if txid == funding_txid else (1 if sent and txid == sent[0][1] else None)
+            ),
+            lambda raw, txid: sent.append((raw, txid)) is None,
+        )
+
+    monkeypatch.setattr(cli_main, "RecoveryCoreReader", lambda **_kwargs: object())
+    monkeypatch.setattr(refund_watcher, "core_collaborators", collaborators)
+    args = [
+        "recover",
+        "watch-claim",
+        *common,
+        "--funding-attempt-id",
+        "11" * 32,
+        "--binding-revision",
+        "0",
+        "--rpc-cookie",
+        str(tmp_path / "test-only-cookie"),
+        "--rpc-port",
+        "18443",
+        "--initial-fee-sat",
+        "300",
+        "--max-fee-sat",
+        "400",
+        "--poll-seconds",
+        "0",
+        str(recovery),
+    ]
+    assert cli_main.main(args) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["kind"] == "ln-to-btc-claim-watch/v1"
+    assert (report["outcome"], report["attempts"]) == ("claim_confirmed", 1)
+    ((raw, txid),) = sent
+    assert report["claim_txid"] == txid
+    with Context(library_path=str(NATIVE_LIBRARY)) as crypto:
+        terms = ContractTerms.model_validate_json(json.dumps(package["contract_terms"]))
+        network = NetworkIdentity.model_validate(package["network_identity"])
+        assert network.name == "regtest"
+        funding = FundingOutput(
+            bytes.fromhex(binding.funding_txid),
+            binding.contract_vout,
+            int(binding.contract_value_sat),
+            bytes.fromhex(binding.contract_script_pubkey),
+        )
+        authorization = UnilateralAuthorization.from_terms(terms, funding, "claim", keys=crypto)
+        checked = validate_unilateral_spend(raw, authorization, verifier=crypto)
+    assert (checked.txid, checked.fee_sat) == (txid, 300)
+    assert package["monotonic_knowledge"]["preimage"] in raw.hex()  # the claim reveals it

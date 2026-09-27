@@ -37,6 +37,7 @@ METHODS = frozenset(
         "getblockchaininfo",
         "getblockhash",
         "getnewaddress",
+        "gettransaction",
         "gettxout",
         "listunspent",
         "sendrawtransaction",
@@ -278,6 +279,22 @@ class WalletRpc:
         if not isinstance(script, str) or type(depth) is not int or depth < 0:
             raise WalletRpcError("Core gettxout result unusable")
         return ConfirmedOutput(_sats(result.get("value")), bytes.fromhex(script), depth)
+
+    def unspent_on_chain(self, txid: str, vout: int) -> bool:
+        """Whether the output is unspent in the active chain, ignoring the mempool.
+
+        Our own unconfirmed spend must not look like a spend.
+        """
+        return self._call("gettxout", txid, vout, False, wallet=False) is not None  # noqa: FBT003
+
+    def wallet_confirmations(self, txid: str) -> int | None:
+        """Depth of a wallet transaction; ``None`` when unknown to the wallet."""
+        try:
+            result = self._call("gettransaction", txid)
+        except WalletRpcError:
+            return None
+        depth = result.get("confirmations") if isinstance(result, dict) else None
+        return depth if type(depth) is int and result.get("txid") == txid else None
 
     def broadcast(self, raw: bytes) -> str:
         """Submit exact bytes; return Core's txid."""

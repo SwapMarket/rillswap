@@ -98,7 +98,10 @@ Receives on-chain BTC by paying a provider's hold invoice from your own LND
    exact funding transaction against the terms, and write the funded snapshot
    (`<output>.funded`).
 7. Once Core shows the contract output at the signed depth, sign the claim
-   (fee from `--fee-rate`, capped by the signed maximum) and broadcast it. The
+   (fee from `--fee-rate`) and broadcast it. Each new block without a
+   confirmation replaces it by RBF at a fee rising linearly to the signed
+   maximum by `refund_lock_height - claim_confirmation_blocks`; after that
+   nothing new is signed. The command returns when the claim confirms. The
    provider settles the hold from the preimage in the claim witness.
 
 ```sh
@@ -116,9 +119,18 @@ rill swap ln-to-btc \
 Nothing is at risk until the hold is paid; an abort before funding, or an
 unusable route, stops with exit code `5` and the held payment fails back when
 the provider cancels the hold. If the command stops after funding, claim from
-the `.funded` snapshot with `rill recover prepare-claim` and `broadcast-claim`
-before the refund lock height. After that the provider refunds and cancels
-the hold, which returns your Lightning funds.
+the `.funded` snapshot with `rill recover watch-claim` (same schedule, from
+`--initial-fee-sat` to `--max-fee-sat`, capped by the signed terms) before
+the refund lock height. After that the provider refunds and cancels the hold,
+which returns your Lightning funds. Core needs `txindex=1` to report the
+funding depth.
+
+```sh
+rill recover watch-claim --network signet.json --crypto-library /path/librill_crypto.so \
+  --funding-attempt-id ATTEMPT --binding-revision 0 --identity /protected/age-identity \
+  --rpc-cookie ~/.bitcoin/signet/.cookie --rpc-port 38332 \
+  --initial-fee-sat 300 --max-fee-sat 3000 swap-recovery.age.funded
+```
 
 The client currently reuses `rill-provider`'s Nostr transport modules.
 Discovery observes a bounded query window and selects the highest valid

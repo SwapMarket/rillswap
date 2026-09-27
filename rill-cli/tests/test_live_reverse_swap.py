@@ -182,6 +182,12 @@ class FakeChain:
         _raw, script, value = self.funded[txid]
         return ConfirmedOutput(value, script, 2)
 
+    def unspent_on_chain(self, txid: str, vout: int) -> bool:
+        return (txid, vout) in {(t, 0) for t in self.provider_broadcasts} and not self.claims
+
+    def wallet_confirmations(self, txid: str) -> int | None:
+        return 1 if txid in self.claim_txids else None  # mined in the next block
+
     def broadcast_claim(self, raw: bytes) -> str:
         self.claims.append(raw)
         txid, _ = _segwit_claim(raw)
@@ -222,6 +228,8 @@ def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(  # noqa:
         tip_height=chain.tip_height,
         new_destination_script=chain.new_destination_script,
         confirmed_output=chain.confirmed_output,
+        unspent_on_chain=chain.unspent_on_chain,
+        wallet_confirmations=chain.wallet_confirmations,
         broadcast=chain.broadcast_claim,
     )
 

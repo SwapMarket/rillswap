@@ -32,6 +32,7 @@ from rill_cli.age_container import (
     PassphraseCredentials,
     RecoveryCredentials,
     X25519Credentials,
+    construct_container_selected_claim,
     construct_container_selected_refund,
     decrypt_verified_plaintext,
     encrypt_verified_plaintext,
@@ -46,6 +47,7 @@ from rill_cli.claim_disclosure import (
     disclose_claim_on_regtest,
 )
 from rill_cli.claim_plan import prepare_encrypted_claim_plan, verify_encrypted_claim_plan
+from rill_cli.claim_watcher import ClaimWatcher
 from rill_cli.live_swap import SwapError
 from rill_cli.publication import (
     RecoveryPublicationUncertainError,
@@ -123,6 +125,7 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - one flat command ta
         ("sign-refund", "explicit BTC-to-LN refund artifact (never broadcasts)"),
         ("broadcast-refund", "explicit regtest refund submit (never retries)"),
         ("watch-refund", "refund a failed swap with fee escalation until it confirms"),
+        ("watch-claim", "claim an LN-to-BTC swap with fee escalation until it confirms"),
     ):
         operation = commands.add_parser(command, help=description)
         operation.add_argument(
@@ -176,6 +179,12 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - one flat command ta
             operation.add_argument(
                 "--lnd-invoice-macaroon", required=True, help="invoices:read macaroon"
             )
+        if command == "watch-claim":
+            operation.add_argument("--initial-fee-sat", required=True, type=int)
+            operation.add_argument(
+                "--max-fee-sat", required=True, type=int, help="capped by the signed terms"
+            )
+            operation.add_argument("--poll-seconds", type=float, default=30.0)
         if command == "broadcast-claim":
             operation.add_argument("--plan", required=True, help="selected encrypted claim plan")
             operation.add_argument(
@@ -300,6 +309,7 @@ def _run(args: argparse.Namespace) -> str:  # noqa: PLR0911, PLR0912, PLR0915 - 
             "sign-refund",
             "broadcast-refund",
             "watch-refund",
+            "watch-claim",
         }:
             if args.command in {"prepare-claim", "broadcast-claim"} and not args.identity:
                 raise RecoveryCLIError("protected X25519 identity required for claim plan")
@@ -329,7 +339,12 @@ def _run(args: argparse.Namespace) -> str:  # noqa: PLR0911, PLR0912, PLR0915 - 
                 or selected.terms.refund_party != "client"
             ):
                 raise RecoveryCLIError("selected recovery is not a client refund")
-            if args.command in {"observe-claim", "prepare-claim", "broadcast-claim"} and (
+            if args.command in {
+                "observe-claim",
+                "prepare-claim",
+                "broadcast-claim",
+                "watch-claim",
+            } and (
                 selected.terms.profile_id != "ln-to-btc/v1" or selected.terms.claimant != "client"
             ):
                 raise RecoveryCLIError("selected recovery is not a client claim")
@@ -339,6 +354,15 @@ def _run(args: argparse.Namespace) -> str:  # noqa: PLR0911, PLR0912, PLR0915 - 
                 cookie_path=Path(args.rpc_cookie),
                 network=network,
             )
+            if args.command == "watch-claim":
+                return _watch_claim(
+                    args,
+                    network,
+                    selected,
+                    reader=reader,
+                    credentials=inspection_credentials,
+                    crypto=crypto,
+                )
             if args.command == "watch-refund":
                 return _watch_refund(
                     args,
@@ -591,6 +615,70 @@ def _run(args: argparse.Namespace) -> str:  # noqa: PLR0911, PLR0912, PLR0915 - 
                 separators=(",", ":"),
             )
         raise RecoveryCLIError("unsupported recovery command")
+
+
+def _watch_claim(  # noqa: PLR0913 - explicit wiring of the collaborators
+    args: argparse.Namespace,
+    network: NetworkIdentity,
+    selected: SelectedRecoveryFundingContext,
+    *,
+    reader: RecoveryCoreReader,
+    credentials: RecoveryCredentials,
+    crypto: Context,
+) -> str:
+    binding, terms = selected.binding, selected.terms
+    funding = FundingOutput(
+        bytes.fromhex(binding.funding_txid),
+        binding.contract_vout,
+        int(binding.contract_value_sat),
+        bytes.fromhex(binding.contract_script_pubkey),
+    )
+    authorization = UnilateralAuthorization.from_terms(terms, funding, "claim", keys=crypto)
+    chain, confirmations, submit = refund_watcher.core_collaborators(
+        reader, funding_txid=binding.funding_txid, contract_vout=binding.contract_vout
+    )
+    ciphertext = Path(args.file).read_bytes()
+
+    def sign(fee: int, tip: int) -> tuple[bytes, str, int, int]:
+        signed = construct_container_selected_claim(
+            ciphertext,
+            network,
+            credentials=credentials,
+            funding_attempt_id=args.funding_attempt_id,
+            binding_revision=args.binding_revision,
+            live_funding=funding,
+            sampled_tip_height=tip,
+            sampled_confirmations=confirmations(binding.funding_txid) or 0,
+            fee_sat=fee,
+            auxiliary_random=os.urandom(32),
+            crypto=crypto,
+        )
+        checked = validate_unilateral_spend(signed, authorization, verifier=crypto)
+        return signed, checked.txid, checked.fee_sat, checked.vsize
+
+    watcher = ClaimWatcher(
+        initial_fee_sat=args.initial_fee_sat,
+        max_fee_sat=min(args.max_fee_sat, max_spendable_fee(authorization)),
+        deadline_height=terms.refund_lock_height - terms.timing_policy.claim_confirmation_blocks,
+        chain=chain,
+        confirmations=confirmations,
+        sign=sign,
+        submit=submit,
+        poll_seconds=args.poll_seconds,
+    )
+    outcome, claim_txid = watcher.run()
+    return json.dumps(
+        {
+            "kind": "ln-to-btc-claim-watch/v1",
+            "outcome": outcome,
+            "claim_txid": claim_txid,
+            "funding_txid": binding.funding_txid,
+            "contract_vout": binding.contract_vout,
+            "attempts": len(watcher.attempts),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _watch_refund(  # noqa: PLR0913 - explicit wiring of the collaborators

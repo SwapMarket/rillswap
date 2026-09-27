@@ -11,8 +11,8 @@ then claim the contract to the client's destination revealing the preimage.
 Nothing of the client's is at risk before the hold is paid; after that the
 Lightning funds stay held until the claim reveals the preimage or the
 provider's refund resolves the hold. If this process dies after paying, the
-recovery file plus ``rill recover prepare-claim`` / ``broadcast-claim``
-finish the claim from the funded snapshot.
+funded recovery snapshot plus ``rill recover watch-claim`` finish the claim,
+with the same fee escalation.
 """
 
 from __future__ import annotations
@@ -51,6 +51,7 @@ from rill_core.wire.reverse_quotes import (
 from rill_core.wire.settlement_messages import FundingBindingPayload, parse_observation
 from rill_provider.lnd_payment_observation import LndObservationError
 
+from rill_cli.claim_watcher import ClaimWatcher
 from rill_cli.live_swap import (
     SwapError,
     _handshake,
@@ -59,6 +60,7 @@ from rill_cli.live_swap import (
     _Session,
     discover,
 )
+from rill_cli.refund_watcher import ChainView
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -88,6 +90,14 @@ class ClaimWallet(Protocol):
 
     def confirmed_output(self, txid: str, vout: int) -> ConfirmedOutput | None:
         """Return the outpoint as Core sees it, or None when unknown or spent."""
+        ...
+
+    def unspent_on_chain(self, txid: str, vout: int) -> bool:
+        """Whether the output is unspent in the active chain (mempool ignored)."""
+        ...
+
+    def wallet_confirmations(self, txid: str) -> int | None:
+        """Depth of a wallet transaction, ``None`` when unknown."""
         ...
 
     def broadcast(self, raw: bytes) -> str:
@@ -263,13 +273,13 @@ async def _await_depth(  # noqa: PLR0913 - explicit waiting bounds
         tip = await asyncio.to_thread(wallet.tip_height)
         if tip >= lock_height:
             raise SwapError(
-                "the refund lock passed before the funding was usable; claim with "
-                "`rill recover prepare-claim` only if the output is still unspent"
+                "the refund lock passed before the funding was usable; the preimage "
+                "stays private and the provider refunds and cancels the hold"
             )
         if time.monotonic() >= deadline:
             raise SwapError(
-                "funding did not confirm in time; finish with `rill recover prepare-claim` "
-                "and `broadcast-claim` on the funded recovery file"
+                "funding did not confirm in time; finish with `rill recover watch-claim` "
+                "on the funded recovery file"
             )
         report(
             f"funding {binding.funding_txid} at depth "
@@ -278,17 +288,16 @@ async def _await_depth(  # noqa: PLR0913 - explicit waiting bounds
         await asyncio.sleep(POLL_SECONDS)
 
 
-def _claim(  # noqa: PLR0913 - explicit signing inputs
+def _claim_signer(  # noqa: PLR0913 - explicit signing inputs
     terms: ContractTerms,
     binding: FundingBinding,
     *,
     script: bytes,
     contract_secret: bytes,
     preimage: bytes,
-    fee_rate_sat_vb: int,
     crypto: Context,
-) -> tuple[bytes, str]:
-    """Build, sign, and validate the claim; return its bytes and txid."""
+) -> tuple[Callable[[int, int], tuple[bytes, str, int, int]], int]:
+    """Return ``sign(fee, tip) -> (raw, txid, fee, vsize)`` and the fee ceiling."""
     funding = FundingOutput(
         txid=bytes.fromhex(binding.funding_txid),
         output_index=binding.contract_vout,
@@ -296,21 +305,31 @@ def _claim(  # noqa: PLR0913 - explicit signing inputs
         script_pubkey=script,
     )
     authorization = UnilateralAuthorization.from_terms(terms, funding, "claim", keys=crypto)
-    ceiling = max_spendable_fee(authorization)
 
-    def sign(fee: int) -> tuple[bytes, str, int]:
+    def sign(fee: int, _tip: int) -> tuple[bytes, str, int, int]:
         plan = build_unilateral_spend(authorization, fee_sat=fee, claim_preimage=preimage)
         signature = bytes(
             crypto.schnorr_sign(contract_secret, plan.signature_hash, secrets.token_bytes(32))
         )
         spend = finalize_unilateral_spend(plan, signature, verifier=crypto)
-        return spend.raw_transaction, spend.txid, spend.vsize
+        return spend.raw_transaction, spend.txid, spend.fee_sat, spend.vsize
 
-    raw, txid, vsize = sign(min(ceiling, 1))
-    wanted = min(ceiling, math.ceil(fee_rate_sat_vb * vsize))
-    if wanted != min(ceiling, 1):
-        raw, txid, _ = sign(wanted)
-    return raw, txid
+    return sign, max_spendable_fee(authorization)
+
+
+def _chain_view(wallet: ClaimWallet, binding: FundingBinding) -> ChainView | None:
+    try:
+        tip = wallet.tip_height()
+        return ChainView(tip, wallet.unspent_on_chain(binding.funding_txid, binding.contract_vout))
+    except Exception:  # noqa: BLE001 - a failed sample is no evidence; wait
+        return None
+
+
+def _submit(wallet: ClaimWallet, raw: bytes, txid: str) -> bool:
+    try:
+        return wallet.broadcast(raw) == txid
+    except Exception:  # noqa: BLE001 - e.g. a replacement below the mempool's; retried
+        return False
 
 
 async def run_reverse_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
@@ -479,17 +498,44 @@ async def run_reverse_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
         timeout=settle_timeout,
         report=report,
     )
-    raw_claim, claim_txid = _claim(
+    sign, ceiling = _claim_signer(
         terms,
         binding,
         script=script,
         contract_secret=contract_secret,
         preimage=preimage,
-        fee_rate_sat_vb=limits.claim_fee_rate_sat_vb,
         crypto=crypto,
     )
-    broadcast = await asyncio.to_thread(wallet.broadcast, raw_claim)
-    if broadcast != claim_txid:
-        raise SwapError("Core broadcast another transaction; check the wallet")
-    report(f"claim broadcast {claim_txid}; the provider settles the hold from its witness")
+    probe_vsize = sign(min(ceiling, 1), 0)[3]
+    watcher = ClaimWatcher(
+        initial_fee_sat=max(1, min(ceiling, math.ceil(limits.claim_fee_rate_sat_vb * probe_vsize))),
+        max_fee_sat=max(1, ceiling),
+        # Confirm before the provider may refund, within the signed claim window.
+        deadline_height=terms.refund_lock_height - terms.timing_policy.claim_confirmation_blocks,
+        chain=lambda: _chain_view(wallet, binding),
+        confirmations=wallet.wallet_confirmations,
+        sign=sign,
+        submit=lambda raw, txid: _submit(wallet, raw, txid),
+        report=report,
+        poll_seconds=POLL_SECONDS,
+    )
+    try:
+        outcome, claim_txid = await asyncio.to_thread(watcher.run, timeout=settle_timeout)
+    except TimeoutError:
+        raise SwapError(
+            "the claim is broadcast but not confirmed yet; keep it moving with "
+            "`rill recover watch-claim` on the funded recovery file before the "
+            f"refund lock height {terms.refund_lock_height}"
+        ) from None
+    if outcome == "claim_window_passed":
+        raise SwapError(
+            "the claim window closed before a claim was signed; the preimage stays "
+            "private and the provider refunds and cancels the hold"
+        )
+    if outcome != "claim_confirmed" or claim_txid is None:
+        raise SwapError(
+            "the contract was spent by another transaction (the provider's refund?); "
+            "check your Lightning payment"
+        )
+    report(f"claim {claim_txid} confirmed; the provider settles the hold from its witness")
     return ReverseSwapOutcome(session.session_id, contract, binding.funding_txid, claim_txid, value)

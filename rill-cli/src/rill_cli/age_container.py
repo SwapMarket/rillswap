@@ -18,6 +18,7 @@ from pyrage import passphrase, x25519
 from rill_core.recovery import (
     OfflineRecoveryInspection,
     SelectedRecoveryFundingContext,
+    construct_selected_recovery_claim,
     construct_selected_recovery_refund,
     inspect_recovery_plaintext,
     inspect_recovery_selected_funding_binding,
@@ -322,6 +323,47 @@ def construct_container_selected_refund(  # noqa: PLR0913 - explicit signing inp
     else:
         return result
     raise RecoveryContainerError("recovery refund construction failed")
+
+
+def construct_container_selected_claim(  # noqa: PLR0913 - explicit signing inputs
+    ciphertext: bytes,
+    expected_network: NetworkIdentity,
+    *,
+    credentials: RecoveryCredentials,
+    funding_attempt_id: str,
+    binding_revision: int,
+    live_funding: FundingOutput,
+    sampled_tip_height: int,
+    sampled_confirmations: int,
+    fee_sat: int,
+    auxiliary_random: bytes,
+    crypto: RecoveryRefundCrypto,
+) -> bytes:
+    """Decrypt and sign an LN-to-BTC claim within this boundary.
+
+    The returned bytes carry the preimage in their witness; no secret leaves
+    otherwise. Core's pre-disclosure margin applies: no claim is signed within
+    the signed claim window before the refund lock.
+    """
+    try:
+        plaintext = _bounded_plaintext(ciphertext, credentials)
+        result = construct_selected_recovery_claim(
+            plaintext,
+            expected_network,
+            funding_attempt_id=funding_attempt_id,
+            binding_revision=binding_revision,
+            live_funding=live_funding,
+            sampled_tip_height=sampled_tip_height,
+            sampled_confirmations=sampled_confirmations,
+            fee_sat=fee_sat,
+            auxiliary_random=auxiliary_random,
+            crypto=crypto,
+        )
+    except Exception:  # noqa: BLE001, S110 - decrypt/native errors can contain secrets
+        pass
+    else:
+        return result
+    raise RecoveryContainerError("recovery claim construction failed")
 
 
 def decrypt_verified_plaintext(
