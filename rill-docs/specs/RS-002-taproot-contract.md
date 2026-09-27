@@ -162,7 +162,10 @@ has the same action and ID with `status` = `declined`, or `status` = `signed`
 with the cosigner's 66-byte `public_nonce` and 32-byte
 `partial_signature`. A second `action_request` carries `action` =
 `cooperative_claim_complete`, the same ID, and the claimant's 32-byte
-`partial_signature`. The receipt `action_result` has the same action and ID
+`partial_signature`. This starts the second request/result pair, so its
+enclosing `in_reply_to` is null; the local one-shot signing transition must
+still require the exact retained, admitted peer-signed proposal result. The
+receipt `action_result` has the same action and ID
 and `status` = `verified`. Results refer to their request via the enclosing
 envelope's `in_reply_to`. The claimant need not wait for the receipt to finish
 or broadcast; a missing receipt never authorizes nonce reuse.
