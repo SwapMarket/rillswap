@@ -59,6 +59,10 @@ jobs:
         run: bunx playwright install --with-deps chromium
       - name: Check disconnected browser behavior
         run: bun run test
+      - name: Check ZIP contains exactly the tested static-site bytes (no deployment)
+        run: |
+          python3 scripts/test_release_bundle.py
+          python3 scripts/check_release_bundle.py dist tmp/release
 
   crypto:
     runs-on: ubuntu-24.04
