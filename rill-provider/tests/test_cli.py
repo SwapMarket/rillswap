@@ -255,3 +255,17 @@ def test_lnd_paths_resolve_and_destination_script_is_checked(tmp_path: Path) -> 
     assert config.service_policy().provider_destination_script == script
     with pytest.raises(OperatorConfigError):
         load_config(_config(tmp_path, provider_destination_script="76a914" + "00" * 20))
+
+
+def test_every_lnd_credential_resolves_relative_to_the_config(tmp_path: Path) -> None:
+    lnd = {
+        "port": 10009,
+        "tls_certificate": "tls.cert",
+        "macaroon": "read.macaroon",
+        "payment_macaroon": "pay.macaroon",
+        "invoices_macaroon": "invoices.macaroon",
+    }
+    config = load_config(_config(tmp_path, lnd=lnd))
+    assert config.lnd is not None
+    assert config.lnd.payment_macaroon == tmp_path / "pay.macaroon"
+    assert config.lnd.invoices_macaroon == tmp_path / "invoices.macaroon"

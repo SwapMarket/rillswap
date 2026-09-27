@@ -225,6 +225,9 @@ def load_config(path: Path) -> OperatorConfig:
                 "payment_macaroon": None
                 if config.lnd.payment_macaroon is None
                 else _resolve(base, config.lnd.payment_macaroon),
+                "invoices_macaroon": None
+                if config.lnd.invoices_macaroon is None
+                else _resolve(base, config.lnd.invoices_macaroon),
             }
         )
     if config.bitcoin_core is not None:
