@@ -48,7 +48,13 @@ from rill_core.settlement import (
 )
 from rill_core.wire import verify_static_handshake_accept, verify_static_handshake_transcript
 from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_model_json
-from rill_core.wire.cooperative_messages import CooperativeClaimPropose
+from rill_core.wire.cooperative_messages import (
+    CooperativeClaimDeclined,
+    CooperativeClaimPropose,
+    CooperativeClaimSigned,
+    check_cooperative_action_context,
+    parse_cooperative_payload,
+)
 from rill_core.wire.envelope_authentication import verify_static_signed_envelope
 from rill_core.wire.hashes import (
     COOPERATIVE_CLAIM_FEATURE,
@@ -438,6 +444,16 @@ class RequestAnswer:
     session_id: str
     request_message_id: str
     response_message_id: str
+    replay: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CooperativeResultAdmission:
+    """Durable peer disposition, never permission to produce our partial."""
+
+    session_id: str
+    message_id: str
+    status: str
     replay: bool
 
 
@@ -2172,6 +2188,10 @@ class LiveSessionStore:
                     supported_features=self._policy.features,
                     crypto=self._crypto,
                 ).hex()
+                # Unlike a request, a cooperative result has no response
+                # outbox. Exclude it before the request replay lookup below.
+                if outer.message_type not in CLIENT_REQUEST_TYPES:
+                    raise LiveSessionStoreError("request not admissible")  # noqa: TRY301
                 seen = connection.execute(
                     "SELECT message_id, seq, unsigned_digest FROM inbox "
                     "WHERE session_id=? AND sender_key=? AND (message_id=? OR seq=?)",
@@ -2282,6 +2302,248 @@ class LiveSessionStore:
         if conflict:
             raise SessionBlockedError("conflicting signed request is durable")
         return RequestAnswer(outer.session_id, outer.message_id, response.message_id, replay=False)
+
+    def _admit_cooperative_result(  # noqa: PLR0912, PLR0915 - one signed admission transaction
+        self, document: bytes, *, now: int
+    ) -> CooperativeResultAdmission:
+        """Record one authenticated client disposition without signing or replying.
+
+        INTERNAL ONLY. An admitted partial is not permission to sign: the
+        process-local native handle, current chain facts, deadline, and exact
+        spending policy must be checked again by a later signing operation.
+        Exact signed replays, even after restart, return a receipt only.
+        Invalid replies are rejected without consuming sequence or changing
+        the attempt. A future runtime must independently trigger unilateral
+        fallback on refusal, invalid response, or the bounded timeout.
+        """
+        if type(now) is not int or now < 0:
+            raise LiveSessionStoreError("cooperative result time unsupported")
+        abandon: bytes | None = None
+        conflict = False
+        status = ""
+        try:
+            outer = _canonical_envelope(document)
+            with self._write() as connection:
+                session = connection.execute(
+                    "SELECT client_key,phase,blocked,revision,next_client_seq,"
+                    "init_bytes,accept_bytes FROM sessions WHERE session_id=?",
+                    (outer.session_id,),
+                ).fetchone()
+                if session is None or session[1] != "ACCEPTED":
+                    raise LiveSessionStoreError("no accepted cooperative session")  # noqa: TRY301
+                client, _, blocked, revision, client_seq, init_bytes, accept_bytes = session
+                digest = verify_static_signed_envelope(
+                    document,
+                    expected_session_id=outer.session_id,
+                    expected_profile=self._policy.profile,
+                    expected_network=self._network,
+                    expected_sender_key=client,
+                    supported_features=self._policy.features,
+                    crypto=self._crypto,
+                ).hex()
+                if outer.message_type != "action_result":
+                    raise LiveSessionStoreError("cooperative result type unsupported")  # noqa: TRY301
+                seen = connection.execute(
+                    "SELECT message_id,seq,unsigned_digest FROM inbox "
+                    "WHERE session_id=? AND sender_key=? AND (message_id=? OR seq=?)",
+                    (outer.session_id, client, outer.message_id, outer.sequence),
+                ).fetchall()
+                if seen:
+                    if seen == [(outer.message_id, outer.sequence, digest)]:
+                        replay = parse_cooperative_payload(
+                            "action_result", canonicalize(outer.payload)
+                        )
+                        if not isinstance(
+                            replay, (CooperativeClaimSigned, CooperativeClaimDeclined)
+                        ):
+                            raise LiveSessionStoreError("cooperative replay type unsupported")  # noqa: TRY301
+                        return CooperativeResultAdmission(
+                            outer.session_id, outer.message_id, replay.status, replay=True
+                        )
+                    _record_conflict(connection, outer.session_id, "request", document)
+                    connection.execute(
+                        "UPDATE cooperation_attempts SET state='ABANDONED' "
+                        "WHERE session_id=? AND state IN ('BURNED','NONCE_READY','SIGNING')",
+                        (outer.session_id,),
+                    )
+                    attempt = connection.execute(
+                        "SELECT cooperation_id FROM cooperation_attempts WHERE session_id=?",
+                        (outer.session_id,),
+                    ).fetchone()
+                    abandon = None if attempt is None else attempt[0]
+                    conflict = True
+                else:
+                    if (
+                        blocked
+                        or outer.sequence != client_seq
+                        or client_seq - FIRST_REQUEST_SEQUENCE >= MAX_REQUESTS_PER_SESSION
+                    ):
+                        raise LiveSessionStoreError("cooperative result out of sequence")  # noqa: TRY301
+                    payload = parse_cooperative_payload(
+                        "action_result", canonicalize(outer.payload)
+                    )
+                    if not isinstance(payload, (CooperativeClaimSigned, CooperativeClaimDeclined)):
+                        raise LiveSessionStoreError("cooperative result status unsupported")  # noqa: TRY301
+                    status = payload.status
+                    cooperation_id = bytes.fromhex(payload.cooperation_id)
+                    row = connection.execute(
+                        "SELECT a.binding,a.owner_generation,a.created_at,a.deadline_at,a.state,"
+                        "a.local_nonce,a.nonce_response_id,w.contract_hash,w.terms_offer,"
+                        "w.funding_binding,w.preimage,w.state "
+                        "FROM cooperation_attempts a JOIN swaps w ON w.session_id=a.session_id "
+                        "WHERE a.session_id=? AND a.cooperation_id=?",
+                        (outer.session_id, cooperation_id),
+                    ).fetchone()
+                    if row is None:
+                        raise LiveSessionStoreError("cooperative proposal unavailable")  # noqa: TRY301
+                    (
+                        binding_bytes,
+                        generation,
+                        created_at,
+                        deadline_at,
+                        state,
+                        local_nonce,
+                        proposal_id,
+                        recorded_hash,
+                        offer_bytes,
+                        funding_bytes,
+                        preimage,
+                        swap_state,
+                    ) = row
+                    binding = parse_json_strict(binding_bytes)
+                    if not isinstance(binding, dict) or (
+                        generation != self._generation
+                        or state != "NONCE_READY"
+                        or not created_at <= now < deadline_at
+                        or swap_state not in ("PAID", "CLAIMING")
+                        or not isinstance(local_nonce, bytes)
+                        or not isinstance(proposal_id, str)
+                        or binding.get("version") != 1
+                        or binding.get("session_id") != outer.session_id
+                        or binding.get("cooperation_id") != payload.cooperation_id
+                        or binding.get("contract_hash") != recorded_hash
+                        or binding.get("deadline_at") != deadline_at
+                        or funding_bytes is None
+                        or not isinstance(preimage, str)
+                        or re.fullmatch(r"[0-9a-f]{64}", preimage) is None
+                    ):
+                        raise LiveSessionStoreError("cooperative proposal no longer current")  # noqa: TRY301
+                    terms = _offer_terms(offer_bytes)
+                    funding = parse_model_json(
+                        FundingBindingPayload,
+                        canonicalize(_canonical_envelope(funding_bytes).payload),
+                    ).binding
+                    if (
+                        contract_hash(terms).hex() != recorded_hash
+                        or COOPERATIVE_CLAIM_FEATURE not in terms.required_features
+                        or hashlib.sha256(bytes.fromhex(preimage)).hexdigest()
+                        != terms.invoice_binding.payment_hash
+                        or funding.contract_hash != recorded_hash
+                        or funding.funding_txid != binding.get("funding_txid")
+                        or funding.contract_vout != binding.get("funding_vout")
+                        or int(funding.contract_value_sat) != binding.get("funding_value_sat")
+                        or funding.contract_script_pubkey != binding.get("funding_script_pubkey")
+                    ):
+                        raise LiveSessionStoreError("cooperative funding differs")  # noqa: TRY301
+                    saved = connection.execute(
+                        "SELECT canonical_bytes FROM outbox WHERE session_id=? AND message_id=?",
+                        (outer.session_id, proposal_id),
+                    ).fetchone()
+                    if saved is None:
+                        raise LiveSessionStoreError("cooperative proposal transcript missing")  # noqa: TRY301
+                    proposal = _canonical_envelope(saved[0])
+                    original = parse_cooperative_payload(
+                        "action_request", canonicalize(proposal.payload)
+                    )
+                    if not isinstance(original, CooperativeClaimPropose) or (
+                        proposal.message_id != proposal_id
+                        or original.cooperation_id != payload.cooperation_id
+                        or original.public_nonce != local_nonce.hex()
+                        or original.unsigned_transaction != binding.get("unsigned_transaction")
+                        or original.payment_preimage != preimage
+                        or original.deadline_at != deadline_at
+                        or original.deadline_height != binding.get("deadline_height")
+                    ):
+                        raise LiveSessionStoreError("cooperative proposal differs")  # noqa: TRY301
+                    initiation = parse_model_json(
+                        HandshakeInit,
+                        canonicalize(_canonical_envelope(init_bytes).payload),
+                    )
+                    acceptance = parse_model_json(
+                        HandshakeAccept,
+                        canonicalize(_canonical_envelope(accept_bytes).payload["accept"]),
+                    )
+                    checked = check_cooperative_action_context(
+                        outer, terms, initiation, acceptance, prior_request=proposal
+                    )
+                    if checked != payload:
+                        raise LiveSessionStoreError("cooperative result context differs")  # noqa: TRY301
+                    if isinstance(payload, CooperativeClaimSigned):
+                        from rill_crypto import Context  # noqa: PLC0415 - native partial boundary
+
+                        if (
+                            not isinstance(self._crypto, Context)
+                            or cooperation_id not in self._cooperation_handles
+                        ):
+                            raise LiveSessionStoreError("cooperative signer custody lost")  # noqa: TRY301
+                        crypto = self._crypto
+                        peer_nonce = bytes.fromhex(payload.public_nonce)
+                        crypto.musig_public_nonce_validate(local_nonce)
+                        crypto.musig_public_nonce_validate(peer_nonce)
+                        crypto.musig_partial_verify(
+                            user_public_key=bytes.fromhex(terms.client_contract_compressed_key),
+                            provider_public_key=bytes.fromhex(
+                                terms.provider_contract_compressed_key
+                            ),
+                            tap_tweak=bytes.fromhex(str(binding["tap_tweak"])),
+                            message=bytes.fromhex(str(binding["signature_hash"])),
+                            user_public_nonce=peer_nonce,
+                            provider_public_nonce=local_nonce,
+                            signer_index=0,
+                            partial_signature=bytes.fromhex(payload.partial_signature),
+                        )
+                        update: tuple[str, bytes | None] = ("SIGNING", peer_nonce)
+                    else:
+                        update = ("ABANDONED", None)
+                        abandon = cooperation_id
+                    connection.execute(
+                        "INSERT INTO inbox VALUES (?,?,?,?,?,?,?)",
+                        (
+                            outer.session_id,
+                            client,
+                            outer.message_id,
+                            outer.sequence,
+                            digest,
+                            document,
+                            revision + 1,
+                        ),
+                    )
+                    if (
+                        connection.execute(
+                            "UPDATE cooperation_attempts SET state=?,peer_nonce=? "
+                            "WHERE session_id=? AND cooperation_id=? AND state='NONCE_READY' "
+                            "AND owner_generation=?",
+                            (*update, outer.session_id, cooperation_id, self._generation),
+                        ).rowcount
+                        != 1
+                    ):
+                        raise LiveSessionStoreError("cooperative attempt changed")  # noqa: TRY301
+                    connection.execute(
+                        "UPDATE sessions SET next_client_seq=?,revision=?,active_at=? "
+                        "WHERE session_id=?",
+                        (client_seq + 1, revision + 1, now, outer.session_id),
+                    )
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo nonce, partial or signed documents
+            raise LiveSessionStoreError("cooperative result refused") from None
+        if abandon is not None:
+            live = self._cooperation_handles.pop(abandon, None)
+            if live is not None:
+                live.close()
+        if conflict:
+            raise SessionBlockedError("conflicting signed cooperative result is durable")
+        return CooperativeResultAdmission(outer.session_id, outer.message_id, status, replay=False)
 
     def _signed_envelope(  # noqa: PLR0913, PLR0917 - one envelope's explicit parts
         self,

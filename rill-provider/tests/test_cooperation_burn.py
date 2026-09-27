@@ -823,3 +823,227 @@ def test_uncertain_nonce_proposal_commit_releases_native_custody(
             "SELECT state FROM cooperation_attempts"
         ).fetchone() == ("ABANDONED",)
         assert len(reopened.pending_outbox()) == int(commit_reached_disk)
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
+)
+@pytest.mark.parametrize(
+    "result_status",
+    [
+        "signed",
+        "signed_clean",
+        "declined",
+        "invalid_partial",
+        "wrong_reply",
+        "wrong_contract",
+        "missing_feature",
+        "expired",
+        "invalid_nonce",
+        "wrong_stage",
+    ],
+)
+def test_authenticated_cooperative_reply_is_durable_without_granting_signature(  # noqa: PLR0915 - three outcomes share one real native transcript
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, result_status: str
+) -> None:
+    """Synthetic admission history, real native action signature and peer partial."""
+    from rill_crypto import Context  # noqa: PLC0415 - opt-in native dependency
+
+    harness = Harness(tmp_path, monkeypatch)
+    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.provision()
+    with (
+        Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
+        harness.acquire() as store,
+    ):
+        session, plan, _ = _featured_paid_swap(harness, store)
+        store._public_keys = crypto  # noqa: SLF001
+        store._crypto = crypto  # noqa: SLF001
+        store._connection.execute(  # noqa: SLF001 - synthetic confirmed client sequence
+            "UPDATE sessions SET next_client_seq=2 WHERE session_id=?", (session,)
+        )
+        monkeypatch.setattr(live, "_new_session_scalar", lambda: (5).to_bytes(32, "big"))
+        with store._write() as connection:  # noqa: SLF001
+            store._contract_key(connection, session)  # noqa: SLF001
+        cooperation_id = b"\xc1" * 32
+        store._burn_cooperative_claim(  # noqa: SLF001
+            session,
+            cooperation_id,
+            plan,
+            now=1000,
+            deadline_at=1020,
+            deadline_height=1100,
+        )
+        proposal_id = store._begin_and_commit_cooperative_proposal(  # noqa: SLF001
+            session, cooperation_id, now=1001
+        )
+        proposal = Envelope.model_validate_json(store.pending_outbox()[0].canonical_bytes)
+        assert proposal.message_id == proposal_id
+        provider_nonce = bytes.fromhex(str(proposal.payload["public_nonce"]))
+        terms = live._offer_terms(  # noqa: SLF001
+            store._connection.execute(  # noqa: SLF001
+                "SELECT terms_offer FROM swaps WHERE session_id=?", (session,)
+            ).fetchone()[0]
+        )
+        user_attempt, user_nonce = crypto.musig_begin(
+            secret_key=(4).to_bytes(32, "big"),
+            user_public_key=bytes.fromhex(terms.client_contract_compressed_key),
+            provider_public_key=bytes.fromhex(terms.provider_contract_compressed_key),
+            tap_tweak=bytes.fromhex(harness.source["taproot_contract"]["tap_tweak"]),
+            message=plan.signature_hash,
+            cooperation_id=cooperation_id,
+        )
+        with user_attempt:
+            user_partial = user_attempt.partial_sign_once(provider_nonce)
+        payload: dict[str, object] = {
+            "action": "cooperative_claim_propose",
+            "cooperation_id": cooperation_id.hex(),
+            "status": "declined" if result_status == "declined" else "signed",
+        }
+        if result_status != "declined":
+            payload["public_nonce"] = (
+                "00" * 66 if result_status == "invalid_nonce" else user_nonce.hex()
+            )
+            payload["partial_signature"] = (
+                "ff" * 32 if result_status == "invalid_partial" else user_partial.hex()
+            )
+        if result_status == "wrong_stage":
+            payload = {
+                "action": "cooperative_claim_complete",
+                "cooperation_id": cooperation_id.hex(),
+                "status": "verified",
+            }
+        unsigned = proposal.model_copy(
+            update={
+                "message_id": "d1" * 32,
+                "sender_session_key": harness.source["verification_context"]["handshake_init"][
+                    "client_session_xonly_key"
+                ],
+                "sequence": 2,
+                "in_reply_to": proposal_id,
+                "message_type": "action_result",
+                "payload": payload,
+                "signature": None,
+            }
+        )
+        if result_status == "wrong_reply":
+            unsigned = unsigned.model_copy(update={"in_reply_to": "ee" * 32})
+        elif result_status == "wrong_contract":
+            unsigned = unsigned.model_copy(update={"contract_hash": "ee" * 32})
+        elif result_status == "missing_feature":
+            unsigned = unsigned.model_copy(update={"required_features": ()})
+        signed = unsigned.model_copy(
+            update={
+                "signature": crypto.schnorr_sign(
+                    (2).to_bytes(32, "big"), live.unsigned_envelope_hash(unsigned), b"\x11" * 32
+                ).hex()
+            }
+        )
+        document = canonicalize(signed.model_dump(mode="json"))
+        if result_status not in ("signed", "signed_clean", "declined"):
+            with pytest.raises(
+                live.LiveSessionStoreError,
+                match=r"result refused|status unsupported|no longer current",
+            ):
+                store._admit_cooperative_result(  # noqa: SLF001
+                    document, now=1020 if result_status == "expired" else 1002
+                )
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT state FROM cooperation_attempts"
+            ).fetchone() == ("NONCE_READY",)
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT count(*) FROM inbox"
+            ).fetchone() == (0,)
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT next_client_seq FROM sessions WHERE session_id=?", (session,)
+            ).fetchone() == (2,)
+            assert crypto._active_attempts == 1  # noqa: SLF001 - provider still owns attempt
+        else:
+            receipt = store._admit_cooperative_result(document, now=1002)  # noqa: SLF001
+            expected_status = "signed" if result_status == "signed_clean" else result_status
+            assert receipt.status == expected_status
+            assert not receipt.replay
+            state = "SIGNING" if result_status in ("signed", "signed_clean") else "ABANDONED"
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT state FROM cooperation_attempts"
+            ).fetchone() == (state,)
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT next_client_seq FROM sessions WHERE session_id=?", (session,)
+            ).fetchone() == (3,)
+            replay = store._admit_cooperative_result(document, now=1030)  # noqa: SLF001
+            assert replay.replay
+            assert replay.status == expected_status
+            fresh_signature = crypto.schnorr_sign(
+                (2).to_bytes(32, "big"), live.unsigned_envelope_hash(unsigned), b"\x22" * 32
+            ).hex()
+            assert fresh_signature != signed.signature
+            same_unsigned = signed.model_copy(update={"signature": fresh_signature})
+            fresh_replay = store._admit_cooperative_result(  # noqa: SLF001
+                canonicalize(same_unsigned.model_dump(mode="json")), now=1031
+            )
+            assert fresh_replay.replay
+            assert crypto._active_attempts == int(state == "SIGNING")  # noqa: SLF001
+            with pytest.raises(live.LiveSessionStoreError, match="request not admissible"):
+                store.answer_request(
+                    document, responder=lambda *_args: None, signer=crypto, now=1002
+                )
+            if result_status == "signed_clean":
+                invalid_signature = unsigned.model_copy(
+                    update={"message_id": "d3" * 32, "signature": "00" * 64}
+                )
+                with pytest.raises(live.LiveSessionStoreError, match="result refused"):
+                    store._admit_cooperative_result(  # noqa: SLF001
+                        canonicalize(invalid_signature.model_dump(mode="json")), now=1003
+                    )
+                assert store._connection.execute(  # noqa: SLF001
+                    "SELECT blocked,next_client_seq FROM sessions WHERE session_id=?", (session,)
+                ).fetchone() == (0, 3)
+                assert store._connection.execute(  # noqa: SLF001
+                    "SELECT state FROM cooperation_attempts"
+                ).fetchone() == ("SIGNING",)
+                assert crypto._active_attempts == 1  # noqa: SLF001 - invalid auth preserves handle
+            if result_status == "signed":
+                conflicting = unsigned.model_copy(update={"message_id": "d2" * 32})
+                conflicting = conflicting.model_copy(
+                    update={
+                        "signature": crypto.schnorr_sign(
+                            (2).to_bytes(32, "big"),
+                            live.unsigned_envelope_hash(conflicting),
+                            b"\x33" * 32,
+                        ).hex()
+                    }
+                )
+                with pytest.raises(live.SessionBlockedError, match="conflicting signed"):
+                    store._admit_cooperative_result(  # noqa: SLF001
+                        canonicalize(conflicting.model_dump(mode="json")), now=1003
+                    )
+                assert store._connection.execute(  # noqa: SLF001
+                    "SELECT blocked FROM sessions WHERE session_id=?", (session,)
+                ).fetchone() == (1,)
+                assert store._connection.execute(  # noqa: SLF001
+                    "SELECT state FROM cooperation_attempts"
+                ).fetchone() == ("ABANDONED",)
+                assert crypto._active_attempts == 0  # noqa: SLF001 - conflict destroyed handle
+                # Blocking further risk cannot block the already-paid script claim.
+                claim_signature = store.sign_with_contract_key(session, b"\x19" * 32, crypto)
+                crypto.schnorr_verify(
+                    bytes.fromhex(terms.provider_contract_compressed_key)[1:],
+                    b"\x19" * 32,
+                    claim_signature,
+                )
+        assert store.pending_outbox()[0].canonical_bytes == canonicalize(
+            proposal.model_dump(mode="json")
+        )
+    if result_status in ("signed", "signed_clean", "declined"):
+        with (
+            Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as verifier,
+            harness.acquire_at(harness.path, crypto=verifier, public_keys=verifier) as restarted,
+        ):
+            assert restarted._connection.execute(  # noqa: SLF001
+                "SELECT state FROM cooperation_attempts"
+            ).fetchone() == ("ABANDONED",)
+            recovered = restarted._admit_cooperative_result(document, now=2000)  # noqa: SLF001
+            assert recovered.replay
+            assert recovered.status == expected_status
