@@ -23,6 +23,7 @@ SCRIPT = bytes.fromhex("5120" + "11" * 32)
 ADDRESS = "bcrt1pexample"
 FUNDING_TXID = "aa" * 32
 SPENDER = "bb" * 32
+ANCHOR = "a1" * 32
 PREIMAGE = "52" * 32
 
 
@@ -40,6 +41,7 @@ def _by_method(
 def _funding_replies(**changes: Any) -> dict[str, Any]:  # noqa: ANN401
     decoded = {
         "txid": FUNDING_TXID,
+        "vin": [{"txid": ANCHOR, "vout": 7}],
         "vout": [
             {"value": 0.00100500, "scriptPubKey": {"hex": SCRIPT.hex()}},
             {"value": 0.5, "scriptPubKey": {"hex": "0014" + "22" * 20}},
@@ -70,6 +72,7 @@ def test_fund_output_signs_exactly_the_requested_payment_at_index_zero(tmp_path:
         b"\x02\x00",
         300,
     )
+    assert (funded.anchor_txid, funded.anchor_vout) == (ANCHOR, 7)
     methods = [(r["method"], r["path"]) for r in requests]
     assert methods == [
         ("decodescript", "/"),

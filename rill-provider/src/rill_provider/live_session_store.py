@@ -43,9 +43,15 @@ from pyrage import x25519
 from rill_core.wire import verify_static_handshake_accept, verify_static_handshake_transcript
 from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_model_json
 from rill_core.wire.envelope_authentication import verify_static_signed_envelope
-from rill_core.wire.hashes import EPOCH_SESSION_FEATURE, handshake_init_hash, unsigned_envelope_hash
+from rill_core.wire.hashes import (
+    EPOCH_SESSION_FEATURE,
+    funding_binding_hash,
+    handshake_init_hash,
+    unsigned_envelope_hash,
+)
 from rill_core.wire.messages import (
     Envelope,
+    FundingBinding,
     HandshakeAccept,
     HandshakeAcceptPayload,
     HandshakeInit,
@@ -1933,7 +1939,7 @@ class LiveSessionStore:
             raise LiveSessionStoreError("settlement work unavailable") from None
         return items
 
-    def advance_reverse_swap(  # noqa: PLR0913 - one atomic transition's explicit parts
+    def advance_reverse_swap(  # noqa: PLR0912, PLR0913 - one atomic transition's explicit parts
         self,
         session_id: str,
         *,
@@ -1941,7 +1947,7 @@ class LiveSessionStore:
         to_state: str,
         signer: EnvelopeSigner,
         now: int,
-        funding: tuple[str, int, bytes] | None = None,
+        funding: tuple[FundingBinding, bytes] | None = None,
         refund: tuple[str, bytes] | None = None,
         preimage: str | None = None,
         refund_confirmations: int | None = None,
@@ -1950,9 +1956,11 @@ class LiveSessionStore:
         """Move one LN to BTC swap forward (RS-004) in one transaction.
 
         ``LN_HELD`` to ``FUNDING_SENT`` is the one funding grant: it records
-        the signed funding ``(txid, vout, raw)`` and marks the reservation
-        ``DISPATCHED`` in the same transaction, refusing when the reservation
-        is not open, so a funding can never be signed twice for one swap.
+        the signed funding ``(binding, raw)``, marks the reservation
+        ``DISPATCHED`` in the same transaction (refusing when the reservation
+        is not open, so a funding can never be signed twice for one swap),
+        and queues the RS-003 ``funding_binding`` message signed with the
+        session key so the client can record it in its recovery file.
         ``SETTLED`` needs the preimage of the terms' payment hash (checked
         here, whatever reported it) and releases the reservation: the hold
         invoice pays for the contract. ``REFUNDING`` records the refund
@@ -1987,8 +1995,14 @@ class LiveSessionStore:
                 columns = "state=?, preimage=COALESCE(?, preimage), updated_at=?"
                 values: list[Any] = [to_state, preimage, now]
                 if funding is not None:
+                    binding, raw = funding
+                    if (
+                        binding.contract_hash != _canonical_envelope(offer_bytes).contract_hash
+                        or binding.funder_role != "provider"
+                    ):
+                        raise LiveSessionStoreError("funding binding is for another swap")  # noqa: TRY301
                     columns += ", funding_txid=?, funding_vout=?, funding_tx=?"
-                    values.extend(funding)
+                    values.extend((binding.funding_txid, binding.contract_vout, raw))
                 if refund is not None:
                     columns += ", refund_txid=?, refund_tx=?"
                     values.extend(refund)
@@ -2015,12 +2029,39 @@ class LiveSessionStore:
                         terms=terms,
                         refund_confirmations=refund_confirmations,
                     )
+                if funding is not None:
+                    self._record_funding_binding(connection, session_id, funding, signer, now)
                 if observation is not None:
                     self._record_observation(connection, session_id, observation, signer, now)
         except LiveSessionStoreError:
             raise
         except Exception:  # noqa: BLE001 - never echo storage details
             raise LiveSessionStoreError("swap transition refused") from None
+
+    def _record_funding_binding(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+        funding: tuple[FundingBinding, bytes],
+        signer: EnvelopeSigner,
+        now: int,
+    ) -> None:
+        binding, raw = funding
+        scalar, _ = self._unseal(connection, session_id)
+        try:
+            signature = signer.schnorr_sign(
+                scalar, funding_binding_hash(binding), secrets.token_bytes(32)
+            )
+        finally:
+            del scalar
+        payload = {
+            "binding": binding.model_dump(mode="json"),
+            "funding_binding_signature": signature.hex(),
+            "funding_transaction": raw.hex(),
+        }
+        self._record_observation(
+            connection, session_id, payload, signer, now, message_type="funding_binding"
+        )
 
     def record_spend_scan(self, session_id: str, height: int) -> None:
         """Remember the last block scanned for a spend of this swap's contract."""
@@ -2397,13 +2438,15 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - never echo routing or payment details
             raise LiveSessionStoreError("payment dispatch refused") from None
 
-    def _record_observation(
+    def _record_observation(  # noqa: PLR0913 - one queued message's parts
         self,
         connection: sqlite3.Connection,
         session_id: str,
         payload: dict[str, Any],
         signer: EnvelopeSigner,
         now: int,
+        *,
+        message_type: str = "observation",
     ) -> None:
         offer_bytes, contract, key, revision, provider_seq = connection.execute(
             "SELECT w.terms_offer, w.contract_hash, s.provider_session_key, s.revision, "
@@ -2411,7 +2454,7 @@ class LiveSessionStore:
             "WHERE w.session_id=?",
             (session_id,),
         ).fetchone()
-        reply = Answer("observation", payload, contract_hash=contract)
+        reply = Answer(message_type, payload, contract_hash=contract)
         scalar, _ = self._unseal(connection, session_id)
         try:
             envelope = self._signed_envelope(
@@ -2847,7 +2890,7 @@ def _upgrade_v10(connection: sqlite3.Connection) -> None:
 def _check_reverse_transition(
     transition: tuple[str, str],
     *,
-    funding: tuple[str, int, bytes] | None,
+    funding: tuple[FundingBinding, bytes] | None,
     refund: tuple[str, bytes] | None,
     preimage: str | None,
     refund_confirmations: int | None,

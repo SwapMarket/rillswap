@@ -57,6 +57,8 @@ class FundedOutput:
     vout: int
     raw: bytes
     fee_sat: int
+    anchor_txid: str  # first input: the RS-003 lineage anchor
+    anchor_vout: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -427,9 +429,17 @@ class CoreTransactionReader:
             raise CoreUnavailableError("Core RPC transport unavailable") from None
         txid = decoded.get("txid") if isinstance(decoded, dict) else None
         outputs = decoded.get("vout") if isinstance(decoded, dict) else None
+        inputs = decoded.get("vin") if isinstance(decoded, dict) else None
+        anchor = inputs[0] if isinstance(inputs, list) and inputs else None
+        anchor_txid = anchor.get("txid") if isinstance(anchor, dict) else None
+        anchor_vout = anchor.get("vout") if isinstance(anchor, dict) else None
         if (
             type(txid) is not str
             or len(txid) != HASH_HEX_LENGTH
+            or type(anchor_txid) is not str
+            or len(anchor_txid) != HASH_HEX_LENGTH
+            or type(anchor_vout) is not int
+            or anchor_vout < 0
             or not isinstance(outputs, list)
             or not outputs
             or not isinstance(outputs[0], dict)
@@ -437,7 +447,14 @@ class CoreTransactionReader:
             or _btc_to_sat(outputs[0].get("value")) != value_sat
         ):
             raise CoreProtocolError("Core wallet signed a different funding than requested")
-        return FundedOutput(txid=txid, vout=0, raw=raw, fee_sat=fee)
+        return FundedOutput(
+            txid=txid,
+            vout=0,
+            raw=raw,
+            fee_sat=fee,
+            anchor_txid=anchor_txid,
+            anchor_vout=anchor_vout,
+        )
 
     def find_spender(self, txid: str, vout: int, *, from_height: int, to_height: int) -> SpendScan:
         """Look for the transaction spending ``txid:vout``: mempool first, then blocks.

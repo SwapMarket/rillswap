@@ -10,6 +10,8 @@ from typing import Any
 
 import pytest
 from rill_core.wire.canonical import canonicalize
+from rill_core.wire.hashes import funding_binding_hash
+from rill_core.wire.messages import Envelope, FundingBinding
 from test_economic_reservations import _ledger
 from test_live_session_store import Harness
 from test_payment_reconciliation import Signer
@@ -30,7 +32,22 @@ REVERSE = json.loads(
 HASH = REVERSE["contract_terms"]["invoice_binding"]["payment_hash"]
 PREIMAGE = REVERSE["monotonic_knowledge"]["preimage"]
 assert hashlib.sha256(bytes.fromhex(PREIMAGE)).hexdigest() == HASH
-FUNDING = ("aa" * 32, 1, b"funding-raw")
+BINDING = FundingBinding(
+    contract_hash=REVERSE["contract_hash"],
+    funding_attempt_id="31" * 32,
+    binding_revision=0,
+    funder_role="provider",
+    lineage_anchor_txid="a1" * 32,
+    lineage_anchor_vout=7,
+    funding_txid="aa" * 32,
+    contract_vout=1,
+    contract_value_sat=REVERSE["contract_terms"]["economics"]["contract_amount_sat"],
+    contract_script_pubkey=REVERSE["taproot_contract"]["script_pubkey"],
+    replaces_txid=None,
+    created_at=1000,
+)
+FUNDING = (BINDING, b"funding-raw")
+FUNDING_ROW = ("aa" * 32, 1, b"funding-raw")
 REFUND = ("bb" * 32, b"refund-raw")
 
 
@@ -106,9 +123,25 @@ def test_funding_is_a_one_shot_grant_marking_the_reservation(harness: Harness) -
         row = _row(store, session)
         assert (row["state"], row["funding_txid"], row["funding_vout"], row["funding_tx"]) == (
             "FUNDING_SENT",
-            *FUNDING,
+            *FUNDING_ROW,
         )
         assert _ledger(store)[HASH][1] == "DISPATCHED"
+        # The client learns the funding through a session-signed RS-003 binding.
+        (queued,) = store._connection.execute(  # noqa: SLF001
+            "SELECT canonical_bytes FROM outbox WHERE session_id=? AND delivery_state='PENDING'",
+            (session,),
+        ).fetchall()
+        envelope = Envelope.model_validate_json(queued[0], strict=True)
+        assert envelope.message_type == "funding_binding"
+        assert envelope.contract_hash == REVERSE["contract_hash"]
+        payload = envelope.payload
+        assert payload["binding"] == BINDING.model_dump(mode="json")
+        assert payload["funding_transaction"] == b"funding-raw".hex()
+        harness.crypto.schnorr_verify(
+            bytes.fromhex(envelope.sender_session_key),
+            funding_binding_hash(BINDING),
+            bytes.fromhex(payload["funding_binding_signature"]),
+        )
         with pytest.raises(live.StaleSwapError):
             _advance(
                 store,
@@ -219,7 +252,7 @@ def test_settlement_work_lists_reverse_states_with_provider_transactions(harness
         store.record_spend_scan(session, 1200)  # never moves backwards
         (item,) = store.settlement_work()
         assert (item.state, item.invoice) == ("FUNDING_SENT", "")
-        assert (item.funding_txid, item.funding_vout, item.funding_tx) == FUNDING
+        assert (item.funding_txid, item.funding_vout, item.funding_tx) == FUNDING_ROW
         assert (item.refund_txid, item.refund_tx, item.spend_scan_height) == (None, None, 1234)
         assert store.unfunded_swaps() == []  # LN_HELD is not an unfunded BTC to LN swap
         _advance(store, harness, session, from_state="FUNDING_SENT", to_state="FUNDED")
@@ -239,3 +272,22 @@ def test_funding_is_refused_without_an_open_reservation(harness: Harness) -> Non
                 funding=FUNDING,
             )
         assert _row(store, session)["state"] == "LN_HELD"  # the whole transition rolled back
+
+
+def test_funding_binding_must_name_this_swap_and_the_provider(harness: Harness) -> None:
+    with harness.acquire() as store:
+        session = insert_reverse_swap(store, harness, "LN_HELD")
+        for wrong in (
+            BINDING.model_copy(update={"funder_role": "client"}),
+            BINDING.model_copy(update={"contract_hash": "99" * 32}),
+        ):
+            with pytest.raises(live.LiveSessionStoreError, match="another swap"):
+                _advance(
+                    store,
+                    harness,
+                    session,
+                    from_state="LN_HELD",
+                    to_state="FUNDING_SENT",
+                    funding=(wrong, b"funding-raw"),
+                )
+        assert _row(store, session)["state"] == "LN_HELD"

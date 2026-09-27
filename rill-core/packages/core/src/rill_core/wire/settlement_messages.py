@@ -13,7 +13,7 @@ from pydantic import Field, model_validator
 
 from rill_core.wire.canonical import canonicalize, parse_json_strict
 from rill_core.wire.messages import ClientAcceptance, FundingBinding  # noqa: TC001
-from rill_core.wire.types import ExactInteger, Hex32, ScriptHex, Signature64, StrictModel
+from rill_core.wire.types import Hex32, Signature64, StrictModel
 
 MIN_TRANSACTION_BYTES = 60
 MAX_TRANSACTION_BYTES = 100_000
@@ -73,19 +73,9 @@ class ClaimBroadcast(StrictModel):
 
 
 class HoldAccepted(StrictModel):
-    """LN to BTC: every accepted HTLC of the hold invoice checked out (RS-004)."""
+    """LN to BTC: every accepted HTLC checked out; the funding_binding follows (RS-004)."""
 
     kind: Literal["hold_accepted"]
-
-
-class FundingBroadcast(StrictModel):
-    """LN to BTC: the provider funded the contract; the client verifies the output."""
-
-    kind: Literal["funding_broadcast"]
-    funding_txid: Hex32
-    contract_vout: ExactInteger
-    contract_value_sat: str
-    contract_script_pubkey: ScriptHex
 
 
 class HoldSettled(StrictModel):
@@ -120,7 +110,6 @@ AnyObservation = (
     | PaymentFailed
     | ClaimBroadcast
     | HoldAccepted
-    | FundingBroadcast
     | HoldSettled
     | SwapAborted
     | RefundBroadcast
@@ -132,7 +121,6 @@ _OBSERVATIONS: dict[str, type[AnyObservation]] = {
     "payment_failed": PaymentFailed,
     "claim_broadcast": ClaimBroadcast,
     "hold_accepted": HoldAccepted,
-    "funding_broadcast": FundingBroadcast,
     "hold_settled": HoldSettled,
     "swap_aborted": SwapAborted,
     "refund_broadcast": RefundBroadcast,

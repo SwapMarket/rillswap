@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import logging
 import math
+import secrets
 from typing import TYPE_CHECKING, Protocol
 
 from rill_core.settlement import (
@@ -24,7 +25,8 @@ from rill_core.settlement import (
     max_spendable_fee,
     reconstruct_taproot_contract,
 )
-from rill_core.wire.messages import Envelope
+from rill_core.wire.hashes import contract_hash
+from rill_core.wire.messages import Envelope, FundingBinding
 
 from rill_provider.lnd_payment_observation import LndObservationError
 from rill_provider.settlement_policy import offered_terms
@@ -192,20 +194,23 @@ class ReverseSettlement:
             value,
             max_fee_sat=int(terms.max_funding_fee_sat),
         )
-        # The grant is durable before any broadcast; FUNDING_SENT rebroadcasts.
-        state = self._move(
-            item,
-            "FUNDING_SENT",
-            now,
-            funding=(funded.txid, funded.vout, funded.raw),
-            observation={
-                "kind": "funding_broadcast",
-                "funding_txid": funded.txid,
-                "contract_vout": funded.vout,
-                "contract_value_sat": str(value),
-                "contract_script_pubkey": script.hex(),
-            },
+        binding = FundingBinding(
+            contract_hash=contract_hash(terms).hex(),
+            funding_attempt_id=secrets.token_hex(32),
+            binding_revision=0,
+            funder_role="provider",
+            lineage_anchor_txid=funded.anchor_txid,
+            lineage_anchor_vout=funded.anchor_vout,
+            funding_txid=funded.txid,
+            contract_vout=funded.vout,
+            contract_value_sat=str(value),
+            contract_script_pubkey=script.hex(),
+            replaces_txid=None,
+            created_at=now,
         )
+        # The grant (and the signed funding_binding for the client) is durable
+        # before any broadcast; FUNDING_SENT rebroadcasts.
+        state = self._move(item, "FUNDING_SENT", now, funding=(binding, funded.raw))
         await asyncio.to_thread(self._chain.broadcast, funded.raw, funded.txid)
         return state
 

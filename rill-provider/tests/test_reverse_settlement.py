@@ -28,7 +28,7 @@ SCRIPT = bytes.fromhex(DOCUMENT["taproot_contract"]["script_pubkey"])
 # refund_lock_height 1100, funding 2, response 6, claim 6 -> fund while tip + 14 < 1100
 # H = 102000 sat; first refund block 1101 + 20 resolution < E_in -> E_in >= 1122
 HELD = HoldInvoiceStatus("ACCEPTED", (HeldHtlc(60_000_000, 1180), HeldHtlc(42_000_000, 1130)))
-FUNDED = FundedOutput("51" * 32, 0, b"funding-raw", 250)
+FUNDED = FundedOutput("51" * 32, 0, b"funding-raw", 250, "a1" * 32, 7)
 NOW = DOCUMENT["created_at"] + 60
 
 
@@ -131,14 +131,23 @@ def test_held_funds_exactly_v_records_the_grant_then_broadcasts(backends: Any) -
     assert _run(engine, _item("LN_HELD")) == "FUNDING_SENT"
     chain.fund_output.assert_called_once_with(SCRIPT, 100_500, max_fee_sat=500)
     moved = _moved(store, "FUNDING_SENT")
-    assert moved["funding"] == ("51" * 32, 0, b"funding-raw")
-    assert moved["observation"] == {
-        "kind": "funding_broadcast",
+    binding, raw = moved["funding"]
+    assert raw == b"funding-raw"
+    assert binding.model_dump(mode="json") == {
+        "contract_hash": DOCUMENT["contract_hash"],
+        "funding_attempt_id": binding.funding_attempt_id,
+        "binding_revision": 0,
+        "funder_role": "provider",
+        "lineage_anchor_txid": "a1" * 32,
+        "lineage_anchor_vout": 7,
         "funding_txid": "51" * 32,
         "contract_vout": 0,
         "contract_value_sat": "100500",
         "contract_script_pubkey": SCRIPT.hex(),
+        "replaces_txid": None,
+        "created_at": NOW,
     }
+    assert "observation" not in moved
     assert order == ["record", "broadcast"]
     chain.broadcast.assert_called_once_with(b"funding-raw", "51" * 32)
 

@@ -46,13 +46,6 @@ def test_fixture_copy_matches_the_specification_vectors() -> None:
     "document",
     [
         {"kind": "hold_accepted"},
-        {
-            "kind": "funding_broadcast",
-            "funding_txid": "51" * 32,
-            "contract_vout": 0,
-            "contract_value_sat": "100500",
-            "contract_script_pubkey": "5120" + "11" * 32,
-        },
         {"kind": "hold_settled"},
         {"kind": "swap_aborted", "reason": "funding window closed"},
         {"kind": "refund_broadcast", "refund_txid": "71" * 32},
@@ -67,6 +60,6 @@ def test_ln_to_btc_observations_are_strict() -> None:
     with pytest.raises(ValidationError):
         parse_observation(canonicalize({"kind": "swap_aborted", "reason": ""}))
     with pytest.raises(ValidationError):
-        parse_observation(canonicalize({"kind": "funding_broadcast", "funding_txid": "51" * 32}))
+        parse_observation(canonicalize({"kind": "refund_broadcast", "refund_txid": "51" * 31}))
     with pytest.raises(ValueError, match="unsupported"):
         parse_observation(canonicalize({"kind": "hold_paid"}))
