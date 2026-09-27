@@ -1047,3 +1047,271 @@ def test_authenticated_cooperative_reply_is_durable_without_granting_signature( 
             recovered = restarted._admit_cooperative_result(document, now=2000)  # noqa: SLF001
             assert recovered.replay
             assert recovered.status == expected_status
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
+)
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "complete",
+        "stale",
+        "spent",
+        "low_fee",
+        "rollback",
+        "wrong_network",
+        "wrong_funding",
+        "low_confirmations",
+        "refund_height",
+        "expired",
+        "invalid_peer",
+        "changed_plan",
+        "non_native",
+        "commit_not_written",
+        "commit_written",
+    ],
+)
+def test_native_provider_partial_requires_fresh_facts_and_durable_completion(  # noqa: PLR0912, PLR0915 - one real native custody lifecycle per outcome
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    """Trusted observations are synthetic; signing and durable custody are real."""
+    from rill_crypto import Context  # noqa: PLC0415 - opt-in native dependency
+
+    harness = Harness(tmp_path, monkeypatch)
+    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.provision()
+    with (
+        Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
+        harness.acquire() as store,
+    ):
+        session, plan, funding = _featured_paid_swap(harness, store)
+        store._public_keys = crypto  # noqa: SLF001 - real native crypto in isolated fixture
+        store._crypto = crypto  # noqa: SLF001
+        store._connection.execute(  # noqa: SLF001 - synthetic confirmed client sequence
+            "UPDATE sessions SET next_client_seq=2 WHERE session_id=?", (session,)
+        )
+        monkeypatch.setattr(live, "_new_session_scalar", lambda: (5).to_bytes(32, "big"))
+        with store._write() as connection:  # noqa: SLF001
+            store._contract_key(connection, session)  # noqa: SLF001
+        cooperation_id = b"\xe1" * 32
+        store._burn_cooperative_claim(  # noqa: SLF001
+            session,
+            cooperation_id,
+            plan,
+            now=1000,
+            deadline_at=1020,
+            deadline_height=1100,
+        )
+        proposal_id = store._begin_and_commit_cooperative_proposal(  # noqa: SLF001
+            session, cooperation_id, now=1001
+        )
+        proposal = Envelope.model_validate_json(store.pending_outbox()[0].canonical_bytes)
+        assert proposal.message_id == proposal_id
+        provider_nonce = bytes.fromhex(str(proposal.payload["public_nonce"]))
+        terms = live._offer_terms(  # noqa: SLF001
+            store._connection.execute(  # noqa: SLF001
+                "SELECT terms_offer FROM swaps WHERE session_id=?", (session,)
+            ).fetchone()[0]
+        )
+        user_attempt, user_nonce = crypto.musig_begin(
+            secret_key=(4).to_bytes(32, "big"),
+            user_public_key=bytes.fromhex(terms.client_contract_compressed_key),
+            provider_public_key=bytes.fromhex(terms.provider_contract_compressed_key),
+            tap_tweak=bytes.fromhex(harness.source["taproot_contract"]["tap_tweak"]),
+            message=plan.signature_hash,
+            cooperation_id=cooperation_id,
+        )
+        with user_attempt:
+            user_partial = user_attempt.partial_sign_once(provider_nonce)
+        unsigned = proposal.model_copy(
+            update={
+                "message_id": "e2" * 32,
+                "sender_session_key": harness.source["verification_context"]["handshake_init"][
+                    "client_session_xonly_key"
+                ],
+                "sequence": 2,
+                "in_reply_to": proposal_id,
+                "message_type": "action_result",
+                "payload": {
+                    "action": "cooperative_claim_propose",
+                    "cooperation_id": cooperation_id.hex(),
+                    "status": "signed",
+                    "public_nonce": user_nonce.hex(),
+                    "partial_signature": user_partial.hex(),
+                },
+                "signature": None,
+            }
+        )
+        signed = unsigned.model_copy(
+            update={
+                "signature": crypto.schnorr_sign(
+                    (2).to_bytes(32, "big"), live.unsigned_envelope_hash(unsigned), b"\x19" * 32
+                ).hex(),
+            }
+        )
+        document = canonicalize(signed.model_dump(mode="json"))
+        assert store._admit_cooperative_result(document, now=1002).status == "signed"  # noqa: SLF001
+        observation = live.CooperativeClaimObservation(
+            network=harness.network,
+            funding_txid=funding.txid.hex(),
+            funding_vout=funding.output_index,
+            funding_value_sat=funding.value_sat,
+            funding_script_pubkey=funding.script_pubkey,
+            tip_height=1090,
+            tip_hash="19" * 32,
+            confirmations=terms.funding_confirmations,
+            sampled_at=1003,
+            mempool_unspent=True,
+            fee_floor_sat=0,
+        )
+        if outcome == "stale":
+            observation = replace(observation, sampled_at=995)
+        elif outcome == "spent":
+            observation = replace(observation, mempool_unspent=False)
+        elif outcome == "low_fee":
+            observation = replace(observation, fee_floor_sat=plan.fee_sat + 1)
+        elif outcome == "wrong_network":
+            observation = replace(
+                observation,
+                network=observation.network.model_copy(update={"genesis_hash": "ff" * 32}),
+            )
+        elif outcome == "wrong_funding":
+            observation = replace(observation, funding_txid="ff" * 32)
+        elif outcome == "low_confirmations":
+            observation = replace(observation, confirmations=terms.funding_confirmations - 1)
+        elif outcome == "refund_height":
+            observation = replace(observation, tip_height=terms.refund_lock_height)
+        elif outcome == "changed_plan":
+            stored = store._connection.execute(  # noqa: SLF001 - synthetic persisted corruption
+                "SELECT binding FROM cooperation_attempts"
+            ).fetchone()[0]
+            corrupted = parse_json_strict(stored)
+            assert isinstance(corrupted, dict)
+            corrupted["signature_hash"] = "ff" * 32
+            store._connection.execute(  # noqa: SLF001
+                "UPDATE cooperation_attempts SET binding=?", (canonicalize(corrupted),)
+            )
+        elif outcome == "invalid_peer":
+            store._connection.execute(  # noqa: SLF001 - corrupted retained inbox
+                "UPDATE inbox SET canonical_bytes=?", (b"corrupted signed result",)
+            )
+        elif outcome == "non_native":
+            store._crypto = harness.crypto  # noqa: SLF001 - refuse non-native signer
+        if outcome == "rollback":
+            real_record = store._record_observation  # noqa: SLF001
+
+            def fail_after_insertion(*args: object, **kwargs: object) -> str:
+                real_record(*args, **kwargs)  # type: ignore[arg-type]
+                raise OSError("test-only failure after signing and outbox insert")
+
+            monkeypatch.setattr(store, "_record_observation", fail_after_insertion)
+        if outcome in ("commit_not_written", "commit_written"):
+
+            class UncertainCompletion:
+                def __init__(self, delegate: sqlite3.Connection) -> None:
+                    self.delegate = delegate
+                    self.fired = False
+
+                def __getattr__(self, name: str) -> Any:  # noqa: ANN401 - SQLite proxy fixture
+                    return getattr(self.delegate, name)
+
+                def execute(self, statement: str, *values: object) -> sqlite3.Cursor:
+                    if (
+                        statement == "COMMIT"
+                        and not self.fired
+                        and self.delegate.execute(
+                            "SELECT state FROM cooperation_attempts WHERE cooperation_id=?",
+                            (cooperation_id,),
+                        ).fetchone()
+                        == ("COMPLETE",)
+                    ):
+                        self.fired = True
+                        if outcome == "commit_written":
+                            self.delegate.execute(statement)
+                        raise sqlite3.OperationalError("unknown completion commit outcome")
+                    return self.delegate.execute(statement, *values)
+
+            proxy = UncertainCompletion(store._connection)  # noqa: SLF001
+            store._connection = proxy  # type: ignore[assignment]  # noqa: SLF001
+            with pytest.raises(live.StaleOwnerError, match="commit outcome uncertain"):
+                store._commit_cooperative_claim_partial(  # noqa: SLF001
+                    session, cooperation_id, observation, now=1003
+                )
+            assert proxy.fired
+            assert crypto._active_attempts == 0  # noqa: SLF001 - no second native signing
+            with pytest.raises(live.StaleOwnerError, match="closed"):
+                store._commit_cooperative_claim_partial(  # noqa: SLF001
+                    session, cooperation_id, observation, now=1004
+                )
+        elif outcome != "complete":
+            with pytest.raises(live.LiveSessionStoreError):
+                store._commit_cooperative_claim_partial(  # noqa: SLF001
+                    session,
+                    cooperation_id,
+                    observation,
+                    now=1020 if outcome == "expired" else 1003,
+                )
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT count(*) FROM outbox WHERE session_id=?", (session,)
+            ).fetchone() == (1,)
+            expected = "ABANDONED" if outcome == "rollback" else "SIGNING"
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT state FROM cooperation_attempts"
+            ).fetchone() == (expected,)
+            assert crypto._active_attempts == int(expected == "SIGNING")  # noqa: SLF001
+        else:
+            complete_id = store._commit_cooperative_claim_partial(  # noqa: SLF001
+                session, cooperation_id, observation, now=1003
+            )
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT state,partial_response_id FROM cooperation_attempts"
+            ).fetchone() == ("COMPLETE", complete_id)
+            assert crypto._active_attempts == 0  # noqa: SLF001 - one-shot native handle consumed
+            queued = store.pending_outbox()
+            assert [entry.message_id for entry in queued] == [proposal_id, complete_id]
+            completion = Envelope.model_validate_json(queued[1].canonical_bytes)
+            assert completion.message_type == "action_request"
+            assert completion.in_reply_to is None
+            assert completion.required_features == (COOPERATIVE_CLAIM_FEATURE,)
+            partial = bytes.fromhex(str(completion.payload["partial_signature"]))
+            signature = crypto.musig_aggregate(
+                user_public_key=bytes.fromhex(terms.client_contract_compressed_key),
+                provider_public_key=bytes.fromhex(terms.provider_contract_compressed_key),
+                tap_tweak=bytes.fromhex(harness.source["taproot_contract"]["tap_tweak"]),
+                message=plan.signature_hash,
+                user_public_nonce=user_nonce,
+                provider_public_nonce=provider_nonce,
+                user_partial_signature=user_partial,
+                provider_partial_signature=partial,
+            )
+            live.finalize_cooperative_claim(plan, signature, verifier=crypto)
+            with pytest.raises(live.LiveSessionStoreError):
+                store._commit_cooperative_claim_partial(  # noqa: SLF001
+                    session, cooperation_id, observation, now=1004
+                )
+        if outcome not in ("non_native", "commit_not_written", "commit_written"):
+            assert store._admit_cooperative_result(document, now=1050).replay  # noqa: SLF001
+    with (
+        Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as verifier,
+        harness.acquire() as restarted,
+    ):
+        expected_after_restart = (
+            "COMPLETE" if outcome in ("complete", "commit_written") else "ABANDONED"
+        )
+        assert restarted._connection.execute(  # noqa: SLF001
+            "SELECT state FROM cooperation_attempts"
+        ).fetchone() == (expected_after_restart,)
+        if outcome in ("commit_not_written", "commit_written"):
+            assert len(restarted.pending_outbox()) == (2 if outcome == "commit_written" else 1)
+        restarted._crypto = verifier  # noqa: SLF001 - independently recover script signing
+        restarted._public_keys = verifier  # noqa: SLF001
+        claim_digest = b"\x19" * 32
+        claim_signature = restarted.sign_with_contract_key(session, claim_digest, verifier)
+        verifier.schnorr_verify(
+            bytes.fromhex(terms.provider_contract_compressed_key)[1:],
+            claim_digest,
+            claim_signature,
+        )

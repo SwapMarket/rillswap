@@ -42,8 +42,10 @@ import pyrage  # type: ignore[import-untyped]
 from pyrage import x25519
 from rill_core.settlement import (
     CooperativeClaimPlan,
+    FundingOutput,
     UnilateralAuthorization,
     build_cooperative_claim,
+    finalize_cooperative_claim,
     reconstruct_taproot_contract,
 )
 from rill_core.wire import verify_static_handshake_accept, verify_static_handshake_transcript
@@ -335,6 +337,7 @@ COOPERATION_ATTEMPT_SCHEMA = (
 SCHEMA = (*SCHEMA_V11, COOPERATION_ATTEMPT_SCHEMA)
 MAX_CLAIM_ATTEMPTS = 32
 COOPERATION_BUDGET_SECONDS = 30
+COOPERATION_OBSERVATION_MAX_AGE_SECONDS = 5
 ADMISSION_INDEXES = (
     "CREATE INDEX epoch_admissions_expiry ON epoch_admissions (expired, retire_after)",
 )
@@ -455,6 +458,29 @@ class CooperativeResultAdmission:
     message_id: str
     status: str
     replay: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CooperativeClaimObservation:
+    """Trusted runtime's fresh, mempool-aware claim sample, not a wire model.
+
+    The store cannot independently acquire chain or LND facts. A future
+    runtime must obtain these from its configured Core and payment backends,
+    bound to one named tip, immediately before invoking the signer. No caller
+    exists yet, and this type must not be deserialized from a peer message.
+    """
+
+    network: NetworkIdentity
+    funding_txid: str
+    funding_vout: int
+    funding_value_sat: int
+    funding_script_pubkey: bytes
+    tip_height: int
+    tip_hash: str
+    confirmations: int
+    sampled_at: int
+    mempool_unspent: bool
+    fee_floor_sat: int
 
 
 class EnvelopeSigner(Protocol):
@@ -2544,6 +2570,290 @@ class LiveSessionStore:
         if conflict:
             raise SessionBlockedError("conflicting signed cooperative result is durable")
         return CooperativeResultAdmission(outer.session_id, outer.message_id, status, replay=False)
+
+    def _commit_cooperative_claim_partial(  # noqa: PLR0912, PLR0915 - one-shot custody transition
+        self,
+        session_id: str,
+        cooperation_id: bytes,
+        observation: CooperativeClaimObservation,
+        *,
+        now: int,
+    ) -> str:
+        """Consume one live handle and commit the signed completion before exposure.
+
+        INTERNAL ONLY. A future runtime must obtain a fresh, named-tip,
+        mempool-aware sample immediately before invocation and independently
+        schedule unilateral fallback. This method never broadcasts.
+        """
+        from rill_crypto import Context  # noqa: PLC0415 - native signer only
+
+        if (
+            not isinstance(self._crypto, Context)
+            or self._public_keys is not self._crypto
+            or not isinstance(cooperation_id, bytes)
+            or len(cooperation_id) != 32  # noqa: PLR2004 - burned ID length
+            or not isinstance(observation, CooperativeClaimObservation)
+            or type(now) is not int
+            or now < 0
+            or observation.network != self._network
+            or type(observation.sampled_at) is not int
+            or not 0 <= observation.sampled_at <= now
+            or now - observation.sampled_at > COOPERATION_OBSERVATION_MAX_AGE_SECONDS
+            or type(observation.tip_height) is not int
+            or observation.tip_height <= 0
+            or type(observation.confirmations) is not int
+            or observation.confirmations < 0
+            or type(observation.fee_floor_sat) is not int
+            or observation.fee_floor_sat < 0
+            or type(observation.funding_vout) is not int
+            or observation.funding_vout < 0
+            or type(observation.funding_value_sat) is not int
+            or observation.funding_value_sat <= 0
+            or type(observation.funding_script_pubkey) is not bytes
+            or observation.mempool_unspent is not True
+            or type(observation.tip_hash) is not str
+            or HEX32.fullmatch(observation.tip_hash) is None
+            or type(observation.funding_txid) is not str
+            or HEX32.fullmatch(observation.funding_txid) is None
+        ):
+            raise LiveSessionStoreError("cooperative signing observation unavailable")
+        crypto = self._crypto
+        consumed = False
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT a.binding,a.owner_generation,a.created_at,a.deadline_at,a.state,"
+                    "a.local_nonce,a.peer_nonce,a.nonce_response_id,s.phase,s.blocked,"
+                    "s.client_key,w.state,w.contract_hash,w.terms_offer,w.funding_binding,"
+                    "w.preimage FROM cooperation_attempts a "
+                    "JOIN sessions s ON s.session_id=a.session_id "
+                    "JOIN swaps w ON w.session_id=a.session_id "
+                    "WHERE a.session_id=? AND a.cooperation_id=?",
+                    (session_id, cooperation_id),
+                ).fetchone()
+                if row is None:
+                    raise LiveSessionStoreError("cooperative signer attempt unavailable")  # noqa: TRY301
+                (
+                    binding_bytes,
+                    generation,
+                    created_at,
+                    deadline_at,
+                    state,
+                    local_nonce,
+                    peer_nonce,
+                    proposal_id,
+                    phase,
+                    blocked,
+                    client_key,
+                    swap_state,
+                    recorded_hash,
+                    offer_bytes,
+                    funding_bytes,
+                    preimage,
+                ) = row
+                binding = parse_json_strict(binding_bytes)
+                if not isinstance(binding, dict) or (
+                    generation != self._generation
+                    or state != "SIGNING"
+                    or phase != "ACCEPTED"
+                    or blocked
+                    or swap_state not in ("PAID", "CLAIMING")
+                    or cooperation_id not in self._cooperation_handles
+                    or not created_at <= now < deadline_at
+                    or binding.get("version") != 1
+                    or binding.get("session_id") != session_id
+                    or binding.get("cooperation_id") != cooperation_id.hex()
+                    or binding.get("contract_hash") != recorded_hash
+                    or binding.get("claimant") != "provider"
+                    or binding.get("deadline_at") != deadline_at
+                    or not isinstance(local_nonce, bytes)
+                    or not isinstance(peer_nonce, bytes)
+                    or not isinstance(proposal_id, str)
+                    or funding_bytes is None
+                    or not isinstance(preimage, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", preimage) is None
+                ):
+                    raise LiveSessionStoreError("cooperative signing custody unavailable")  # noqa: TRY301
+                terms = _offer_terms(offer_bytes)
+                fee_sat = binding.get("fee_sat")
+                deadline_height = binding.get("deadline_height")
+                if (
+                    type(fee_sat) is not int
+                    or fee_sat < 0
+                    or type(deadline_height) is not int
+                    or deadline_height <= 0
+                ):
+                    raise LiveSessionStoreError("cooperative signing plan malformed")  # noqa: TRY301
+                retained = parse_model_json(
+                    FundingBindingPayload,
+                    canonicalize(_canonical_envelope(funding_bytes).payload),
+                ).binding
+                if (
+                    contract_hash(terms).hex() != recorded_hash
+                    or terms.network_identity != self._network
+                    or COOPERATIVE_CLAIM_FEATURE not in terms.required_features
+                    or hashlib.sha256(bytes.fromhex(preimage)).hexdigest()
+                    != terms.invoice_binding.payment_hash
+                    or retained.contract_hash != recorded_hash
+                    or retained.funding_txid != binding.get("funding_txid")
+                    or retained.contract_vout != binding.get("funding_vout")
+                    or int(retained.contract_value_sat) != binding.get("funding_value_sat")
+                    or retained.contract_script_pubkey != binding.get("funding_script_pubkey")
+                    or observation.funding_txid != retained.funding_txid
+                    or observation.funding_vout != retained.contract_vout
+                    or observation.funding_value_sat != int(retained.contract_value_sat)
+                    or observation.funding_script_pubkey.hex() != retained.contract_script_pubkey
+                    or observation.confirmations < terms.funding_confirmations
+                    or observation.tip_height >= terms.refund_lock_height
+                    or observation.tip_height >= deadline_height
+                    or fee_sat < observation.fee_floor_sat
+                ):
+                    raise LiveSessionStoreError("cooperative signing facts changed")  # noqa: TRY301
+                funding = FundingOutput(
+                    txid=bytes.fromhex(retained.funding_txid),
+                    output_index=retained.contract_vout,
+                    value_sat=int(retained.contract_value_sat),
+                    script_pubkey=bytes.fromhex(retained.contract_script_pubkey),
+                )
+                authorization = UnilateralAuthorization.from_terms(
+                    terms, funding, "claim", keys=crypto
+                )
+                plan = build_cooperative_claim(authorization, fee_sat=fee_sat)
+                taproot = reconstruct_taproot_contract(terms, keys=crypto)
+                if (
+                    plan.base_transaction.hex() != binding.get("unsigned_transaction")
+                    or plan.signature_hash.hex() != binding.get("signature_hash")
+                    or terms.client_contract_compressed_key != binding.get("user_key")
+                    or terms.provider_contract_compressed_key != binding.get("provider_key")
+                    or taproot.tap_tweak.hex() != binding.get("tap_tweak")
+                ):
+                    raise LiveSessionStoreError("cooperative claim plan differs")  # noqa: TRY301
+                saved = connection.execute(
+                    "SELECT canonical_bytes FROM outbox WHERE session_id=? AND message_id=?",
+                    (session_id, proposal_id),
+                ).fetchone()
+                if saved is None:
+                    raise LiveSessionStoreError("cooperative proposal missing")  # noqa: TRY301
+                proposal = _canonical_envelope(saved[0])
+                original = parse_cooperative_payload(
+                    "action_request", canonicalize(proposal.payload)
+                )
+                if not isinstance(original, CooperativeClaimPropose) or (
+                    original.cooperation_id != cooperation_id.hex()
+                    or original.public_nonce != local_nonce.hex()
+                    or original.unsigned_transaction != plan.base_transaction.hex()
+                ):
+                    raise LiveSessionStoreError("cooperative proposal differs")  # noqa: TRY301
+                matches: list[CooperativeClaimSigned] = []
+                for (admitted,) in connection.execute(
+                    "SELECT canonical_bytes FROM inbox WHERE session_id=? AND sender_key=? "
+                    "AND seq>=? ORDER BY seq",
+                    (session_id, client_key, FIRST_REQUEST_SEQUENCE),
+                ):
+                    candidate = _canonical_envelope(admitted)
+                    if (
+                        candidate.message_type != "action_result"
+                        or candidate.in_reply_to != proposal_id
+                    ):
+                        continue
+                    verify_static_signed_envelope(
+                        admitted,
+                        expected_session_id=session_id,
+                        expected_profile=self._policy.profile,
+                        expected_network=self._network,
+                        expected_sender_key=client_key,
+                        supported_features=self._policy.features,
+                        crypto=crypto,
+                    )
+                    result = parse_cooperative_payload(
+                        "action_result", canonicalize(candidate.payload)
+                    )
+                    if isinstance(result, CooperativeClaimSigned) and (
+                        result.cooperation_id == cooperation_id.hex()
+                        and result.public_nonce == peer_nonce.hex()
+                    ):
+                        matches.append(result)
+                if len(matches) != 1:
+                    raise LiveSessionStoreError("cooperative admitted partial unavailable")  # noqa: TRY301
+                result = matches[0]
+                crypto.musig_public_nonce_validate(peer_nonce)
+                crypto.musig_partial_verify(
+                    user_public_key=bytes.fromhex(terms.client_contract_compressed_key),
+                    provider_public_key=bytes.fromhex(terms.provider_contract_compressed_key),
+                    tap_tweak=taproot.tap_tweak,
+                    message=plan.signature_hash,
+                    user_public_nonce=peer_nonce,
+                    provider_public_nonce=local_nonce,
+                    signer_index=0,
+                    partial_signature=bytes.fromhex(result.partial_signature),
+                )
+                # Popping BEFORE native consumption makes every failure one-shot.
+                handle = self._cooperation_handles.pop(cooperation_id)
+                consumed = True
+                try:
+                    partial = handle.partial_sign_once(peer_nonce)
+                finally:
+                    handle.close()
+                crypto.musig_partial_verify(
+                    user_public_key=bytes.fromhex(terms.client_contract_compressed_key),
+                    provider_public_key=bytes.fromhex(terms.provider_contract_compressed_key),
+                    tap_tweak=taproot.tap_tweak,
+                    message=plan.signature_hash,
+                    user_public_nonce=peer_nonce,
+                    provider_public_nonce=local_nonce,
+                    signer_index=1,
+                    partial_signature=partial,
+                )
+                signature = crypto.musig_aggregate(
+                    user_public_key=bytes.fromhex(terms.client_contract_compressed_key),
+                    provider_public_key=bytes.fromhex(terms.provider_contract_compressed_key),
+                    tap_tweak=taproot.tap_tweak,
+                    message=plan.signature_hash,
+                    user_public_nonce=peer_nonce,
+                    provider_public_nonce=local_nonce,
+                    user_partial_signature=bytes.fromhex(result.partial_signature),
+                    provider_partial_signature=partial,
+                )
+                finalize_cooperative_claim(plan, signature, verifier=crypto)
+                completion = {
+                    "action": "cooperative_claim_complete",
+                    "cooperation_id": cooperation_id.hex(),
+                    "partial_signature": partial.hex(),
+                }
+                message_id = self._record_observation(
+                    connection,
+                    session_id,
+                    completion,
+                    crypto,
+                    now,
+                    message_type="action_request",
+                    required_features=(COOPERATIVE_CLAIM_FEATURE,),
+                )
+                if (
+                    connection.execute(
+                        "UPDATE cooperation_attempts SET state='COMPLETE',"
+                        "partial_signature=?,partial_response_id=? "
+                        "WHERE session_id=? AND cooperation_id=? AND state='SIGNING' "
+                        "AND owner_generation=?",
+                        (partial, message_id, session_id, cooperation_id, self._generation),
+                    ).rowcount
+                    != 1
+                ):
+                    raise LiveSessionStoreError("cooperative signing state changed")  # noqa: TRY301
+        except BaseException as error:
+            if consumed and os.getpid() == self._pid and self._lock_fd is not None:
+                # A rollback cannot restore a consumed native handle.
+                with suppress(Exception), self._write() as connection:
+                    connection.execute(
+                        "UPDATE cooperation_attempts SET state='ABANDONED' "
+                        "WHERE session_id=? AND cooperation_id=? AND state='SIGNING' "
+                        "AND owner_generation=?",
+                        (session_id, cooperation_id, self._generation),
+                    )
+            if isinstance(error, Exception) and not isinstance(error, LiveSessionStoreError):
+                raise LiveSessionStoreError("cooperative signing refused") from None
+            raise
+        return message_id
 
     def _signed_envelope(  # noqa: PLR0913, PLR0917 - one envelope's explicit parts
         self,
