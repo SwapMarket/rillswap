@@ -6,7 +6,9 @@ import hmac
 import json
 import os
 import pickle
+import select
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 from threading import Event, Thread
@@ -292,6 +294,104 @@ def test_context_cannot_close_with_live_attempt() -> None:
         context.close()
     attempt.close()
     context.close()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+@pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
+def test_inherited_context_and_nonce_handle_never_touch_native_state() -> None:  # noqa: C901, PLR0915 - fork/lock/timeout failure cases belong to one regression
+    """A child must refuse before acquiring a vanished thread's native lock."""
+    context = Context(library_path=LIBRARY)
+    user_key, provider_key = context.public_key(scalar(1)), context.public_key(scalar(2))
+    attempt, _ = context.musig_begin(
+        secret_key=scalar(1),
+        user_public_key=user_key,
+        provider_public_key=provider_key,
+        tap_tweak=scalar(3),
+        message=b"\x44" * 32,
+        cooperation_id=b"\x55" * 32,
+    )
+    entered, release = Event(), Event()
+
+    def hold_native_lock() -> None:
+        with context._lock:
+            entered.set()
+            assert release.wait(timeout=5)
+
+    holder = Thread(target=hold_native_lock)
+    holder.start()
+    assert entered.wait(timeout=2)
+    read_fd, write_fd = os.pipe()
+    try:
+        child = os.fork()
+        if child == 0:
+            os.close(read_fd)
+            try:
+                native_calls: list[str] = []
+
+                class ForbiddenNative:
+                    def rill_musig_attempt_destroy(self, _pointer: Any) -> None:
+                        native_calls.append("attempt destroy")
+
+                    def rill_crypto_context_destroy(self, _pointer: Any) -> None:
+                        native_calls.append("context destroy")
+
+                    def __getattr__(self, name: str) -> Any:
+                        raise AssertionError(f"fork child called native {name}")  # noqa: TRY301
+
+                context._native.lib = ForbiddenNative()
+                for operation in (
+                    lambda: context.public_key(scalar(1)),
+                    context.close,
+                    context.__enter__,
+                    lambda: context.musig_begin(
+                        secret_key=scalar(1),
+                        user_public_key=user_key,
+                        provider_public_key=provider_key,
+                        tap_tweak=scalar(3),
+                        message=b"\x44" * 32,
+                        cooperation_id=b"\x55" * 32,
+                    ),
+                    lambda: attempt.partial_sign_once(b"\x02" * 66),
+                    attempt.close,
+                    attempt.__enter__,
+                ):
+                    try:
+                        operation()
+                    except RuntimeError as error:
+                        if "inherited across fork" not in str(error):
+                            raise
+                    else:
+                        raise AssertionError("fork child used parent-native state")
+                # Weakref finalizers must also skip the parent's C pointers.
+                attempt._finalizer()
+                context._finalizer()
+                assert not native_calls
+                os.write(write_fd, b"refused")
+            except Exception:  # noqa: BLE001 - report all child failures through pipe
+                os.write(write_fd, b"failed")
+            finally:
+                os._exit(0)  # never run inherited pytest teardown
+        os.close(write_fd)
+        readable, _, _ = select.select([read_fd], [], [], 2)
+        if not readable:
+            os.kill(child, signal.SIGKILL)
+            os.waitpid(child, 0)
+            pytest.fail("fork child waited on the parent's native lock")
+        result = os.read(read_fd, 32)
+        _, status = os.waitpid(child, 0)
+        assert result == b"refused"
+        assert os.WIFEXITED(status)
+        # The child did not destroy the independent parent's real native state.
+        release.set()
+        holder.join(timeout=2)
+        assert not holder.is_alive()
+        assert context.public_key(scalar(1)) == user_key
+    finally:
+        release.set()
+        holder.join(timeout=2)
+        os.close(read_fd)
+        attempt.close()
+        context.close()
 
 
 def test_context_and_attempt_reject_copy_and_serialization() -> None:

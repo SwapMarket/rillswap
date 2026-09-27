@@ -182,6 +182,7 @@ class Context:
     ) -> None:
         self._native = _Native(library_path)
         self._lock = RLock()
+        self._owner_pid = os.getpid()
         self._active_attempts = 0
         random_value = os.urandom(32) if context_random is None else context_random
         random_input = self._native.input(random_value, 32, "context_random")
@@ -193,9 +194,23 @@ class Context:
             raise CryptoError(9)
         self._finalizer = weakref.finalize(
             self,
-            self._native.lib.rill_crypto_context_destroy,
+            self._destroy_if_owner,
+            self._native,
             self._pointer,
+            self._owner_pid,
         )
+
+    @staticmethod
+    def _destroy_if_owner(native: _Native, pointer: Any, owner_pid: int) -> None:
+        # A fork child owns neither the original native context nor its
+        # process-local MuSig handles. Do not use potentially inherited locks
+        # or C state there, even if garbage collection runs in the child.
+        if os.getpid() == owner_pid:
+            native.lib.rill_crypto_context_destroy(pointer)
+
+    def _require_owner(self) -> None:
+        if os.getpid() != self._owner_pid:
+            raise RuntimeError("cryptographic context inherited across fork")
 
     def _require_open(self) -> None:
         if self._pointer == self._native.ffi.NULL:
@@ -203,12 +218,14 @@ class Context:
 
     @contextmanager
     def _operation(self) -> Iterator[None]:
+        self._require_owner()  # before acquiring an inherited, possibly locked RLock
         with self._lock:
             self._require_open()
             yield
 
     def close(self) -> None:
         """Destroy the context after all child attempts are destroyed."""
+        self._require_owner()
         with self._lock:
             if self._active_attempts:
                 raise RuntimeError("cannot close context with live MuSig attempts")
@@ -217,6 +234,7 @@ class Context:
                 self._pointer = self._native.ffi.NULL
 
     def __enter__(self) -> Self:
+        self._require_owner()
         with self._lock:
             self._require_open()
             return self
@@ -480,6 +498,8 @@ class MusigAttempt:
 
     @staticmethod
     def _destroy(context: Context, pointer: Any) -> None:
+        if os.getpid() != context._owner_pid:
+            return
         context._native.lib.rill_musig_attempt_destroy(pointer)
         with context._lock:
             context._active_attempts -= 1
@@ -502,12 +522,14 @@ class MusigAttempt:
 
     def close(self) -> None:
         """Wipe and free the native attempt."""
+        self._context._require_owner()
         with self._context._lock:
             if self._pointer != self._context._native.ffi.NULL:
                 self._finalizer()
                 self._pointer = self._context._native.ffi.NULL
 
     def __enter__(self) -> Self:
+        self._context._require_owner()
         with self._context._lock:
             if self._pointer == self._context._native.ffi.NULL:
                 raise RuntimeError("MuSig attempt is closed")
