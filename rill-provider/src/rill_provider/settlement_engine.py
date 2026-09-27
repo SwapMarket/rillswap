@@ -220,6 +220,7 @@ class SettlementEngine:
         for session_id in await self._close_unfunded(now):
             results[session_id] = "FAILED"
         await self._release_claims()
+        await self._release_expired()
         return results
 
     async def _close_unfunded(self, now: int) -> list[str]:
@@ -262,6 +263,19 @@ class SettlementEngine:
                 continue
             closed.append(session_id)
         return closed
+
+    async def _release_expired(self) -> None:
+        """Release terminal swaps' reservations once every exposure window closed."""
+        try:
+            if not self._store.expirable_exposure_pending():
+                return
+            tip = await asyncio.to_thread(self._chain.tip_height)
+            released = self._store.release_expired_exposure(tip)
+        except Exception:  # noqa: BLE001 - retried next tick; nothing is released
+            LOG.warning("exposure release deferred", exc_info=False)
+            return
+        if released:
+            LOG.info("released %d reservations whose exposure windows closed", released)
 
     async def _release_claims(self) -> None:
         """Release historical claimed reservations on fresh claim-depth evidence.

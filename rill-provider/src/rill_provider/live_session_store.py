@@ -1473,9 +1473,12 @@ class LiveSessionStore:
                 ]
                 # Release before deletion: an idle session's open offer can never
                 # be accepted again. Its payment hash stays reserved forever.
+                # UNKNOWN (migrated) rows of a pre-acceptance session never had a
+                # contract either: nothing was dispatched for a hash with no swap.
                 connection.executemany(
                     "UPDATE economic_reservations SET state='RELEASED', release_evidence=? "
-                    "WHERE session_id=? AND state='UNSENT'",
+                    "WHERE session_id=? AND state IN ('UNSENT', 'UNKNOWN') "
+                    "AND session_id NOT IN (SELECT session_id FROM swaps)",
                     [(_release_evidence("expired-offer", expired_at=now), sid) for (sid,) in idle],
                 )
                 for (sid,) in idle:
@@ -2059,6 +2062,73 @@ class LiveSessionStore:
                 ]
         except Exception:  # noqa: BLE001 - never echo storage details
             raise LiveSessionStoreError("claim listing refused") from None
+
+    def expirable_exposure_pending(self) -> bool:
+        """Whether any terminal swap still holds a reservation (worth asking the tip)."""
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT 1 FROM economic_reservations r JOIN swaps w "
+                    "ON w.session_id=r.session_id WHERE r.state<>'RELEASED' "
+                    "AND w.state IN ('FAILED', 'CLAIMED', 'LOST') LIMIT 1"
+                ).fetchone()
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("exposure check refused") from None
+        return row is not None
+
+    def release_expired_exposure(self, tip_height: int) -> int:
+        """Release reservations of terminal swaps whose exposure windows have all closed.
+
+        Once the tip is past both the signed ``max_outgoing_htlc_expiry_height``
+        (no Lightning HTLC of this swap can still be pending) and
+        ``refund_lock_height`` (the client could refund), plus
+        ``refund_resolution_confirmations``, nothing can change what this
+        swap cost. This is the only release for migrated ``UNKNOWN`` rows of
+        ``FAILED`` swaps and for ``FAILED`` swaps whose failure no payer
+        attested. Non-terminal swaps are never touched. Returns the count.
+        """
+        if type(tip_height) is not int or tip_height <= 0:
+            raise LiveSessionStoreError("tip height must be a positive block height")
+        try:
+            with self._write() as connection:
+                rows = connection.execute(
+                    "SELECT r.payment_hash, w.state, w.terms_offer FROM economic_reservations r "
+                    "JOIN swaps w ON w.session_id=r.session_id "
+                    "WHERE r.state<>'RELEASED' AND w.state IN ('FAILED', 'CLAIMED', 'LOST')"
+                ).fetchall()
+                released = 0
+                for payment_hash, state, offer in rows:
+                    terms = _offer_terms(offer)
+                    policy = terms.timing_policy
+                    htlc_expiry = getattr(policy, "max_outgoing_htlc_expiry_height", None)
+                    if type(htlc_expiry) is not int:
+                        continue  # another profile: no rule here
+                    closed = (
+                        max(htlc_expiry, terms.refund_lock_height)
+                        + terms.refund_resolution_confirmations
+                    )
+                    if tip_height < closed:
+                        continue
+                    evidence = _release_evidence(
+                        "exposure-expired",
+                        swap_state=state,
+                        tip_height=tip_height,
+                        htlc_expiry_height=htlc_expiry,
+                        refund_lock_height=terms.refund_lock_height,
+                        required_confirmations=terms.refund_resolution_confirmations,
+                    )
+                    released += connection.execute(
+                        "UPDATE economic_reservations SET state='RELEASED', release_evidence=? "
+                        "WHERE payment_hash=? AND state<>'RELEASED'",
+                        (evidence, payment_hash),
+                    ).rowcount
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("exposure release refused") from None
+        return released
 
     def release_claim(self, session_id: str, claim_txid: str, *, confirmations: int) -> bool:
         """Release a claimed swap's reservation on fresh evidence of claim depth.

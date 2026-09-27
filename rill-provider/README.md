@@ -198,6 +198,16 @@ A session holds at most one firm offer (RS-003), and the store refuses a second
 one as a backstop. Releases, each atomic with the fact that justifies it:
 
 - `expired-offer`: idle expiry of an open offer, before its session is deleted.
+  A migrated `UNKNOWN` row of such a session (no swap ever existed) is
+  released the same way: nothing was ever dispatched for it.
+- `exposure-expired`: a terminal swap (`FAILED`, `CLAIMED`, `LOST`) whose
+  reservation is still held, once Core's tip is past both the signed
+  `max_outgoing_htlc_expiry_height` (no Lightning HTLC can still be pending)
+  and `refund_lock_height` (the client could refund), plus
+  `refund_resolution_confirmations`. Time is affirmative evidence here:
+  nothing can change what the swap cost any more. This is what eventually
+  frees migrated `UNKNOWN` rows of `FAILED` swaps and failures no payer
+  attested. Non-terminal swaps are never released by time alone.
 - `failed-before-dispatch`: a transition to terminal `FAILED` while the
   reservation is still `UNSENT`. Every dispatch marks its reservation in the
   same transaction, so `UNSENT` proves no payment was sent, and `FAILED` has no
@@ -229,10 +239,11 @@ conflict evidence is kept. Both deadline guards trust the host clock: a forward
 clock jump can irreversibly close valid accepted swaps, so run NTP-synchronized
 hosts and alert on clock steps.
 
-Capacity stays held by `DISPATCHED` swaps that fail after dispatch (including
-bound tracked failures), `UNKNOWN` rows that never reach `CLAIMED`, and
-unresolved `PAYING` swaps. The claim path depends on the retained claim txid;
-storage integrity is assumed. Raise
+Capacity stays held by unresolved `PAYING` swaps (a tracker that never
+reaches a terminal outcome keeps the swap open, and the swap is never closed
+without evidence) and by terminal swaps until their exposure windows close.
+The claim path depends on the retained claim txid; storage integrity is
+assumed. Raise
 `max_active_reservations` to accept more exposure. Doing so does not resolve
 uncertainty, and freeing a slot does not replenish Lightning liquidity.
 

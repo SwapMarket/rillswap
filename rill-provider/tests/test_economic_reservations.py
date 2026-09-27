@@ -577,3 +577,63 @@ def _swap(store: live.LiveSessionStore) -> tuple[str, int | None, str | None]:
     return store._connection.execute(  # noqa: SLF001
         "SELECT state, outpoint_spent_height, outpoint_spent_block FROM swaps"
     ).fetchone()
+
+
+@pytest.mark.parametrize(
+    ("swap_state", "reservation", "released"),
+    [
+        ("FAILED", "UNKNOWN", True),  # migrated: nothing else ever releases it
+        ("FAILED", "DISPATCHED", True),  # failure no payer attested
+        ("CLAIMED", "UNSENT", True),
+        ("LOST", "UNKNOWN", True),
+        ("PAYING", "DISPATCHED", False),  # non-terminal: never by time alone
+        ("CLAIMING", "UNKNOWN", False),
+    ],
+)
+def test_exposure_release_needs_a_terminal_swap_and_both_windows_closed(
+    harness: Harness,
+    swap_state: str,
+    reservation: str,
+    released: bool,  # noqa: FBT001
+) -> None:
+    # Fixture terms: max_outgoing_htlc_expiry_height 1070, refund_lock_height 1100,
+    # refund_resolution_confirmations 4: the window closes at tip 1104.
+    with harness.acquire() as store:
+        _insert_funded_swap(store, harness, swap_state)
+        _set_reservation(store, reservation)
+        pending = store.expirable_exposure_pending()
+        assert pending is (swap_state in {"FAILED", "CLAIMED", "LOST"})
+        assert store.release_expired_exposure(1103) == 0
+        assert _ledger(store)[_hash(harness)][1] == reservation
+        assert store.release_expired_exposure(1104) == (1 if released else 0)
+        _session, state, evidence = _ledger(store)[_hash(harness)]
+        assert state == ("RELEASED" if released else reservation)
+        if released:
+            assert evidence == (
+                b'{"htlc_expiry_height":1070,"reason":"exposure-expired",'
+                b'"refund_lock_height":1100,"required_confirmations":4,'
+                b'"swap_state":"' + swap_state.encode() + b'","tip_height":1104,"version":1}'
+            )
+            assert store.release_expired_exposure(1200) == 0  # once
+            assert not store.expirable_exposure_pending()
+        with pytest.raises(live.LiveSessionStoreError, match="tip height"):
+            store.release_expired_exposure(0)
+
+
+def test_idle_expiry_releases_a_migrated_unknown_row_without_a_contract(
+    harness: Harness,
+) -> None:
+    with harness.acquire() as store:
+        _insert_funded_swap(store, harness, "PAYING")
+        offer = store.reserve(_other_init(harness, 1), now=1000).session_id
+        store._connection.execute(  # noqa: SLF001
+            "INSERT INTO payment_hashes VALUES (?, ?, 1000)", ("a1" * 32, offer)
+        )
+        store._connection.execute(  # noqa: SLF001
+            "INSERT INTO economic_reservations VALUES (?, ?, 'UNKNOWN', NULL)", ("a1" * 32, offer)
+        )
+        _set_reservation(store, "UNKNOWN")  # the funded swap's row stays UNKNOWN too
+        assert store.expire_idle(now=10_000, idle_timeout=100) == 1
+        ledger = _ledger(store)
+        assert ledger["a1" * 32][1] == "RELEASED"  # no swap: no contract ever existed
+        assert ledger[_hash(harness)][1] == "UNKNOWN"  # accepted swaps are never idle-expired

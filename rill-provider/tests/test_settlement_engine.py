@@ -200,3 +200,23 @@ def test_conflict_before_dispatch_commit_prevents_send(monkeypatch: pytest.Monke
     result = asyncio.run(engine._pay(ITEM, TERMS, BINDING, 1070, DOCUMENT["created_at"]))  # noqa: SLF001
     assert result == PaymentOutcome("UNKNOWN")
     lightning.send.assert_not_called()
+
+
+@pytest.mark.parametrize("pending", [False, True])
+def test_exposure_release_asks_the_tip_only_when_a_terminal_swap_holds_capacity(
+    pending: bool,  # noqa: FBT001
+) -> None:
+    store, chain = Mock(), Mock()
+    store.settlement_work.return_value = ()
+    store.unfunded_swaps.return_value = ()
+    store.unreleased_claims.return_value = ()
+    store.expirable_exposure_pending.return_value = pending
+    store.release_expired_exposure.return_value = 2
+    chain.tip_height.return_value = 1200
+    engine = SettlementEngine(store, chain, Mock(), Mock())
+    assert asyncio.run(engine.tick(now=1500)) == {}
+    if pending:
+        store.release_expired_exposure.assert_called_once_with(1200)
+    else:
+        assert not chain.mock_calls
+        store.release_expired_exposure.assert_not_called()
