@@ -198,4 +198,8 @@ def test_reverse_schedule_windows_must_fit() -> None:
     with pytest.raises(ValueError, match="unsupported"):
         QuoteSchedule(hold_invoice_lifetime=100)  # shorter than the terms lifetime
     with pytest.raises(ValueError, match="unsupported"):
+        # 1800 s remaining + 120 s terms lifetime: an offer would expire as it is made
+        QuoteSchedule(hold_invoice_lifetime=1_800)
+    assert QuoteSchedule(hold_invoice_lifetime=1_920).hold_invoice_lifetime == 1_920
+    with pytest.raises(ValueError, match="unsupported"):
         QuoteSchedule(reverse_refund_delay_blocks=2000, refund_and_ln_resolution_blocks=20)

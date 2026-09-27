@@ -626,7 +626,11 @@ class SettlementEngine:
         ceiling = max_spendable_fee(self._authorization(terms, binding))
         floor = min(self._settings.claim_fee_sat, ceiling)
         spend = self._claim(item, terms, binding, floor)
-        rate = await asyncio.to_thread(self._chain.fee_rate_sat_vb, CLAIM_ESTIMATE_TARGET)
+        try:
+            rate = await asyncio.to_thread(self._chain.fee_rate_sat_vb, CLAIM_ESTIMATE_TARGET)
+        except Exception:  # noqa: BLE001 - advice only; never defer a timelocked spend for it
+            LOG.warning("fee estimate unavailable; signing at the floor fee")
+            rate = None
         if rate is None:
             return spend
         wanted = min(ceiling, max(floor, math.ceil(rate * spend.vsize)))

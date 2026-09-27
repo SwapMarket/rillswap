@@ -82,7 +82,7 @@ def test_hold_is_opened_for_exactly_h_with_the_schedule_cltv() -> None:
     outcome = asyncio.run(service._open_hold(_document(REVERSE_FIRM), _terms()))  # noqa: SLF001
     assert outcome == ("lnbcrt1007u1hold", HOLD)
     service._hold_invoices.add.assert_called_once_with(  # type: ignore[union-attr] # noqa: SLF001
-        HASH, value_msat=100_700_000, expiry_seconds=1_800, cltv_expiry_delta=185
+        HASH, value_msat=100_700_000, expiry_seconds=3_600, cltv_expiry_delta=185
     )
 
 

@@ -76,7 +76,7 @@ class QuoteSchedule:
     reverse_refund_delay_blocks: int = 144
     refund_and_ln_resolution_blocks: int = 40
     claim_fee_reserve_sat: int = 1_000
-    hold_invoice_lifetime: int = 1_800
+    hold_invoice_lifetime: int = 3_600
 
     def __post_init__(self) -> None:
         """Refuse values the wire cannot carry or timing that cannot fit."""
@@ -113,7 +113,10 @@ class QuoteSchedule:
             + self.claim_confirmation_blocks
             < self.reverse_refund_delay_blocks
             and self.incoming_htlc_expiry_delta_blocks <= MAX_HOLD_CLTV_DELTA
-            and self.hold_invoice_lifetime >= self.terms_lifetime
+            # RS-004: the offer must be acceptable for terms_lifetime while the
+            # hold invoice still has the required remaining time.
+            and self.hold_invoice_lifetime
+            >= self.minimum_invoice_remaining_seconds + self.terms_lifetime
         ):
             raise ValueError("quote schedule unsupported")
 

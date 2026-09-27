@@ -88,7 +88,7 @@ class QuoteSettings(_Strict):
     reverse_refund_delay_blocks: int = Field(default=144, ge=1, le=MAX_WIRE_INTEGER)
     refund_and_ln_resolution_blocks: int = Field(default=40, ge=1, le=MAX_WIRE_INTEGER)
     claim_fee_reserve_sat: int = Field(default=1_000, ge=0, le=MAX_SATS)
-    hold_invoice_lifetime: int = Field(default=1_800, ge=1, le=MAX_WIRE_INTEGER)
+    hold_invoice_lifetime: int = Field(default=3_600, ge=1, le=MAX_WIRE_INTEGER)
 
 
 class Lnd(_Strict):

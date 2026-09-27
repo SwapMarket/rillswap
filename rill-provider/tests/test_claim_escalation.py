@@ -478,3 +478,17 @@ def test_the_first_claim_fee_follows_the_estimate_between_floor_and_ceiling(
     assert spend.fee_sat == expected
     assert built == [300] if expected == 300 else [300, expected]
     chain.fee_rate_sat_vb.assert_called_once_with(settlement_engine.CLAIM_ESTIMATE_TARGET)
+
+
+def test_an_unavailable_fee_estimate_never_defers_the_first_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, _store, chain = _engine(monkeypatch, [], {}, 1000)
+    engine._settings = replace(engine._settings, claim_fee_sat=300)  # noqa: SLF001
+    chain.fee_rate_sat_vb.side_effect = RuntimeError("estimatesmartfee unavailable")
+    monkeypatch.setattr(
+        engine,
+        "_claim",
+        lambda *_a: SimpleNamespace(raw_transaction=b"c", txid="a0" * 32, fee_sat=300, vsize=VSIZE),
+    )
+    assert asyncio.run(engine._initial_claim(ITEM, TERMS, BINDING)).fee_sat == 300  # noqa: SLF001
