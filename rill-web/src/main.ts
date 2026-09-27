@@ -30,6 +30,9 @@ function mount(root: HTMLElement): void {
   root.append(
     element("h1", "RillSwap"),
     element("p", "Local-only development preview. Swaps, signing, payments, and recovery are not implemented. Do not enter secrets or send funds."),
+    Object.assign(element("a", "Experimental BTC to Lightning swap client (signet, testnet4, regtest)"), {
+      href: "./swap.html",
+    }),
     element("p", `Build: ${BUILD_ID}. This preview does not check for updates. Reloading a mutable website could still change its code.`),
   );
 
