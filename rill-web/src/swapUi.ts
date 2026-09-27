@@ -140,6 +140,10 @@ function fundingPrompt(panel: HTMLElement, networkName: NetworkName, request: Fu
     node("p", `Keep the network fee at or below ${request.maxFundingFeeSat} sat. Use only native segwit inputs. ` +
       "Sign and finalize in your wallet, then paste the finalized PSBT (base64 or hex) here. Do not broadcast yet."),
     node("p", `If the provider does not pay, you can refund after block ${request.refundLockHeight}.`),
+    node("p", "Pay this address once, in this one transaction. A second payment to it is not a new swap: " +
+      "it is never paid over Lightning, the refund tools cover only the bound funding output, and once " +
+      "the provider knows the preimage it can claim any output at this address. It may be lost.",
+    "swap-second-deposit-warning"),
   );
   const psbt = node("textarea", "", "swap-psbt");
   panel.append(psbt);
