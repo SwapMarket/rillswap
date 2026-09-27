@@ -1,7 +1,10 @@
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"
 testpaths = ["tests"]
-markers = ["native_crypto: opt-in contract tests against the pinned rill-crypto library"]
+markers = [
+    "native_crypto: opt-in contract tests against the pinned rill-crypto library",
+    "bitcoin_core: opt-in pinned Bitcoin Core consensus tests",
+]
 
 [tool.mypy]
 python_version = "3.13"
