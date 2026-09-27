@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spec.rillswap.invalid/schemas/wire/settlement-v1.schema.json",
+  "title": "RillSwap BTC to LN acceptance, funding, and settlement payloads v1",
+  "description": "Structural payloads for terms_accept, funding_binding, ack, and observation (RS-003). Contextual rules live in RS-001 and RS-003.",
+  "$defs": {
+    "clientAcceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_hash",
+        "handshake_hash",
+        "session_id",
+        "client_session_xonly_key",
+        "provider_session_xonly_key"
+      ],
+      "properties": {
+        "contract_hash": { "$ref": "common-v1.schema.json#/$defs/hex32" },
+        "handshake_hash": { "$ref": "common-v1.schema.json#/$defs/hex32" },
+        "session_id": { "$ref": "common-v1.schema.json#/$defs/hex32" },
+        "client_session_xonly_key": { "$ref": "common-v1.schema.json#/$defs/hex32" },
+        "provider_session_xonly_key": { "$ref": "common-v1.schema.json#/$defs/hex32" }
+      }
+    },
+    "termsAccept": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["acceptance", "client_acceptance_signature"],
+      "properties": {
+        "acceptance": { "$ref": "#/$defs/clientAcceptance" },
+        "client_acceptance_signature": { "$ref": "common-v1.schema.json#/$defs/signature64" }
+      }
+    },
+    "fundingBindingMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["binding", "funding_binding_signature", "funding_transaction"],
+      "properties": {
+        "binding": { "$ref": "funding-binding-v1.schema.json" },
+        "funding_binding_signature": { "$ref": "common-v1.schema.json#/$defs/signature64" },
+        "funding_transaction": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{2}){60,100000}$"
+        }
+      }
+    },
+    "ack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["acknowledged_message_id"],
+      "properties": {
+        "acknowledged_message_id": { "$ref": "common-v1.schema.json#/$defs/hex32" }
+      }
+    },
+    "observation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "payment_preimage"],
+          "properties": {
+            "kind": { "const": "payment_settled" },
+            "payment_preimage": { "$ref": "common-v1.schema.json#/$defs/hex32" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "payment_failed" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "claim_txid"],
+          "properties": {
+            "kind": { "const": "claim_broadcast" },
+            "claim_txid": { "$ref": "common-v1.schema.json#/$defs/hex32" }
+          }
+        }
+      ]
+    }
+  }
+}

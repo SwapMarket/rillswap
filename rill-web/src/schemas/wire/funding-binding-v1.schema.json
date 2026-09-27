@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spec.rillswap.invalid/schemas/wire/funding-binding-v1.schema.json",
+  "title": "RillSwap funding binding v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_hash",
+    "funding_attempt_id",
+    "binding_revision",
+    "funder_role",
+    "lineage_anchor_txid",
+    "lineage_anchor_vout",
+    "funding_txid",
+    "contract_vout",
+    "contract_value_sat",
+    "contract_script_pubkey",
+    "replaces_txid",
+    "created_at"
+  ],
+  "properties": {
+    "contract_hash": {
+      "$ref": "common-v1.schema.json#/$defs/hex32"
+    },
+    "funding_attempt_id": {
+      "$ref": "common-v1.schema.json#/$defs/hex32"
+    },
+    "binding_revision": {
+      "$ref": "common-v1.schema.json#/$defs/exactInteger"
+    },
+    "funder_role": {
+      "enum": ["client", "provider"]
+    },
+    "lineage_anchor_txid": {
+      "$ref": "common-v1.schema.json#/$defs/hex32"
+    },
+    "lineage_anchor_vout": {
+      "$ref": "common-v1.schema.json#/$defs/exactInteger"
+    },
+    "funding_txid": {
+      "$ref": "common-v1.schema.json#/$defs/hex32"
+    },
+    "contract_vout": {
+      "$ref": "common-v1.schema.json#/$defs/exactInteger"
+    },
+    "contract_value_sat": {
+      "$ref": "common-v1.schema.json#/$defs/decimalSats"
+    },
+    "contract_script_pubkey": {
+      "$ref": "common-v1.schema.json#/$defs/scriptHex"
+    },
+    "replaces_txid": {
+      "oneOf": [
+        {
+          "$ref": "common-v1.schema.json#/$defs/hex32"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "created_at": {
+      "$ref": "common-v1.schema.json#/$defs/exactInteger"
+    }
+  }
+}

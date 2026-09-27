@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spec.rillswap.invalid/schemas/wire/envelope-v1.schema.json",
+  "title": "RillSwap application envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "wire_version",
+    "profile_id",
+    "network_identity",
+    "session_id",
+    "message_id",
+    "sender_session_key",
+    "sequence",
+    "in_reply_to",
+    "contract_hash",
+    "message_type",
+    "payload",
+    "required_features",
+    "extensions",
+    "signature"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "rillswap"
+    },
+    "wire_version": {
+      "const": "1"
+    },
+    "profile_id": {
+      "enum": ["btc-to-ln/v1", "ln-to-btc/v1"]
+    },
+    "network_identity": {
+      "$ref": "common-v1.schema.json#/$defs/networkIdentity"
+    },
+    "session_id": {
+      "$ref": "common-v1.schema.json#/$defs/hex32"
+    },
+    "message_id": {
+      "$ref": "common-v1.schema.json#/$defs/hex32"
+    },
+    "sender_session_key": {
+      "$ref": "common-v1.schema.json#/$defs/hex32"
+    },
+    "sequence": {
+      "$ref": "common-v1.schema.json#/$defs/exactInteger"
+    },
+    "in_reply_to": {
+      "oneOf": [
+        {
+          "$ref": "common-v1.schema.json#/$defs/hex32"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "contract_hash": {
+      "oneOf": [
+        {
+          "$ref": "common-v1.schema.json#/$defs/hex32"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "message_type": {
+      "enum": [
+        "handshake_init",
+        "handshake_accept",
+        "handshake_confirm",
+        "quote_request",
+        "quote_offer",
+        "terms_offer",
+        "terms_accept",
+        "funding_binding",
+        "observation",
+        "action_request",
+        "action_result",
+        "ack",
+        "error"
+      ]
+    },
+    "payload": {
+      "type": "object",
+      "maxProperties": 128
+    },
+    "required_features": {
+      "$ref": "common-v1.schema.json#/$defs/featureList"
+    },
+    "extensions": {
+      "$ref": "common-v1.schema.json#/$defs/extensions"
+    },
+    "signature": {
+      "oneOf": [
+        {
+          "$ref": "common-v1.schema.json#/$defs/signature64"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

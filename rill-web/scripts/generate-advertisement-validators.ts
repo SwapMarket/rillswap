@@ -7,6 +7,12 @@ import standaloneCode from "ajv/dist/standalone/index.js";
 
 import advertisementSchema from "../src/schemas/advertisements/advertisement-v1.schema.json";
 import commonSchema from "../src/schemas/wire/common-v1.schema.json";
+import contractTermsSchema from "../src/schemas/wire/contract-terms-v1.schema.json";
+import envelopeSchema from "../src/schemas/wire/envelope-v1.schema.json";
+import fundingBindingSchema from "../src/schemas/wire/funding-binding-v1.schema.json";
+import handshakeSchema from "../src/schemas/wire/handshake-v1.schema.json";
+import quoteSchema from "../src/schemas/wire/quote-v1.schema.json";
+import settlementSchema from "../src/schemas/wire/settlement-v1.schema.json";
 
 const ajv = new Ajv2020({ strict: true, code: { source: true, esm: true } });
 ajv.addSchema(commonSchema);
@@ -25,10 +31,45 @@ const output = "// Generated from vendored RS-005 schemas. Run `bun run check:sc
     validateNetwork: networkId,
   });
 const path = resolve(import.meta.dir, "../src/generated/manualAdvertisementValidators.js");
-if (process.argv.includes("--check")) {
-  if (readFileSync(path, "utf8") !== output) {
-    throw new Error("Generated advertisement validators are stale");
+
+// RS-001/RS-003 wire messages for the browser swap client.
+const wire = new Ajv2020({ strict: true, code: { source: true, esm: true } });
+for (const schema of [
+  commonSchema,
+  contractTermsSchema,
+  envelopeSchema,
+  fundingBindingSchema,
+  handshakeSchema,
+  quoteSchema,
+  settlementSchema,
+]) {
+  wire.addSchema(schema);
+}
+const def = (schema: { $id: string }, name: string): string => `${schema.$id}#/$defs/${name}`;
+const wireExports = {
+  validateEnvelope: envelopeSchema.$id,
+  validateHandshakeAcceptPayload: def(handshakeSchema, "acceptPayload"),
+  validateFirmQuoteRequest: def(quoteSchema, "firmRequest"),
+  validateTermsOffer: def(quoteSchema, "termsOffer"),
+  validateQuoteError: def(quoteSchema, "error"),
+  validateContractTerms: contractTermsSchema.$id,
+  validateFundingBinding: fundingBindingSchema.$id,
+  validateTermsAccept: def(settlementSchema, "termsAccept"),
+  validateFundingBindingMessage: def(settlementSchema, "fundingBindingMessage"),
+  validateAck: def(settlementSchema, "ack"),
+  validateObservation: def(settlementSchema, "observation"),
+};
+for (const ref of Object.values(wireExports)) {
+  if (!wire.getSchema(ref)) throw new Error(`Required wire schema ${ref} failed to compile`);
+}
+const wireOutput = "// Generated from vendored RS-001/RS-003 schemas. Run `bun run check:schemas`.\n" +
+  standaloneCode(wire, wireExports);
+const wirePath = resolve(import.meta.dir, "../src/generated/wireValidators.js");
+
+for (const [target, text] of [[path, output], [wirePath, wireOutput]] as const) {
+  if (process.argv.includes("--check")) {
+    if (readFileSync(target, "utf8") !== text) throw new Error(`Generated validators are stale: ${target}`);
+  } else {
+    writeFileSync(target, text);
   }
-} else {
-  writeFileSync(path, output);
 }
