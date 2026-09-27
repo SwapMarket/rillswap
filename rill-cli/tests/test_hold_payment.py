@@ -1,0 +1,56 @@
+"""The client refuses a hold payment whose final hop expires before the provider's minimum."""
+
+from __future__ import annotations
+
+from unittest.mock import Mock
+
+import pytest
+from rill_provider._lnd_proto import lightning_pb2
+from rill_provider._lnd_proto.routerrpc import router_pb2
+from rill_provider.lnd_payment_send import PaymentOutcome
+
+from rill_cli.hold_payment import HoldPaymentError, LndHoldPayer
+from rill_cli.live_swap import SwapError
+
+
+def _payer(final_expiry: int) -> tuple[LndHoldPayer, Mock]:
+    payer = LndHoldPayer.__new__(LndHoldPayer)
+    sender = Mock()
+    route = lightning_pb2.Route(
+        hops=[lightning_pb2.Hop(expiry=final_expiry + 40), lightning_pb2.Hop(expiry=final_expiry)]
+    )
+    sender.prepare.return_value = Mock(
+        request=router_pb2.SendToRouteRequest(route=route).SerializeToString()
+    )
+    sender.send.return_value = PaymentOutcome("IN_FLIGHT")
+    payer._sender = sender  # noqa: SLF001
+    return payer, sender
+
+
+def _pay(payer: LndHoldPayer) -> str:
+    return payer.pay(
+        "lnbcrt1hold",
+        invoice_binding=Mock(),
+        min_final_expiry_height=1035,
+        max_expiry_height=1300,
+        fee_limit_sat=100,
+    )
+
+
+def test_a_final_expiry_at_the_minimum_is_sent() -> None:
+    payer, sender = _payer(1035)
+    assert _pay(payer) == "IN_FLIGHT"
+    sender.send.assert_called_once()
+    assert sender.prepare.call_args.kwargs == {
+        "invoice_binding": sender.prepare.call_args.kwargs["invoice_binding"],
+        "fee_limit_sat": 100,
+        "max_expiry_height": 1300,
+    }
+
+
+def test_an_earlier_final_expiry_is_never_sent() -> None:
+    payer, sender = _payer(1034)
+    with pytest.raises(HoldPaymentError, match="expires before"):
+        _pay(payer)
+    sender.send.assert_not_called()
+    assert issubclass(HoldPaymentError, SwapError)  # reported as a stopped swap, nothing at risk

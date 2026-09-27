@@ -1,4 +1,4 @@
-"""``rill swap btc-to-ln``: one live swap through a provider."""
+"""``rill swap btc-to-ln`` and ``rill swap ln-to-btc``: one live swap through a provider."""
 
 from __future__ import annotations
 
@@ -17,22 +17,58 @@ from rill_cli.age_container import (
     encrypt_verified_plaintext,
     verify_export_ciphertext,
 )
+from rill_cli.hold_payment import LndHoldPayer
+from rill_cli.live_reverse_swap import ReverseSwapLimits, run_reverse_swap
 from rill_cli.live_swap import SwapLimits, run_swap
 from rill_cli.publication import publish_new_ciphertext
 from rill_cli.wallet_rpc import WalletRpc
 
 if TYPE_CHECKING:
     import argparse
+    from collections.abc import Callable
 
     from rill_core.recovery import OfflineRecoveryInspection
     from rill_core.wire.types import NetworkIdentity
 
 
 def add_parser(categories: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """Register ``swap btc-to-ln``."""
+    """Register ``swap btc-to-ln`` and ``swap ln-to-btc``."""
     swap = categories.add_parser("swap", help="live swaps (moves real funds)")
     kinds = swap.add_subparsers(dest="command", required=True)
-    command = kinds.add_parser("btc-to-ln", help="pay a Lightning invoice with on-chain BTC")
+    forward = kinds.add_parser("btc-to-ln", help="pay a Lightning invoice with on-chain BTC")
+    _common_arguments(forward)
+    forward.add_argument("--invoice", required=True, help="BOLT11 invoice to be paid")
+    forward.add_argument("--max-funding-fee-sat", type=int, default=5_000)
+    forward.add_argument("--max-refund-fee-sat", type=int, default=5_000)
+    forward.add_argument("--max-refund-delay-blocks", type=int, default=288)
+    forward.add_argument("--fee-rate", type=int, default=2, help="funding sat/vB")
+    forward.add_argument("--wallet", required=True, help="Core wallet that funds the swap")
+    forward.add_argument("--lnd-macaroon", required=True, help="invoice-decoding macaroon")
+    reverse = kinds.add_parser("ln-to-btc", help="receive on-chain BTC by paying over Lightning")
+    _common_arguments(reverse)
+    reverse.add_argument("--payout-sat", required=True, type=int, help="on-chain amount wanted")
+    reverse.add_argument("--min-claim-fee-reserve-sat", type=int, default=500)
+    reverse.add_argument(
+        "--min-refund-delay-blocks",
+        type=int,
+        default=72,
+        help="blocks the provider must wait before it may refund",
+    )
+    reverse.add_argument(
+        "--max-incoming-htlc-delay-blocks",
+        type=int,
+        default=432,
+        help="how long your Lightning funds may stay held",
+    )
+    reverse.add_argument("--max-routing-fee-sat", type=int, default=1_000)
+    reverse.add_argument("--fee-rate", type=int, default=2, help="claim sat/vB")
+    reverse.add_argument("--wallet", required=True, help="Core wallet receiving the payout")
+    reverse.add_argument(
+        "--lnd-macaroon", required=True, help="macaroon able to decode and send payments"
+    )
+
+
+def _common_arguments(command: argparse.ArgumentParser) -> None:
     command.add_argument("--network", required=True, help="complete trusted network JSON file")
     command.add_argument("--crypto-library", required=True, help="verified native library path")
     command.add_argument("--relay", required=True, help="Nostr relay URL (ws:// or wss://)")
@@ -46,19 +82,12 @@ def add_parser(categories: argparse._SubParsersAction[argparse.ArgumentParser]) 
         help="connect to relays directly, revealing your IP address to them",
     )
     command.add_argument("--provider", required=True, help="provider identity x-only key (hex)")
-    command.add_argument("--invoice", required=True, help="BOLT11 invoice to be paid")
     command.add_argument("--max-success-fee-sat", required=True, type=int)
-    command.add_argument("--max-funding-fee-sat", type=int, default=5_000)
     command.add_argument("--max-claim-fee-sat", type=int, default=5_000)
-    command.add_argument("--max-refund-fee-sat", type=int, default=5_000)
-    command.add_argument("--max-refund-delay-blocks", type=int, default=288)
-    command.add_argument("--fee-rate", type=int, default=2, help="funding sat/vB")
     command.add_argument("--core-port", required=True, type=int, help="loopback Core RPC port")
     command.add_argument("--core-cookie", required=True, help="Core .cookie file")
-    command.add_argument("--wallet", required=True, help="Core wallet that funds the swap")
     command.add_argument("--lnd-port", required=True, type=int, help="loopback LND gRPC port")
     command.add_argument("--lnd-tls-cert", required=True, help="LND tls.cert")
-    command.add_argument("--lnd-macaroon", required=True, help="invoice-decoding macaroon")
     command.add_argument("--recipient", required=True, help="X25519 age recipient")
     command.add_argument("--identity", required=True, help="matching private age identity file")
     command.add_argument(
@@ -113,6 +142,8 @@ def run(args: argparse.Namespace, network: NetworkIdentity, identity: str) -> st
         wallet = WalletRpc(
             port=args.core_port, cookie_path=args.core_cookie, wallet=args.wallet, network=network
         )
+        if args.command == "ln-to-btc":
+            return asyncio.run(_reverse(args, network, crypto, decoder, wallet, write_recovery))
         limits = SwapLimits(
             max_success_fee_sat=args.max_success_fee_sat,
             max_funding_fee_sat=args.max_funding_fee_sat,
@@ -144,3 +175,49 @@ def run(args: argparse.Namespace, network: NetworkIdentity, identity: str) -> st
             )
 
         return asyncio.run(swap())
+
+
+async def _reverse(  # noqa: PLR0913, PLR0917 - explicit already-built handles
+    args: argparse.Namespace,
+    network: NetworkIdentity,
+    crypto: Context,
+    decoder: LndInvoiceDecoder,
+    wallet: WalletRpc,
+    write_recovery: Callable[[bytes, bytes | None], None],
+) -> str:
+    payer = LndHoldPayer(
+        port=args.lnd_port,
+        tls_certificate_path=args.lnd_tls_cert,
+        macaroon_path=args.lnd_macaroon,
+        network=network,
+    )
+    limits = ReverseSwapLimits(
+        max_success_fee_sat=args.max_success_fee_sat,
+        min_claim_fee_reserve_sat=args.min_claim_fee_reserve_sat,
+        max_claim_fee_sat=args.max_claim_fee_sat,
+        min_refund_delay_blocks=args.min_refund_delay_blocks,
+        max_incoming_htlc_delay_blocks=args.max_incoming_htlc_delay_blocks,
+        max_routing_fee_sat=args.max_routing_fee_sat,
+        claim_fee_rate_sat_vb=args.fee_rate,
+    )
+    proxy = require_relay_route(network, args.relay_proxy, allow_direct=args.allow_direct_relay)
+    async with RelayConnection(args.relay, proxy=proxy) as connection:
+        outcome = await run_reverse_swap(
+            connection,
+            identity=args.provider,
+            network=network,
+            payout_sat=args.payout_sat,
+            decode_invoice=decoder.decode,
+            payer=payer,
+            wallet=wallet,
+            write_recovery=write_recovery,
+            limits=limits,
+            crypto=crypto,
+            timeout=args.timeout,
+            settle_timeout=args.settle_timeout,
+            report=_report,
+        )
+    return (
+        f"Claimed {outcome.payout_sat} sat. claim {outcome.claim_txid} "
+        f"(funding {outcome.funding_txid}, contract {outcome.contract_hash})"
+    )

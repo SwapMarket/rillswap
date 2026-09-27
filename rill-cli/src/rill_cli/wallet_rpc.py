@@ -37,6 +37,7 @@ METHODS = frozenset(
         "getblockchaininfo",
         "getblockhash",
         "getnewaddress",
+        "gettxout",
         "listunspent",
         "sendrawtransaction",
         "walletcreatefundedpsbt",
@@ -66,6 +67,15 @@ class WalletFunding:
     inputs: tuple[FundingPrevout, ...]
     other_outputs: tuple[PlannedFundingOutput, ...]
     fee_sat: int
+
+
+@dataclass(frozen=True, slots=True)
+class ConfirmedOutput:
+    """One outpoint's value, script, and depth (0 in the mempool) per Core."""
+
+    value_sat: int
+    script_pubkey: bytes
+    confirmations: int
 
 
 def _sats(value: object) -> int:
@@ -254,6 +264,20 @@ class WalletRpc:
         if not candidates:
             raise WalletRpcError("no single confirmed coin covers funding and its fee reserve")
         return min(candidates, key=lambda coin: (coin.value_sat, coin.txid, coin.output_index))
+
+    def confirmed_output(self, txid: str, vout: int) -> ConfirmedOutput | None:
+        """Return the unspent output as Core sees it (mempool included), or None.
+
+        ``None`` means unknown or spent; it is never evidence about which.
+        """
+        result = self._call("gettxout", txid, vout, True, wallet=False)  # noqa: FBT003 - include_mempool
+        if result is None:
+            return None
+        script = result.get("scriptPubKey", {}).get("hex") if isinstance(result, dict) else None
+        depth = result.get("confirmations") if isinstance(result, dict) else None
+        if not isinstance(script, str) or type(depth) is not int or depth < 0:
+            raise WalletRpcError("Core gettxout result unusable")
+        return ConfirmedOutput(_sats(result.get("value")), bytes.fromhex(script), depth)
 
     def broadcast(self, raw: bytes) -> str:
         """Submit exact bytes; return Core's txid."""

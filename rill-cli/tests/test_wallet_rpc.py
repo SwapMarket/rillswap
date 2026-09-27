@@ -272,3 +272,23 @@ def test_malformed_psbt_results_have_sanitized_wallet_errors(
     with pytest.raises(WalletRpcError, match="unusable"):
         wallet.fund(bytes.fromhex(CONTRACT), 50_000, fee_rate_sat_vb=2)
     assert "sendrawtransaction" not in {call["method"] for call in calls}
+
+
+def test_confirmed_output_reads_gettxout_with_mempool(
+    core: tuple[WalletRpc, list[dict[str, Any]]], answers: dict[str, Any]
+) -> None:
+    wallet, calls = core
+    answers["gettxout"] = {
+        "value": "#0.00050000#",
+        "scriptPubKey": {"hex": CONTRACT},
+        "confirmations": 0,
+    }
+    seen = wallet.confirmed_output("51" * 32, 1)
+    assert seen is not None
+    assert (seen.value_sat, seen.script_pubkey.hex(), seen.confirmations) == (50_000, CONTRACT, 0)
+    assert (calls[-1]["path"], calls[-1]["params"]) == ("/", ["51" * 32, 1, True])
+    answers["gettxout"] = None
+    assert wallet.confirmed_output("51" * 32, 1) is None  # unknown or spent, never which
+    answers["gettxout"] = {"value": "#0.00050000#", "scriptPubKey": {}, "confirmations": 1}
+    with pytest.raises(WalletRpcError):
+        wallet.confirmed_output("51" * 32, 1)

@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     from rill_cli.wallet_rpc import WalletFunding
 
 PROFILE: Literal["btc-to-ln/v1"] = "btc-to-ln/v1"
+type ProfileId = Literal["btc-to-ln/v1", "ln-to-btc/v1"]
 ENCRYPTION_SUITES = ("noise-xk-secp256k1-chachapoly-sha256/v1",)
 CAPABILITIES = ("core/v1", "recovery/v1")
 NIP59_BACKDATE_SECONDS = 2 * 24 * 60 * 60
@@ -138,8 +139,14 @@ def _scalar(crypto: Context) -> tuple[bytes, bytes]:
             continue
 
 
-def verify_announcement(
-    raw: bytes, *, identity: str, network: NetworkIdentity, crypto: Context, now: int
+def verify_announcement(  # noqa: PLR0913 - explicit trust inputs
+    raw: bytes,
+    *,
+    identity: str,
+    network: NetworkIdentity,
+    crypto: Context,
+    now: int,
+    profile: ProfileId = PROFILE,
 ) -> dict[str, Any]:
     """Return the advertisement of a valid, unexpired announcement or raise."""
     event = nip01._verify_signed_event(raw, verifier=crypto)  # noqa: SLF001
@@ -159,7 +166,7 @@ def verify_announcement(
     if (
         advertisement["provider_identity_xonly_key"] != identity
         or network.model_dump(mode="json") not in advertisement["network_identities"]
-        or PROFILE not in advertisement["profiles"]
+        or profile not in advertisement["profiles"]
         or not advertisement["created_at"] <= now < advertisement["expires_at"]
         or not advertisement["epoch_inbox_xonly_keys"]
     ):
@@ -190,6 +197,7 @@ async def discover(  # noqa: PLR0913 - explicit trust inputs
     crypto: Context,
     now: int,
     timeout: float = 10.0,  # noqa: ASYNC109
+    profile: ProfileId = PROFILE,
 ) -> dict[str, Any]:
     """Select the highest valid revision observed during a bounded relay query.
 
@@ -209,7 +217,12 @@ async def discover(  # noqa: PLR0913 - explicit trust inputs
                     )
                 try:
                     found = verify_announcement(
-                        raw, identity=identity, network=network, crypto=crypto, now=now
+                        raw,
+                        identity=identity,
+                        network=network,
+                        crypto=crypto,
+                        now=now,
+                        profile=profile,
                     )
                 except Exception:  # noqa: BLE001, S112 - ignore invalid events
                     continue
@@ -234,11 +247,13 @@ class _Session:
         network: NetworkIdentity,
         *,
         timeout: float,
+        profile: ProfileId = PROFILE,
     ) -> None:
         self.connection = connection
         self.crypto = crypto
         self.network = network
         self.timeout = timeout
+        self.profile = profile
         self.secret, public = _scalar(crypto)
         self.key = public[1:].hex()
         self.session_id = secrets.token_hex(32)
@@ -261,7 +276,7 @@ class _Session:
                 {
                     "protocol": "rillswap",
                     "wire_version": "1",
-                    "profile_id": PROFILE,
+                    "profile_id": self.profile,
                     "network_identity": self.network.model_dump(mode="json"),
                     "session_id": self.session_id,
                     "message_id": secrets.token_hex(32),
@@ -316,7 +331,7 @@ class _Session:
                 recipient_mailbox_secret=self.secret,
                 expected_recipient_xonly_key=self.key,
                 expected_network=self.network,
-                expected_profile_id=PROFILE,
+                expected_profile_id=self.profile,
                 crypto=self.crypto,
             )
         except Exception:  # noqa: BLE001 - not for us or malformed
@@ -389,6 +404,7 @@ def _recovery_document(  # noqa: PLR0913 - one record's explicit parts
     birthday: int,
     created_at: int,
     funding: tuple[tuple[FundingBinding, str], ...] = (),
+    preimage: bytes | None = None,
 ) -> bytes:
     terms = offer.terms.contract_terms
     artifacts = reconstruct_taproot_contract(terms, keys=session.crypto)
@@ -400,7 +416,7 @@ def _recovery_document(  # noqa: PLR0913 - one record's explicit parts
             "created_at": created_at,
             "updated_at": int(time.time()) if funding else created_at,
             "network_identity": session.network.model_dump(mode="json"),
-            "profile_id": PROFILE,
+            "profile_id": session.profile,
             "contract_hash": offer.terms.contract_hash,
             "contract_terms": terms.model_dump(mode="json"),
             "verification_context": {
@@ -447,8 +463,8 @@ def _recovery_document(  # noqa: PLR0913 - one record's explicit parts
             },
             "recovery_authorization_xonly_key": terms.recovery_authorization_xonly_key,
             "monotonic_knowledge": {
-                "preimage_known": False,
-                "preimage": None,
+                "preimage_known": preimage is not None,
+                "preimage": None if preimage is None else preimage.hex(),
                 "dangerous_signature_issued": False,
             },
             "extensions": {},
@@ -469,7 +485,7 @@ async def _handshake(
     init = HandshakeInit(
         protocol="rillswap",
         wire_version="1",
-        profile_id=PROFILE,
+        profile_id=session.profile,
         network_identity=session.network,
         session_id=session.session_id,
         client_challenge=secrets.token_hex(32),
