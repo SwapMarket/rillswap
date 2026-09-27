@@ -82,6 +82,11 @@ class QuoteSettings(_Strict):
     client_response_blocks: int = Field(default=36, ge=1, le=MAX_WIRE_INTEGER)
     claim_confirmation_blocks: int = Field(default=6, ge=1, le=MAX_WIRE_INTEGER)
     terms_lifetime: int = Field(default=120, ge=1, le=MAX_WIRE_INTEGER)
+    # LN to BTC (RS-004) only: provider funding window and hold invoice terms.
+    reverse_refund_delay_blocks: int = Field(default=144, ge=1, le=MAX_WIRE_INTEGER)
+    refund_and_ln_resolution_blocks: int = Field(default=40, ge=1, le=MAX_WIRE_INTEGER)
+    claim_fee_reserve_sat: int = Field(default=1_000, ge=0, le=MAX_SATS)
+    hold_invoice_lifetime: int = Field(default=1_800, ge=1, le=MAX_WIRE_INTEGER)
 
 
 class Lnd(_Strict):
@@ -92,6 +97,8 @@ class Lnd(_Strict):
     macaroon: Path
     # offchain:read+write; when set (with bitcoin_core) funded swaps are paid and claimed.
     payment_macaroon: Path | None = None
+    # invoices:read+write; required to serve LN to BTC (hold invoices).
+    invoices_macaroon: Path | None = None
 
 
 class PublicTerms(_Strict):
@@ -178,6 +185,7 @@ class OperatorConfig(_Strict):
             handshake_timeout=self.handshake_timeout,
             max_sends_per_tick=self.max_sends_per_tick,
             quote=QuoteSchedule(**self.quote.model_dump()),
+            profile=self.handshake.profile,  # type: ignore[arg-type]
             provider_destination_script=self.provider_destination_script,
         )
 

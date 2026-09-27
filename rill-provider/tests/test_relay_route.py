@@ -150,3 +150,20 @@ def test_public_firm_offers_refuse_to_start_without_settlement() -> None:
     )
     with pytest.raises(OperatorConfigError, match="payment_macaroon"):
         asyncio.run(cli._serve(config, None, ""))  # type: ignore[arg-type]  # noqa: SLF001
+
+
+def test_ln_to_btc_firm_offers_refuse_to_start_without_hold_invoices() -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from rill_provider import cli  # noqa: PLC0415
+    from rill_provider.operator_config import OperatorConfigError  # noqa: PLC0415
+
+    config: Any = SimpleNamespace(
+        network=_network("signet"),
+        provider_destination_script="0014" + "11" * 20,
+        handshake=SimpleNamespace(profile="ln-to-btc/v1"),
+        lnd=SimpleNamespace(payment_macaroon="pay.macaroon", invoices_macaroon=None),
+        bitcoin_core=object(),
+    )
+    with pytest.raises(OperatorConfigError, match="invoices_macaroon"):
+        asyncio.run(cli._serve(config, None, ""))  # type: ignore[arg-type]  # noqa: SLF001

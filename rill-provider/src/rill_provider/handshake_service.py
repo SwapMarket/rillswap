@@ -16,10 +16,14 @@ from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
+from rill_core.wire.canonical import canonicalize
 from rill_core.wire.messages import InvoiceBinding
+from rill_core.wire.quotes import parse_quote_request
+from rill_core.wire.reverse_quotes import ReverseFirmQuoteRequest
 
 from rill_provider.live_session_store import (
     FIRST_REQUEST_SEQUENCE,
+    Answer,
     LiveSessionStoreError,
     SessionBlockedError,
     SessionExpiredError,
@@ -30,9 +34,11 @@ from rill_provider.lnd_payment_observation import LndObservationError
 from rill_provider.provider_identity import AnnouncementTerms
 from rill_provider.quote_policy import (
     FirmSigner,
+    HoldOutcome,
     InvoiceOutcome,
     QuoteSchedule,
     QuoteTerms,
+    hold_invoice_msat,
     success_fee,
 )
 from rill_provider.relay_client import RelayConnection, RelayError
@@ -41,10 +47,12 @@ from rill_provider.settlement_policy import answer_client_request
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from rill_core.wire.types import NetworkIdentity
+    from rill_core.wire.messages import Envelope
+    from rill_core.wire.types import NetworkIdentity, ProfileId
     from rill_crypto import Context
 
-    from rill_provider.live_session_store import LiveSessionStore
+    from rill_provider.live_session_store import LiveSessionStore, RequestContext
+    from rill_provider.lnd_hold_invoice import LndHoldInvoices
     from rill_provider.provider_identity import ProviderIdentity
     from rill_provider.settlement_engine import SettlementEngine
 
@@ -87,6 +95,7 @@ class ServicePolicy:
     max_sends_per_tick: int = 16
     quote: QuoteSchedule = field(default_factory=QuoteSchedule)
     provider_destination_script: str | None = None  # required for firm offers
+    profile: ProfileId = "btc-to-ln/v1"  # the one negotiated profile this service serves
     relay_proxy: str | None = None  # checked loopback CONNECT proxy, or direct
 
     def __post_init__(self) -> None:
@@ -129,6 +138,7 @@ class HandshakeService:
         chain_tip: Callable[[], int] | None = None,
         invoice_decoder: Callable[[str], InvoiceBinding] | None = None,
         settlement: SettlementEngine | None = None,
+        hold_invoices: LndHoldInvoices | None = None,
     ) -> None:
         """Bind already-acquired, already-verified resources.
 
@@ -147,6 +157,7 @@ class HandshakeService:
         self._chain_tip = chain_tip
         self._invoice_decoder = invoice_decoder
         self._settlement = settlement
+        self._hold_invoices = hold_invoices
         self._state = _State()
 
     def _now(self) -> int:
@@ -360,6 +371,72 @@ class HandshakeService:
             LOG.warning("invoice decoding unavailable; firm quote answered capacity_unavailable")
             return "unavailable"
 
+    async def _open_hold(self, document: bytes, terms: QuoteTerms) -> HoldOutcome:
+        """Open the hold invoice for a new LN to BTC firm request (RS-004).
+
+        Runs before the store transaction, like invoice decoding. The invoice
+        is for exactly ``H`` at this payout with the schedule's final CLTV, so
+        the offer can bind its decoding; ``_answer`` cancels it again when the
+        answer is not a terms offer. An unavailable backend only defers.
+        """
+        envelope = json.loads(document)
+        payload = envelope.get("payload")
+        if (
+            self._hold_invoices is None
+            or self._invoice_decoder is None
+            or terms.firm is None
+            or terms.profile != "ln-to-btc/v1"
+            or envelope.get("sequence") != FIRST_REQUEST_SEQUENCE
+            or not isinstance(payload, dict)
+            or payload.get("mode") != "firm"
+            or self._store.classify_request(document) != "new"
+        ):
+            return None
+        try:
+            request = parse_quote_request(canonicalize(payload))
+        except ValueError:
+            return None  # the quote rules answer request_unacceptable
+        if not isinstance(request, ReverseFirmQuoteRequest):
+            return None
+        payout = int(request.nominal_payout_sat)
+        if (
+            not any(low <= payout <= high for low, high in terms.amount_bands)
+            or self._store.payment_hash_reserved(request.payment_hash)
+            or not self._store.firm_capacity_available()
+        ):
+            return None  # refused without opening anything
+        hold_invoices, decoder, schedule = (
+            self._hold_invoices,
+            self._invoice_decoder,
+            terms.schedule,
+        )
+        try:
+            bolt11 = await asyncio.to_thread(
+                lambda: hold_invoices.add(
+                    request.payment_hash,
+                    value_msat=hold_invoice_msat(terms, payout),
+                    expiry_seconds=schedule.hold_invoice_lifetime,
+                    cltv_expiry_delta=schedule.incoming_htlc_expiry_delta_blocks,
+                )
+            )
+            binding = await asyncio.to_thread(decoder, bolt11)
+        except Exception as error:  # noqa: BLE001 - an unavailable backend only defers
+            LOG.warning(
+                "hold invoice unavailable (%s); firm quote answered capacity_unavailable",
+                type(error).__name__,
+            )
+            return "unavailable"
+        return (bolt11, binding)
+
+    async def _cancel_hold(self, hold: HoldOutcome) -> None:
+        if not isinstance(hold, tuple) or self._hold_invoices is None:
+            return
+        hold_invoices, payment_hash = self._hold_invoices, hold[1].payment_hash
+        try:
+            await asyncio.to_thread(lambda: hold_invoices.cancel(payment_hash))
+        except Exception as error:  # noqa: BLE001 - the invoice expires on its own
+            LOG.warning("unused hold invoice not canceled (%s)", type(error).__name__)
+
     async def _route_ready(  # noqa: PLR0911 - one closed rule per branch
         self, document: bytes, terms: QuoteTerms
     ) -> QuoteTerms:
@@ -413,16 +490,28 @@ class HandshakeService:
             now=now,
             firm=self._firm_signer(),
             invoice=invoice,
+            profile=policy.profile,
         )
         terms = await self._route_ready(document, terms)
-        answer = self._store.answer_request(
-            document,
-            responder=lambda request, prior, context: answer_client_request(
-                request, prior, context, terms, self._transport
-            ),
-            signer=self._transport,
-            now=now,
-        )
+        terms = replace(terms, hold=await self._open_hold(document, terms))
+        sent: list[str] = []
+
+        def responder(
+            request: Envelope, prior: tuple[Envelope, ...], context: RequestContext
+        ) -> Answer:
+            answer = answer_client_request(request, prior, context, terms, self._transport)
+            sent.append(answer.message_type)
+            return answer
+
+        try:
+            answer = self._store.answer_request(
+                document, responder=responder, signer=self._transport, now=now
+            )
+        except BaseException:
+            await self._cancel_hold(terms.hold)
+            raise
+        if sent != ["terms_offer"]:  # refused, or a replay: this invoice binds nothing
+            await self._cancel_hold(terms.hold)
         # A replay re-sends the recorded answer (RS-001 stable replay).
         await self._send_pending(answer.response_message_id, relays)
         return "request-replay" if answer.replay else "request-answered"

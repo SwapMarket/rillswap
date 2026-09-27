@@ -24,6 +24,7 @@ from rill_core.networks import require_funding_release
 from rill_provider.core_tx_bytes import CoreTransactionReader
 from rill_provider.handshake_service import HandshakeService
 from rill_provider.live_session_store import LiveSessionStore, LiveSessionStoreError
+from rill_provider.lnd_hold_invoice import LndHoldInvoices
 from rill_provider.lnd_invoice_decode import LndInvoiceDecoder
 from rill_provider.lnd_payment_observation import LndObservationError
 from rill_provider.lnd_payment_send import LndPaymentSender
@@ -190,6 +191,22 @@ def _settlement(
     return SettlementEngine(store, chain, lightning, crypto)
 
 
+def _hold_invoices(config: OperatorConfig) -> LndHoldInvoices | None:
+    lnd = config.lnd
+    if lnd is None or lnd.invoices_macaroon is None:
+        return None
+    try:
+        return LndHoldInvoices(
+            host="127.0.0.1",
+            port=lnd.port,
+            tls_certificate_path=lnd.tls_certificate,
+            macaroon_path=lnd.invoices_macaroon,
+            network=config.network,
+        )
+    except ValueError:
+        raise OperatorConfigError("lnd requires a supported network") from None
+
+
 def _invoice_decoder(config: OperatorConfig) -> Callable[[str], InvoiceBinding] | None:
     lnd = config.lnd
     if lnd is None:
@@ -221,6 +238,15 @@ async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
     ):
         # Firm offers invite funding; without settlement nothing would pay them.
         raise OperatorConfigError("firm offers need lnd.payment_macaroon and bitcoin_core")
+    if (
+        config.provider_destination_script is not None
+        and config.handshake.profile == "ln-to-btc/v1"
+        and (lnd is None or lnd.invoices_macaroon is None or config.bitcoin_core is None)
+    ):
+        # LN to BTC firm offers open hold invoices and fund contracts.
+        raise OperatorConfigError(
+            "ln-to-btc firm offers need lnd.invoices_macaroon and bitcoin_core"
+        )
     try:
         proxy = require_relay_route(
             config.network, config.relay_proxy, allow_direct=config.allow_direct_relays
@@ -260,6 +286,7 @@ async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
             chain_tip=_chain_tip(config),
             invoice_decoder=_invoice_decoder(config),
             settlement=_settlement(config, store, crypto),
+            hold_invoices=_hold_invoices(config),
         )
         await service.run(stop)
 

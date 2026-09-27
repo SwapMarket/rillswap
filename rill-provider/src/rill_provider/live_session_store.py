@@ -2370,6 +2370,25 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - never echo storage details
             raise LiveSessionStoreError("spent observation refused") from None
 
+    def payment_hash_reserved(self, payment_hash: str) -> bool:
+        """Whether ``payment_hash`` is already reserved (pre-check before opening a hold).
+
+        The authoritative check runs inside ``answer_request``; this only
+        avoids opening a hold invoice an offer could never bind.
+        """
+        if type(payment_hash) is not str or len(payment_hash) != 64:  # noqa: PLR2004 - hex digest
+            raise LiveSessionStoreError("payment hash must be 32 bytes of hex")
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT 1 FROM payment_hashes WHERE payment_hash=?", (payment_hash,)
+                ).fetchone()
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("reservation check refused") from None
+        return row is not None
+
     def firm_capacity_available(self) -> bool:
         """Whether any session could still receive a firm offer (global count only).
 
