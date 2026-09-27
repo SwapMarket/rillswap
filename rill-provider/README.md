@@ -523,8 +523,8 @@ rill-provider provision-store --config provider.json
 rill-provider serve --config provider.json           # until SIGINT/SIGTERM
 ```
 
-A v8, v9, or v10 store upgrades to v11 automatically when `serve` (or any command)
-opens it. v9 adds the `claim_attempts` table, and each `CLAIMING` swap's
+A v8, v9, v10, or v11 store upgrades to v12 automatically when `serve` (or any
+command) opens it. v9 adds the `claim_attempts` table, and each `CLAIMING` swap's
 retained claim becomes attempt 0 with an unknown fee and height, which the
 engine validates and observes before any bump. v10 rebuilds `swaps` with the
 terminal `LOST` state and NULL `outpoint_spent_height`/`outpoint_spent_block`
@@ -533,8 +533,11 @@ v11 rebuilds `swaps` with the LN to BTC states (`LN_HELD`, `FUNDING_SENT`,
 `FUNDED`, `SETTLED`, `REFUNDING`, `REFUNDED`, `ABORTED`) and NULL
 `funding_txid`, `funding_vout`, `funding_tx`, `refund_txid`, `refund_tx`,
 and `spend_scan_height` on every existing row; v10 stores upgrade on open.
-Older binaries refuse a v9, v10, or v11 store, so a binary rollback after this
-upgrade is not possible.
+v12 adds an empty cooperation-attempt ledger without modifying existing swaps
+or granting signing permission. Old accepted swaps remain unilateral. A missing
+attempt row never authorizes allocating a nonce, and an interrupted migration
+rolls back its schema and both version markers. Older binaries refuse a v9,
+v10, v11, or v12 store, so a binary rollback after this upgrade is not possible.
 
 Upgrading an authoritative v5, v6, or v7 installation is an explicit offline operation:
 

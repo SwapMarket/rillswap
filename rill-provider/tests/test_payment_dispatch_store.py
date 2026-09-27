@@ -9,7 +9,7 @@ from unittest.mock import Mock
 
 import pytest
 from rill_core.wire.canonical import canonicalize
-from test_live_session_store import Harness, swaps_as_v9
+from test_live_session_store import Harness, swaps_as_v9, without_v12_cooperation
 
 from rill_provider import live_session_store as live
 
@@ -78,6 +78,7 @@ def _as_v5(path: Path) -> None:
 
 def _as_v6(path: Path) -> None:
     with sqlite3.connect(path) as connection:
+        without_v12_cooperation(connection)
         swaps_as_v9(connection)
         connection.execute("DROP TABLE claim_attempts")
         connection.execute("DROP TABLE economic_reservations")
@@ -186,7 +187,7 @@ def test_upgrade_is_explicit_and_never_backfills_send_permission(
         assert store._connection.execute("SELECT * FROM payment_dispatch").fetchall() == []  # noqa: SLF001
         assert not store.commit_payment_dispatch(session, _hash(harness), b"request")
     with harness.acquire() as store:
-        assert store._connection.execute("PRAGMA user_version").fetchone() == (11,)  # noqa: SLF001
+        assert store._connection.execute("PRAGMA user_version").fetchone() == (12,)  # noqa: SLF001
         assert not store.commit_payment_dispatch(session, _hash(harness), b"request")
 
 

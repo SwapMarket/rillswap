@@ -8,7 +8,7 @@ import sqlite3
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from test_live_session_store import Harness, _other_init, swaps_as_v9
+from test_live_session_store import Harness, _other_init, swaps_as_v9, without_v12_cooperation
 from test_payment_dispatch_store import _hash, _insert_funded_swap
 from test_payment_reconciliation import _paying
 from test_quote_policy import FIRM, _firm
@@ -125,6 +125,7 @@ def test_dispatch_without_an_open_reservation_keeps_the_grant(
 
 def _as_v7(path: Path) -> None:
     with sqlite3.connect(path) as connection:
+        without_v12_cooperation(connection)
         swaps_as_v9(connection)
         connection.execute("DROP TABLE claim_attempts")
         connection.execute("DROP TABLE economic_reservations")
@@ -156,7 +157,7 @@ def test_v7_upgrade_is_explicit_and_backfills_conservatively(harness: Harness) -
         session, state, evidence = ledger[tombstoned]
         assert (session, state) == ("dd" * 32, "RELEASED")
         assert evidence == b'{"reason":"expired-offer","source":"migration","version":1}'
-        assert store._connection.execute("PRAGMA user_version").fetchone() == (11,)  # noqa: SLF001
+        assert store._connection.execute("PRAGMA user_version").fetchone() == (12,)  # noqa: SLF001
     with harness.acquire() as store:  # idempotent: no further migration
         assert len(_ledger(store)) == 4
 

@@ -189,6 +189,12 @@ def swaps_as_v9(connection: sqlite3.Connection) -> None:
     connection.execute("DROP TABLE swaps_v10")
 
 
+def without_v12_cooperation(connection: sqlite3.Connection) -> None:
+    """Restore an exact prior-release fixture, never discard signing evidence."""
+    assert connection.execute("SELECT count(*) FROM cooperation_attempts").fetchone() == (0,)
+    connection.execute("DROP TABLE cooperation_attempts")
+
+
 class Harness:
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self.source, self.envelopes = _envelopes()

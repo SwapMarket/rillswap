@@ -77,7 +77,7 @@ if TYPE_CHECKING:
     from rill_provider.provider_identity import ProviderIdentity
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
-SCHEMA_VERSION = 11  # v8-v10 upgrade on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
+SCHEMA_VERSION = 12  # v8-v11 upgrade on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
 CONTRACT_KEY_RECORD_KIND = "rillswap-provider-contract-key"
 OPEN_PHASES = ("CONFIRMED", "ACCEPTED")  # sessions that may still send requests
 SWAP_TRANSITIONS = frozenset(
@@ -284,15 +284,47 @@ SCHEMA_V9 = (*SCHEMA_V8, CLAIM_ATTEMPT_SCHEMA)
 SCHEMA_V10 = tuple(
     SWAPS_V10_SCHEMA if statement is SWAPS_V9_SCHEMA else statement for statement in SCHEMA_V9
 )
-SCHEMA = tuple(
+SCHEMA_V11 = tuple(
     SWAPS_SCHEMA if statement is SWAPS_V10_SCHEMA else statement for statement in SCHEMA_V10
 )
+COOPERATION_ATTEMPT_SCHEMA = (
+    "CREATE TABLE cooperation_attempts (cooperation_id BLOB PRIMARY KEY NOT NULL CHECK "
+    "(typeof(cooperation_id)='blob' AND length(cooperation_id)=32), session_id TEXT NOT NULL, "
+    "owner_generation INTEGER NOT NULL CHECK (typeof(owner_generation)='integer' AND "
+    "owner_generation > 0), binding BLOB NOT NULL "
+    "CHECK (typeof(binding)='blob' AND length(binding) BETWEEN 1 AND 65536), "
+    "created_at INTEGER NOT NULL CHECK (typeof(created_at)='integer' AND created_at >= 0), "
+    "deadline_at INTEGER NOT NULL CHECK (typeof(deadline_at)='integer' AND "
+    "deadline_at > created_at), state TEXT NOT NULL CHECK "
+    "(state IN ('BURNED','NONCE_READY','SIGNING','COMPLETE','ABANDONED')), "
+    "local_nonce BLOB CHECK (local_nonce IS NULL OR (typeof(local_nonce)='blob' AND "
+    "length(local_nonce)=66)), peer_nonce BLOB CHECK (peer_nonce IS NULL OR "
+    "(typeof(peer_nonce)='blob' AND length(peer_nonce)=66)), partial_signature BLOB CHECK "
+    "(partial_signature IS NULL OR (typeof(partial_signature)='blob' AND "
+    "length(partial_signature)=32)), nonce_response_id TEXT, partial_response_id TEXT, "
+    "CHECK ((local_nonce IS NULL)=(nonce_response_id IS NULL)), "
+    "CHECK ((partial_signature IS NULL)=(partial_response_id IS NULL)), "
+    "CHECK ((state='BURNED' AND local_nonce IS NULL AND peer_nonce IS NULL) OR "
+    "(state='NONCE_READY' AND local_nonce IS NOT NULL AND peer_nonce IS NULL) OR "
+    "(state='SIGNING' AND local_nonce IS NOT NULL AND peer_nonce IS NOT NULL) OR "
+    "(state='COMPLETE' AND local_nonce IS NOT NULL AND peer_nonce IS NOT NULL AND "
+    "partial_signature IS NOT NULL) OR "
+    "(state='ABANDONED' AND partial_signature IS NULL)), "
+    "CHECK (state='COMPLETE' OR partial_signature IS NULL))"
+)
+SCHEMA = (*SCHEMA_V11, COOPERATION_ATTEMPT_SCHEMA)
 MAX_CLAIM_ATTEMPTS = 32
 ADMISSION_INDEXES = (
     "CREATE INDEX epoch_admissions_expiry ON epoch_admissions (expired, retire_after)",
 )
 RESERVATION_INDEXES = (
     "CREATE INDEX economic_reservations_state ON economic_reservations (state, session_id)",
+)
+COOPERATION_INDEXES = (
+    (
+        "CREATE UNIQUE INDEX cooperation_unfinished_session ON cooperation_attempts (session_id) "
+        "WHERE state IN ('BURNED','NONCE_READY','SIGNING')"
+    ),
 )
 
 
@@ -635,7 +667,7 @@ class LiveSessionStore:
                 connection.execute("BEGIN IMMEDIATE")
                 for statement in SCHEMA:
                     connection.execute(statement)
-                for statement in (*ADMISSION_INDEXES, *RESERVATION_INDEXES):
+                for statement in (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES):
                     connection.execute(statement)
                 connection.execute("INSERT INTO epoch_retirement VALUES (1, 0)")
                 connection.execute(
@@ -767,6 +799,8 @@ class LiveSessionStore:
                 _upgrade_v9(connection)
             if version in (5, 6, 7, 8, 9, 10):
                 _upgrade_v10(connection)
+            if version != SCHEMA_VERSION:
+                _upgrade_v11(connection)
             if version != SCHEMA_VERSION:
                 connection.execute("UPDATE meta SET schema_version=?", (SCHEMA_VERSION,))
                 connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -2741,7 +2775,7 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
     if connection.execute("PRAGMA application_id").fetchone() != (
         APPLICATION_ID,
     ) or version not in (
-        (5, 6, 7, 8, 9, 10, SCHEMA_VERSION) if allow_v5 else (8, 9, 10, SCHEMA_VERSION)
+        (5, 6, 7, 8, 9, 10, 11, SCHEMA_VERSION) if allow_v5 else (8, 9, 10, 11, SCHEMA_VERSION)
     ):
         raise LiveSessionStoreError("live session store version unsupported")
     objects = {
@@ -2757,6 +2791,7 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
         8: SCHEMA_V8,
         9: SCHEMA_V9,
         10: SCHEMA_V10,
+        11: SCHEMA_V11,
         SCHEMA_VERSION: SCHEMA,
     }[version]
     indexes = {
@@ -2764,10 +2799,19 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
         8: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
         9: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
         10: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
-        SCHEMA_VERSION: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
+        11: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
+        SCHEMA_VERSION: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
     }
     expected = {("table", statement.split()[2]): statement for statement in schema}
-    expected.update({("index", sql.split()[2]): sql for sql in indexes.get(version, ())})
+    expected.update(
+        {
+            (
+                "index",
+                sql.split()[3] if sql.startswith("CREATE UNIQUE INDEX ") else sql.split()[2],
+            ): sql
+            for sql in indexes.get(version, ())
+        }
+    )
     if objects != expected:
         raise LiveSessionStoreError("live session store schema incompatible")
     if connection.execute("PRAGMA quick_check").fetchone() != ("ok",):
@@ -2885,6 +2929,18 @@ def _upgrade_v10(connection: sqlite3.Connection) -> None:
         "INSERT INTO swaps SELECT *, NULL, NULL, NULL, NULL, NULL, NULL FROM swaps_v10"
     )
     connection.execute("DROP TABLE swaps_v10")
+
+
+def _upgrade_v11(connection: sqlite3.Connection) -> None:
+    """Add durable cooperation burns without retrofitting legacy swaps.
+
+    The empty table proves storage capability, never an affirmative signing
+    grant. Only a newly authenticated, signed cooperative contract may later
+    insert a fresh burned attempt before allocating an opaque nonce handle.
+    """
+    connection.execute(COOPERATION_ATTEMPT_SCHEMA)
+    for statement in COOPERATION_INDEXES:
+        connection.execute(statement)
 
 
 def _check_reverse_transition(
