@@ -63,6 +63,8 @@ class BitcoinCore(_Strict):
 
     port: int = Field(ge=1, le=65535)
     cookie_file: Path
+    # Wallet that funds LN to BTC contracts (RS-004); default wallet when absent.
+    wallet: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.-]{1,64}$")
 
 
 class QuoteSettings(_Strict):

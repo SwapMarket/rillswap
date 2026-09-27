@@ -177,7 +177,10 @@ def _settlement(
         return None
     try:
         chain = CoreTransactionReader(
-            port=core.port, cookie_path=core.cookie_file, network=config.network
+            port=core.port,
+            cookie_path=core.cookie_file,
+            network=config.network,
+            wallet=core.wallet,
         )
         lightning = LndPaymentSender(
             host="127.0.0.1",

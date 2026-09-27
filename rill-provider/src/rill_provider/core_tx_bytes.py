@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -31,6 +32,12 @@ RPC_VERIFY_ALREADY_IN_CHAIN = -27
 RPC_INVALID_ADDRESS_OR_KEY = -5  # getrawtransaction: not in mempool or txindex
 MAX_COOKIE_BYTES = 512
 MAX_RESPONSE_BYTES = 256 * 1024
+MAX_BLOCK_RESPONSE_BYTES = 32 * 1024 * 1024  # a decoded block (getblock verbosity 2)
+MAX_SPEND_SCAN_BLOCKS = 12  # blocks decoded per find_spender call
+FUNDING_ESTIMATE_TARGET = 6
+MAX_SCRIPT_BYTES = 40
+_WALLET_NAME = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+SATS_PER_BTC = Decimal(100_000_000)
 MAX_TRANSACTION_HEX_BYTES = 200_000
 MAX_PORT = 65535
 HTTP_OK = 200
@@ -40,6 +47,33 @@ HASH_HEX_LENGTH = 64
 MAX_ESTIMATE_TARGET = 1008  # Core's estimatesmartfee bound
 SATS_PER_BTC = Decimal(100_000_000)
 MAX_SATS = 21_000_000 * 100_000_000
+
+
+@dataclass(frozen=True, slots=True)
+class FundedOutput:
+    """A signed, not yet broadcast wallet transaction paying the contract at index 0."""
+
+    txid: str
+    vout: int
+    raw: bytes
+    fee_sat: int
+
+
+@dataclass(frozen=True, slots=True)
+class SpendObservation:
+    """The transaction spending a contract output and the witness of that input."""
+
+    txid: str
+    witness: tuple[bytes, ...]
+    height: int | None  # None while only in the mempool
+
+
+@dataclass(frozen=True, slots=True)
+class SpendScan:
+    """Result of one bounded ``find_spender`` call."""
+
+    spender: SpendObservation | None
+    scanned_to: int  # last block height searched (resume from the next one)
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +187,7 @@ class CoreTransactionReader:
         *,
         port: int,
         cookie_path: str | os.PathLike[str],
+        wallet: str | None = None,
         network: NetworkIdentity,
         host: str = "127.0.0.1",
     ) -> None:
@@ -166,6 +201,9 @@ class CoreTransactionReader:
         self._url = f"http://[{host}]:{port}/" if host == "::1" else f"http://{host}:{port}/"
         self._cookie_path = Path(cookie_path)
         self._network = network
+        if wallet is not None and _WALLET_NAME.fullmatch(wallet) is None:
+            raise ValueError("Core wallet name unsupported")
+        self._wallet_path = "/" if wallet is None else f"/wallet/{wallet}"
 
     def tip_height(self) -> int:
         """Return the current tip height after checking chain and genesis.
@@ -338,6 +376,116 @@ class CoreTransactionReader:
             raise CoreProtocolError("Core reported another transaction ID")
         return txid
 
+    def fund_output(
+        self, script_pubkey: bytes, value_sat: int, *, max_fee_sat: int
+    ) -> FundedOutput:
+        """Build and sign (never broadcast) a wallet transaction paying ``value_sat`` to the script.
+
+        The paid output is always index 0 (change, if any, is index 1); inputs
+        are locked in the wallet so a second build cannot double-spend them.
+        The fee must not exceed ``max_fee_sat`` or nothing is signed. The
+        caller records the exact bytes durably, then ``broadcast``s them.
+        """
+        if not (
+            type(script_pubkey) is bytes
+            and 0 < len(script_pubkey) <= MAX_SCRIPT_BYTES
+            and type(value_sat) is int
+            and value_sat > 0
+            and type(max_fee_sat) is int
+            and max_fee_sat >= 0
+        ):
+            raise ValueError("funding request unsupported")
+        amount = f"{Decimal(value_sat) / SATS_PER_BTC:.8f}"
+        options = {
+            "changePosition": 1,
+            "lockUnspents": True,
+            "replaceable": False,
+            "conf_target": FUNDING_ESTIMATE_TARGET,
+            "estimate_mode": "economical",
+        }
+        try:
+            with self._client() as client:
+                described = self._rpc(client, "decodescript", [script_pubkey.hex()], 1)
+                address = described.get("address") if isinstance(described, dict) else None
+                if type(address) is not str:
+                    raise CoreProtocolError("contract script has no address")
+                created = self._rpc(
+                    client, "walletcreatefundedpsbt", [[], [{address: amount}], 0, options], 2
+                )
+                fee = _fee_sat(created)
+                if fee > max_fee_sat:
+                    raise CoreProtocolError("funding fee exceeds the signed maximum")
+                signed = self._rpc(client, "walletprocesspsbt", [created["psbt"], True], 3)
+                if not isinstance(signed, dict) or type(signed.get("psbt")) is not str:
+                    raise CoreProtocolError("Core wallet could not sign the funding")
+                final = self._rpc(client, "finalizepsbt", [signed["psbt"], True], 4)
+                if not isinstance(final, dict) or final.get("complete") is not True:
+                    raise CoreProtocolError("Core wallet could not sign every funding input")
+                raw = _transaction_bytes(final.get("hex"))
+                decoded = self._rpc(client, "decoderawtransaction", [raw.hex()], 5)
+        except httpx.HTTPError:
+            raise CoreUnavailableError("Core RPC transport unavailable") from None
+        txid = decoded.get("txid") if isinstance(decoded, dict) else None
+        outputs = decoded.get("vout") if isinstance(decoded, dict) else None
+        if (
+            type(txid) is not str
+            or len(txid) != HASH_HEX_LENGTH
+            or not isinstance(outputs, list)
+            or not outputs
+            or not isinstance(outputs[0], dict)
+            or outputs[0].get("scriptPubKey", {}).get("hex") != script_pubkey.hex()
+            or _btc_to_sat(outputs[0].get("value")) != value_sat
+        ):
+            raise CoreProtocolError("Core wallet signed a different funding than requested")
+        return FundedOutput(txid=txid, vout=0, raw=raw, fee_sat=fee)
+
+    def find_spender(self, txid: str, vout: int, *, from_height: int, to_height: int) -> SpendScan:
+        """Look for the transaction spending ``txid:vout``: mempool first, then blocks.
+
+        Blocks ``from_height`` through ``to_height`` are decoded oldest first,
+        at most ``MAX_SPEND_SCAN_BLOCKS`` per call; ``scanned_to`` tells the
+        caller where to resume. A mempool spender has ``height`` ``None``.
+        """
+        if not (
+            type(txid) is str
+            and len(txid) == HASH_HEX_LENGTH
+            and type(vout) is int
+            and vout >= 0
+            and type(from_height) is int
+            and type(to_height) is int
+            and from_height > 0
+        ):
+            raise ValueError("spend scan bounds unsupported")
+        try:
+            with self._client() as client:
+                (entry,) = _list(
+                    self._rpc(client, "gettxspendingprevout", [[{"txid": txid, "vout": vout}]], 1),
+                    1,
+                )
+                spender = entry.get("spendingtxid") if isinstance(entry, dict) else None
+                if type(spender) is str and len(spender) == HASH_HEX_LENGTH:
+                    decoded = self._rpc(client, "getrawtransaction", [spender, True], 2)
+                    witness = _spending_witness(decoded, txid, vout)
+                    if witness is not None:
+                        return SpendScan(SpendObservation(spender, witness, None), from_height - 1)
+                scanned_to = from_height - 1
+                last = min(to_height, from_height + MAX_SPEND_SCAN_BLOCKS - 1)
+                for height in range(from_height, last + 1):
+                    block_hash = self._rpc(client, "getblockhash", [height], 3)
+                    block = self._rpc(client, "getblock", [block_hash, 2], 4)
+                    transactions = block.get("tx") if isinstance(block, dict) else None
+                    for transaction in _list(transactions):
+                        witness = _spending_witness(transaction, txid, vout)
+                        if witness is not None:
+                            spender = transaction.get("txid")
+                            if type(spender) is not str or len(spender) != HASH_HEX_LENGTH:
+                                raise CoreProtocolError("Core reported a malformed spender")
+                            return SpendScan(SpendObservation(spender, witness, height), height)
+                    scanned_to = height
+        except httpx.HTTPError:
+            raise CoreUnavailableError("Core RPC transport unavailable") from None
+        return SpendScan(None, scanned_to)
+
     def outpoint_unspent(self, txid: str, vout: int) -> bool:
         """Whether ``txid:vout`` is unspent on the confirmed chain (mempool ignored).
 
@@ -446,12 +594,23 @@ class CoreTransactionReader:
             "getrawtransaction",
             "gettxout",
             "sendrawtransaction",
+            # LN to BTC (RS-004): the provider funds contracts from its Core
+            # wallet and looks for the client's claim spending them.
+            "decodescript",
+            "walletcreatefundedpsbt",
+            "walletprocesspsbt",
+            "finalizepsbt",
+            "decoderawtransaction",
+            "gettxspendingprevout",
+            "getblock",
         ):
             raise CoreProtocolError("unsupported Core RPC method")
+        path = self._wallet_path if method.startswith("wallet") else "/"
+        max_bytes = MAX_BLOCK_RESPONSE_BYTES if method == "getblock" else MAX_RESPONSE_BYTES
         try:
             with client.stream(
                 "POST",
-                "/",
+                path,
                 headers={"Accept-Encoding": "identity"},
                 json={"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
                 timeout=httpx.Timeout(READ_SECONDS, connect=CONNECT_SECONDS),
@@ -466,7 +625,7 @@ class CoreTransactionReader:
                     raise CoreProtocolError("compressed Core RPC responses are unsupported")
                 chunks = bytearray()
                 for part in response.iter_raw():
-                    if len(chunks) + len(part) > MAX_RESPONSE_BYTES:
+                    if len(chunks) + len(part) > max_bytes:
                         raise CoreProtocolError("Core RPC response exceeded resource limit")
                     chunks.extend(part)
             envelope = json.loads(
@@ -539,3 +698,41 @@ def _checked_outpoint(output: object, binding: FundingBinding, tip_height: int) 
     ):
         raise CoreProtocolError("Core contract outpoint evidence is inconsistent")
     return count
+
+
+def _fee_sat(created: object) -> int:
+    fee = created.get("fee") if isinstance(created, dict) else None
+    if type(created) is not dict or type(created.get("psbt")) is not str:
+        raise CoreProtocolError("Core wallet returned no PSBT")
+    return _btc_to_sat(fee)
+
+
+def _btc_to_sat(value: object) -> int:
+    if not isinstance(value, Decimal):
+        raise CoreProtocolError("Core reported a non-decimal amount")
+    sats = value * SATS_PER_BTC
+    if sats != sats.to_integral_value() or sats < 0:
+        raise CoreProtocolError("Core reported a non-integral satoshi amount")
+    return int(sats)
+
+
+def _list(value: object, exact: int | None = None) -> list[Any]:
+    if not isinstance(value, list) or (exact is not None and len(value) != exact):
+        raise CoreProtocolError("Core reported a malformed list")
+    return value
+
+
+def _spending_witness(decoded: object, txid: str, vout: int) -> tuple[bytes, ...] | None:
+    """Return the witness of the input of ``decoded`` spending ``txid:vout``, if any."""
+    inputs = decoded.get("vin") if isinstance(decoded, dict) else None
+    for entry in _list(inputs):
+        if not isinstance(entry, dict) or entry.get("txid") != txid or entry.get("vout") != vout:
+            continue
+        items = entry.get("txinwitness", [])
+        if not isinstance(items, list) or not all(type(item) is str for item in items):
+            raise CoreProtocolError("Core reported a malformed witness")
+        try:
+            return tuple(bytes.fromhex(item) for item in items)
+        except ValueError:
+            raise CoreProtocolError("Core reported a malformed witness") from None
+    return None
