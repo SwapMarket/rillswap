@@ -445,6 +445,9 @@ def test_native_sequence_reuse_conflicts_whatever_the_label(
         reuse.update(message_id="23" * 32, sequence=sequence, message_type=label, signature=None)
         unsigned = unsigned_envelope_hash(Envelope.model_validate_json(json.dumps(reuse)))
         reuse["signature"] = crypto.schnorr_sign(CLIENT_SECRET, unsigned, b"\x68" * 32).hex()
+        invalid = dict(reuse, signature="00" * 64)
+        assert deliver(invalid) == "refused"  # no unauthenticated sequence-conflict denial
+        assert deliver(request) == "request-replay"
         assert deliver(reuse) == "blocked"
         assert deliver(request) == "blocked"
         assert store.session_mailboxes() == ()

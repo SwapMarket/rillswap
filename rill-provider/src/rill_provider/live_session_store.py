@@ -2257,8 +2257,8 @@ class LiveSessionStore:
                     crypto=self._crypto,
                 ).hex()
                 # Unlike a request, a cooperative result has no response
-                # outbox. Exclude it before the request replay lookup below.
-                if outer.message_type not in CLIENT_REQUEST_TYPES:
+                # outbox and has its own conflict admission boundary.
+                if outer.message_type == "action_result":
                     raise LiveSessionStoreError("request not admissible")  # noqa: TRY301
                 seen = connection.execute(
                     "SELECT message_id, seq, unsigned_digest FROM inbox "
@@ -2267,6 +2267,8 @@ class LiveSessionStore:
                 ).fetchall()
                 if seen:
                     if seen == [(outer.message_id, outer.sequence, digest)]:
+                        if outer.message_type not in CLIENT_REQUEST_TYPES:
+                            raise LiveSessionStoreError("request not admissible")  # noqa: TRY301
                         answer = connection.execute(
                             "SELECT message_id FROM outbox WHERE session_id=? AND in_reply_to=?",
                             (outer.session_id, outer.message_id),
