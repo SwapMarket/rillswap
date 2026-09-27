@@ -61,10 +61,12 @@ from rill_core.wire.envelope_authentication import verify_static_signed_envelope
 from rill_core.wire.hashes import (
     COOPERATIVE_CLAIM_FEATURE,
     EPOCH_SESSION_FEATURE,
+    client_acceptance_hash,
     contract_hash,
     funding_binding_hash,
     handshake_hash,
     handshake_init_hash,
+    provider_terms_hash,
     unsigned_envelope_hash,
 )
 from rill_core.wire.messages import (
@@ -2323,6 +2325,8 @@ class LiveSessionStore:
                     reply = responder(outer, prior, context)
                     if reply.effect is not None:
                         _apply_effect(connection, outer, reply.effect, replied, now)
+                        if isinstance(reply.effect, AcceptSwap):
+                            self._admit_claim_arbitration(connection, outer, reply, replied, now)
                     if reply.payment_hash is not None:
                         connection.execute(
                             "INSERT INTO payment_hashes VALUES (?, ?, ?)",
@@ -2372,6 +2376,113 @@ class LiveSessionStore:
         if conflict:
             raise SessionBlockedError("conflicting signed request is durable")
         return RequestAnswer(outer.session_id, outer.message_id, response.message_id, replay=False)
+
+    def _admit_claim_arbitration(
+        self,
+        connection: sqlite3.Connection,
+        request: Envelope,
+        reply: Answer,
+        replied: tuple[bytes] | None,
+        now: int,
+    ) -> None:
+        """Affirmatively mark only a newly featured, independently signed swap.
+
+        This runs in the same write transaction as first acceptance. An
+        ADMITTED row alone can never delay the existing unilateral claim,
+        allocate a nonce or infer eligibility for an older accepted swap.
+        """
+        if replied is None:
+            return  # existing _apply_effect rejects this before returning
+        offer = _canonical_envelope(replied[0])
+        if offer.message_type != "terms_offer":
+            return  # existing unfeatured acceptance behavior is unchanged
+        payload = parse_model_json(TermsOfferPayload, canonicalize(offer.payload))
+        offered = payload.terms
+        terms = offered.contract_terms
+        try:
+            row = connection.execute(
+                "SELECT init_bytes,accept_bytes,transcript_digest,client_key,"
+                "provider_session_key FROM sessions WHERE session_id=?",
+                (request.session_id,),
+            ).fetchone()
+            if row is None or row[1] is None:
+                raise ValueError("featured session transcript unavailable")  # noqa: TRY301
+            init_bytes, accept_bytes, transcript, client_key, provider_key = row
+            initiation = parse_model_json(
+                HandshakeInit, canonicalize(_canonical_envelope(init_bytes).payload)
+            )
+            acceptance = parse_model_json(
+                HandshakeAccept,
+                canonicalize(_canonical_envelope(accept_bytes).payload["accept"]),
+            )
+            if not any(
+                COOPERATIVE_CLAIM_FEATURE in feature_set
+                for feature_set in (
+                    initiation.required_features,
+                    acceptance.required_features,
+                    terms.required_features,
+                )
+            ):
+                return  # the previously accepted, fully unfeatured contract
+            accepted = parse_model_json(TermsAcceptPayload, canonicalize(request.payload))
+            signed = accepted.acceptance
+            acceptance.validate_against(initiation, supported_features=self._policy.features)
+            require_supported_contract_features(terms, initiation, acceptance)
+            digest = contract_hash(terms).hex()
+            transcript_hash = handshake_hash(initiation, acceptance).hex()
+            if (
+                COOPERATIVE_CLAIM_FEATURE not in self._policy.features
+                or request.message_type != "terms_accept"
+                or request.in_reply_to != offer.message_id
+                or request.session_id != initiation.session_id
+                or offer.session_id != initiation.session_id
+                or request.profile_id != "btc-to-ln/v1"
+                or offer.profile_id != request.profile_id
+                or terms.profile_id != request.profile_id
+                or initiation.profile_id != request.profile_id
+                or acceptance.profile_id != request.profile_id
+                or terms.network_identity != self._network
+                or initiation.network_identity != self._network
+                or acceptance.network_identity != self._network
+                or request.sender_session_key != client_key
+                or request.sender_session_key != initiation.client_session_xonly_key
+                or offer.sender_session_key != provider_key
+                or offer.sender_session_key != acceptance.provider_session_xonly_key
+                or offered.handshake_hash != transcript_hash
+                or transcript != transcript_hash
+                or offered.contract_hash != digest
+                or offer.contract_hash != digest
+                or request.contract_hash != digest
+                or reply.effect != AcceptSwap(digest)
+                or reply.message_type != "ack"
+                or reply.contract_hash != digest
+                or reply.payment_hash is not None
+                or reply.payload != {"acknowledged_message_id": request.message_id}
+                or signed.contract_hash != digest
+                or signed.handshake_hash != transcript_hash
+                or signed.session_id != request.session_id
+                or signed.client_session_xonly_key != client_key
+                or signed.provider_session_xonly_key != provider_key
+                or now > terms.terms_expiry
+            ):
+                raise ValueError("featured acceptance differs")  # noqa: TRY301
+            self._crypto.schnorr_verify(
+                bytes.fromhex(acceptance.provider_identity_xonly_key),
+                provider_terms_hash(offered),
+                bytes.fromhex(payload.provider_terms_signature),
+            )
+            self._crypto.schnorr_verify(
+                bytes.fromhex(client_key),
+                client_acceptance_hash(signed),
+                bytes.fromhex(accepted.client_acceptance_signature),
+            )
+            connection.execute(
+                "INSERT INTO claim_arbitration (session_id,contract_hash,version,state) "
+                "VALUES (?,?,1,'ADMITTED')",
+                (request.session_id, digest),
+            )
+        except Exception:  # noqa: BLE001 - no signed acceptance or local policy oracle
+            raise LiveSessionStoreError("cooperative admission refused") from None
 
     def _admit_cooperative_result(  # noqa: PLR0912, PLR0915 - one signed admission transaction
         self, document: bytes, *, now: int

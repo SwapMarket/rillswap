@@ -547,6 +547,16 @@ restarting its deadline; retained fallback and completed bytes are preserved.
 There is no active cooperative scheduler yet. A binary rollback from v13 is
 not supported.
 
+On the current version, a *new* BTC-to-LN acceptance can record an `ADMITTED`
+arbitration row only when both retained authenticated handshake halves and the
+identity-signed offer require `cooperative-claim/v1`, the client's nested
+acceptance is independently signature-verified, and the signed acknowledgment
+is bound to that contract in the same transaction. Mixed feature commitments
+are refused instead of silently downgraded. Old or fully unfeatured accepted
+swaps get no row. `ADMITTED` alone starts no cooperation window and does not
+delay the normal unilateral claim. Live quotes do not yet offer this feature;
+the scheduler and crash-safe fallback are still required before activation.
+
 Upgrading an authoritative v5, v6, or v7 installation is an explicit offline operation:
 
 ```sh
