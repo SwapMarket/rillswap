@@ -450,6 +450,7 @@ def refund_after_unpaid(  # noqa: PLR0913 - explicit scenario inputs
     miner: str,
     invoice_state: str,
     stop_mining: threading.Event,
+    recovery: Path,
 ) -> bool:
     """The provider failed after dispatch; the client refunds with fee escalation.
 
@@ -532,7 +533,7 @@ def refund_after_unpaid(  # noqa: PLR0913 - explicit scenario inputs
             "3",
             "--poll-seconds",
             "2",
-            str(work / "user-recovery.age.funded"),
+            str(recovery),
         ],
         stdout=watch_stdout,
         stderr=watch_stderr,
@@ -835,10 +836,8 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
     args = parser.parse_args()
     if args.ln_to_btc and (args.unpaid_refund or args.reconcile_after_settle):
         parser.error("--ln-to-btc runs its own scenario")
-    if args.web and (
-        args.ln_to_btc or args.unpaid_refund or args.reconcile_after_settle
-    ):
-        parser.error("--web runs only the plain BTC to LN scenario")
+    if args.web and (args.ln_to_btc or args.reconcile_after_settle):
+        parser.error("--web runs the BTC to LN scenario, optionally --unpaid-refund")
     work = ROOT / "tmp" / f"e2e-{time.strftime('%Y%m%dT%H%M%S')}"
     work.mkdir(parents=True, mode=0o700)
     stack = Stack(work)
@@ -1052,7 +1051,20 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
         log(f"user invoice {state}")
         if args.unpaid_refund:
             ok = refund_after_unpaid(
-                stack, args, work, swap, config, miner, state, stop_mining
+                stack,
+                args,
+                work,
+                swap,
+                config,
+                miner,
+                state,
+                stop_mining,
+                work
+                / (
+                    "web-recovery-funded.age"
+                    if args.web
+                    else "user-recovery.age.funded"
+                ),
             )
             log("PASS" if ok else f"FAIL (logs in {work})")
             return 0 if ok else 1
