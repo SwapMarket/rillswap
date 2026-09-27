@@ -292,7 +292,7 @@ class HandshakeService:
             seen.popitem(last=False)
         return True
 
-    async def handle(self, event: bytes, relays: Sequence[Relay]) -> str:  # noqa: PLR0911 - one disposition per outcome
+    async def handle(self, event: bytes, relays: Sequence[Relay]) -> str:  # noqa: PLR0911, PLR0912 - one disposition per outcome
         """Route one untrusted relay event; return a content-free disposition."""
         if not self._first_sight(event):
             return "duplicate"
@@ -306,7 +306,8 @@ class HandshakeService:
                 document = None
             now = self._now()
             if document is not None:
-                if json.loads(document).get("message_type") == "handshake_confirm":
+                message_type = json.loads(document).get("message_type")
+                if message_type == "handshake_confirm":
                     try:
                         admitted = store.admit_confirm(document, now=now)
                     except (StaleOwnerError, SessionBlockedError, SessionExpiredError):
@@ -317,6 +318,9 @@ class HandshakeService:
                         return await self._answer(document, relays, now)
                     await self._resubscribe(relays)
                     return "confirm-replay" if admitted.replay else "confirm-admitted"
+                if message_type == "action_result":
+                    result = store._admit_cooperative_result(document, now=now)  # noqa: SLF001 - store-owned admission; no signer or reply
+                    return "result-replay" if result.replay else "result-admitted"
                 return await self._answer(document, relays, now)
             init = store.open_epoch_frame(event, now=now, transport=self._transport)
             reserved = store.reserve(init, now=now)

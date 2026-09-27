@@ -337,6 +337,60 @@ def test_ownership_loss_is_never_swallowed_as_a_refusal() -> None:
         asyncio.run(service.handle(event, []))
 
 
+def test_result_transport_admits_without_creating_an_answer() -> None:
+    """Ingress routes to the authenticated store, not request-response logic."""
+
+    class CooperativeStore:
+        def __init__(self) -> None:
+            self.document = b'{"message_type":"action_result"}'
+            self.replay = False
+            self.error: LiveSessionStoreError | None = None
+            self.admitted: list[tuple[bytes, int]] = []
+            self.answered: list[bytes] = []
+
+        def open_mailbox_frame(self, *_args: object, **_kwargs: object) -> bytes:
+            return self.document
+
+        def _admit_cooperative_result(self, document: bytes, *, now: int) -> SimpleNamespace:
+            self.admitted.append((document, now))
+            if self.error is not None:
+                raise self.error
+            return SimpleNamespace(replay=self.replay)
+
+        def answer_request(self, document: bytes, **_kwargs: object) -> None:
+            self.answered.append(document)
+            raise LiveSessionStoreError("not a client request")
+
+    policy = ServicePolicy(
+        network=None,  # type: ignore[arg-type]
+        profiles=("btc-to-ln/v1",),
+        amount_bands=((1000, 2000),),
+        base_fee_sat=1,
+        proportional_millionths=1,
+        slot="s",
+        relay_urls=("ws://r/",),
+    )
+    store = CooperativeStore()
+    service = HandshakeService(store, object(), object(), policy, clock=lambda: 123)  # type: ignore[arg-type]
+    relay = _Relay(accept=True)
+
+    def handle_event(index: int) -> str:
+        return asyncio.run(service.handle(json.dumps({"id": f"{index:064x}"}).encode(), [relay]))
+
+    assert handle_event(1) == "result-admitted"
+    store.replay = True
+    assert handle_event(2) == "result-replay"
+    store.error = LiveSessionStoreError("invalid cooperative result")
+    assert handle_event(3) == "refused"
+    assert store.admitted == [(store.document, 123)] * 3
+    assert store.answered == []
+    assert relay.published == []
+    store.document = b'{"message_type":"action_request"}'
+    assert handle_event(4) == "refused"
+    assert store.answered == [store.document]
+    assert relay.published == []
+
+
 @pytest.mark.native_crypto
 @NATIVE
 @pytest.mark.parametrize(("label", "sequence"), [("handshake_confirm", 2), ("quote_request", 1)])
