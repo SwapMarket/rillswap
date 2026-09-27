@@ -479,6 +479,39 @@ Settlement steps:
   wait restarts. `LOST` releases the economic reservation as `claim-lost`:
   the Lightning payment is gone and nothing further can happen to the swap.
 
+**LN to BTC (RS-004).** A service whose `handshake.profile` is
+`ln-to-btc/v1` serves that profile only. Firm offers need
+`lnd.invoices_macaroon` (`invoices:read` and `invoices:write`, for
+`AddHoldInvoice`, `LookupInvoiceV2`, `SettleInvoice`, and `CancelInvoice`) and
+`bitcoin_core` with an optional `wallet` that funds contracts; `serve` refuses
+to start otherwise. For each new firm request the service opens a hold invoice
+for `H` (lifetime `quote.hold_invoice_lifetime`, default 3600 s, which must
+cover `minimum_invoice_remaining_seconds + terms_lifetime`) and cancels it
+again unless the answer is exactly that terms offer. `ReverseSettlement` then
+advances each swap one step per tick:
+- `ACCEPTED` to `LN_HELD` once the hold is `ACCEPTED` for exactly `H` with
+  every part expiring after `refund_lock_height + 1 +
+  refund_and_ln_resolution_blocks`, and while the funding window is open;
+  otherwise the hold is canceled and the swap is `ABORTED` (also when the
+  invoice expires unpaid).
+- `LN_HELD` to `FUNDING_SENT`: the hold is checked again, Core's wallet
+  builds and signs (never broadcasts) a payment of exactly `V` to the
+  contract at index 0 with locked inputs, refusing a fee above
+  `max_funding_fee_sat`. The signed bytes, the reservation marked
+  `DISPATCHED`, and a session-signed `funding_binding` for the client are
+  committed in one transaction; only then is the transaction broadcast, and
+  every later tick rebroadcasts it.
+- `FUNDED` at `funding_confirmations`. The engine looks for a spend of the
+  contract output (`gettxspendingprevout` for the mempool, then at most 12
+  blocks per tick with `getblock` verbosity 2 from a durable scan cursor). A
+  spend whose witness holds the preimage of the payment hash settles the
+  hold and the swap is `SETTLED`. Any other spender is logged and never
+  settled on.
+- Past `refund_lock_height` with no claim, the refund leaf is signed with the
+  contract key, recorded (`REFUNDING`), and broadcast. The engine keeps
+  looking for a late claim (which still settles). The hold is canceled
+  only once the refund has `refund_resolution_confirmations` (`REFUNDED`).
+
 Cooperative MuSig2 claims are not negotiated yet.
 
 ### Operator entrypoint (private regtest only)
@@ -490,13 +523,17 @@ rill-provider provision-store --config provider.json
 rill-provider serve --config provider.json           # until SIGINT/SIGTERM
 ```
 
-A v8 or v9 store upgrades to v10 automatically when `serve` (or any command)
+A v8, v9, or v10 store upgrades to v11 automatically when `serve` (or any command)
 opens it. v9 adds the `claim_attempts` table, and each `CLAIMING` swap's
 retained claim becomes attempt 0 with an unknown fee and height, which the
 engine validates and observes before any bump. v10 rebuilds `swaps` with the
 terminal `LOST` state and NULL `outpoint_spent_height`/`outpoint_spent_block`
 on every existing row, so no swap changes state and lost-claim observation starts from scratch.
-Older binaries refuse a v9 or v10 store, so a binary rollback after this
+v11 rebuilds `swaps` with the LN to BTC states (`LN_HELD`, `FUNDING_SENT`,
+`FUNDED`, `SETTLED`, `REFUNDING`, `REFUNDED`, `ABORTED`) and NULL
+`funding_txid`, `funding_vout`, `funding_tx`, `refund_txid`, `refund_tx`,
+and `spend_scan_height` on every existing row; v10 stores upgrade on open.
+Older binaries refuse a v9, v10, or v11 store, so a binary rollback after this
 upgrade is not possible.
 
 Upgrading an authoritative v5, v6, or v7 installation is an explicit offline operation:

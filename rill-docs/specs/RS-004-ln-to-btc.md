@@ -107,7 +107,24 @@ contract only once the invoice is `ACCEPTED` with total held amount exactly
 while `tip + funding_confirmations + client_response_blocks +
 claim_confirmation_blocks < refund_lock_height`. Otherwise it cancels the hold
 invoice and the swap is `ABORTED`. The provider sends `funding_binding` with
-`funder_role` `"provider"` (RS-003 shape).
+`funder_role` `"provider"` (RS-003 shape), unsolicited and bound to the
+contract hash, signed with its session key over `funding_binding_hash`, and
+carrying the exact funding transaction. Version 1 has one attempt with
+`binding_revision` 0 and no replacement. It records the signed funding bytes
+and marks the swap's economic reservation dispatched before it broadcasts.
+The client MUST verify the signature, that the binding names this contract,
+the Taproot script, and `V`, and that the transaction bytes pay exactly that
+output; it then appends the binding to its recovery record's
+`funding_history` before waiting for `funding_confirmations`.
+
+Other provider notices are `observation` payloads and carry no authority:
+`hold_accepted`, `hold_settled`, `swap_aborted` (with a short `reason`, sent
+only when nothing was funded), `refund_broadcast`, and `refund_confirmed`
+(each with `refund_txid`).
+
+A provider's hold invoice MUST outlive the offer: its expiry is at least
+`terms_expiry + minimum_invoice_remaining_seconds`, so a client accepting just
+before `terms_expiry` still has that long to pay.
 
 The client learns the preimage-revealing claim is safe as in the previous
 section, then broadcasts its unilateral claim. The provider learns the

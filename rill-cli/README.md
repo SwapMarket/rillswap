@@ -78,6 +78,48 @@ Exit codes:
 - `2`: any other failure. Check whether a `.funded` file exists before
   assuming nothing was committed.
 
+## Live swap: `rill swap ln-to-btc`
+
+Receives on-chain BTC by paying a provider's hold invoice from your own LND
+(RS-004). Same networks and mainnet gate as above. It runs these steps in order:
+1. Verify the announcement (it must offer `ln-to-btc/v1`) and handshake.
+2. Generate the preimage locally and request firm terms for `--payout-sat`,
+   with your claim destination (a fresh `--wallet` address) and limits: the
+   provider may refund no earlier than `--min-refund-delay-blocks` from now,
+   and your Lightning funds may stay held at most
+   `--max-incoming-htlc-delay-blocks`.
+3. Decode the hold invoice with your LND and verify the terms, the invoice
+   binding, and the provider's signature.
+4. Write the encrypted recovery file, including the preimage, then accept.
+5. Pay the hold invoice (`--lnd-macaroon` needs offchain read and write) on a
+   route whose final hop expires no earlier than the terms'
+   `min_incoming_htlc_expiry_height`, within `--max-routing-fee-sat`.
+6. Wait for the provider's session-signed `funding_binding`, check it and the
+   exact funding transaction against the terms, and write the funded snapshot
+   (`<output>.funded`).
+7. Once Core shows the contract output at the signed depth, sign the claim
+   (fee from `--fee-rate`, capped by the signed maximum) and broadcast it. The
+   provider settles the hold from the preimage in the claim witness.
+
+```sh
+rill swap ln-to-btc \
+  --network trusted-regtest-network.json \
+  --crypto-library /absolute/path/to/librill_crypto.so \
+  --relay ws://127.0.0.1:7777 --provider PROVIDER_XONLY_HEX \
+  --payout-sat 50000 --max-success-fee-sat 1000 \
+  --core-port 18443 --core-cookie ~/.bitcoin/regtest/.cookie --wallet receive \
+  --lnd-port 10009 --lnd-tls-cert tls.cert --lnd-macaroon payment.macaroon \
+  --recipient age1... --identity /protected/age-identity \
+  --recovery-output swap-recovery.age
+```
+
+Nothing is at risk until the hold is paid; an abort before funding, or an
+unusable route, stops with exit code `5` and the held payment fails back when
+the provider cancels the hold. If the command stops after funding, claim from
+the `.funded` snapshot with `rill recover prepare-claim` and `broadcast-claim`
+before the refund lock height. After that the provider refunds and cancels
+the hold, which returns your Lightning funds.
+
 The client currently reuses `rill-provider`'s Nostr transport modules.
 Discovery observes a bounded query window and selects the highest valid
 announcement revision it receives, rather than trusting arrival order. Equal
