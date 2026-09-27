@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { schnorr } from "@noble/curves/secp256k1.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import canonicalize from "canonicalize";
+import { finalizeEvent, getPublicKey } from "nostr-tools";
 import type { NostrEvent } from "nostr-tools";
 
 import { discoverProvider } from "../src/swap/discovery";
@@ -112,5 +115,31 @@ describe("provider discovery", () => {
     await expect(discoverProvider(at([]), IDENTITY, NETWORK, "btc-to-ln/v1")).rejects.toThrow(SwapError);
     const other = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
     await expect(discoverProvider(at([ANNOUNCEMENT]), other, NETWORK, "btc-to-ln/v1")).rejects.toThrow(SwapError);
+  });
+
+  test("two independent identities on different relays need no shared registry (N01)", async () => {
+    spyOn(Date, "now").mockReturnValue(1703021600 * 1000);
+    const secondSecret = Uint8Array.from({ length: 32 }, (_, index) => index === 31 ? 7 : 0);
+    const secondIdentity = getPublicKey(secondSecret);
+    const secondApplication = structuredClone(application);
+    secondApplication.advertisement.provider_identity_xonly_key = secondIdentity;
+    const tag = sha256(new TextEncoder().encode("RillSwap/advertisement/v1"));
+    const signedBytes = new TextEncoder().encode(canonicalize(secondApplication.advertisement)!);
+    const digest = sha256(new Uint8Array([...tag, ...tag, ...signedBytes]));
+    secondApplication.signature = Buffer.from(schnorr.sign(digest, secondSecret)).toString("hex");
+    const secondEvent = finalizeEvent({
+      kind: 39417,
+      created_at: vector.created_at,
+      tags: vector.tags,
+      content: canonicalize(secondApplication)!,
+    }, secondSecret);
+    const sources = [at([ANNOUNCEMENT]), at([JSON.stringify(secondEvent)])];
+    const identities = [IDENTITY, secondIdentity];
+    for (const [index, source] of sources.entries()) {
+      const found = await discoverProvider(source, identities[index]!, NETWORK, "btc-to-ln/v1");
+      expect(found.identityXOnlyKey).toBe(identities[index]!);
+      await expect(discoverProvider(source, identities[1 - index]!, NETWORK, "btc-to-ln/v1"))
+        .rejects.toThrow(SwapError);
+    }
   });
 });
