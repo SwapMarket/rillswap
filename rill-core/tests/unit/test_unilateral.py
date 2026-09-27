@@ -14,12 +14,16 @@ from rill_core.settlement import (
     FundingOutput,
     TaprootContract,
     UnilateralAuthorization,
+    build_cooperative_claim,
     build_unilateral_spend,
+    finalize_cooperative_claim,
     finalize_unilateral_spend,
     max_spendable_fee,
     reconstruct_taproot_contract,
+    validate_cooperative_claim,
     validate_unilateral_spend,
 )
+from rill_core.settlement import unilateral as tx
 from rill_core.wire.messages import ContractTerms
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "settlement-v1"
@@ -190,6 +194,79 @@ def _first_context() -> tuple[
         _terms(taproot_case),
         _funding(settlement_case),
     )
+
+
+def test_cooperative_claim_binds_exact_key_path_transaction_and_output_key() -> None:
+    case, terms, funding = _first_context()
+    authorization = UnilateralAuthorization.from_terms(
+        terms, funding, "claim", keys=_keys(terms, case)
+    )
+    plan = build_cooperative_claim(authorization, fee_sat=300)
+    # This synthetic verifier tests the policy boundary; the native/Bitcoin
+    # Core tests separately establish actual BIP340/MuSig consensus validity.
+    signature = b"\x11" * 64
+    verifier = ExpectedVerifier(funding.script_pubkey[2:], plan.signature_hash, signature)
+    validated = finalize_cooperative_claim(plan, signature, verifier=verifier)
+    assert validated.signature_hash == plan.signature_hash
+    assert validated.fee_sat == 300
+    assert validated.raw_transaction[-69:] == b"\x40" + signature + b"\x00\x00\x00\x00"
+    assert len(verifier.calls) == 1
+    assert validate_cooperative_claim(validated.raw_transaction, authorization, verifier=verifier)
+    assert len(verifier.calls) == 2
+    internal_key_verifier = ExpectedVerifier(
+        bytes.fromhex(case["artifacts"]["internal_key"]), plan.signature_hash, signature
+    )
+    with pytest.raises(ValidationError, match="signature is invalid"):
+        validate_cooperative_claim(
+            validated.raw_transaction, authorization, verifier=internal_key_verifier
+        )
+
+
+def test_cooperative_claim_refuses_every_transaction_policy_escape() -> None:
+    case, terms, funding = _first_context()
+    authorization = UnilateralAuthorization.from_terms(
+        terms, funding, "claim", keys=_keys(terms, case)
+    )
+    signature = b"\x11" * 64
+    plan = build_cooperative_claim(authorization, fee_sat=300)
+    verifier = ExpectedVerifier(funding.script_pubkey[2:], plan.signature_hash, signature)
+    good = tx._parse_transaction(  # noqa: SLF001 - mutate parsed bytes for adversarial policy cases
+        finalize_cooperative_claim(plan, signature, verifier=verifier).raw_transaction
+    )
+    incoming = good.inputs[0]
+    outgoing = good.outputs[0]
+    mutations = [
+        replace(good, version=1),
+        replace(good, lock_time=1),
+        replace(good, inputs=(replace(incoming, sequence=0xFFFFFFFF),)),
+        replace(good, inputs=(replace(incoming, script_sig=b"\x01"),)),
+        replace(
+            good, inputs=(replace(incoming, prevout=replace(incoming.prevout, txid=b"\xff" * 32)),)
+        ),
+        replace(good, inputs=(incoming, incoming), witnesses=((signature,), (signature,))),
+        replace(good, outputs=(outgoing, outgoing)),
+        replace(good, outputs=(replace(outgoing, script_pubkey=b"\x51\x20" + b"\xff" * 32),)),
+        replace(good, outputs=(replace(outgoing, value_sat=funding.value_sat + 1),)),
+        replace(
+            good,
+            outputs=(
+                replace(outgoing, value_sat=funding.value_sat - authorization.fee_cap_sat - 1),
+            ),
+        ),
+        replace(good, witnesses=((signature, b"\x50"),)),  # annex
+        replace(good, witnesses=((signature + b"\x00",),)),  # explicit default sighash
+        replace(good, witnesses=((b"\x00" * 64,),)),
+    ]
+    for candidate in mutations:
+        with pytest.raises(ValidationError):
+            validate_cooperative_claim(candidate.serialize(), authorization, verifier=verifier)
+    refund = UnilateralAuthorization.from_terms(terms, funding, "refund", keys=_keys(terms, case))
+    with pytest.raises(ValidationError, match="only for a claim"):
+        build_cooperative_claim(refund, fee_sat=300)
+    with pytest.raises(ValidationError, match="internally inconsistent"):
+        finalize_cooperative_claim(
+            replace(plan, signature_hash=b"\x00" * 32), signature, verifier=verifier
+        )
 
 
 def test_authorization_rejects_unsupported_profile_and_wrong_funding() -> None:

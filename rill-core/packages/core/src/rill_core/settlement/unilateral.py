@@ -198,6 +198,30 @@ class ValidatedUnilateralSpend:
 
 
 @dataclass(frozen=True, slots=True)
+class CooperativeClaimPlan:
+    """Frozen one-input claim transaction and BIP341 key-path signing digest."""
+
+    authorization: UnilateralAuthorization
+    fee_sat: int
+    base_transaction: bytes
+    signature_hash: bytes
+    output_value_sat: int
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedCooperativeClaim:
+    """Exact tweaked-key claim with a single BIP340 witness signature."""
+
+    raw_transaction: bytes
+    signature_hash: bytes
+    fee_sat: int
+    txid: str
+    wtxid: str
+    weight: int
+    vsize: int
+
+
+@dataclass(frozen=True, slots=True)
 class _Outpoint:
     txid: bytes
     output_index: int
@@ -406,6 +430,97 @@ def validate_unilateral_spend(  # noqa: PLR0912
     )
 
 
+def build_cooperative_claim(
+    authorization: UnilateralAuthorization, *, fee_sat: int
+) -> CooperativeClaimPlan:
+    """Freeze the same authorized claim output for a tweaked key-path attempt.
+
+    The caller must independently establish directional LN/preimage authority
+    and durably burn a unique cooperation ID before allocating a nonce handle.
+    This function neither signs nor grants permission to disclose a preimage.
+    """
+    if authorization.path != "claim" or authorization.lock_time != 0:
+        raise ValidationError("cooperative key path is only for a claim")
+    _require_fee_and_output(authorization, fee_sat)
+    transaction = _build_transaction(authorization, fee_sat, witness=())
+    return CooperativeClaimPlan(
+        authorization=authorization,
+        fee_sat=fee_sat,
+        base_transaction=transaction.serialize_base(),
+        signature_hash=_taproot_key_path_sighash(transaction, authorization),
+        output_value_sat=authorization.funding.value_sat - fee_sat,
+    )
+
+
+def finalize_cooperative_claim(
+    plan: CooperativeClaimPlan, signature: bytes, *, verifier: SchnorrVerifier
+) -> ValidatedCooperativeClaim:
+    """Attach only a 64-byte SIGHASH_DEFAULT signature to the frozen plan."""
+    _require_signature(signature)
+    if plan.authorization.path != "claim" or plan.authorization.lock_time != 0:
+        raise ValidationError("cooperative key path is only for a claim")
+    _require_fee_and_output(plan.authorization, plan.fee_sat)
+    transaction = _build_transaction(plan.authorization, plan.fee_sat, witness=(signature,))
+    if (
+        plan.base_transaction != transaction.serialize_base()
+        or plan.signature_hash != _taproot_key_path_sighash(transaction, plan.authorization)
+        or plan.output_value_sat != transaction.outputs[0].value_sat
+    ):
+        raise ValidationError("cooperative claim plan is internally inconsistent")
+    return validate_cooperative_claim(
+        transaction.serialize(), plan.authorization, verifier=verifier
+    )
+
+
+def validate_cooperative_claim(
+    raw_transaction: bytes,
+    authorization: UnilateralAuthorization,
+    *,
+    verifier: SchnorrVerifier,
+) -> ValidatedCooperativeClaim:
+    """Authorize every untrusted transaction byte before a key-path claim is used."""
+    if authorization.path != "claim" or authorization.lock_time != 0:
+        raise ValidationError("cooperative key path is only for a claim")
+    transaction = _parse_transaction(raw_transaction)
+    if transaction.version != TRANSACTION_VERSION or transaction.lock_time != 0:
+        raise ValidationError("cooperative claim requires version two and locktime zero")
+    if len(transaction.inputs) != 1 or len(transaction.outputs) != 1:
+        raise ValidationError("cooperative claim requires one input and one output")
+    tx_input = transaction.inputs[0]
+    if tx_input.prevout != _Outpoint(
+        authorization.funding.txid, authorization.funding.output_index
+    ):
+        raise ValidationError("cooperative claim spends the wrong outpoint")
+    if tx_input.script_sig or tx_input.sequence != INPUT_SEQUENCE:
+        raise ValidationError("cooperative claim scriptSig or sequence is incorrect")
+    tx_output = transaction.outputs[0]
+    if tx_output.script_pubkey != authorization.destination_script:
+        raise ValidationError("cooperative claim uses the wrong role destination")
+    fee_sat = authorization.funding.value_sat - tx_output.value_sat
+    _require_fee_and_output(authorization, fee_sat)
+    if len(transaction.witnesses) != 1 or len(transaction.witnesses[0]) != 1:
+        raise ValidationError("cooperative claim requires one signature and no annex")
+    signature = transaction.witnesses[0][0]
+    _require_signature(signature)
+    digest = _taproot_key_path_sighash(transaction, authorization)
+    try:
+        verifier.schnorr_verify(authorization.funding.script_pubkey[2:], digest, signature)
+    except Exception as error:
+        raise ValidationError("cooperative claim BIP340 signature is invalid") from error
+    base = transaction.serialize_base()
+    raw = transaction.serialize()
+    weight = 3 * len(base) + len(raw)
+    return ValidatedCooperativeClaim(
+        raw_transaction=raw,
+        signature_hash=digest,
+        fee_sat=fee_sat,
+        txid=_hash256(base)[::-1].hex(),
+        wtxid=_hash256(raw)[::-1].hex(),
+        weight=weight,
+        vsize=(weight + 3) // 4,
+    )
+
+
 def _role_destination(terms: ContractTerms, role: str) -> bytes:
     value = (
         terms.client_destination_script if role == "client" else terms.provider_destination_script
@@ -526,8 +641,34 @@ def _taproot_script_path_sighash(
     transaction: _Transaction,
     authorization: UnilateralAuthorization,
 ) -> bytes:
-    funding = authorization.funding
     message = (
+        _taproot_common_sighash_message(transaction, authorization)
+        + b"\x02"  # spend_type = 2 * ext_flag + annex_present (1, 0)
+        + (0).to_bytes(4, "little")
+        + authorization.tapleaf_hash
+        + b"\x00"
+        + CODESEPARATOR_POSITION.to_bytes(4, "little")
+    )
+    return tagged_hash("TapSighash", b"\x00" + message)
+
+
+def _taproot_key_path_sighash(
+    transaction: _Transaction, authorization: UnilateralAuthorization
+) -> bytes:
+    """BIP341 SIGHASH_DEFAULT with ext_flag=0 and no annex, all prevouts."""
+    message = (
+        _taproot_common_sighash_message(transaction, authorization)
+        + b"\x00"
+        + (0).to_bytes(4, "little")
+    )
+    return tagged_hash("TapSighash", b"\x00" + message)
+
+
+def _taproot_common_sighash_message(
+    transaction: _Transaction, authorization: UnilateralAuthorization
+) -> bytes:
+    funding = authorization.funding
+    return (
         bytes([SIGHASH_DEFAULT])
         + transaction.version.to_bytes(4, "little", signed=True)
         + transaction.lock_time.to_bytes(4, "little")
@@ -542,13 +683,7 @@ def _taproot_script_path_sighash(
         + hashlib.sha256(
             b"".join(tx_output.serialize() for tx_output in transaction.outputs),
         ).digest()
-        + b"\x02"
-        + (0).to_bytes(4, "little")
-        + authorization.tapleaf_hash
-        + b"\x00"
-        + CODESEPARATOR_POSITION.to_bytes(4, "little")
     )
-    return tagged_hash("TapSighash", b"\x00" + message)
 
 
 class _Reader:

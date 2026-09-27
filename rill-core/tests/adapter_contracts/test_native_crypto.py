@@ -23,7 +23,9 @@ from rill_core.settlement import (
     SignedFundingBinding,
     TaprootContract,
     UnilateralAuthorization,
+    build_cooperative_claim,
     build_unilateral_spend,
+    finalize_cooperative_claim,
     finalize_unilateral_spend,
     reconstruct_taproot_contract,
     validate_unilateral_spend,
@@ -260,6 +262,71 @@ def test_pinned_native_crypto_reproduces_every_signed_unilateral_vector() -> Non
                     )
                     == validated
                 )
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 to run pinned native interoperability",
+)
+def test_both_profiles_aggregate_tweaked_key_path_claim_signatures() -> None:
+    from rill_crypto import Context  # noqa: PLC0415
+
+    taproot_cases = json.loads((FIXTURES / "taproot-cases-v1.json").read_text())["valid"]
+    funding_by_id = {
+        case["taproot_vector"]: case
+        for case in json.loads((FIXTURES / "settlement-cases-v1.json").read_text())["valid"]
+    }
+    with Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto:
+        for index, case in enumerate(taproot_cases, start=1):
+            terms = ContractTerms.model_validate_json(json.dumps(case["contract_terms"]))
+            funding_case = funding_by_id[case["id"]]["synthetic_funding"]
+            funding = FundingOutput(
+                txid=bytes.fromhex(funding_case["txid"]),
+                output_index=funding_case["vout"],
+                value_sat=int(funding_case["value_sat"]),
+                script_pubkey=bytes.fromhex(funding_case["script_pubkey"]),
+            )
+            auth = UnilateralAuthorization.from_terms(terms, funding, "claim", keys=crypto)
+            plan = build_cooperative_claim(auth, fee_sat=300)
+            user_key = bytes.fromhex(terms.client_contract_compressed_key)
+            provider_key = bytes.fromhex(terms.provider_contract_compressed_key)
+            session = {
+                "user_public_key": user_key,
+                "provider_public_key": provider_key,
+                "tap_tweak": bytes.fromhex(case["artifacts"]["tap_tweak"]),
+                "message": plan.signature_hash,
+            }
+            user_attempt, user_nonce = crypto.musig_begin(
+                secret_key=bytes.fromhex(case["fixture_keys"]["client_contract_secret_key"]),
+                cooperation_id=bytes([index]) * 32,
+                **session,
+            )
+            provider_attempt, provider_nonce = crypto.musig_begin(
+                secret_key=bytes.fromhex(case["fixture_keys"]["provider_contract_secret_key"]),
+                cooperation_id=bytes([index]) * 32,
+                **session,
+            )
+            with user_attempt, provider_attempt:
+                user_partial = user_attempt.partial_sign_once(provider_nonce)
+                provider_partial = provider_attempt.partial_sign_once(user_nonce)
+                nonces = {"user_public_nonce": user_nonce, "provider_public_nonce": provider_nonce}
+                crypto.musig_partial_verify(
+                    signer_index=0, partial_signature=user_partial, **session, **nonces
+                )
+                crypto.musig_partial_verify(
+                    signer_index=1, partial_signature=provider_partial, **session, **nonces
+                )
+                signature = crypto.musig_aggregate(
+                    user_partial_signature=user_partial,
+                    provider_partial_signature=provider_partial,
+                    **session,
+                    **nonces,
+                )
+            claim = finalize_cooperative_claim(plan, signature, verifier=crypto)
+            assert claim.raw_transaction.hex().endswith(signature.hex() + "00000000")
+            assert claim.fee_sat == 300
+            assert len(claim.signature_hash) == 32
 
 
 @pytest.mark.native_crypto
