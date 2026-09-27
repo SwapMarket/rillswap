@@ -45,6 +45,8 @@ not pay, refund with `rill recover watch-refund` on the funded recovery file
 after the refund height; the browser does not refund. Nothing is stored in the
 browser, so an upgrade or reload reads, migrates, or resumes nothing; an
 interrupted swap continues only through the downloaded recovery file.
+There is no service worker or in-page update check: a new release takes
+effect only when the user reloads, which also discards the in-memory keys.
 
 What relays learn: each gift wrap shows its recipient key (the provider's
 epoch inbox or session key, or this tab's fresh session key), a randomly
@@ -172,7 +174,9 @@ PSBT, and a gift wrap produced by rill-provider. From the repository root,
 `scripts/regtest_e2e.py --web --crypto-library <path>` runs a live regtest
 swap with `scripts/web-swap-e2e.ts` driving `runSwap` (Core's wallet stands in
 for the user's wallet) and then requires `rill recover inspect` to accept both
-browser-written recovery files.
+browser-written recovery files. Adding `--unpaid-refund` makes the provider
+fail after dispatch and refunds with `rill recover watch-refund` from the
+browser-written funded recovery file alone.
 
 `bun run test` checks the same built bytes at `/` and `/repository/` on
 loopback. All runtime assets are local. Browser tests need a supported

@@ -38,3 +38,14 @@ test("the preview page links to the swap page", async ({ page }) => {
   await page.getByRole("link", { name: /Experimental BTC to Lightning swap client/ }).click();
   await expect(page).toHaveURL(SWAP);
 });
+
+test("the swap page installs no service worker, so no release replaces it mid-swap (W11)", async ({ page }) => {
+  await page.goto(SWAP);
+  await expect(page.locator("#swap-start")).toBeVisible();
+  const registrations = await page.evaluate(async () =>
+    "serviceWorker" in navigator ? (await navigator.serviceWorker.getRegistrations()).length : 0);
+  expect(registrations).toBe(0);
+  const scripts = await page.locator("script").evaluateAll((nodes) =>
+    nodes.map((node) => (node as HTMLScriptElement).src));
+  for (const src of scripts) expect(new URL(src).host).toBe("127.0.0.1:18765");
+});
