@@ -95,6 +95,28 @@ class CandidateFundingOutpoint:
     inclusion_block_hash: str
 
 
+@dataclass(frozen=True, slots=True)
+class CooperativeClaimOutpoint:
+    """One named-tip confirmed UTXO sample with mempool spends considered.
+
+    This is read-only evidence, not spending authority. A mempool spend may
+    arrive immediately after the sample. It carries neither a signing time
+    nor fee-policy or Lightning authorization.
+    """
+
+    network_identity: NetworkIdentity
+    static_match: FundingBindingTransactionMatch
+    funding_txid: str
+    funding_vout: int
+    funding_value_sat: int
+    funding_script_pubkey: bytes
+    tip_hash: str
+    tip_height: int
+    confirmations: int
+    inclusion_height: int
+    inclusion_block_hash: str
+
+
 class CoreReadError(Exception):
     """No usable requested evidence was established; never absence proof."""
 
@@ -288,6 +310,59 @@ class CoreTransactionReader:
         a trickling local endpoint. Unknown/unstable facts fail closed without
         retry, wallet RPC, database updates, or automatic scans.
         """
+        match, tip_hash, tip_height, confirmations, inclusion_height, inclusion_hash = (
+            self._observe_outpoint(binding, terms, keys=keys, include_mempool=False)
+        )
+        return CandidateFundingOutpoint(
+            self._network,
+            match,
+            tip_hash,
+            tip_height,
+            confirmations,
+            inclusion_height,
+            inclusion_hash,
+        )
+
+    def observe_cooperative_claim_outpoint(
+        self,
+        binding: FundingBinding,
+        terms: ContractTerms,
+        *,
+        keys: TaprootKeyOperations,
+    ) -> CooperativeClaimOutpoint:
+        """Sample one confirmed outpoint, including known mempool spends.
+
+        A positive sample is immediately staleable and grants no signing
+        permission. Future runtime must independently bound total elapsed
+        acquisition time, establish fee/payment/deadline policy, and ensure
+        unilateral fallback. No chain-only fallback is attempted on failure.
+        """
+        match, tip_hash, tip_height, confirmations, inclusion_height, inclusion_hash = (
+            self._observe_outpoint(binding, terms, keys=keys, include_mempool=True)
+        )
+        return CooperativeClaimOutpoint(
+            self._network,
+            match,
+            binding.funding_txid,
+            binding.contract_vout,
+            int(binding.contract_value_sat),
+            bytes.fromhex(binding.contract_script_pubkey),
+            tip_hash,
+            tip_height,
+            confirmations,
+            inclusion_height,
+            inclusion_hash,
+        )
+
+    def _observe_outpoint(
+        self,
+        binding: FundingBinding,
+        terms: ContractTerms,
+        *,
+        keys: TaprootKeyOperations,
+        include_mempool: bool,
+    ) -> tuple[FundingBindingTransactionMatch, str, int, int, int, str]:
+        """One read-only Core session, identical checks for either fixed RPC mode."""
         if not isinstance(binding, FundingBinding):
             raise TypeError("a parsed binding is required")
         if not isinstance(terms.network_identity, NetworkIdentity) or (
@@ -312,7 +387,10 @@ class CoreTransactionReader:
                 raw = _transaction_bytes(raw_hex)
                 match = check_funding_binding_transaction(raw, binding, terms, keys=keys)
                 output = self._rpc(
-                    client, "gettxout", [binding.funding_txid, binding.contract_vout, False], 4
+                    client,
+                    "gettxout",
+                    [binding.funding_txid, binding.contract_vout, include_mempool],
+                    4,
                 )
                 confirmations = _checked_outpoint(output, binding, tip_height)
                 inclusion_height = tip_height - confirmations + 1
@@ -338,15 +416,7 @@ class CoreTransactionReader:
             raise CoreUnavailableError("Core RPC transport unavailable") from None
         if tip_hash != end_hash or tip_height != end_height or output["bestblock"] != tip_hash:
             raise CoreUnavailableError("Core chain view changed; no current outpoint proof")
-        return CandidateFundingOutpoint(
-            self._network,
-            match,
-            tip_hash,
-            tip_height,
-            confirmations,
-            inclusion_height,
-            inclusion_hash,
-        )
+        return match, tip_hash, tip_height, confirmations, inclusion_height, inclusion_hash
 
     def _client(self) -> httpx.Client:
         username, password = _cookie(self._cookie_path)

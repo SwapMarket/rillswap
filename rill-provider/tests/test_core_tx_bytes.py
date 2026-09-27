@@ -533,6 +533,8 @@ def _candidate_reply(  # noqa: PLR0912, PLR0915 - explicit malformed Core respon
         "bestblockhash": tip,
         "initialblockdownload": False,
     }
+    if change == "wrong-chain":
+        info["chain"] = "main"
     output: dict[str, Any] = {
         "bestblock": tip,
         "confirmations": 3,
@@ -556,6 +558,12 @@ def _candidate_reply(  # noqa: PLR0912, PLR0915 - explicit malformed Core respon
         output["bestblock"] = "bb" * 32
     if change == "boolean-confirms":
         output["confirmations"] = True
+    if change == "zero-confirms":
+        output["confirmations"] = 0
+    if change == "negative-confirms":
+        output["confirmations"] = -1
+    if change == "missing-confirms":
+        output.pop("confirmations")
     if change == "excess-confirmations":
         output["confirmations"] = 106
     if change in ("tip-inclusion", "tip-inclusion-mismatch"):
@@ -587,10 +595,14 @@ def _candidate_reply(  # noqa: PLR0912, PLR0915 - explicit malformed Core respon
         transaction = "02000000000100"
     result: object = {
         "getblockchaininfo": info,
-        "getblockhash": GENESIS if payload["params"] == [0] else block_hash,
+        "getblockhash": ("ff" * 32 if change == "wrong-genesis" else GENESIS)
+        if payload["params"] == [0]
+        else block_hash,
         "getrawtransaction": transaction,
         "gettxout": output if change != "null" else None,
     }[payload["method"]]
+    if change == "mempool-spend" and payload["method"] == "gettxout":
+        result = None if payload["params"][2] is True else output
     if change == "block-not-found" and payload["id"] == 6:
         return 200, json.dumps(
             {
@@ -656,6 +668,142 @@ def test_candidate_is_a_named_tip_utxo_sample_not_lineage_authority(
     assert requests[4]["params"] == [103]
     assert requests[5]["params"] == [binding.funding_txid, False, "cc" * 32]
     assert len(requests) == 7
+
+
+def test_cooperative_claim_sample_considers_mempool_without_granting_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    terms, binding, network = _context()
+    match = FundingBindingTransactionMatch(
+        binding.funding_txid,
+        binding.contract_vout,
+        binding.lineage_anchor_txid,
+        binding.lineage_anchor_vout,
+    )
+    checked: list[bytes] = []
+
+    def checker(raw: bytes, *_args: object, **_kwargs: object) -> FundingBindingTransactionMatch:
+        checked.append(raw)
+        return match
+
+    monkeypatch.setattr(core_tx_bytes, "check_funding_binding_transaction", checker)
+    requests: list[dict[str, Any]] = []
+    with _server(lambda payload: _candidate_reply(payload, binding), requests) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        result = reader.observe_cooperative_claim_outpoint(
+            binding,
+            terms,
+            keys=None,  # type: ignore[arg-type]
+        )
+    assert type(result) is core_tx_bytes.CooperativeClaimOutpoint
+    assert checked == [bytes.fromhex("02000000000100")]
+    assert result.network_identity == network
+    assert result.static_match == match
+    assert result.funding_txid == binding.funding_txid
+    assert result.funding_vout == binding.contract_vout
+    assert result.funding_value_sat == int(binding.contract_value_sat)
+    assert result.funding_script_pubkey == bytes.fromhex(binding.contract_script_pubkey)
+    assert (result.tip_hash, result.tip_height, result.confirmations) == ("aa" * 32, 105, 3)
+    assert (result.inclusion_height, result.inclusion_block_hash) == (103, "cc" * 32)
+    assert [request["method"] for request in requests] == [
+        "getblockchaininfo",
+        "getblockhash",
+        "getrawtransaction",
+        "gettxout",
+        "getblockhash",
+        "getrawtransaction",
+        "getblockchaininfo",
+    ]
+    assert requests[3]["params"] == [binding.funding_txid, binding.contract_vout, True]
+
+
+def test_cooperative_sample_never_falls_back_to_chain_only_after_mempool_spend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    terms, binding, network = _context()
+    monkeypatch.setattr(
+        core_tx_bytes,
+        "check_funding_binding_transaction",
+        lambda *_args, **_kwargs: FundingBindingTransactionMatch(
+            binding.funding_txid,
+            binding.contract_vout,
+            binding.lineage_anchor_txid,
+            binding.lineage_anchor_vout,
+        ),
+    )
+    requests: list[dict[str, Any]] = []
+    with _server(
+        lambda payload: _candidate_reply(payload, binding, change="mempool-spend"), requests
+    ) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        with pytest.raises(CoreUnavailableError):
+            reader.observe_cooperative_claim_outpoint(
+                binding,
+                terms,
+                keys=None,  # type: ignore[arg-type]
+            )
+        candidate = reader.observe_candidate_outpoint(
+            binding,
+            terms,
+            keys=None,  # type: ignore[arg-type]
+        )
+    assert candidate.chain_only_confirmations == 3
+    assert [item["params"][2] for item in requests if item["method"] == "gettxout"] == [
+        True,
+        False,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("change", "error_type"),
+    [
+        ("tip", CoreUnavailableError),
+        ("wrong-chain", CoreProtocolError),
+        ("wrong-genesis", CoreProtocolError),
+        ("height", CoreUnavailableError),
+        ("null", CoreUnavailableError),
+        ("bestblock", CoreUnavailableError),
+        ("unsynced", CoreProtocolError),
+        ("script", CoreProtocolError),
+        ("value", CoreProtocolError),
+        ("fractional-sat", CoreProtocolError),
+        ("zero-confirms", CoreProtocolError),
+        ("negative-confirms", CoreProtocolError),
+        ("missing-confirms", CoreProtocolError),
+        ("coinbase", CoreProtocolError),
+        ("tip-inclusion-mismatch", CoreProtocolError),
+        ("block-bytes-differ", CoreProtocolError),
+    ],
+)
+def test_cooperative_sample_rejects_inconsistent_chain_or_utxo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+    error_type: type[Exception],
+) -> None:
+    terms, binding, network = _context()
+    monkeypatch.setattr(
+        core_tx_bytes,
+        "check_funding_binding_transaction",
+        lambda *_args, **_kwargs: FundingBindingTransactionMatch(
+            binding.funding_txid,
+            binding.contract_vout,
+            binding.lineage_anchor_txid,
+            binding.lineage_anchor_vout,
+        ),
+    )
+    requests: list[dict[str, Any]] = []
+    with _server(
+        lambda payload: _candidate_reply(payload, binding, change=change), requests
+    ) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        with pytest.raises(error_type):
+            reader.observe_cooperative_claim_outpoint(
+                binding,
+                terms,
+                keys=None,  # type: ignore[arg-type]
+            )
+    assert [item["params"][2] for item in requests if item["method"] == "gettxout"] in ([], [True])
 
 
 def test_candidate_tip_block_inclusion_is_still_not_lineage_authority(
