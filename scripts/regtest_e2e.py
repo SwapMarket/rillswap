@@ -31,6 +31,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -732,6 +733,73 @@ def check_ln_to_btc(stack: Stack, work: Path, claim_txid: str, payout: int) -> N
     log(f"user received {credited} sat on chain; hold {payment_hash[:16]} settled")
 
 
+def web_client_command(  # noqa: PLR0913 - one explicit command line
+    stack: Stack,
+    args: argparse.Namespace,
+    work: Path,
+    relay: str,
+    provider: str,
+    bolt11: str,
+    user_age: x25519.Identity,
+) -> list[str]:
+    """The rill-web runSwap driver with Core's user wallet as the user's wallet."""
+    bun = shutil.which("bun")
+    if bun is None:
+        raise RuntimeError("--web needs bun on PATH")
+    return [
+        bun,
+        "run",
+        str(ROOT / "rill-web" / "scripts" / "web-swap-e2e.ts"),
+        "--relay",
+        relay,
+        "--provider",
+        provider,
+        "--network",
+        str(work / "network.json"),
+        "--invoice",
+        bolt11,
+        "--core-port",
+        str(stack.host_port(stack.core, 18443)),
+        "--core-cookie",
+        str(work / "core.cookie"),
+        "--wallet",
+        "user",
+        "--recipient",
+        str(user_age.to_public()),
+        "--out",
+        str(work),
+        "--settle-timeout",
+        str(args.timeout),
+    ]
+
+
+def inspect_web_recovery(args: argparse.Namespace, work: Path) -> bool:
+    """rill-cli must accept both browser-written recovery files offline."""
+    for stage in ("terms", "funded"):
+        inspected = subprocess.run(  # noqa: S603 - our own console script
+            [
+                str(CLI / "rill"),
+                "recover",
+                "inspect",
+                "--network",
+                str(work / "network.json"),
+                "--crypto-library",
+                args.crypto_library,
+                "--identity",
+                str(work / "user-age.key"),
+                str(work / f"web-recovery-{stage}.age"),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        log(f"rill recover inspect ({stage}) exit {inspected.returncode}")
+        if inspected.returncode != 0:
+            sys.stderr.write(inspected.stderr)
+            return False
+    return True
+
+
 def main() -> int:  # noqa: PLR0915 - one ordered scenario
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--crypto-library", required=True)
@@ -759,9 +827,18 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
         action="store_true",
         help="RS-004: pay the provider's hold invoice and claim its on-chain funding",
     )
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        help="run the BTC to LN swap with the rill-web browser client (bun)",
+    )
     args = parser.parse_args()
     if args.ln_to_btc and (args.unpaid_refund or args.reconcile_after_settle):
         parser.error("--ln-to-btc runs its own scenario")
+    if args.web and (
+        args.ln_to_btc or args.unpaid_refund or args.reconcile_after_settle
+    ):
+        parser.error("--web runs only the plain BTC to LN scenario")
     work = ROOT / "tmp" / f"e2e-{time.strftime('%Y%m%dT%H%M%S')}"
     work.mkdir(parents=True, mode=0o700)
     stack = Stack(work)
@@ -907,11 +984,13 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
             "user", "addinvoice", "--amt", "50000", "--memo", "rill-e2e"
         )
         bolt11, payment_hash = invoice["payment_request"], invoice["r_hash"]
-        log("running rill swap btc-to-ln")
+        log("running " + ("the rill-web client" if args.web else "rill swap btc-to-ln"))
         client_stdout = files.enter_context((work / "client.stdout").open("wb"))
         client_stderr = files.enter_context((work / "client.stderr").open("wb"))
         client = subprocess.Popen(  # noqa: S603
-            [
+            web_client_command(stack, args, work, relay, xonly, bolt11, user_age)
+            if args.web
+            else [
                 str(CLI / "rill"),
                 "swap",
                 "btc-to-ln",
@@ -986,6 +1065,8 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
         ok = swap.returncode == 0 and state == "SETTLED" and claimed
         if ok:
             check_absolute_payment(stack, work)
+        if ok and args.web:
+            ok = inspect_web_recovery(args, work)
         log("PASS" if ok else f"FAIL (logs in {work})")
         return 0 if ok else 1
     finally:
