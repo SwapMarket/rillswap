@@ -8,6 +8,7 @@ import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+import pyrage
 import pytest
 from rill_core.settlement import (
     CooperativeClaimPlan,
@@ -22,7 +23,7 @@ from rill_core.wire.hashes import (
     handshake_hash,
     handshake_init_hash,
 )
-from rill_core.wire.messages import ContractTerms, HandshakeAccept, HandshakeInit
+from rill_core.wire.messages import ContractTerms, Envelope, HandshakeAccept, HandshakeInit
 from test_live_session_store import Harness, PurePublicKeys
 from test_payment_dispatch_store import _insert_funded_swap
 from test_settlement_engine import BINDING
@@ -53,6 +54,19 @@ class PinnedContractKeys(PurePublicKeys):
         return bytes.fromhex(str(self.artifacts["output_xonly_key"])), int(
             self.artifacts["output_key_parity"]
         )
+
+
+class FixtureEnvelopeSigner:
+    """Allows only its own exact test signature; not actual BIP340 signing."""
+
+    def __init__(self, harness: Harness, keys: PurePublicKeys) -> None:
+        self.crypto, self.keys = harness.crypto, keys
+
+    def schnorr_sign(self, secret_key: bytes, message: bytes, auxiliary_random: bytes) -> bytes:
+        assert len(auxiliary_random) == 32
+        signature = b"\x77" * 64
+        self.crypto.permitted.add((self.keys.public_key(secret_key)[1:], message, signature))
+        return signature
 
 
 def _featured_paid_swap(
@@ -127,9 +141,20 @@ def _featured_paid_swap(
     preimage = b"\x42" * 32
     assert hashlib.sha256(preimage).hexdigest() == terms.invoice_binding.payment_hash
     connection = store._connection  # noqa: SLF001 - synthetic persisted-state fixture only
+    (challenge, provider_key) = connection.execute(
+        "SELECT provider_challenge,provider_session_key FROM sessions WHERE session_id=?",
+        (session,),
+    ).fetchone()
+    sealed = pyrage.encrypt(
+        store._key_record(  # noqa: SLF001 - rebuild fixture custody for the changed init digest
+            session, handshake_init_hash(init).hex(), challenge, harness.scalar, provider_key
+        ),
+        [harness.custody.to_public()],
+    )
     connection.execute(
-        "UPDATE sessions SET init_bytes=?,accept_bytes=?,transcript_digest=? WHERE session_id=?",
-        (canonicalize(init_envelope), canonicalize(accept_envelope), transcript, session),
+        "UPDATE sessions SET init_bytes=?,accept_bytes=?,transcript_digest=?,"
+        "session_secret_age=? WHERE session_id=?",
+        (canonicalize(init_envelope), canonicalize(accept_envelope), transcript, sealed, session),
     )
     connection.execute(
         "UPDATE swaps SET contract_hash=?,terms_offer=?,terms_accept=?,funding_binding=?,"
@@ -328,3 +353,201 @@ def test_supported_cooperation_cannot_upgrade_an_accepted_legacy_contract(
         assert store._connection.execute(  # noqa: SLF001
             "SELECT count(*) FROM cooperation_attempts"
         ).fetchone() == (0,)
+
+
+def test_public_nonce_and_signed_proposal_commit_before_outbox_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, monkeypatch)
+    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.provision()
+    nonce = b"\x02" * 66  # structural test only; native integration validates the curve
+    with harness.acquire() as store:
+        session, plan, _ = _featured_paid_swap(harness, store)
+        store._burn_cooperative_claim(  # noqa: SLF001
+            session,
+            b"\x51" * 32,
+            plan,
+            now=1000,
+            deadline_at=1020,
+            deadline_height=1100,
+        )
+
+        def validate_nonce(value: bytes) -> None:
+            if value != nonce:
+                raise ValueError("unexpected test nonce")
+
+        monkeypatch.setattr(
+            harness.crypto, "musig_public_nonce_validate", validate_nonce, raising=False
+        )
+        signer = FixtureEnvelopeSigner(harness, store._public_keys)  # noqa: SLF001
+        message_id = store._commit_cooperative_proposal_nonce(  # noqa: SLF001
+            session, b"\x51" * 32, nonce, signer=signer, now=1001
+        )
+        (state, saved_nonce, response_id) = store._connection.execute(  # noqa: SLF001
+            "SELECT state,local_nonce,nonce_response_id FROM cooperation_attempts"
+        ).fetchone()
+        assert (state, saved_nonce, response_id) == ("NONCE_READY", nonce, message_id)
+        pending = store.pending_outbox()
+        assert len(pending) == 1
+        assert pending[0].message_id == message_id
+        envelope = Envelope.model_validate_json(pending[0].canonical_bytes, strict=True)
+        assert envelope.message_type == "action_request"
+        assert envelope.required_features == (COOPERATIVE_CLAIM_FEATURE,)
+        assert envelope.payload["unsigned_transaction"] == plan.base_transaction.hex()
+        assert envelope.payload["public_nonce"] == nonce.hex()
+        assert envelope.payload["payment_preimage"] == "42" * 32
+        with pytest.raises(live.LiveSessionStoreError, match="unavailable"):
+            store._commit_cooperative_proposal_nonce(  # noqa: SLF001
+                session, b"\x51" * 32, nonce, signer=signer, now=1002
+            )
+    with harness.acquire() as store:
+        assert store._connection.execute(  # noqa: SLF001
+            "SELECT state,local_nonce,nonce_response_id FROM cooperation_attempts"
+        ).fetchone() == ("ABANDONED", nonce, message_id)
+        # Replaying already committed public bytes never recreates a secret
+        # handle or re-signs a changed message after the owner is gone.
+        assert store.pending_outbox()[0].canonical_bytes == pending[0].canonical_bytes
+        with pytest.raises(live.LiveSessionStoreError, match="unavailable"):
+            store._commit_cooperative_proposal_nonce(  # noqa: SLF001
+                session, b"\x51" * 32, nonce, signer=signer, now=1002
+            )
+        with pytest.raises(live.LiveSessionStoreError, match="unavailable"):
+            store._burn_cooperative_claim(  # noqa: SLF001
+                session,
+                b"\x52" * 32,
+                plan,
+                now=1002,
+                deadline_at=1019,
+                deadline_height=1100,
+            )
+        # Do not cancel the already sequenced proposal. A later fallback
+        # observation must have a contiguous sequence and remain deliverable.
+        with store._write() as connection:  # noqa: SLF001 - outbox sequence boundary
+            observation_id = store._record_observation(  # noqa: SLF001
+                connection,
+                session,
+                {"event": "fallback"},
+                FixtureEnvelopeSigner(harness, PurePublicKeys()),
+                1003,
+            )
+        messages = store.pending_outbox()
+        assert [entry.message_id for entry in messages] == [message_id, observation_id]
+        assert [
+            Envelope.model_validate_json(entry.canonical_bytes).sequence for entry in messages
+        ] == [0, 1]
+
+
+def test_failed_proposal_signing_rolls_back_nonce_and_outbox_together(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, monkeypatch)
+    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.provision()
+    with harness.acquire() as store:
+        session, plan, _ = _featured_paid_swap(harness, store)
+        store._burn_cooperative_claim(  # noqa: SLF001
+            session,
+            b"\x61" * 32,
+            plan,
+            now=1000,
+            deadline_at=1020,
+            deadline_height=1100,
+        )
+        monkeypatch.setattr(
+            harness.crypto, "musig_public_nonce_validate", lambda _nonce: None, raising=False
+        )
+
+        class FailingSigner:
+            def schnorr_sign(
+                self, _secret_key: bytes, _message: bytes, _auxiliary_random: bytes
+            ) -> bytes:
+                raise OSError("fixture signing interrupted")
+
+        with pytest.raises(live.LiveSessionStoreError, match="commit refused"):
+            store._commit_cooperative_proposal_nonce(  # noqa: SLF001
+                session,
+                b"\x61" * 32,
+                b"\x02" * 66,
+                signer=FailingSigner(),
+                now=1001,
+            )
+        assert store._connection.execute(  # noqa: SLF001
+            "SELECT state,local_nonce,nonce_response_id FROM cooperation_attempts"
+        ).fetchone() == ("BURNED", None, None)
+        assert store.pending_outbox() == ()
+        before_sequence = store._connection.execute(  # noqa: SLF001
+            "SELECT next_provider_seq FROM sessions WHERE session_id=?", (session,)
+        ).fetchone()
+
+        original_record = store._record_observation  # noqa: SLF001
+
+        def interrupted_record(*args: object, **kwargs: object) -> str:
+            original_record(*args, **kwargs)  # type: ignore[arg-type]
+            raise OSError("interrupted after outbox insertion")
+
+        monkeypatch.setattr(store, "_record_observation", interrupted_record)
+        with pytest.raises(live.LiveSessionStoreError, match="commit refused"):
+            store._commit_cooperative_proposal_nonce(  # noqa: SLF001
+                session,
+                b"\x61" * 32,
+                b"\x02" * 66,
+                signer=FixtureEnvelopeSigner(harness, store._public_keys),  # noqa: SLF001
+                now=1001,
+            )
+        assert (
+            store._connection.execute(  # noqa: SLF001
+                "SELECT next_provider_seq FROM sessions WHERE session_id=?", (session,)
+            ).fetchone()
+            == before_sequence
+        )
+        assert store._connection.execute(  # noqa: SLF001
+            "SELECT state,local_nonce,nonce_response_id FROM cooperation_attempts"
+        ).fetchone() == ("BURNED", None, None)
+        assert store.pending_outbox() == ()
+    with harness.acquire() as store:
+        assert store._connection.execute(  # noqa: SLF001
+            "SELECT state FROM cooperation_attempts"
+        ).fetchone() == ("ABANDONED",)
+
+
+@pytest.mark.parametrize("changed", ["preimage", "funding", "time"])
+def test_committed_burn_cannot_publish_against_changed_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed: str
+) -> None:
+    harness = Harness(tmp_path, monkeypatch)
+    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.provision()
+    with harness.acquire() as store:
+        session, plan, _ = _featured_paid_swap(harness, store)
+        store._burn_cooperative_claim(  # noqa: SLF001
+            session,
+            b"\x71" * 32,
+            plan,
+            now=1000,
+            deadline_at=1020,
+            deadline_height=1100,
+        )
+        if changed == "preimage":
+            store._connection.execute(  # noqa: SLF001 - simulate inconsistent retained evidence
+                "UPDATE swaps SET preimage=? WHERE session_id=?", ("41" * 32, session)
+            )
+        elif changed == "funding":
+            store._connection.execute(  # noqa: SLF001
+                "UPDATE swaps SET funding_binding=NULL WHERE session_id=?", (session,)
+            )
+        monkeypatch.setattr(
+            harness.crypto, "musig_public_nonce_validate", lambda _nonce: None, raising=False
+        )
+        with pytest.raises(live.LiveSessionStoreError, match=r"unavailable|binding changed"):
+            store._commit_cooperative_proposal_nonce(  # noqa: SLF001
+                session,
+                b"\x71" * 32,
+                b"\x02" * 66,
+                signer=FixtureEnvelopeSigner(harness, store._public_keys),  # noqa: SLF001
+                now=999 if changed == "time" else 1001,
+            )
+        assert store._connection.execute(  # noqa: SLF001
+            "SELECT state,local_nonce,nonce_response_id FROM cooperation_attempts"
+        ).fetchone() == ("BURNED", None, None)
+        assert store.pending_outbox() == ()

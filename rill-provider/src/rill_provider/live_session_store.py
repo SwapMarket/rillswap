@@ -48,6 +48,7 @@ from rill_core.settlement import (
 )
 from rill_core.wire import verify_static_handshake_accept, verify_static_handshake_transcript
 from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_model_json
+from rill_core.wire.cooperative_messages import CooperativeClaimPropose
 from rill_core.wire.envelope_authentication import verify_static_signed_envelope
 from rill_core.wire.hashes import (
     COOPERATIVE_CLAIM_FEATURE,
@@ -1092,6 +1093,138 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - never echo stored credentials or wire data
             raise LiveSessionStoreError("cooperative attempt refused") from None
 
+    def _commit_cooperative_proposal_nonce(
+        self,
+        session_id: str,
+        cooperation_id: bytes,
+        public_nonce: bytes,
+        *,
+        signer: EnvelopeSigner,
+        now: int,
+    ) -> str:
+        """Commit a native public nonce and signed BTC-to-LN proposal before exposure.
+
+        INTERNAL ONLY. The native handle must have been allocated AFTER the
+        durable burn. On failure/uncertain commit destroy it and fall back; do
+        not regenerate for this ID. The returned ID names a committed outbox
+        message, not delivery or permission to disclose a partial signature.
+        """
+        if (
+            not isinstance(cooperation_id, bytes)
+            or len(cooperation_id) != 32  # noqa: PLR2004 - BIP327 context length
+            or not isinstance(public_nonce, bytes)
+            or len(public_nonce) != 66  # noqa: PLR2004 - BIP327 public nonce length
+            or type(now) is not int
+            or now < 0
+        ):
+            raise LiveSessionStoreError("cooperative nonce parameters refused")
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT a.binding,a.owner_generation,a.created_at,a.deadline_at,a.state,"
+                    "s.phase,s.blocked,w.state,w.preimage,w.contract_hash,"
+                    "w.terms_offer,w.funding_binding "
+                    "FROM cooperation_attempts a JOIN sessions s ON s.session_id=a.session_id "
+                    "JOIN swaps w ON w.session_id=a.session_id "
+                    "WHERE a.session_id=? AND a.cooperation_id=?",
+                    (session_id, cooperation_id),
+                ).fetchone()
+                if row is None:
+                    raise LiveSessionStoreError("cooperative burn unavailable")  # noqa: TRY301
+                (
+                    binding_bytes,
+                    generation,
+                    created_at,
+                    deadline_at,
+                    state,
+                    phase,
+                    blocked,
+                    swap_state,
+                    preimage,
+                    recorded_hash,
+                    offer_bytes,
+                    funding_binding_bytes,
+                ) = row
+                binding = parse_json_strict(binding_bytes)
+                if not isinstance(binding, dict) or (
+                    generation != self._generation
+                    or state != "BURNED"
+                    or phase != "ACCEPTED"
+                    or blocked
+                    or swap_state not in ("PAID", "CLAIMING")
+                    or not created_at <= now < deadline_at
+                    or binding.get("version") != 1
+                    or binding.get("session_id") != session_id
+                    or binding.get("cooperation_id") != cooperation_id.hex()
+                    or binding.get("contract_hash") != recorded_hash
+                    or binding.get("claimant") != "provider"
+                    or binding.get("deadline_at") != deadline_at
+                    or not isinstance(preimage, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", preimage) is None
+                    or funding_binding_bytes is None
+                    or COOPERATIVE_CLAIM_FEATURE not in self._policy.features
+                ):
+                    raise LiveSessionStoreError("cooperative nonce unavailable")  # noqa: TRY301
+                terms = _offer_terms(offer_bytes)
+                retained_funding = parse_model_json(
+                    FundingBindingPayload,
+                    canonicalize(_canonical_envelope(funding_binding_bytes).payload),
+                ).binding
+                if (
+                    contract_hash(terms).hex() != recorded_hash
+                    or COOPERATIVE_CLAIM_FEATURE not in terms.required_features
+                    or hashlib.sha256(bytes.fromhex(preimage)).hexdigest()
+                    != terms.invoice_binding.payment_hash
+                    or retained_funding.contract_hash != recorded_hash
+                    or retained_funding.funding_txid != binding.get("funding_txid")
+                    or retained_funding.contract_vout != binding.get("funding_vout")
+                    or int(retained_funding.contract_value_sat) != binding.get("funding_value_sat")
+                    or retained_funding.contract_script_pubkey
+                    != binding.get("funding_script_pubkey")
+                ):
+                    raise LiveSessionStoreError("cooperative nonce binding changed")  # noqa: TRY301
+                # Production supplies native rill-crypto.Context and checks both
+                # nonce points before any signed envelope can leave the store.
+                cast("Context", self._crypto).musig_public_nonce_validate(public_nonce)
+                proposal = CooperativeClaimPropose.model_validate_json(
+                    canonicalize(
+                        {
+                            "action": "cooperative_claim_propose",
+                            "cooperation_id": cooperation_id.hex(),
+                            "unsigned_transaction": binding["unsigned_transaction"],
+                            "payment_preimage": preimage,
+                            "public_nonce": public_nonce.hex(),
+                            "deadline_at": deadline_at,
+                            "deadline_height": binding["deadline_height"],
+                        }
+                    ),
+                    strict=True,
+                )
+                message_id = self._record_observation(
+                    connection,
+                    session_id,
+                    proposal.model_dump(mode="json"),
+                    signer,
+                    now,
+                    message_type="action_request",
+                    required_features=(COOPERATIVE_CLAIM_FEATURE,),
+                )
+                if (
+                    connection.execute(
+                        "UPDATE cooperation_attempts SET state='NONCE_READY',local_nonce=?,"
+                        "nonce_response_id=? WHERE cooperation_id=? AND session_id=? "
+                        "AND state='BURNED' AND owner_generation=?",
+                        (public_nonce, message_id, cooperation_id, session_id, self._generation),
+                    ).rowcount
+                    != 1
+                ):
+                    raise LiveSessionStoreError("cooperative nonce state changed")  # noqa: TRY301
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo nonce or stored state
+            raise LiveSessionStoreError("cooperative nonce commit refused") from None
+        return message_id
+
     def _expectations(self) -> dict[str, object]:
         return {
             "expected_provider_identity": self._identity,
@@ -2000,6 +2133,8 @@ class LiveSessionStore:
         scalar: bytes,
         signer: EnvelopeSigner,
         in_reply_to: str | None,
+        *,
+        required_features: tuple[str, ...] = (),
     ) -> Envelope:
         unsigned = Envelope.model_validate_json(
             canonicalize(
@@ -2016,7 +2151,7 @@ class LiveSessionStore:
                     "contract_hash": reply.contract_hash,
                     "message_type": reply.message_type,
                     "payload": reply.payload,
-                    "required_features": [],
+                    "required_features": list(required_features),
                     "extensions": {},
                     "signature": None,
                 }
@@ -2679,7 +2814,8 @@ class LiveSessionStore:
         now: int,
         *,
         message_type: str = "observation",
-    ) -> None:
+        required_features: tuple[str, ...] = (),
+    ) -> str:
         offer_bytes, contract, key, revision, provider_seq = connection.execute(
             "SELECT w.terms_offer, w.contract_hash, s.provider_session_key, s.revision, "
             "s.next_provider_seq FROM swaps w JOIN sessions s ON s.session_id = w.session_id "
@@ -2690,7 +2826,14 @@ class LiveSessionStore:
         scalar, _ = self._unseal(connection, session_id)
         try:
             envelope = self._signed_envelope(
-                _canonical_envelope(offer_bytes), key, provider_seq, reply, scalar, signer, None
+                _canonical_envelope(offer_bytes),
+                key,
+                provider_seq,
+                reply,
+                scalar,
+                signer,
+                None,
+                required_features=required_features,
             )
         finally:
             del scalar
@@ -2708,6 +2851,7 @@ class LiveSessionStore:
             "UPDATE sessions SET revision=?, next_provider_seq=?, active_at=? WHERE session_id=?",
             (revision + 1, provider_seq + 1, now, session_id),
         )
+        return envelope.message_id
 
     def sign_with_contract_key(
         self, session_id: str, digest: bytes, signer: EnvelopeSigner
