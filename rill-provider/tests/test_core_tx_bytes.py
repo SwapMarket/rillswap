@@ -74,6 +74,11 @@ def _server(
     header_mode: str = "normal",
 ) -> Iterator[int]:
     class Handler(BaseHTTPRequestHandler):
+        # Paced responses explicitly send HTTP/1.1. Match the handler's own
+        # connection semantics so a reused httpx client is not handed a socket
+        # that Python already closed after the previous RPC.
+        protocol_version = "HTTP/1.1"
+
         def do_POST(self) -> None:
             content = self.rfile.read(int(self.headers["content-length"]))
             payload: dict[str, Any] = json.loads(content)
