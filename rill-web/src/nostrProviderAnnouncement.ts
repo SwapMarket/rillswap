@@ -26,6 +26,8 @@ export interface AnnouncementCandidate extends Omit<ManualProviderCandidate, "so
   readonly source: "signed-nip01-announcement";
   readonly outerEventId: string;
   readonly addressD: string;
+  /** The signed advertisement requires an epoch-bound session handshake. */
+  readonly requiresEpochBinding: boolean;
 }
 
 export class AnnouncementRefusedError extends Error {
@@ -125,6 +127,8 @@ export function verifyNostrProviderAnnouncement(
       source: "signed-nip01-announcement" as const,
       outerEventId: event.id,
       addressD: addressTag[1],
+      // supportedExtensions admits only the exact epoch-binding requirement.
+      requiresEpochBinding: Object.keys(advertisement.extensions as object).length > 0,
     });
   } catch {
     throw new AnnouncementRefusedError();
