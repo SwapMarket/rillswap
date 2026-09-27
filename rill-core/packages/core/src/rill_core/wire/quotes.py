@@ -8,9 +8,9 @@ decoded binding is passed in explicitly.
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import TYPE_CHECKING, Literal, cast
 
-from pydantic import Field, model_validator
+from pydantic import Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 from rill_core.wire.canonical import JsonValue, canonicalize, parse_json_strict
 from rill_core.wire.messages import BtcToLnEconomics, InvoiceBinding, ProviderTerms
@@ -112,20 +112,36 @@ class FirmQuoteRequest(StrictModel):
 
 
 QuoteRequest = IndicativeQuoteRequest | FirmQuoteRequest
+if TYPE_CHECKING:
+    from rill_core.wire.reverse_quotes import (
+        ReverseFirmQuoteRequest,
+        ReverseIndicativeQuoteRequest,
+    )
+
+    AnyQuoteRequest = QuoteRequest | ReverseIndicativeQuoteRequest | ReverseFirmQuoteRequest
 
 
-def parse_quote_request(document: bytes) -> QuoteRequest:
-    """Strictly parse a ``QuoteRequestV1`` payload, dispatching on ``mode``."""
+def parse_quote_request(document: bytes) -> AnyQuoteRequest:
+    """Strictly parse a ``QuoteRequestV1`` payload, dispatching on ``kind`` and ``mode``.
+
+    Returns an RS-003 request for ``btc-to-ln`` and an RS-004 request
+    (``rill_core.wire.reverse_quotes``) for ``ln-to-btc``.
+    """
+    from rill_core.wire import reverse_quotes  # noqa: PLC0415 - reverse imports this module
+
     parsed = parse_json_strict(document)
+    kind = parsed.get("kind") if isinstance(parsed, dict) else None
     mode = parsed.get("mode") if isinstance(parsed, dict) else None
-    model: type[IndicativeQuoteRequest | FirmQuoteRequest]
-    if mode == "indicative":
-        model = IndicativeQuoteRequest
-    elif mode == "firm":
-        model = FirmQuoteRequest
-    else:
-        raise ValueError("quote request mode unsupported")
-    return model.model_validate_json(canonicalize(parsed), strict=True)
+    models: dict[tuple[object, object], type[StrictModel]] = {
+        ("btc-to-ln", "indicative"): IndicativeQuoteRequest,
+        ("btc-to-ln", "firm"): FirmQuoteRequest,
+        ("ln-to-btc", "indicative"): reverse_quotes.ReverseIndicativeQuoteRequest,
+        ("ln-to-btc", "firm"): reverse_quotes.ReverseFirmQuoteRequest,
+    }
+    model = models.get((kind, mode))
+    if model is None:
+        raise ValueError("quote request kind or mode unsupported")
+    return cast("AnyQuoteRequest", model.model_validate_json(canonicalize(parsed), strict=True))
 
 
 class QuoteOffer(StrictModel):
@@ -156,10 +172,39 @@ class QuoteOffer(StrictModel):
 
 
 class TermsOfferPayload(StrictModel):
-    """Firm answer: provider identity-signed ``ProviderTermsV1``."""
+    """Firm answer: provider identity-signed ``ProviderTermsV1``.
+
+    ``hold_invoice`` is present exactly for ``ln-to-btc/v1`` terms (RS-004):
+    the BOLT11 hold invoice for ``H`` whose decoding must equal
+    ``terms.contract_terms.invoice_binding``. BTC to LN offers carry exactly
+    ``terms`` and ``provider_terms_signature`` (RS-003).
+    """
 
     terms: ProviderTerms
     provider_terms_signature: Signature64
+    hold_invoice: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        """Omit ``hold_invoice`` when absent so BTC to LN offers keep RS-003's shape."""
+        document: dict[str, object] = handler(self)
+        if document.get("hold_invoice") is None:
+            document.pop("hold_invoice", None)
+        return document
+
+    @model_validator(mode="after")
+    def validate_hold_invoice(self) -> TermsOfferPayload:
+        """Require the hold invoice for LN to BTC and forbid it otherwise."""
+        reverse = self.terms.contract_terms.profile_id == "ln-to-btc/v1"
+        if reverse and self.hold_invoice is None:
+            raise ValueError("LN to BTC terms offer requires a hold invoice")
+        if not reverse and self.hold_invoice is not None:
+            raise ValueError("BTC to LN terms offer carries no hold invoice")
+        if self.hold_invoice is not None and (
+            len(self.hold_invoice) > MAX_INVOICE_CHARS or not _INVOICE.fullmatch(self.hold_invoice)
+        ):
+            raise ValueError("hold invoice must be a lowercase BOLT11 string")
+        return self
 
 
 class QuoteError(StrictModel):
