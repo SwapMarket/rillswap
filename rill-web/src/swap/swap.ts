@@ -257,7 +257,7 @@ export async function runSwap(
   const bindingSignature = sign(fundingBindingHash(binding), session.secret);
   const funded = { ...record, updatedAt: seconds(), funding: [{ binding, signature: bindingSignature }] };
   await hooks.saveRecovery(await encryptRecovery(funded, request.ageRecipient), "funded");
-  hooks.report(`funded recovery file saved (funding ${funding.txid}, attempt ${binding.funding_attempt_id})`);
+  hooks.report(`funded recovery file saved (funding ${funding.txid}, attempt ${binding.funding_attempt_id} revision 0)`);
   const bound = session.envelope(
     "funding_binding",
     { binding, funding_binding_signature: bindingSignature, funding_transaction: funding.raw },
