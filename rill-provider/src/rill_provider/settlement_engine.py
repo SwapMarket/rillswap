@@ -49,13 +49,14 @@ from rill_provider.core_tx_bytes import CoreTransactionUnknownError
 from rill_provider.live_session_store import MAX_CLAIM_ATTEMPTS, StaleSwapError
 from rill_provider.lnd_invoice_decode import InvoiceRejectedError
 from rill_provider.lnd_payment_observation import LndNotSyncedError, LndUnavailableError
+from rill_provider.reverse_settlement import HoldInvoiceBackend, ReverseSettlement
 from rill_provider.settlement_policy import SettlementCrypto, offered_terms
 
 if TYPE_CHECKING:
     from rill_core.settlement.taproot import TaprootKeyOperations
     from rill_core.wire.messages import ContractTerms, FundingBinding, InvoiceBinding
 
-    from rill_provider.core_tx_bytes import CandidateFundingOutpoint
+    from rill_provider.core_tx_bytes import CandidateFundingOutpoint, FundedOutput, SpendScan
     from rill_provider.live_session_store import LiveSessionStore, SettlementItem
     from rill_provider.lnd_payment_send import PaymentOutcome, PreparedPayment
     from rill_provider.payment_dispatch_record import PaymentAuthority
@@ -91,6 +92,14 @@ class ChainBackend(Protocol):
     def block_hash(self, height: int) -> str:
         """Return the active-chain block hash at ``height`` or raise."""
         ...
+
+    def fund_output(
+        self, script_pubkey: bytes, value_sat: int, *, max_fee_sat: int
+    ) -> FundedOutput:
+        """Sign (never broadcast) a wallet payment to the script at index 0 (RS-004)."""
+
+    def find_spender(self, txid: str, vout: int, *, from_height: int, to_height: int) -> SpendScan:
+        """Look for the transaction spending the outpoint (RS-004)."""
 
     def fee_rate_sat_vb(self, target_blocks: int) -> float | None:
         """Return a conservative feerate estimate, or ``None`` when the node has none."""
@@ -148,20 +157,37 @@ class EngineSettings:
 class SettlementEngine:
     """Drive every funded swap forward; safe to call repeatedly."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - explicit injected backends
         self,
         store: LiveSessionStore,
         chain: ChainBackend,
         lightning: LightningBackend,
         crypto: EngineCrypto,
         settings: EngineSettings | None = None,
+        *,
+        hold_invoices: HoldInvoiceBackend | None = None,
     ) -> None:
-        """Bind already-configured backends; no I/O."""
+        """Bind already-configured backends; no I/O.
+
+        ``hold_invoices`` enables the LN to BTC lifecycle (RS-004); without
+        it, swaps of that profile are left untouched.
+        """
         self._store = store
         self._chain = chain
         self._lightning = lightning
         self._crypto = crypto
         self._settings = settings or EngineSettings()
+        self._reverse = (
+            None
+            if hold_invoices is None
+            else ReverseSettlement(
+                store,
+                chain,
+                hold_invoices,
+                crypto,
+                refund_fee_floor_sat=self._settings.claim_fee_sat,
+            )
+        )
         self._claim_cursor = ""  # fair paging of the historical claim sweep
 
     def _fee_limit(self, success_fee_sat: int) -> int:
@@ -242,6 +268,8 @@ class SettlementEngine:
         for session_id, offer in unfunded:
             try:
                 terms = offered_terms(Envelope.model_validate_json(offer, strict=True))
+                if terms.profile_id != "btc-to-ln/v1":
+                    continue  # LN to BTC: the provider funds; ReverseSettlement decides
                 invoice = terms.invoice_binding
                 expiry = int(terms.timing_policy.model_dump()["max_outgoing_htlc_expiry_height"])
                 if now < invoice.expires_at and (
@@ -305,6 +333,10 @@ class SettlementEngine:
 
     async def _advance(self, item: SettlementItem, now: int) -> str:  # noqa: PLR0911 - one step per state
         terms = offered_terms(Envelope.model_validate_json(item.terms_offer, strict=True))
+        if terms.profile_id == "ln-to-btc/v1":
+            return item.state if self._reverse is None else await self._reverse.advance(item, now)
+        if item.funding_binding is None:
+            return item.state  # ACCEPTED: awaiting the client's funding binding
         funding = Envelope.model_validate_json(item.funding_binding, strict=True)
         binding = parse_model_json(FundingBindingPayload, canonicalize(funding.payload)).binding
         invoice = terms.invoice_binding

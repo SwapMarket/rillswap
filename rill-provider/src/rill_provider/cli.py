@@ -191,7 +191,7 @@ def _settlement(
         )
     except ValueError:
         raise OperatorConfigError("settlement requires a supported network") from None
-    return SettlementEngine(store, chain, lightning, crypto)
+    return SettlementEngine(store, chain, lightning, crypto, hold_invoices=_hold_invoices(config))
 
 
 def _hold_invoices(config: OperatorConfig) -> LndHoldInvoices | None:

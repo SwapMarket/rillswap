@@ -431,7 +431,7 @@ class SettlementItem:
     state: str
     blocked: bool
     terms_offer: bytes
-    funding_binding: bytes
+    funding_binding: bytes | None  # None before the client's binding (or for LN to BTC)
     invoice: str
     preimage: str | None
     claim_tx: bytes | None
@@ -1883,8 +1883,8 @@ class LiveSessionStore:
                     "JOIN sessions s ON s.session_id = w.session_id "
                     "LEFT JOIN payment_dispatch p ON p.session_id = w.session_id "
                     "JOIN inbox i ON i.session_id = w.session_id AND i.sender_key = s.client_key "
-                    "AND i.seq = ? WHERE w.state IN ('FUNDING_SEEN', 'PAYING', 'PAID', 'CLAIMING', "
-                    "'LN_HELD', 'FUNDING_SENT', 'FUNDED', 'REFUNDING') "
+                    "AND i.seq = ? WHERE w.state IN ('ACCEPTED', 'FUNDING_SEEN', 'PAYING', 'PAID', "
+                    "'CLAIMING', 'LN_HELD', 'FUNDING_SENT', 'FUNDED', 'REFUNDING') "
                     + selected
                     + "ORDER BY w.updated_at, w.session_id",
                     parameters,
