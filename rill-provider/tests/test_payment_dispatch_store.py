@@ -42,7 +42,8 @@ def _insert_funded_swap(store: live.LiveSessionStore, harness: Harness, state: s
     )
     # Database fixture for the durable transition boundary, not wire admission.
     store._connection.execute(  # noqa: SLF001
-        "INSERT INTO swaps VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL)",
+        "INSERT INTO swaps VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, "
+        "NULL, NULL, NULL, NULL, NULL, NULL)",
         (
             reservation.session_id,
             source["contract_hash"],
@@ -185,7 +186,7 @@ def test_upgrade_is_explicit_and_never_backfills_send_permission(
         assert store._connection.execute("SELECT * FROM payment_dispatch").fetchall() == []  # noqa: SLF001
         assert not store.commit_payment_dispatch(session, _hash(harness), b"request")
     with harness.acquire() as store:
-        assert store._connection.execute("PRAGMA user_version").fetchone() == (10,)  # noqa: SLF001
+        assert store._connection.execute("PRAGMA user_version").fetchone() == (11,)  # noqa: SLF001
         assert not store.commit_payment_dispatch(session, _hash(harness), b"request")
 
 

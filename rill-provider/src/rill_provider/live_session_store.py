@@ -23,6 +23,7 @@ funding, payment, or claim authority.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -70,7 +71,7 @@ if TYPE_CHECKING:
     from rill_provider.provider_identity import ProviderIdentity
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
-SCHEMA_VERSION = 10  # v8-v9 upgrade on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
+SCHEMA_VERSION = 11  # v8-v10 upgrade on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
 CONTRACT_KEY_RECORD_KIND = "rillswap-provider-contract-key"
 OPEN_PHASES = ("CONFIRMED", "ACCEPTED")  # sessions that may still send requests
 SWAP_TRANSITIONS = frozenset(
@@ -84,6 +85,31 @@ SWAP_TRANSITIONS = frozenset(
         ("CLAIMING", "CLAIMED"),
         ("CLAIMING", "LOST"),  # the client's refund spent the contract; no claim confirmed
     }
+)
+# LN to BTC (RS-004): the provider funds after the hold invoice is accepted and
+# settles it with the preimage the client's claim reveals, or refunds.
+REVERSE_SWAP_TRANSITIONS = frozenset(
+    {
+        ("ACCEPTED", "LN_HELD"),  # every HTLC accepted, amount and expiry checked
+        ("ACCEPTED", "ABORTED"),  # hold canceled or expired before funding
+        ("LN_HELD", "FUNDING_SENT"),  # the one funding grant: signed funding recorded
+        ("LN_HELD", "ABORTED"),  # hold no longer accepted, or the window closed
+        ("FUNDING_SENT", "FUNDED"),
+        ("FUNDING_SENT", "SETTLED"),  # a claim revealed the preimage before our depth check
+        ("FUNDED", "SETTLED"),
+        ("FUNDED", "REFUNDING"),  # past the refund lock, still unspent: refund broadcast
+        ("REFUNDING", "SETTLED"),  # the claim won the race: settle, the hold pays for it
+        ("REFUNDING", "REFUNDED"),  # refund at depth, hold canceled
+    }
+)
+REVERSE_STATES = (
+    "LN_HELD",
+    "FUNDING_SENT",
+    "FUNDED",
+    "SETTLED",
+    "REFUNDING",
+    "REFUNDED",
+    "ABORTED",
 )
 CLIENT_REQUEST_TYPES = ("quote_request", "terms_accept", "funding_binding")
 SWAP_COLUMNS = (
@@ -120,7 +146,7 @@ SWAPS_V9_SCHEMA = (
 # blocks. outpoint_spent_height/block are the tip height and hash at which
 # that spend was first observed (the anchor must stay on the active chain);
 # NULL while the output is unspent or a recorded attempt is mined.
-SWAPS_SCHEMA = (
+SWAPS_V10_SCHEMA = (
     "CREATE TABLE swaps (session_id TEXT PRIMARY KEY, contract_hash TEXT NOT NULL UNIQUE, "
     "terms_offer BLOB NOT NULL, terms_accept BLOB NOT NULL, state TEXT NOT NULL CHECK "
     "(state IN ('ACCEPTED', 'FUNDING_SEEN', 'PAYING', 'PAID', 'FAILED', 'CLAIMING', "
@@ -128,6 +154,25 @@ SWAPS_SCHEMA = (
     "updated_at INTEGER NOT NULL, outpoint_spent_height INTEGER "
     "CHECK (outpoint_spent_height > 0), outpoint_spent_block TEXT "
     "CHECK ((outpoint_spent_block IS NULL) = (outpoint_spent_height IS NULL)))"
+)
+# v11 adds the LN to BTC states and the provider's own funding and refund
+# transactions (RS-004): funding_* is the signed funding the provider
+# broadcast, refund_* its refund spend, spend_scan_height the last block
+# scanned for a client claim spending the contract.
+SWAPS_SCHEMA = (
+    "CREATE TABLE swaps (session_id TEXT PRIMARY KEY, contract_hash TEXT NOT NULL UNIQUE, "
+    "terms_offer BLOB NOT NULL, terms_accept BLOB NOT NULL, state TEXT NOT NULL CHECK "
+    "(state IN ('ACCEPTED', 'FUNDING_SEEN', 'PAYING', 'PAID', 'FAILED', 'CLAIMING', "
+    "'CLAIMED', 'LOST', 'LN_HELD', 'FUNDING_SENT', 'FUNDED', 'SETTLED', 'REFUNDING', "
+    "'REFUNDED', 'ABORTED')), funding_binding BLOB, preimage TEXT, claim_txid TEXT, "
+    "claim_tx BLOB, updated_at INTEGER NOT NULL, outpoint_spent_height INTEGER "
+    "CHECK (outpoint_spent_height > 0), outpoint_spent_block TEXT "
+    "CHECK ((outpoint_spent_block IS NULL) = (outpoint_spent_height IS NULL)), "
+    "funding_txid TEXT, funding_vout INTEGER CHECK (funding_vout >= 0), funding_tx BLOB, "
+    "refund_txid TEXT, refund_tx BLOB, spend_scan_height INTEGER CHECK (spend_scan_height > 0), "
+    "CHECK ((funding_txid IS NULL) = (funding_tx IS NULL) AND "
+    "(funding_txid IS NULL) = (funding_vout IS NULL)), "
+    "CHECK ((refund_txid IS NULL) = (refund_tx IS NULL)))"
 )
 SCHEMA_V5 = (
     (
@@ -230,8 +275,11 @@ CLAIM_ATTEMPT_SCHEMA = (
     "PRIMARY KEY (session_id, attempt))"
 )
 SCHEMA_V9 = (*SCHEMA_V8, CLAIM_ATTEMPT_SCHEMA)
+SCHEMA_V10 = tuple(
+    SWAPS_V10_SCHEMA if statement is SWAPS_V9_SCHEMA else statement for statement in SCHEMA_V9
+)
 SCHEMA = tuple(
-    SWAPS_SCHEMA if statement is SWAPS_V9_SCHEMA else statement for statement in SCHEMA_V9
+    SWAPS_SCHEMA if statement is SWAPS_V10_SCHEMA else statement for statement in SCHEMA_V10
 )
 MAX_CLAIM_ATTEMPTS = 32
 ADMISSION_INDEXES = (
@@ -395,6 +443,13 @@ class SettlementItem:
     # a non-attempt; the hash anchors the wait to the active chain.
     outpoint_spent_height: int | None = None
     outpoint_spent_block: str | None = None
+    # LN to BTC (RS-004): the provider's own funding and refund, and the scan cursor.
+    funding_txid: str | None = None
+    funding_vout: int | None = None
+    funding_tx: bytes | None = None
+    refund_txid: str | None = None
+    refund_tx: bytes | None = None
+    spend_scan_height: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -704,6 +759,8 @@ class LiveSessionStore:
                 _upgrade_v8(connection)
             if version in (5, 6, 7, 8, 9):
                 _upgrade_v9(connection)
+            if version in (5, 6, 7, 8, 9, 10):
+                _upgrade_v10(connection)
             if version != SCHEMA_VERSION:
                 connection.execute("UPDATE meta SET schema_version=?", (SCHEMA_VERSION,))
                 connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -1820,11 +1877,14 @@ class LiveSessionStore:
                     "SELECT w.session_id, w.state, s.blocked, w.terms_offer, w.funding_binding, "  # noqa: S608 - only static SQL fragments; bound session ID
                     "i.canonical_bytes, w.preimage, w.claim_tx, w.claim_txid, "
                     "COALESCE(p.state, 'UNKNOWN'), p.payment_hash, p.request, "
-                    "w.outpoint_spent_height, w.outpoint_spent_block FROM swaps w "
+                    "w.outpoint_spent_height, w.outpoint_spent_block, w.funding_txid, "
+                    "w.funding_vout, w.funding_tx, w.refund_txid, w.refund_tx, "
+                    "w.spend_scan_height FROM swaps w "
                     "JOIN sessions s ON s.session_id = w.session_id "
                     "LEFT JOIN payment_dispatch p ON p.session_id = w.session_id "
                     "JOIN inbox i ON i.session_id = w.session_id AND i.sender_key = s.client_key "
-                    "AND i.seq = ? WHERE w.state IN ('FUNDING_SEEN', 'PAYING', 'PAID', 'CLAIMING') "
+                    "AND i.seq = ? WHERE w.state IN ('FUNDING_SEEN', 'PAYING', 'PAID', 'CLAIMING', "
+                    "'LN_HELD', 'FUNDING_SENT', 'FUNDED', 'REFUNDING') "
                     + selected
                     + "ORDER BY w.updated_at, w.session_id",
                     parameters,
@@ -1836,7 +1896,8 @@ class LiveSessionStore:
                         bool(blocked),
                         offer,
                         binding,
-                        str(_canonical_envelope(request).payload["invoice"]),
+                        # LN to BTC requests carry a payment hash, not an invoice.
+                        str(_canonical_envelope(request).payload.get("invoice", "")),
                         preimage,
                         claim_tx,
                         claim_txid,
@@ -1846,6 +1907,7 @@ class LiveSessionStore:
                         else None,
                         spent_height,
                         spent_block,
+                        *provider_transactions,
                     )
                     for (
                         session_id,
@@ -1862,6 +1924,7 @@ class LiveSessionStore:
                         record,
                         spent_height,
                         spent_block,
+                        *provider_transactions,
                     ) in rows
                 )
         except LiveSessionStoreError:
@@ -1869,6 +1932,111 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - never echo storage details
             raise LiveSessionStoreError("settlement work unavailable") from None
         return items
+
+    def advance_reverse_swap(  # noqa: PLR0913 - one atomic transition's explicit parts
+        self,
+        session_id: str,
+        *,
+        from_state: str,
+        to_state: str,
+        signer: EnvelopeSigner,
+        now: int,
+        funding: tuple[str, int, bytes] | None = None,
+        refund: tuple[str, bytes] | None = None,
+        preimage: str | None = None,
+        refund_confirmations: int | None = None,
+        observation: dict[str, Any] | None = None,
+    ) -> None:
+        """Move one LN to BTC swap forward (RS-004) in one transaction.
+
+        ``LN_HELD`` to ``FUNDING_SENT`` is the one funding grant: it records
+        the signed funding ``(txid, vout, raw)`` and marks the reservation
+        ``DISPATCHED`` in the same transaction, refusing when the reservation
+        is not open, so a funding can never be signed twice for one swap.
+        ``SETTLED`` needs the preimage of the terms' payment hash (checked
+        here, whatever reported it) and releases the reservation: the hold
+        invoice pays for the contract. ``REFUNDING`` records the refund
+        ``(txid, raw)``; ``REFUNDED`` releases on the refund's depth;
+        ``ABORTED`` releases an undispatched reservation (nothing was funded).
+        """
+        _check_reverse_transition(
+            (from_state, to_state),
+            funding=funding,
+            refund=refund,
+            preimage=preimage,
+            refund_confirmations=refund_confirmations,
+        )
+        try:
+            with self._write() as connection:
+                (offer_bytes,) = connection.execute(
+                    "SELECT terms_offer FROM swaps WHERE session_id=? AND state=?",
+                    (session_id, from_state),
+                ).fetchone() or (None,)
+                if offer_bytes is None:
+                    raise StaleSwapError("swap state changed")  # noqa: TRY301
+                terms = _offer_terms(offer_bytes)
+                payment_hash = terms.invoice_binding.payment_hash
+                if terms.profile_id != "ln-to-btc/v1":
+                    raise LiveSessionStoreError("not an LN to BTC swap")  # noqa: TRY301
+                if preimage is not None and (
+                    type(preimage) is not str
+                    or len(preimage) != 64  # noqa: PLR2004 - hex preimage
+                    or hashlib.sha256(bytes.fromhex(preimage)).hexdigest() != payment_hash
+                ):
+                    raise LiveSessionStoreError("preimage does not match the payment hash")  # noqa: TRY301
+                columns = "state=?, preimage=COALESCE(?, preimage), updated_at=?"
+                values: list[Any] = [to_state, preimage, now]
+                if funding is not None:
+                    columns += ", funding_txid=?, funding_vout=?, funding_tx=?"
+                    values.extend(funding)
+                if refund is not None:
+                    columns += ", refund_txid=?, refund_tx=?"
+                    values.extend(refund)
+                updated = connection.execute(
+                    f"UPDATE swaps SET {columns} WHERE session_id=? AND state=?",  # noqa: S608 - static column list
+                    (*values, session_id, from_state),
+                ).rowcount
+                if updated != 1:
+                    raise StaleSwapError("swap state changed")  # noqa: TRY301
+                if to_state == "FUNDING_SENT":
+                    granted = connection.execute(
+                        "UPDATE economic_reservations SET state='DISPATCHED' "
+                        "WHERE payment_hash=? AND session_id=? AND state IN ('UNSENT', 'UNKNOWN')",
+                        (payment_hash, session_id),
+                    ).rowcount
+                    if granted != 1:
+                        raise LiveSessionStoreError("funding grant refused")  # noqa: TRY301
+                if to_state in ("ABORTED", "SETTLED", "REFUNDED"):
+                    _release_reverse_terminal(
+                        connection,
+                        session_id,
+                        to_state,
+                        now,
+                        terms=terms,
+                        refund_confirmations=refund_confirmations,
+                    )
+                if observation is not None:
+                    self._record_observation(connection, session_id, observation, signer, now)
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("swap transition refused") from None
+
+    def record_spend_scan(self, session_id: str, height: int) -> None:
+        """Remember the last block scanned for a spend of this swap's contract."""
+        if type(height) is not int or height <= 0:
+            raise LiveSessionStoreError("scan height must be a positive block height")
+        try:
+            with self._write() as connection:
+                connection.execute(
+                    "UPDATE swaps SET spend_scan_height=? WHERE session_id=? "
+                    "AND (spend_scan_height IS NULL OR spend_scan_height < ?)",
+                    (height, session_id, height),
+                )
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("scan cursor refused") from None
 
     def advance_swap(  # noqa: PLR0913 - one atomic transition's explicit parts
         self,
@@ -2271,15 +2439,17 @@ class LiveSessionStore:
     ) -> bytes:
         """BIP340-sign one digest with this swap's sealed provider contract key.
 
-        Only for a swap that reached ``PAID`` or ``CLAIMING`` (the claim leaf);
-        the scalar never leaves the store.
+        Only for a swap that reached ``PAID`` or ``CLAIMING`` (the claim leaf),
+        or an LN to BTC swap that is ``FUNDED`` or ``REFUNDING`` (the refund
+        leaf); the scalar never leaves the store.
         """
         try:
             with self._write() as connection:
                 row = connection.execute(
                     "SELECT k.compressed_key, k.secret_age FROM contract_keys k "
                     "JOIN swaps w ON w.session_id = k.session_id "
-                    "WHERE k.session_id=? AND w.state IN ('PAID', 'CLAIMING')",
+                    "WHERE k.session_id=? "
+                    "AND w.state IN ('PAID', 'CLAIMING', 'FUNDED', 'REFUNDING')",
                     (session_id,),
                 ).fetchone()
                 if row is None or type(digest) is not bytes or len(digest) != 32:  # noqa: PLR2004
@@ -2527,7 +2697,9 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
     (version,) = connection.execute("PRAGMA user_version").fetchone()
     if connection.execute("PRAGMA application_id").fetchone() != (
         APPLICATION_ID,
-    ) or version not in ((5, 6, 7, 8, 9, SCHEMA_VERSION) if allow_v5 else (8, 9, SCHEMA_VERSION)):
+    ) or version not in (
+        (5, 6, 7, 8, 9, 10, SCHEMA_VERSION) if allow_v5 else (8, 9, 10, SCHEMA_VERSION)
+    ):
         raise LiveSessionStoreError("live session store version unsupported")
     objects = {
         (kind, name): definition
@@ -2541,12 +2713,14 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
         7: SCHEMA_V7,
         8: SCHEMA_V8,
         9: SCHEMA_V9,
+        10: SCHEMA_V10,
         SCHEMA_VERSION: SCHEMA,
     }[version]
     indexes = {
         7: ADMISSION_INDEXES,
         8: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
         9: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
+        10: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
         SCHEMA_VERSION: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
     }
     expected = {("table", statement.split()[2]): statement for statement in schema}
@@ -2647,13 +2821,92 @@ def _upgrade_v9(connection: sqlite3.Connection) -> None:
     references ``swaps`` by foreign key.
     """
     connection.execute("ALTER TABLE swaps RENAME TO swaps_v9")
-    connection.execute(SWAPS_SCHEMA)
+    connection.execute(SWAPS_V10_SCHEMA)
     connection.execute(
         "INSERT INTO swaps SELECT session_id, contract_hash, terms_offer, terms_accept, state, "
         "funding_binding, preimage, claim_txid, claim_tx, updated_at, NULL, NULL "
         "FROM swaps_v9"
     )
     connection.execute("DROP TABLE swaps_v9")
+
+
+def _upgrade_v10(connection: sqlite3.Connection) -> None:
+    """Rebuild ``swaps`` with the LN to BTC states and provider transaction columns.
+
+    Additive: every row is copied unchanged with NULL provider transactions;
+    no swap changes state. Existing stores only ever held BTC to LN swaps.
+    """
+    connection.execute("ALTER TABLE swaps RENAME TO swaps_v10")
+    connection.execute(SWAPS_SCHEMA)
+    connection.execute(
+        "INSERT INTO swaps SELECT *, NULL, NULL, NULL, NULL, NULL, NULL FROM swaps_v10"
+    )
+    connection.execute("DROP TABLE swaps_v10")
+
+
+def _check_reverse_transition(
+    transition: tuple[str, str],
+    *,
+    funding: tuple[str, int, bytes] | None,
+    refund: tuple[str, bytes] | None,
+    preimage: str | None,
+    refund_confirmations: int | None,
+) -> None:
+    """Refuse an LN to BTC transition that lacks, or carries, the wrong evidence."""
+    to_state = transition[1]
+    if transition not in REVERSE_SWAP_TRANSITIONS:
+        raise LiveSessionStoreError("swap transition unsupported")
+    if (to_state == "FUNDING_SENT") != (funding is not None):
+        raise LiveSessionStoreError("funding transition needs the exact funding")
+    if (to_state == "REFUNDING") != (refund is not None):
+        raise LiveSessionStoreError("refund transition needs the exact refund")
+    if (to_state == "SETTLED") != (preimage is not None):
+        raise LiveSessionStoreError("settlement needs the preimage")
+    if to_state == "REFUNDED" and refund_confirmations is None:
+        raise LiveSessionStoreError("refund release needs observed confirmations")
+
+
+def _release_reverse_terminal(  # noqa: PLR0913 - explicit terminal evidence
+    connection: sqlite3.Connection,
+    session_id: str,
+    to_state: str,
+    now: int,
+    *,
+    terms: ContractTerms,
+    refund_confirmations: int | None,
+) -> None:
+    """Release an LN to BTC swap's reservation with the evidence its terminal state carries.
+
+    ABORTED releases only an undispatched reservation (no funding was ever
+    signed). SETTLED releases a dispatched one: the verified preimage means
+    the hold invoice pays for the contract. REFUNDED releases on the retained
+    refund txid at its signed depth, like a BTC to LN claim.
+    """
+    payment_hash = terms.invoice_binding.payment_hash
+    if to_state == "ABORTED":
+        evidence = _release_evidence("hold-canceled", aborted_at=now)
+        allowed = ("UNSENT", "UNKNOWN")
+    elif to_state == "SETTLED":
+        evidence = _release_evidence("hold-settled", settled_at=now)
+        allowed = ("DISPATCHED", "UNKNOWN")
+    else:
+        (refund_txid,) = connection.execute(
+            "SELECT refund_txid FROM swaps WHERE session_id=?", (session_id,)
+        ).fetchone()
+        if type(refund_txid) is not str:
+            raise LiveSessionStoreError("refund evidence unavailable")
+        evidence = _release_evidence(
+            "refund-confirmed",
+            refund_txid=refund_txid,
+            required_confirmations=terms.refund_resolution_confirmations,
+            observed_confirmations=int(refund_confirmations or 0),
+        )
+        allowed = ("DISPATCHED", "UNKNOWN")
+    connection.execute(
+        "UPDATE economic_reservations SET state='RELEASED', release_evidence=? "
+        "WHERE payment_hash=? AND session_id=? AND state IN (?, ?)",
+        (evidence, payment_hash, session_id, *allowed),
+    )
 
 
 def _release_terminal(  # noqa: PLR0913 - explicit terminal evidence
@@ -2950,7 +3203,7 @@ def _apply_effect(
             raise LiveSessionStoreError("offer reservation is closed")
         connection.execute(
             "INSERT INTO swaps VALUES (?, ?, ?, ?, 'ACCEPTED', NULL, NULL, NULL, NULL, ?, "
-            "NULL, NULL)",
+            "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
             (request.session_id, effect.contract_hash, replied[0], document, now),
         )
         connection.execute(
