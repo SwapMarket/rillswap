@@ -13,6 +13,11 @@ non-zero unless the user's invoice is SETTLED, the provider's claim reaches
 ``CLAIMED``, and the sole LND attempt matches the committed absolute-bounded route.
 Use ``--reconcile-after-settle`` to inject a provider crash after LND succeeds,
 recover the witness with an offchain:read macaroon, and resume the normal claim.
+``--ln-to-btc`` runs RS-004 instead: the user opens the channel, pays the
+provider's hold invoice, and claims the contract the provider funds from its
+Core wallet; it passes once the provider's swap is ``SETTLED``, its hold
+invoice settled, the user's payment succeeded, and the confirmed claim pays
+the user at least the requested payout.
 """
 
 from __future__ import annotations
@@ -301,6 +306,7 @@ def provider_config(
         "core.cookie",
         private=True,
     )
+    profile = "ln-to-btc/v1" if args.ln_to_btc else "btc-to-ln/v1"
     destination = stack.cli(
         "getaddressinfo",
         stack.cli("getnewaddress", "", "bech32m", wallet="miner"),
@@ -324,6 +330,8 @@ def provider_config(
             "macaroon": "provider-admin.macaroon",
             "payment_macaroon": "provider-admin.macaroon",
         },
+        # A disposable regtest node: the admin macaroon stands in for each
+        # narrower credential, which production operators bake separately.
         "provider_destination_script": json.loads(destination)["scriptPubKey"],
         "authority": {
             "volume_label": "e2e",
@@ -331,13 +339,13 @@ def provider_config(
             "single_host": True,
         },
         "handshake": {
-            "profile": "btc-to-ln/v1",
+            "profile": profile,
             "features": ["epoch-bound-session/v1"] if args.epoch_bound else [],
             "encryption_suites": ["noise-xk-secp256k1-chachapoly-sha256/v1"],
             "capabilities": ["core/v1", "recovery/v1"],
         },
         "terms": {
-            "profiles": ["btc-to-ln/v1"],
+            "profiles": [profile],
             "amount_bands": [[1000, 1_000_000]],
             "base_fee_sat": 50,
             "proportional_millionths": 1000,
@@ -345,6 +353,9 @@ def provider_config(
         },
         "relay_urls": [relay],
     }
+    if args.ln_to_btc:
+        config["bitcoin_core"]["wallet"] = "provider"
+        config["lnd"]["invoices_macaroon"] = "provider-admin.macaroon"
     (work / "provider-store").mkdir(mode=0o700)
     path = work / "provider.json"
     path.write_text(json.dumps(config, indent=1))
@@ -609,6 +620,118 @@ def reconcile_after_crash(stack: Stack, config: Path, payment_hash: str) -> None
     log("crash-recovered witness using offchain:read only; dispatch bytes unchanged")
 
 
+def ln_to_btc(  # noqa: PLR0913 - explicit scenario inputs
+    stack: Stack,
+    args: argparse.Namespace,
+    work: Path,
+    relay: str,
+    xonly: str,
+    user_age: x25519.Identity,
+    files: ExitStack,
+) -> bool:
+    """RS-004: the user pays the hold invoice, claims on chain, the provider settles."""
+    payout = 50_000
+    log("running rill swap ln-to-btc")
+    stdout = files.enter_context((work / "client.stdout").open("wb"))
+    stderr = files.enter_context((work / "client.stderr").open("wb"))
+    command = [
+        str(CLI / "rill"),
+        "swap",
+        "ln-to-btc",
+        "--network",
+        str(work / "network.json"),
+        "--crypto-library",
+        args.crypto_library,
+        "--relay",
+        relay,
+        "--provider",
+        xonly,
+        "--payout-sat",
+        str(payout),
+        "--max-success-fee-sat",
+        "2000",
+        "--core-port",
+        str(stack.host_port(stack.core, 18443)),
+        "--core-cookie",
+        str(work / "core.cookie"),
+        "--wallet",
+        "user",
+        "--lnd-port",
+        str(stack.host_port(stack.lnd["user"], 10009)),
+        "--lnd-tls-cert",
+        str(work / "user-tls.cert"),
+        "--lnd-macaroon",
+        str(work / "user-admin.macaroon"),
+        "--recipient",
+        str(user_age.to_public()),
+        "--identity",
+        str(work / "user-age.key"),
+        "--recovery-output",
+        str(work / "user-recovery.age"),
+        "--settle-timeout",
+        str(args.timeout),
+    ]
+    client = subprocess.Popen(command, stdout=stdout, stderr=stderr)  # noqa: S603
+    try:
+        code = client.wait(timeout=args.timeout + 120)
+    finally:
+        if client.poll() is None:
+            client.kill()
+            client.wait(10)
+    out = (work / "client.stdout").read_text()
+    sys.stderr.write((work / "client.stderr").read_text())
+    log(f"client exit {code}: {out.strip()}")
+    claim = re.search(r"claim ([0-9a-f]{64})", out)
+    if code != 0 or claim is None:
+        return False
+    deadline = time.monotonic() + 180
+    state = None
+    while time.monotonic() < deadline and state != "SETTLED":
+        with sqlite3.connect(
+            (work / "provider-store/live.sqlite").as_uri() + "?mode=ro", uri=True
+        ) as connection:
+            (state,) = connection.execute("SELECT state FROM swaps").fetchone()
+        time.sleep(2)
+    log(f"provider swap {state}")
+    if state != "SETTLED":
+        return False
+    check_ln_to_btc(stack, work, claim.group(1), payout)
+    return True
+
+
+def check_ln_to_btc(stack: Stack, work: Path, claim_txid: str, payout: int) -> None:
+    """The hold settled once, the payment succeeded, and the claim paid the user."""
+    with sqlite3.connect(
+        (work / "provider-store/live.sqlite").as_uri() + "?mode=ro", uri=True
+    ) as connection:
+        ((payment_hash, reservation),) = connection.execute(
+            "SELECT payment_hash, state FROM economic_reservations"
+        ).fetchall()
+    assert reservation == "RELEASED"
+    hold = stack.lncli("provider", "lookupinvoice", payment_hash)
+    assert hold["state"] == "SETTLED"
+    (payment,) = stack.lncli("user", "listpayments", "--include_incomplete")["payments"]
+    assert payment["payment_hash"] == payment_hash
+    assert payment["status"] == "SUCCEEDED"
+    deadline = time.monotonic() + 120  # the provider may settle from the mempool
+    while (
+        json.loads(stack.cli("gettransaction", claim_txid, wallet="user"))[
+            "confirmations"
+        ]
+        < 1
+    ):
+        assert time.monotonic() < deadline, "the claim did not confirm"
+        time.sleep(2)
+    received = stack.cli("gettransaction", claim_txid, wallet="user")
+    credited = sum(
+        round(float(entry["amount"]) * 100_000_000)
+        for entry in json.loads(received)["details"]
+        if entry["category"] == "receive"
+    )
+    assert credited >= payout, (credited, payout)  # the claim fee came from the reserve
+    log(f"user received {credited} sat on chain; hold {payment_hash[:16]} settled")
+
+
 def main() -> int:  # noqa: PLR0915 - one ordered scenario
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--crypto-library", required=True)
@@ -631,7 +754,14 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
         action="store_true",
         help="crash after LND settles, reconcile with read credentials, then resume",
     )
+    parser.add_argument(
+        "--ln-to-btc",
+        action="store_true",
+        help="RS-004: pay the provider's hold invoice and claim its on-chain funding",
+    )
     args = parser.parse_args()
+    if args.ln_to_btc and (args.unpaid_refund or args.reconcile_after_settle):
+        parser.error("--ln-to-btc runs its own scenario")
     work = ROOT / "tmp" / f"e2e-{time.strftime('%Y%m%dT%H%M%S')}"
     work.mkdir(parents=True, mode=0o700)
     stack = Stack(work)
@@ -645,6 +775,8 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
         stack.start()
         stack.cli("createwallet", "miner")
         stack.cli("createwallet", "user")
+        if args.ln_to_btc:
+            stack.cli("createwallet", "provider")  # funds RS-004 contracts
         miner = stack.cli("getnewaddress", wallet="miner")
         mine(stack, 101, miner)
         stack.wait_active()
@@ -657,15 +789,25 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
             "1",
             wallet="miner",
         )
+        if args.ln_to_btc:
+            stack.cli(
+                "sendtoaddress",
+                stack.cli("getnewaddress", wallet="provider"),
+                "1",
+                wallet="miner",
+            )
         mine(stack, 6, miner)
         wait_synced(stack)
-        user_pubkey = stack.lncli("user", "getinfo")["identity_pubkey"]
-        stack.lncli("provider", "connect", f"{user_pubkey}@{stack.lnd['user']}:9735")
+        # The payer of the swap's Lightning leg opens the channel: the provider
+        # for BTC to LN, the user for LN to BTC.
+        payer, payee = ("user", "provider") if args.ln_to_btc else ("provider", "user")
+        payee_pubkey = stack.lncli(payee, "getinfo")["identity_pubkey"]
+        stack.lncli(payer, "connect", f"{payee_pubkey}@{stack.lnd[payee]}:9735")
         stack.lncli(
-            "provider",
+            payer,
             "openchannel",
             "--node_key",
-            user_pubkey,
+            payee_pubkey,
             "--local_amt",
             "1000000",
         )
@@ -676,7 +818,7 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
             time.sleep(0.3)
         else:
             raise RuntimeError("channel did not open")
-        log("channel open provider -> user")
+        log(f"channel open {payer} -> {payee}")
 
         relay, relay_stop = start_relay()
         log(f"relay {relay}")
@@ -732,10 +874,6 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
             raise RuntimeError("provider exited; see provider.log")
         log(f"provider {xonly[:16]} serving")
 
-        invoice = stack.lncli(
-            "user", "addinvoice", "--amt", "50000", "--memo", "rill-e2e"
-        )
-        bolt11, payment_hash = invoice["payment_request"], invoice["r_hash"]
         stack.copy_out(
             stack.lnd["user"], "/root/.lnd/tls.cert", "user-tls.cert", private=False
         )
@@ -761,6 +899,14 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
                     return
 
         threading.Thread(target=keep_mining, daemon=True).start()
+        if args.ln_to_btc:
+            ok = ln_to_btc(stack, args, work, relay, xonly, user_age, files)
+            log("PASS" if ok else f"FAIL (logs in {work})")
+            return 0 if ok else 1
+        invoice = stack.lncli(
+            "user", "addinvoice", "--amt", "50000", "--memo", "rill-e2e"
+        )
+        bolt11, payment_hash = invoice["payment_request"], invoice["r_hash"]
         log("running rill swap btc-to-ln")
         client_stdout = files.enter_context((work / "client.stdout").open("wb"))
         client_stderr = files.enter_context((work / "client.stderr").open("wb"))
