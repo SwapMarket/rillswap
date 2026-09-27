@@ -46,6 +46,13 @@ after the refund height; the browser does not refund. Nothing is stored in the
 browser, so an upgrade or reload reads, migrates, or resumes nothing; an
 interrupted swap continues only through the downloaded recovery file.
 
+What relays learn: each gift wrap shows its recipient key (the provider's
+epoch inbox or session key, or this tab's fresh session key), a randomly
+backdated timestamp, and its size, and the client's subscription names its
+session key; payloads, invoices, payment hashes, and session IDs are encrypted.
+The relay also sees the client's IP address unless the browser uses Tor or a
+VPN. This is not anonymity.
+
 The swap page's CSP allows `connect-src wss:` plus plain `ws://` to loopback
 (for a local regtest relay); `RelayConnection` enforces the same rule. The
 preview page keeps `connect-src 'none'`.

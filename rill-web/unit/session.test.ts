@@ -96,3 +96,24 @@ describe("rill-provider interop", () => {
       envelope.profile_id)).toThrow();
   });
 });
+
+describe("relay-visible metadata (N07/N08)", () => {
+  test("a gift wrap exposes only the recipient, a fuzzed time, and its size", async () => {
+    const { client, provider } = pair();
+    const secret = { payment_hash: "5a".repeat(32), invoice: "lnbcrt500u1pexampleinvoice", contract: "6b".repeat(32) };
+    const envelope = client.envelope("quote_request", secret, { contract: secret.contract });
+    const before = Math.floor(Date.now() / 1000);
+    await client.send(envelope, provider.key);
+    const outer = (client.relay as MemoryRelay).published.at(-1)!;
+    const visible = JSON.stringify(outer);
+    for (const hidden of [secret.payment_hash, secret.invoice, secret.contract, envelope.session_id,
+      envelope.message_id, client.key]) {
+      expect(visible).not.toContain(hidden);
+    }
+    // What an observer does learn: the recipient key, a backdated time, and the size.
+    expect(outer.tags).toEqual([["p", provider.key]]);
+    expect(outer.kind).toBe(1059);
+    expect(outer.created_at).toBeLessThanOrEqual(before + 1);
+    expect(outer.pubkey).not.toBe(client.key);
+  });
+});
