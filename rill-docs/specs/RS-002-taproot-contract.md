@@ -140,3 +140,39 @@ Each signer validates the other public nonce and partial signature. The final
 signature MUST verify against the exact tweaked output key before use. Profile
 documents define directional authorization conditions. Cooperative failure
 MUST immediately leave unilateral recovery available.
+
+### 5.1 Negotiated action payloads (implementation pending)
+
+For **new** swaps, `cooperative-claim/v1` is required in both authenticated
+handshake halves and signed contract terms. An accepted older swap without it
+continues unilaterally. The claimant (provider for BTC to LN, client for LN to
+BTC) initiates a bounded cooperative attempt. Both peers use signed RS-001
+envelopes with the same session, network, profile, and contract hash. The
+receiver independently checks the claimant/cosigner sender role, message
+sequence, exact `in_reply_to`, signed feature negotiation, frozen transaction,
+funding state, deadline, and one-shot burn. A parsed payload alone grants no
+signing authority.
+
+The closed `action_request` proposal carries `action` =
+`cooperative_claim_propose`, a 32-byte `cooperation_id`, lowercase hex
+`unsigned_transaction` (60 to 1,000 bytes), the 32-byte `payment_preimage`, a
+66-byte `public_nonce`, and nonnegative integer `deadline_at` and
+`deadline_height`. Its `in_reply_to` is null. The `action_result` reply either
+has the same action and ID with `status` = `declined`, or `status` = `signed`
+with the cosigner's 66-byte `public_nonce` and 32-byte
+`partial_signature`. A second `action_request` carries `action` =
+`cooperative_claim_complete`, the same ID, and the claimant's 32-byte
+`partial_signature`. The receipt `action_result` has the same action and ID
+and `status` = `verified`. Results refer to their request via the enclosing
+envelope's `in_reply_to`. The claimant need not wait for the receipt to finish
+or broadcast; a missing receipt never authorizes nonce reuse.
+
+The local attempt has at most 30 seconds and ends before the existing
+unilateral broadcast/escalation cutoff (both constraints apply). The first
+release permits one cooperative attempt per swap; later fee bumps use fresh
+unilateral spends. Both parties burn before allocating a nonce, consume before
+revealing a partial, and fall back without extending the budget on refusal,
+invalid data, restart, or timeout. For LN to BTC the client first durably
+saves a signed unilateral claim; proposal preimage disclosure can settle the
+hold, so the provider does not return a partial until it positively reconciles
+that settlement. No runtime currently enables these payloads for new swaps.
