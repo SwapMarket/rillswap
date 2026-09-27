@@ -536,7 +536,10 @@ and `spend_scan_height` on every existing row; v10 stores upgrade on open.
 v12 adds an empty cooperation-attempt ledger without modifying existing swaps
 or granting signing permission. Old accepted swaps remain unilateral. A missing
 attempt row never authorizes allocating a nonce, and an interrupted migration
-rolls back its schema and both version markers. Older binaries refuse a v9,
+rolls back its schema and both version markers. Every unfinished cooperation
+burn is abandoned on the next store acquisition; its ID is never reissued, and
+no native nonce handle is reconstructed from persistent state. Older binaries
+refuse a v9,
 v10, v11, or v12 store, so a binary rollback after this upgrade is not possible.
 
 Upgrading an authoritative v5, v6, or v7 installation is an explicit offline operation:

@@ -36,16 +36,25 @@ from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, Self
+from typing import TYPE_CHECKING, Any, Protocol, Self, cast
 
 import pyrage  # type: ignore[import-untyped]
 from pyrage import x25519
+from rill_core.settlement import (
+    CooperativeClaimPlan,
+    UnilateralAuthorization,
+    build_cooperative_claim,
+    reconstruct_taproot_contract,
+)
 from rill_core.wire import verify_static_handshake_accept, verify_static_handshake_transcript
 from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_model_json
 from rill_core.wire.envelope_authentication import verify_static_signed_envelope
 from rill_core.wire.hashes import (
+    COOPERATIVE_CLAIM_FEATURE,
     EPOCH_SESSION_FEATURE,
+    contract_hash,
     funding_binding_hash,
+    handshake_hash,
     handshake_init_hash,
     unsigned_envelope_hash,
 )
@@ -55,8 +64,10 @@ from rill_core.wire.messages import (
     HandshakeAccept,
     HandshakeAcceptPayload,
     HandshakeInit,
+    require_supported_contract_features,
 )
 from rill_core.wire.quotes import TermsOfferPayload
+from rill_core.wire.settlement_messages import FundingBindingPayload, TermsAcceptPayload
 from rill_core.wire.types import NetworkIdentity
 
 from rill_provider._nip59_receive import _decode_gift_wrap_candidate
@@ -69,6 +80,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from os import PathLike
 
+    from rill_core.settlement.taproot import TaprootKeyOperations
     from rill_core.wire.envelope_authentication import EnvelopeSchnorrVerifier
     from rill_core.wire.messages import ContractTerms
     from rill_crypto import Context
@@ -314,6 +326,7 @@ COOPERATION_ATTEMPT_SCHEMA = (
 )
 SCHEMA = (*SCHEMA_V11, COOPERATION_ATTEMPT_SCHEMA)
 MAX_CLAIM_ATTEMPTS = 32
+COOPERATION_BUDGET_SECONDS = 30
 ADMISSION_INDEXES = (
     "CREATE INDEX epoch_admissions_expiry ON epoch_admissions (expired, retire_after)",
 )
@@ -810,6 +823,13 @@ class LiveSessionStore:
                 "ON h.epoch_key=e.epoch_key WHERE h.epoch_key IS NULL LIMIT 1"
             ).fetchone():
                 raise LiveSessionStoreError("epoch key history unavailable")  # noqa: TRY301
+            # Native one-shot nonce handles never survive process ownership.
+            # Abandon every unfinished burn before this generation is usable;
+            # absence of a live handle never authorizes recreating one.
+            connection.execute(
+                "UPDATE cooperation_attempts SET state='ABANDONED' "
+                "WHERE state IN ('BURNED','NONCE_READY','SIGNING')"
+            )
             connection.execute("UPDATE meta SET policy_jcs=?", (policy_jcs,))
             generation = row[0][6] + 1
             connection.execute("UPDATE meta SET generation=?", (generation,))
@@ -893,6 +913,184 @@ class LiveSessionStore:
                 connection.execute("ROLLBACK")
             self.close()
             raise StaleOwnerError("commit outcome uncertain; ownership released") from None
+
+    def _burn_cooperative_claim(  # noqa: PLR0913 - frozen attempt identity and two deadlines
+        self,
+        session_id: str,
+        cooperation_id: bytes,
+        plan: CooperativeClaimPlan,
+        *,
+        now: int,
+        deadline_at: int,
+        deadline_height: int,
+    ) -> None:
+        """Reserve one immutable ID before any native MuSig nonce allocation.
+
+        INTERNAL ONLY. A committed burn is not permission to allocate a nonce,
+        sign, send a message, or act on a supplied chain view. Future callers
+        must independently validate current chain and Lightning facts and use
+        separate durable response/outbox methods. Uncertain commits never
+        return an authorization. Existing swaps without the signed feature
+        cannot reach this path, and abandoned IDs are never reused.
+        """
+        if (
+            not isinstance(cooperation_id, bytes)
+            or len(cooperation_id) != 32  # noqa: PLR2004 - BIP327 context length
+            or cooperation_id == bytes(32)
+            or not isinstance(plan, CooperativeClaimPlan)
+            or type(now) is not int
+            or type(deadline_at) is not int
+            or type(deadline_height) is not int
+            or now < 0
+            or not now < deadline_at <= now + COOPERATION_BUDGET_SECONDS
+            or deadline_height <= 0
+        ):
+            raise LiveSessionStoreError("cooperative attempt parameters refused")
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT s.init_bytes, s.accept_bytes, s.transcript_digest, s.phase, "
+                    "s.blocked, w.contract_hash, w.terms_offer, w.terms_accept, w.state, "
+                    "w.funding_binding, w.funding_txid, w.funding_vout, w.preimage "
+                    "FROM sessions s JOIN swaps w ON s.session_id=w.session_id "
+                    "WHERE s.session_id=?",
+                    (session_id,),
+                ).fetchone()
+                if row is None:
+                    raise LiveSessionStoreError("no accepted cooperative swap")  # noqa: TRY301
+                (
+                    init_bytes,
+                    accept_bytes,
+                    transcript,
+                    phase,
+                    blocked,
+                    recorded_hash,
+                    offer,
+                    accepted,
+                    state,
+                    binding_bytes,
+                    funding_txid,
+                    funding_vout,
+                    preimage,
+                ) = row
+                if (
+                    phase != "ACCEPTED"
+                    or blocked
+                    or accept_bytes is None
+                    or COOPERATIVE_CLAIM_FEATURE not in self._policy.features
+                    or connection.execute(
+                        "SELECT 1 FROM cooperation_attempts WHERE session_id=? LIMIT 1",
+                        (session_id,),
+                    ).fetchone()
+                    is not None
+                ):
+                    raise LiveSessionStoreError("cooperative attempt unavailable")  # noqa: TRY301
+                init_envelope = _canonical_envelope(init_bytes)
+                accept_envelope = _canonical_envelope(accept_bytes)
+                initiation = parse_model_json(HandshakeInit, canonicalize(init_envelope.payload))
+                acceptance = parse_model_json(
+                    HandshakeAccept, canonicalize(accept_envelope.payload["accept"])
+                )
+                terms = _offer_terms(offer)
+                client_acceptance = parse_model_json(
+                    TermsAcceptPayload, canonicalize(_canonical_envelope(accepted).payload)
+                ).acceptance
+                digest = contract_hash(terms).hex()
+                transcript_hash = handshake_hash(initiation, acceptance).hex()
+                require_supported_contract_features(terms, initiation, acceptance)
+                acceptance.validate_against(initiation, supported_features=self._policy.features)
+                if (
+                    COOPERATIVE_CLAIM_FEATURE not in terms.required_features
+                    or session_id != initiation.session_id
+                    or transcript_hash != transcript
+                    or digest != recorded_hash
+                    or terms.network_identity != self._network
+                    or terms.profile_id != self._policy.profile
+                    or client_acceptance.contract_hash != digest
+                    or client_acceptance.handshake_hash != transcript_hash
+                    or client_acceptance.session_id != session_id
+                    or client_acceptance.client_session_xonly_key
+                    != initiation.client_session_xonly_key
+                    or client_acceptance.provider_session_xonly_key
+                    != acceptance.provider_session_xonly_key
+                    or deadline_height > terms.refund_lock_height
+                    or not isinstance(preimage, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", preimage) is None
+                    or hashlib.sha256(bytes.fromhex(preimage)).hexdigest()
+                    != terms.invoice_binding.payment_hash
+                ):
+                    raise LiveSessionStoreError("cooperative authority unavailable")  # noqa: TRY301
+                funding = plan.authorization.funding
+                if terms.profile_id == "btc-to-ln/v1":
+                    if state not in ("PAID", "CLAIMING") or binding_bytes is None:
+                        raise LiveSessionStoreError("payment not claimable")  # noqa: TRY301
+                    signed_binding = parse_model_json(
+                        FundingBindingPayload,
+                        canonicalize(_canonical_envelope(binding_bytes).payload),
+                    ).binding
+                    if (
+                        signed_binding.contract_hash != digest
+                        or signed_binding.funding_txid != funding.txid.hex()
+                        or signed_binding.contract_vout != funding.output_index
+                        or int(signed_binding.contract_value_sat) != funding.value_sat
+                        or signed_binding.contract_script_pubkey != funding.script_pubkey.hex()
+                    ):
+                        raise LiveSessionStoreError("funding binding mismatch")  # noqa: TRY301
+                elif (
+                    state != "SETTLED"
+                    or funding_txid != funding.txid.hex()
+                    or funding_vout != funding.output_index
+                ):
+                    # Reverse SETTLED currently follows a witnessed claim. A
+                    # pre-spend settle path must be separately designed first.
+                    raise LiveSessionStoreError("reverse claim not settled")  # noqa: TRY301
+                keys = cast("TaprootKeyOperations", self._public_keys)
+                authorization = UnilateralAuthorization.from_terms(
+                    terms, funding, "claim", keys=keys
+                )
+                frozen = build_cooperative_claim(authorization, fee_sat=plan.fee_sat)
+                if plan != frozen:
+                    raise LiveSessionStoreError("cooperative transaction differs")  # noqa: TRY301
+                taproot = reconstruct_taproot_contract(terms, keys=keys)
+                immutable = canonicalize(
+                    {
+                        "version": 1,
+                        "session_id": session_id,
+                        "cooperation_id": cooperation_id.hex(),
+                        "contract_hash": digest,
+                        "network_identity": terms.network_identity.model_dump(mode="json"),
+                        "claimant": terms.claimant,
+                        "user_key": terms.client_contract_compressed_key,
+                        "provider_key": terms.provider_contract_compressed_key,
+                        "tap_tweak": taproot.tap_tweak.hex(),
+                        "funding_txid": funding.txid.hex(),
+                        "funding_vout": funding.output_index,
+                        "funding_value_sat": funding.value_sat,
+                        "funding_script_pubkey": funding.script_pubkey.hex(),
+                        "unsigned_transaction": frozen.base_transaction.hex(),
+                        "signature_hash": frozen.signature_hash.hex(),
+                        "fee_sat": frozen.fee_sat,
+                        "deadline_at": deadline_at,
+                        "deadline_height": deadline_height,
+                    }
+                )
+                connection.execute(
+                    "INSERT INTO cooperation_attempts "
+                    "(cooperation_id, session_id, owner_generation, binding, "
+                    "created_at, deadline_at, state) VALUES (?, ?, ?, ?, ?, ?, 'BURNED')",
+                    (
+                        cooperation_id,
+                        session_id,
+                        self._generation,
+                        immutable,
+                        now,
+                        deadline_at,
+                    ),
+                )
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo stored credentials or wire data
+            raise LiveSessionStoreError("cooperative attempt refused") from None
 
     def _expectations(self) -> dict[str, object]:
         return {
