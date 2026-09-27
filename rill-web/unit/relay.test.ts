@@ -56,6 +56,17 @@ describe("relay connection", () => {
     expect(await refused).toBe(false);
   });
 
+  test("an AUTH challenge never triggers stable-key authentication (N12)", async () => {
+    const { relay, socket } = await connect();
+    await relay.subscribe({ kinds: [1059] });
+    socket.deliver(["AUTH", "relay-challenge"]);
+    const published = relay.publish({ id: "aa" } as NostrEvent);
+    socket.deliver(["OK", "aa", false, "auth-required"]);
+    expect(await published).toBe(false);
+    expect(socket.sent.map((frame) => frame[0])).toEqual(["REQ", "EVENT"]);
+    relay.close();
+  });
+
   test("live events are queued only for the current subscription", async () => {
     const { relay, socket } = await connect();
     await relay.subscribe({ kinds: [1059] });
