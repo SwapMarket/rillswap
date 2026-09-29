@@ -317,6 +317,63 @@ def test_announcements_are_durably_ordered_cached_and_sessions_expire(
         assert len(up.published) == published
 
 
+def test_relay_queue_loss_forces_one_replay_req_and_failed_req_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Loss on an otherwise-live socket must not silently strand a wrapper."""
+
+    class CountingRelay(_Relay):
+        def __init__(self) -> None:
+            super().__init__(accept=True)
+            self.dropped_events = 0
+            self.subscriptions = 0
+            self.fail_next = False
+
+        async def subscribe(self, filters: list[dict[str, Any]]) -> None:
+            self.subscriptions += 1
+            if self.fail_next:
+                self.fail_next = False
+                raise OSError("test-only relay send failure")
+            await super().subscribe(filters)
+
+    harness = Harness(tmp_path, monkeypatch)
+    harness.provision()
+    policy = ServicePolicy(
+        network=harness.network,
+        profiles=("btc-to-ln/v1",),
+        amount_bands=((1000, 2000),),
+        base_fee_sat=1,
+        proportional_millionths=1,
+        slot="s",
+        relay_urls=("ws://fake/",),
+    )
+    relay = CountingRelay()
+    healthy = CountingRelay()
+    with harness.acquire() as store:
+        service = HandshakeService(store, _Identity(), object(), policy, clock=lambda: 10_000)  # type: ignore[arg-type]
+        asyncio.run(service.tick([relay, healthy]))
+        assert relay.subscriptions == 1
+        assert healthy.subscriptions == 1
+        asyncio.run(service.tick([relay, healthy]))
+        assert relay.subscriptions == 1
+        relay.dropped_events += 1
+        asyncio.run(service.tick([relay, healthy]))
+        assert relay.subscriptions == 2
+        assert healthy.subscriptions == 1  # one faulty relay does not replay all others
+        asyncio.run(service.tick([relay, healthy]))
+        assert relay.subscriptions == 2
+        relay.dropped_events += 1
+        relay.fail_next = True
+        asyncio.run(service.tick([relay, healthy]))
+        assert relay.subscriptions == 3
+        assert healthy.subscriptions == 1
+        asyncio.run(service.tick([relay, healthy]))
+        assert relay.subscriptions == 4
+        assert healthy.subscriptions == 2  # retry after failed REQ repairs all filters
+        asyncio.run(service.tick([relay, healthy]))
+        assert relay.subscriptions == 4
+
+
 def test_ownership_loss_is_never_swallowed_as_a_refusal() -> None:
     class Fenced:
         def open_mailbox_frame(self, *_args: object, **_kwargs: object) -> bytes:

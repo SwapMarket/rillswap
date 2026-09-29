@@ -70,6 +70,32 @@ def test_malformed_and_foreign_frames_are_ignored() -> None:
     asyncio.run(scenario())
 
 
+def test_dropped_ingress_frame_is_replayed_after_replacing_req() -> None:
+    async def scenario() -> None:
+        relay = FakeRelay()
+        url = await relay.start()
+        recipient = "cc" * 32
+        dropped = _event("07" * 32, recipient)
+        try:
+            await relay.inject(dropped)
+            async with RelayConnection(url) as connection:
+                connection._events = asyncio.Queue(maxsize=1)  # noqa: SLF001 - bounded ingress seam
+                connection._dispatch(  # noqa: SLF001 - deterministic queue saturation
+                    json.dumps(["EVENT", SUBSCRIPTION_ID, json.loads(_event("06" * 32, recipient))])
+                )
+                connection._dispatch(  # noqa: SLF001
+                    json.dumps(["EVENT", SUBSCRIPTION_ID, json.loads(dropped)])
+                )
+                assert connection.dropped_events == 1
+                assert json.loads(await asyncio.wait_for(_next(connection), 5))["id"] == "06" * 32
+                await connection.subscribe([{"kinds": [1059], "#p": [recipient]}])
+                assert json.loads(await asyncio.wait_for(_next(connection), 5))["id"] == "07" * 32
+        finally:
+            await relay.stop()
+
+    asyncio.run(scenario())
+
+
 def test_closed_relay_ends_events_and_fails_publication() -> None:
     async def scenario() -> None:
         relay = FakeRelay()

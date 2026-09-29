@@ -317,14 +317,19 @@ each tick it:
 - republishes the RS-005 announcement when the keys change or the refresh
   interval elapses;
 - resubscribes to the epoch keys and to the open session mailboxes
-  (`session_mailboxes`);
+  (`session_mailboxes`), and reissues the same NIP-01 filter when a live relay
+  connection reports dropped ingress events. This asks the relay to replay
+  retained history; the provider cannot recover an event the relay discarded or
+  that predates the bounded subscription lookback;
 - retries the pending outbox.
 
-Each inbound event is one of three things:
+Each admitted inbound event is one of four things:
 - an init on an epoch inbox (`reserve`, then `create_accept`, then wrap and
   publish);
 - a confirm on a session mailbox (`admit_confirm`);
-- a later signed client request (`answer_request`).
+- a later signed client request (`answer_request`);
+- an authenticated cooperative result (`_admit_cooperative_result`, no reply
+  or signing permission by itself).
 
 Dispositions are content-free. The service adds scheduling and retries, never
 authority.

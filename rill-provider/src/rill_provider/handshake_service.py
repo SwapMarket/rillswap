@@ -114,6 +114,8 @@ class ServicePolicy:
 @dataclass(slots=True)
 class _State:
     subscribed: tuple[str, ...] = ()
+    retry_subscription: bool = False
+    relay_drops: dict[int, tuple[Relay, int]] = field(default_factory=dict)
     announced_keys: tuple[str, ...] = ()
     announced_at: int = 0
     announcement: bytes | None = None  # exact bytes, retransmitted unchanged
@@ -267,11 +269,34 @@ class HandshakeService:
 
     async def _resubscribe(self, relays: Sequence[Relay]) -> None:
         wanted = tuple(self._filters()[0]["#p"])
-        if wanted != self._state.subscribed:
-            await asyncio.gather(
-                *(self.subscribe(relay) for relay in relays), return_exceptions=True
+        # A full per-relay ingress queue drops a wrapper without closing its
+        # socket. Re-REQ the same filter to replay relay history; inbox/outbox
+        # admission is idempotent. Snapshot counters before REQ so another drop
+        # during publication triggers another bounded retry on the next tick.
+        observed: dict[int, tuple[Relay, int]] = {}
+        for relay in relays:
+            count = getattr(relay, "dropped_events", 0)
+            observed[id(relay)] = (relay, count if type(count) is int and count >= 0 else 0)
+        lost = []
+        for relay in relays:
+            previous = self._state.relay_drops.get(id(relay))
+            seen = previous[1] if previous is not None and previous[0] is relay else 0
+            if observed[id(relay)][1] > seen:
+                lost.append(relay)
+        if lost:
+            LOG.warning("relay inbound queue overflow; replay subscription requested")
+        refresh_all = wanted != self._state.subscribed or self._state.retry_subscription
+        if refresh_all or lost:
+            targets = relays if refresh_all else lost
+            results = await asyncio.gather(
+                *(self.subscribe(relay) for relay in targets), return_exceptions=True
             )
+            if any(isinstance(result, BaseException) for result in results):
+                self._state.retry_subscription = True  # retry even if the filter is empty
+                return
             self._state.subscribed = wanted
+            self._state.retry_subscription = False
+        self._state.relay_drops = observed  # prune disconnected connection IDs
 
     async def _send_pending(self, message_id: str, relays: Sequence[Relay]) -> None:
         self._state.attempts[message_id] = self._now()
