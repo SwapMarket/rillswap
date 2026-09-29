@@ -949,6 +949,17 @@ class LiveSessionStore:
             # Abandon every unfinished burn before this generation is usable;
             # absence of a live handle never authorizes recreating one.
             connection.execute(
+                "UPDATE outbox SET delivery_state='RECONCILED' "
+                "WHERE delivery_state='PENDING' AND EXISTS "
+                "(SELECT 1 FROM cooperation_attempts a "
+                "JOIN claim_arbitration c ON c.session_id=a.session_id "
+                "WHERE c.state IN ('WAITING','CLOSED') "
+                "AND c.owner_generation=a.owner_generation "
+                "AND a.session_id=outbox.session_id "
+                "AND a.nonce_response_id=outbox.message_id "
+                "AND a.state IN ('BURNED','NONCE_READY','SIGNING'))"
+            )
+            connection.execute(
                 "UPDATE cooperation_attempts SET state='ABANDONED' "
                 "WHERE state IN ('BURNED','NONCE_READY','SIGNING')"
             )
@@ -1881,6 +1892,103 @@ class LiveSessionStore:
             raise
         except Exception:  # noqa: BLE001 - never echo secret material or library errors
             raise LiveSessionStoreError("outbox wrap refused") from None
+
+    def pending_sendable(  # noqa: PLR0911 - one fail-closed proposal authorization
+        self, message_id: str, *, now: int, tip_height: int | None = None
+    ) -> bool:
+        """Allow ordinary outbox replay; proposal replay needs a live window.
+
+        The caller must sample an independent fresh Core tip for a proposal.
+        A completion is distinct: its selected cooperative winner stays owed
+        even after the deadline or a new owner takes over.
+        """
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT session_id,canonical_bytes FROM outbox "
+                    "WHERE message_id=? AND delivery_state='PENDING'",
+                    (message_id,),
+                ).fetchone()
+                if row is None:
+                    return False
+                session_id, document = row
+                envelope = _canonical_envelope(document)
+                if (
+                    envelope.message_type != "action_request"
+                    or envelope.payload.get("action") != "cooperative_claim_propose"
+                ):
+                    return True
+                if type(now) is not int or type(tip_height) is not int:
+                    return False
+                attempt = connection.execute(
+                    "SELECT a.owner_generation,a.deadline_at,a.state,a.binding,"
+                    "s.phase,s.blocked,w.state,w.contract_hash "
+                    "FROM cooperation_attempts a "
+                    "JOIN sessions s ON s.session_id=a.session_id "
+                    "JOIN swaps w ON w.session_id=a.session_id "
+                    "WHERE a.session_id=? AND a.nonce_response_id=?",
+                    (session_id, message_id),
+                ).fetchone()
+                if attempt is None:
+                    return False
+                generation, deadline_at, state, bound, phase, blocked, swap_state, digest = attempt
+                binding = parse_json_strict(bound)
+                deadline_height = (
+                    binding.get("deadline_height") if isinstance(binding, dict) else None
+                )
+                if (
+                    generation != self._generation
+                    or state not in ("NONCE_READY", "SIGNING")
+                    or phase != "ACCEPTED"
+                    or blocked
+                    or swap_state != "PAID"
+                    or not isinstance(binding, dict)
+                    or binding.get("contract_hash") != digest
+                    or binding.get("deadline_at") != deadline_at
+                    or type(deadline_height) is not int
+                ):
+                    return False
+                try:
+                    _require_waiting_cooperation(
+                        connection,
+                        session_id,
+                        digest,
+                        self._generation,
+                        now=now,
+                        deadline_at=deadline_at,
+                        deadline_height=deadline_height,
+                        tip_height=tip_height,
+                    )
+                except LiveSessionStoreError:
+                    return False
+                return True
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - malformed proposal is not dispatch permission
+            return False
+
+    def reconcile_expired_cooperative_proposals(self, now: int) -> int:
+        """Retire only linked live proposals whose original window has expired."""
+        if type(now) is not int or now < 0:
+            raise LiveSessionStoreError("cooperative deadline unavailable")
+        try:
+            with self._write() as connection:
+                return connection.execute(
+                    "UPDATE outbox SET delivery_state='RECONCILED' "
+                    "WHERE delivery_state='PENDING' AND EXISTS "
+                    "(SELECT 1 FROM cooperation_attempts a "
+                    "JOIN claim_arbitration c ON c.session_id=a.session_id "
+                    "WHERE a.session_id=outbox.session_id "
+                    "AND a.nonce_response_id=outbox.message_id "
+                    "AND a.state IN ('NONCE_READY','SIGNING') "
+                    "AND c.state='WAITING' AND c.version=1 "
+                    "AND c.owner_generation=a.owner_generation AND c.deadline_at<=?)",
+                    (now,),
+                ).rowcount
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo stored message details
+            raise LiveSessionStoreError("cooperative proposal reconciliation refused") from None
 
     def open_mailbox_frame(self, outer_event: bytes, *, transport: Context) -> bytes:
         """Decode a gift wrap sent to one of our session mailboxes.
@@ -3222,6 +3330,8 @@ class LiveSessionStore:
                 ):
                     raise LiveSessionStoreError("cooperative selection refused")  # noqa: TRY301
                 if select_winner:
+                    _reconcile_cooperative_proposal(connection, session_id)
+                if select_winner:
                     if (
                         connection.execute(
                             "UPDATE swaps SET state='CLAIMING',claim_tx=?,claim_txid=?,"
@@ -4120,6 +4230,7 @@ class LiveSessionStore:
                     "UPDATE claim_arbitration SET state='CLOSED' WHERE session_id=?",
                     (candidate.session_id,),
                 )
+                _reconcile_cooperative_proposal(connection, candidate.session_id)
                 self._record_observation(
                     connection,
                     candidate.session_id,
@@ -4812,6 +4923,17 @@ def _require_waiting_cooperation(  # noqa: PLR0913 - exact owner, contract, and 
         != ("WAITING", generation, digest, deadline_at, deadline_height, None, None)
     ):
         raise LiveSessionStoreError("cooperative window unavailable")
+
+
+def _reconcile_cooperative_proposal(connection: sqlite3.Connection, session_id: str) -> None:
+    """Stop retrying only this swap's committed, now-obsolete proposal."""
+    connection.execute(
+        "UPDATE outbox SET delivery_state='RECONCILED' "
+        "WHERE delivery_state='PENDING' AND session_id=? AND message_id IN "
+        "(SELECT nonce_response_id FROM cooperation_attempts WHERE session_id=? "
+        "AND nonce_response_id IS NOT NULL)",
+        (session_id, session_id),
+    )
 
 
 def _configure(connection: sqlite3.Connection) -> None:

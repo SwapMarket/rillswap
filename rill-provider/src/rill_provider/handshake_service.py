@@ -61,6 +61,7 @@ if TYPE_CHECKING:
 LOG = logging.getLogger(__name__)
 NIP59_BACKDATE_SECONDS = 2 * 24 * 60 * 60
 MAX_SEEN_EVENTS = 4096
+TIP_LOOKUP_WAIT_SECONDS = 2.0  # waiting bound, not cancellation of Core's worker thread
 _RELAY_CONNECTED = b""  # in-band wake: tick now and re-announce
 
 
@@ -164,9 +165,21 @@ class HandshakeService:
         self._hold_invoices = hold_invoices
         self._state = _State()
         self._deadline_healthy = True
+        self._deadline_wall_anchor, self._deadline_monotonic_anchor = self._now(), time.monotonic()
+        self._deadline_high_water = self._deadline_wall_anchor
+        self._tip_lookup: asyncio.Task[int] | None = None
 
     def _now(self) -> int:
         return int(self._clock())
+
+    def _deadline_now(self) -> int:
+        """Keep deadline eligibility irreversible through clock corrections."""
+        self._deadline_high_water = max(
+            self._now(),
+            self._deadline_high_water,
+            self._deadline_wall_anchor + int(time.monotonic() - self._deadline_monotonic_anchor),
+        )
+        return self._deadline_high_water
 
     async def _publish(self, event: bytes, relays: Sequence[Relay]) -> bool:
         results = await asyncio.gather(
@@ -236,11 +249,30 @@ class HandshakeService:
     async def _refresh_tip(self) -> None:
         if self._chain_tip is None:
             return
-        try:
-            self._state.tip = await asyncio.to_thread(self._chain_tip)
-        except Exception:  # noqa: BLE001 - an unavailable tip only disables quotes
-            self._state.tip = None
+        self._state.tip = await self._sample_tip()
+        if self._state.tip is None:
             LOG.warning("chain tip unavailable; quotes answered capacity_unavailable")
+
+    async def _sample_tip(self) -> int | None:
+        """Share one outstanding Core lookup, without canceling a timed-out worker."""
+        if self._chain_tip is None:
+            return None
+        task = self._tip_lookup
+        if task is None or task.done():
+            task = asyncio.create_task(asyncio.to_thread(self._chain_tip))
+            self._tip_lookup = task
+
+            def consume(done: asyncio.Task[int]) -> None:
+                if not done.cancelled():
+                    with suppress(Exception):
+                        done.exception()  # avoid an unobserved late RPC failure
+
+            task.add_done_callback(consume)
+        try:
+            height = await asyncio.wait_for(asyncio.shield(task), TIP_LOOKUP_WAIT_SECONDS)
+        except Exception:  # noqa: BLE001 - no proof of tip, never start another pending RPC
+            return None
+        return height if type(height) is int and height >= 0 else None
 
     async def _announce(self, epochs: tuple[str, ...], now: int) -> None:
         policy, state = self._policy, self._state
@@ -303,7 +335,21 @@ class HandshakeService:
 
     async def _send_pending(self, message_id: str, relays: Sequence[Relay]) -> None:
         self._state.attempts[message_id] = self._now()
+        now = self._deadline_now()
+        tip: int | None = None
+        if not self._store.pending_sendable(message_id, now=now):
+            tip = await self._sample_tip()
+            if tip is None:
+                # No independent tip, so no proposal disclosure. Keep the
+                # underlying RPC single-flight if the waiter merely timed out.
+                return
+            if not self._store.pending_sendable(
+                message_id, now=self._deadline_now(), tip_height=tip
+            ):
+                return
         wrap = self._store.wrap_pending(message_id, transport=self._transport)
+        if not self._store.pending_sendable(message_id, now=self._deadline_now(), tip_height=tip):
+            return  # arbitration may have closed before wrapping finished
         if not await self._publish(wrap, relays):
             LOG.warning("outbox wrap not accepted by any relay; will retry")
 
@@ -557,13 +603,6 @@ class HandshakeService:
         settlement = self._settlement
         if settlement is None:
             return set(), None
-        wall_anchor, monotonic_anchor = self._now(), time.monotonic()
-
-        def deadline_now() -> int:
-            # A backward wall-clock adjustment cannot extend an open window
-            # during this owner's lifetime. Restart closes old windows instead.
-            return max(self._now(), wall_anchor + int(time.monotonic() - monotonic_anchor))
-
         # Acquisition closes old WAITING rows, but never broadcasts them. Do
         # not admit a new relay request before valid old-owner fallback bundles
         # have been selected. Submission runs separately from relay/tick I/O.
@@ -597,7 +636,9 @@ class HandshakeService:
             task.add_done_callback(complete)
 
         try:
-            for candidate in settlement.select_due_fallbacks(deadline_now(), closed_only=True):
+            for candidate in settlement.select_due_fallbacks(
+                self._deadline_now(), closed_only=True
+            ):
                 dispatch(candidate)
         except StaleOwnerError:
             raise
@@ -605,7 +646,7 @@ class HandshakeService:
             unhealthy()
             LOG.warning("startup fallback selection deferred; admissions disabled")
         try:
-            for winner in settlement.recover_cooperative_winners(deadline_now()):
+            for winner in settlement.recover_cooperative_winners(self._deadline_now()):
                 dispatch(winner)
         except StaleOwnerError:
             raise
@@ -616,7 +657,8 @@ class HandshakeService:
         async def supervise() -> None:
             while not stop.is_set():
                 try:
-                    for candidate in settlement.select_due_fallbacks(deadline_now()):
+                    self._store.reconcile_expired_cooperative_proposals(self._deadline_now())
+                    for candidate in settlement.select_due_fallbacks(self._deadline_now()):
                         dispatch(candidate)
                 except StaleOwnerError:
                     unhealthy()
@@ -628,7 +670,7 @@ class HandshakeService:
                 try:
                     for candidate in settlement.recorded_fallbacks():
                         dispatch(candidate)
-                    for winner in settlement.recover_cooperative_winners(deadline_now()):
+                    for winner in settlement.recover_cooperative_winners(self._deadline_now()):
                         dispatch(winner)
                     for winner in settlement.recorded_cooperative_winners():
                         dispatch(winner)

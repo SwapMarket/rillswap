@@ -44,6 +44,7 @@ if TYPE_CHECKING:
         "burn_after_close",
         "begin_after_close",
         "nonce_race",
+        "expired_without_selection",
     ],
 )
 def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0912, PLR0915 - native custody lifecycle
@@ -183,6 +184,23 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0912, P
         proposal_id = store.begin_selected_cooperative_proposal(
             session, cooperation_id, now=1001, tip_height=1090
         )
+        assert not store.pending_sendable(proposal_id, now=1001)
+        assert store.pending_sendable(proposal_id, now=1001, tip_height=1090)
+        assert not store.pending_sendable(proposal_id, now=1001, tip_height=1100)
+        assert not store.pending_sendable(proposal_id, now=1020, tip_height=1090)
+        if winner == "expired_without_selection":
+            assert store.reconcile_expired_cooperative_proposals(1019) == 0
+            assert store.reconcile_expired_cooperative_proposals(1020) == 1
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT delivery_state FROM outbox WHERE message_id=?", (proposal_id,)
+            ).fetchone() == ("RECONCILED",)
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT state FROM claim_arbitration WHERE session_id=?", (session,)
+            ).fetchone() == ("WAITING",)
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT state FROM swaps WHERE session_id=?", (session,)
+            ).fetchone() == ("PAID",)
+            return
         proposal = Envelope.model_validate_json(store.pending_outbox()[0].canonical_bytes)
         provider_nonce = bytes.fromhex(str(proposal.payload["public_nonce"]))
         user_attempt, user_nonce = crypto.musig_begin(
@@ -266,6 +284,7 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0912, P
                 (session,),
             ).fetchone() == (completion_id,)
             assert any(entry.message_id == completion_id for entry in store.pending_outbox())
+            assert store.pending_sendable(completion_id, now=1025)  # selected winner is still owed
             assert store.recorded_fallbacks() == ()
             assert store.selected_cooperative_claim(session).raw == raw
             with pytest.raises(LiveSessionStoreError, match="replacement refused"):
@@ -323,6 +342,9 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0912, P
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as verifier,
         harness.acquire() as resumed,
     ):
+        assert resumed._connection.execute(  # noqa: SLF001
+            "SELECT delivery_state FROM outbox WHERE message_id=?", (proposal_id,)
+        ).fetchone() == ("RECONCILED",)
         if winner == "prior_paid":
             resumed._public_keys = verifier  # noqa: SLF001 - native custody on reacquisition
             resumed._crypto = verifier  # noqa: SLF001
