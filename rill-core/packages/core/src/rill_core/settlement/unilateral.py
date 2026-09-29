@@ -452,6 +452,42 @@ def build_cooperative_claim(
     )
 
 
+def verify_cooperative_claim_proposal(
+    raw_transaction: bytes, authorization: UnilateralAuthorization
+) -> CooperativeClaimPlan:
+    """Reconstruct an exact one-input key-path claim before any client signing.
+
+    This checks transaction and fee policy only. The caller must separately
+    authenticate the proposal, establish payment and selected funding evidence,
+    and enforce a one-shot nonce/partial-signature boundary.
+    """
+    if not isinstance(raw_transaction, bytes) or not raw_transaction:
+        raise ValidationError("cooperative proposal must be nonempty bytes")
+    if len(raw_transaction) > MAX_TRANSACTION_BYTES:
+        raise ValidationError("cooperative proposal exceeds the size limit")
+    reader = _Reader(raw_transaction)
+    reader.read(4)  # version: the reconstructed plan fixes the only supported value
+    if reader.compact_size() != 1:
+        raise ValidationError("cooperative proposal requires one input")
+    reader.read(32 + 4)  # prevout: checked by exact reconstruction below
+    reader.string(maximum=MAX_SCRIPT_BYTES, field="input scriptSig")
+    reader.read(4)  # sequence
+    if reader.compact_size() != 1:
+        raise ValidationError("cooperative proposal requires one output")
+    output_value_sat = int.from_bytes(reader.read(8), "little")
+    _require_satoshis(output_value_sat, field="transaction output value")
+    reader.string(maximum=MAX_SCRIPT_BYTES, field="output scriptPubKey")
+    reader.read(4)  # locktime
+    if reader.offset != len(raw_transaction):
+        raise ValidationError("cooperative proposal contains trailing bytes")
+    plan = build_cooperative_claim(
+        authorization, fee_sat=authorization.funding.value_sat - output_value_sat
+    )
+    if raw_transaction != plan.base_transaction:
+        raise ValidationError("cooperative proposal differs from authorized claim")
+    return plan
+
+
 def finalize_cooperative_claim(
     plan: CooperativeClaimPlan, signature: bytes, *, verifier: SchnorrVerifier
 ) -> ValidatedCooperativeClaim:

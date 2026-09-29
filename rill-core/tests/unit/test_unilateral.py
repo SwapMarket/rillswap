@@ -22,6 +22,7 @@ from rill_core.settlement import (
     reconstruct_taproot_contract,
     validate_cooperative_claim,
     validate_unilateral_spend,
+    verify_cooperative_claim_proposal,
 )
 from rill_core.settlement import unilateral as tx
 from rill_core.wire.messages import ContractTerms
@@ -220,6 +221,79 @@ def test_cooperative_claim_binds_exact_key_path_transaction_and_output_key() -> 
         validate_cooperative_claim(
             validated.raw_transaction, authorization, verifier=internal_key_verifier
         )
+
+
+@pytest.mark.parametrize("profile", ["btc-to-ln/v1", "ln-to-btc/v1"])
+def test_cooperative_proposal_reconstructs_fee_and_exact_sighash(profile: str) -> None:
+    case = next(
+        item
+        for item in _load("taproot-cases-v1.json")["valid"]
+        if item["contract_terms"]["profile_id"] == profile
+    )
+    settlement = next(
+        item
+        for item in _load("settlement-cases-v1.json")["valid"]
+        if item["taproot_vector"] == case["id"]
+    )
+    terms, funding = _terms(case), _funding(settlement)
+    authorization = UnilateralAuthorization.from_terms(
+        terms, funding, "claim", keys=_keys(terms, case)
+    )
+    for fee in (0, 300, max_spendable_fee(authorization)):
+        plan = build_cooperative_claim(authorization, fee_sat=fee)
+        assert verify_cooperative_claim_proposal(plan.base_transaction, authorization) == plan
+        assert len(plan.signature_hash) == 32
+
+
+def test_cooperative_proposal_refuses_base_encoding_and_policy_escapes() -> None:
+    case, terms, funding = _first_context()
+    authorization = UnilateralAuthorization.from_terms(
+        terms, funding, "claim", keys=_keys(terms, case)
+    )
+    plan = build_cooperative_claim(authorization, fee_sat=300)
+    raw = plan.base_transaction
+
+    def changed(start: int, end: int, replacement: bytes) -> bytes:
+        return raw[:start] + replacement + raw[end:]
+
+    # One canonical input/output, no witness, exactly the selected funding
+    # outpoint/destination and the locally enforced signed fee cap and dust.
+    invalid: list[object] = [
+        None,
+        bytearray(raw),
+        b"",
+        raw[:-1],
+        raw + b"\x00",
+        b"\x00" * (tx.MAX_TRANSACTION_BYTES + 1),
+        changed(0, 4, b"\x03\x00\x00\x00"),
+        changed(4, 5, b"\x00"),
+        changed(4, 5, b"\x02"),
+        changed(4, 5, b"\xfd\x01\x00"),
+        changed(4, 5, b"\x00\x01"),  # witness marker is not base serialization
+        changed(5, 6, bytes([raw[5] ^ 1])),
+        changed(37, 38, bytes([raw[37] ^ 1])),
+        changed(41, 42, b"\x01\x00"),
+        changed(41, 42, b"\xfd\x11\x27"),  # scriptSig > MAX_SCRIPT_BYTES
+        changed(42, 43, bytes([raw[42] ^ 1])),
+        changed(46, 47, b"\x00"),
+        changed(46, 47, b"\x02"),
+        changed(47, 55, (funding.value_sat + 1).to_bytes(8, "little")),
+        changed(
+            47, 55, (funding.value_sat - max_spendable_fee(authorization) - 1).to_bytes(8, "little")
+        ),
+        changed(47, 55, (0).to_bytes(8, "little")),
+        changed(56, 57, bytes([raw[56] ^ 1])),
+        changed(len(raw) - 4, len(raw), b"\x01\x00\x00\x00"),
+    ]
+    signature = b"\x11" * 64
+    verifier = ExpectedVerifier(funding.script_pubkey[2:], plan.signature_hash, signature)
+    invalid.append(finalize_cooperative_claim(plan, signature, verifier=verifier).raw_transaction)
+    for candidate in invalid:
+        with pytest.raises(ValidationError):
+            verify_cooperative_claim_proposal(candidate, authorization)  # type: ignore[arg-type]
+    refund = UnilateralAuthorization.from_terms(terms, funding, "refund", keys=_keys(terms, case))
+    with pytest.raises(ValidationError, match="only for a claim"):
+        verify_cooperative_claim_proposal(raw, refund)
 
 
 def test_cooperative_claim_refuses_every_transaction_policy_escape() -> None:

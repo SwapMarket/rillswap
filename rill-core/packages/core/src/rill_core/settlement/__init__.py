@@ -35,6 +35,7 @@ from rill_core.settlement.unilateral import (
     max_spendable_fee,
     validate_cooperative_claim,
     validate_unilateral_spend,
+    verify_cooperative_claim_proposal,
 )
 
 __all__ = [
@@ -65,5 +66,6 @@ __all__ = [
     "reconstruct_taproot_contract",
     "validate_cooperative_claim",
     "validate_unilateral_spend",
+    "verify_cooperative_claim_proposal",
     "verify_static_signed_funding_binding_history",
 ]
