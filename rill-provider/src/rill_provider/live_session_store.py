@@ -25,6 +25,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -617,6 +618,20 @@ class PreparedFallback:
 
 
 @dataclass(frozen=True, slots=True)
+class ReadinessChallenge:
+    """A newly issued request, not an admission or restartable authority."""
+
+    session_id: str
+    request_id: str
+    challenge: str
+    contract_hash: str
+    owner_generation: int
+    started_at: int
+    deadline_at: int
+    deadline_height: int
+
+
+@dataclass(frozen=True, slots=True)
 class CooperativeWinner:
     """Affirmative, selected key-path bytes with the accepted authority snapshot."""
 
@@ -948,6 +963,30 @@ class LiveSessionStore:
             # Native one-shot nonce handles never survive process ownership.
             # Abandon every unfinished burn before this generation is usable;
             # absence of a live handle never authorizes recreating one.
+            # A signed readiness request is historical evidence, not a live
+            # token. This prefilter avoids loading an ordinary outbox backlog;
+            # only the parsed exact action is reconciled on reacquisition.
+            for request_id, document in connection.execute(
+                "SELECT message_id,canonical_bytes FROM outbox WHERE delivery_state='PENDING' "
+                "AND instr(canonical_bytes,?)>0",
+                (b'"action":"cooperative_claim_ready"',),
+            ).fetchall():
+                try:
+                    outgoing = _canonical_envelope(document)
+                except Exception:  # noqa: BLE001 - unrelated malformed outbox needs its own review
+                    logging.getLogger(__name__).warning(
+                        "pending outbox envelope malformed; retained for operator review"
+                    )
+                    continue
+                if (
+                    outgoing.message_type == "action_request"
+                    and outgoing.payload.get("action") == "cooperative_claim_ready"
+                ):
+                    connection.execute(
+                        "UPDATE outbox SET delivery_state='RECONCILED' "
+                        "WHERE message_id=? AND delivery_state='PENDING'",
+                        (request_id,),
+                    )
             connection.execute(
                 "UPDATE outbox SET delivery_state='RECONCILED' "
                 "WHERE delivery_state='PENDING' AND EXISTS "
@@ -1913,6 +1952,14 @@ class LiveSessionStore:
                     return False
                 session_id, document = row
                 envelope = _canonical_envelope(document)
+                if (
+                    envelope.message_type == "action_request"
+                    and envelope.payload.get("action") == "cooperative_claim_ready"
+                ):
+                    # Outbox history alone never restores a process-local probe.
+                    # A future live caller must pass a current-owner token to
+                    # an explicitly authorized dispatch path.
+                    return False
                 if (
                     envelope.message_type != "action_request"
                     or envelope.payload.get("action") != "cooperative_claim_propose"
@@ -3840,6 +3887,126 @@ class LiveSessionStore:
             raise
         except Exception:  # noqa: BLE001 - never echo storage details
             raise LiveSessionStoreError("claim arbitration unavailable") from None
+
+    def issue_cooperative_readiness(  # noqa: PLR0913 - fixed time/height probe budget
+        self,
+        session_id: str,
+        *,
+        signer: EnvelopeSigner,
+        started_at: int,
+        now: int,
+        deadline_at: int,
+        deadline_height: int,
+    ) -> ReadinessChallenge:
+        """Sign one process-owned readiness probe for an authenticated PAID swap.
+
+        Issuance alone never delays unilateral claiming. Only a current owner
+        holding the returned token in memory may accept a later signed echo.
+        An abandoned request must never be reconstructed from the outbox.
+        """
+        if (
+            type(started_at) is not int
+            or type(now) is not int
+            or type(deadline_at) is not int
+            or type(deadline_height) is not int
+            or started_at < 0
+            or not started_at <= now < deadline_at <= started_at + COOPERATION_BUDGET_SECONDS
+            or deadline_height <= 0
+        ):
+            raise LiveSessionStoreError("readiness deadline unavailable")
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT a.state,a.version,a.contract_hash,s.phase,s.blocked,"
+                    "w.state,w.contract_hash,w.terms_offer,w.funding_binding,w.preimage,"
+                    "w.claim_tx,w.claim_txid FROM claim_arbitration a "
+                    "JOIN swaps w ON w.session_id=a.session_id "
+                    "JOIN sessions s ON s.session_id=a.session_id WHERE a.session_id=?",
+                    (session_id,),
+                ).fetchone()
+                if row is None or row[:2] != ("ADMITTED", 1):
+                    raise LiveSessionStoreError("readiness not admitted")  # noqa: TRY301
+                (
+                    _,
+                    _,
+                    admitted_hash,
+                    phase,
+                    blocked,
+                    state,
+                    swap_hash,
+                    offer,
+                    funding,
+                    preimage,
+                    claim_tx,
+                    claim_txid,
+                ) = row
+                if (
+                    phase != "ACCEPTED"
+                    or blocked
+                    or state != "PAID"
+                    or swap_hash != admitted_hash
+                    or funding is None
+                    or claim_tx is not None
+                    or claim_txid is not None
+                    or not isinstance(preimage, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", preimage) is None
+                    or connection.execute(
+                        "SELECT 1 FROM claim_attempts WHERE session_id=? LIMIT 1", (session_id,)
+                    ).fetchone()
+                    or connection.execute(
+                        "SELECT 1 FROM cooperation_attempts WHERE session_id=? LIMIT 1",
+                        (session_id,),
+                    ).fetchone()
+                ):
+                    raise LiveSessionStoreError("readiness swap unavailable")  # noqa: TRY301
+                terms = _offer_terms(offer)
+                binding_envelope = _canonical_envelope(funding)
+                binding = parse_model_json(
+                    FundingBindingPayload, canonicalize(binding_envelope.payload)
+                ).binding
+                if (
+                    COOPERATIVE_CLAIM_FEATURE not in self._policy.features
+                    or COOPERATIVE_CLAIM_FEATURE not in terms.required_features
+                    or terms.profile_id != "btc-to-ln/v1"
+                    or terms.network_identity != self._network
+                    or contract_hash(terms).hex() != admitted_hash
+                    or binding_envelope.contract_hash != admitted_hash
+                    or binding.contract_hash != admitted_hash
+                    or deadline_height > terms.refund_lock_height
+                    or hashlib.sha256(bytes.fromhex(preimage)).hexdigest()
+                    != terms.invoice_binding.payment_hash
+                ):
+                    raise LiveSessionStoreError("readiness authority unavailable")  # noqa: TRY301
+                challenge = secrets.token_hex(32)
+                request_id = self._record_observation(
+                    connection,
+                    session_id,
+                    {
+                        "action": "cooperative_claim_ready",
+                        "challenge": challenge,
+                        "payment_preimage": preimage,
+                        "deadline_at": deadline_at,
+                        "deadline_height": deadline_height,
+                    },
+                    signer,
+                    now,
+                    message_type="action_request",
+                    required_features=(COOPERATIVE_CLAIM_FEATURE,),
+                )
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo preimage, session or signer details
+            raise LiveSessionStoreError("readiness issue refused") from None
+        return ReadinessChallenge(
+            session_id,
+            request_id,
+            challenge,
+            admitted_hash,
+            self._generation,
+            started_at,
+            deadline_at,
+            deadline_height,
+        )
 
     def prepare_claim_window(  # noqa: PLR0913 - signed fallback and immutable deadline bundle
         self,
