@@ -29,6 +29,7 @@ def _callbacks(  # noqa: PLR0913 - independent node identity fault knobs
     challenge: object,
     chain: str,
     genesis: str | None = None,
+    outpoint: object = ...,
 ) -> tuple[
     tuple[
         Callable[[], ChainView | None], Callable[[str], int | None], Callable[[bytes, str], bool]
@@ -52,7 +53,7 @@ def _callbacks(  # noqa: PLR0913 - independent node identity fault knobs
         result: object = {
             "getblockchaininfo": info,
             "getblockhash": network.genesis_hash if genesis is None else genesis,
-            "gettxout": {"confirmations": 1},
+            "gettxout": {"confirmations": 1} if outpoint is ... else outpoint,
             "getrawtransaction": {"txid": TXID, "confirmations": 2},
             "testmempoolaccept": [{"allowed": True, "txid": TXID}],
             "sendrawtransaction": TXID,
@@ -142,3 +143,17 @@ def test_watcher_attests_each_session_then_allows_expected_rpcs(
         "testmempoolaccept",
         "sendrawtransaction",
     ]
+
+
+@pytest.mark.parametrize("outpoint", [False, 0, "spent", [], ["unspent"]])
+def test_malformed_utxo_response_is_not_evidence_of_a_foreign_spend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outpoint: object
+) -> None:
+    network = NetworkIdentity.model_validate_json(
+        (NETWORKS / "regtest-rillswap-e2e-v1.json").read_bytes()
+    )
+    (view, _, _), methods = _callbacks(
+        tmp_path, monkeypatch, network, challenge=..., chain="regtest", outpoint=outpoint
+    )
+    assert view() is None
+    assert methods == ["getblockchaininfo", "getblockhash", "gettxout"]

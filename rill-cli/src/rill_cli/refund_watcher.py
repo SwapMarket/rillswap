@@ -306,6 +306,8 @@ def core_collaborators(
                 out = reader._rpc(  # noqa: SLF001
                     session, "gettxout", [funding_txid, contract_vout, False], 3
                 )
+                if out is not None and not isinstance(out, dict):
+                    return None  # malformed result cannot prove spent or unspent
         except Exception:  # noqa: BLE001 - transport or node failure is not evidence
             LOG.info("Core chain view unavailable; waiting")
             return None
