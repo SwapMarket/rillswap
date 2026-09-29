@@ -54,6 +54,7 @@ from rill_provider.live_session_store import (
     CooperativeWinner,
     LiveSessionStoreError,
     PreparedFallback,
+    ReadinessChallenge,
     RecordedUnilateralClaim,
     StaleOwnerError,
     StaleSwapError,
@@ -64,6 +65,8 @@ from rill_provider.reverse_settlement import HoldInvoiceBackend, ReverseSettleme
 from rill_provider.settlement_policy import SettlementCrypto, offered_terms
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from rill_core.settlement.taproot import TaprootKeyOperations
     from rill_core.wire.messages import ContractTerms, FundingBinding, InvoiceBinding
 
@@ -318,6 +321,80 @@ class SettlementEngine:
             observation={"kind": "claim_broadcast", "claim_txid": spend.txid},
         )
         self._claim_probes.pop(window.session_id, None)
+
+    async def prepare_cooperative_window(
+        self,
+        challenge: ReadinessChallenge,
+        *,
+        sample_tip: Callable[[], Awaitable[int | None]],
+        now: Callable[[], int],
+    ) -> None:
+        """Commit a verified fallback using the original paid probe's deadlines.
+
+        Sign locally before the last fresh-tip check. No cooperative nonce is
+        exposed here; the store's ADMITTED-to-WAITING transaction is the only
+        authority for a subsequent signing attempt.
+        """
+        window = self.probe_window(challenge.session_id)
+        if (
+            window is None
+            or window.abandoned
+            or challenge.contract_hash != window.contract_hash
+            or challenge.owner_generation != window.owner_generation
+            or challenge.started_at != window.started_at
+            or challenge.deadline_at != window.deadline_at
+            or time.monotonic() >= window.started_monotonic + COOPERATIVE_PROBE_SECONDS
+            or now() >= window.deadline_at
+        ):
+            raise LiveSessionStoreError("original claim probe unavailable")
+        items = self._store.settlement_work(session_id=challenge.session_id)
+        if len(items) != 1:
+            raise LiveSessionStoreError("paid claim unavailable")
+        item = items[0]
+        if item.state != "PAID" or item.preimage is None:
+            raise LiveSessionStoreError("paid claim unavailable")
+        terms = offered_terms(Envelope.model_validate_json(item.terms_offer, strict=True))
+        if (
+            terms.profile_id != "btc-to-ln/v1"
+            or contract_hash(terms).hex() != window.contract_hash
+            or challenge.deadline_height
+            != terms.refund_lock_height - terms.timing_policy.claim_confirmation_blocks
+            or item.funding_binding is None
+        ):
+            raise LiveSessionStoreError("cooperative fallback terms changed")
+        funding = Envelope.model_validate_json(item.funding_binding, strict=True)
+        binding = parse_model_json(FundingBindingPayload, canonicalize(funding.payload)).binding
+        if (
+            funding.contract_hash != window.contract_hash
+            or binding.contract_hash != window.contract_hash
+            or hashlib.sha256(bytes.fromhex(item.preimage)).hexdigest()
+            != terms.invoice_binding.payment_hash
+        ):
+            raise LiveSessionStoreError("cooperative fallback binding changed")
+        spend = await self._initial_claim(item, terms, binding, use_estimate=False)
+        tip = await sample_tip()
+        committed_at = now()
+        if (
+            tip is None
+            or type(tip) is not int
+            or tip >= challenge.deadline_height
+            or committed_at >= window.deadline_at
+            or time.monotonic() >= window.started_monotonic + COOPERATIVE_PROBE_SECONDS
+            or self.probe_window(challenge.session_id) != window
+            or not self._new_exposure_allowed
+        ):
+            raise LiveSessionStoreError("cooperative fallback deadline unavailable")
+        self._store.prepare_claim_window(
+            challenge.session_id,
+            fallback_raw=spend.raw_transaction,
+            fallback_txid=spend.txid,
+            fallback_fee_sat=spend.fee_sat,
+            started_at=window.started_at,
+            now=committed_at,
+            deadline_at=window.deadline_at,
+            deadline_height=challenge.deadline_height,
+        )
+        self._claim_probes.pop(challenge.session_id, None)
 
     def disable_new_exposure(self) -> None:
         """Latch off new BTC-to-LN sends after deadline supervision fails."""

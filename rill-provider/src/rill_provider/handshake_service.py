@@ -302,6 +302,72 @@ class HandshakeService:
             return None
         return challenge
 
+    def _abandon_live_echo(self, challenge: ReadinessChallenge) -> None:
+        """Retire failed live authority without renewing or exposing a nonce."""
+        self._readiness_probes.pop(challenge.session_id, None)
+        self._readiness_ready.pop(challenge.session_id, None)
+        if self._settlement is not None:
+            self._settlement.abandon_probe(challenge.session_id)
+        try:
+            self._store.retire_cooperative_readiness(challenge)
+        except StaleOwnerError:
+            raise
+        except LiveSessionStoreError:
+            LOG.warning("readiness retirement deferred for %s", challenge.session_id[:16])
+
+    async def _prepare_ready_echo(self, challenge: ReadinessChallenge) -> str:
+        """Consume the original echo, then commit the fallback before any nonce."""
+        settlement = self._settlement
+        token = self.take_cooperative_readiness(challenge.session_id)
+        if settlement is None or token != challenge:
+            self._abandon_live_echo(challenge)
+            return "readiness-abandoned"
+
+        async def fresh_tip() -> int | None:
+            tip = await self._fresh_probe_tip()
+            return tip if not self._readiness_closed and self._deadline_healthy else None
+
+        try:
+            await settlement.prepare_cooperative_window(
+                token, sample_tip=fresh_tip, now=self._deadline_now
+            )
+        except StaleOwnerError:
+            raise
+        except Exception:  # noqa: BLE001 - no nonce or proposal on uncertain preparation
+            self._abandon_live_echo(challenge)
+            LOG.warning(
+                "cooperative fallback preparation abandoned for %s", challenge.session_id[:16]
+            )
+            return "readiness-abandoned"
+        self._store.retire_cooperative_readiness(challenge)
+        return "readiness-prepared"
+
+    async def _admit_ready_result(self, document: bytes, session_id: object) -> str:
+        """Authenticate the exact signed echo and prepare only its live probe."""
+        challenge = self._readiness_probes.get(session_id) if isinstance(session_id, str) else None
+        if challenge is None:
+            return "refused"  # stored requests never recreate a live token
+        live_window = (
+            self._settlement.probe_window(challenge.session_id)
+            if self._settlement is not None
+            else None
+        )
+        tip = await (self._fresh_probe_tip() if live_window is not None else self._sample_tip())
+        if tip is None or self._readiness_closed or not self._deadline_healthy:
+            if live_window is not None:
+                self._abandon_live_echo(challenge)
+            return "refused"
+        result = self._store.admit_cooperative_readiness(
+            document, challenge, now=self._deadline_now(), tip_height=tip
+        )
+        if result.replay:
+            return "result-replay"  # a replay never restores eligibility
+        del self._readiness_probes[challenge.session_id]
+        self._readiness_ready[challenge.session_id] = challenge
+        if live_window is not None:
+            return await self._prepare_ready_echo(challenge)
+        return "readiness-admitted"
+
     def _expire_readiness(self) -> None:
         now = self._deadline_now()
         for session_id, challenge in tuple(self._readiness_probes.items()):
@@ -596,25 +662,7 @@ class HandshakeService:
                         isinstance(payload, dict)
                         and payload.get("action") == "cooperative_claim_ready"
                     ):
-                        session_id = envelope.get("session_id")
-                        challenge = (
-                            self._readiness_probes.get(session_id)
-                            if isinstance(session_id, str)
-                            else None
-                        )
-                        if challenge is None:
-                            return "refused"  # stored requests never recreate a live token
-                        tip = await self._sample_tip()
-                        if tip is None or self._readiness_closed or not self._deadline_healthy:
-                            return "refused"
-                        result = store.admit_cooperative_readiness(
-                            document, challenge, now=self._deadline_now(), tip_height=tip
-                        )
-                        if result.replay:
-                            return "result-replay"  # a replay never restores eligibility
-                        del self._readiness_probes[challenge.session_id]
-                        self._readiness_ready[challenge.session_id] = challenge
-                        return "readiness-admitted"
+                        return await self._admit_ready_result(document, envelope.get("session_id"))
                     result = store._admit_cooperative_result(document, now=now)  # noqa: SLF001 - store-owned admission; no signer or reply
                     return "result-replay" if result.replay else "result-admitted"
                 return await self._answer(document, relays, now)
