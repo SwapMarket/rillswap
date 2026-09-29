@@ -62,6 +62,13 @@ one provider, reached over a Nostr relay. It runs these steps in order:
    Publication failure may leave a valid `.paid` file. Preserve all snapshots,
    inspect any `.paid` file, and do not retry payment.
 
+The post-funding provider stream is consumed in authenticated sequence order.
+`--settle-timeout` is one finite, positive lifetime starting at the successful
+funding broadcast; nonterminal observations do not renew it. Expiry means
+settlement was not observed, not that the invoice is unpaid. Check the invoice
+and retain recovery files before taking further action. Cooperative readiness
+echoes remain disabled until the complete signing/completion handler is wired.
+
 ```sh
 rill swap btc-to-ln \
   --network trusted-regtest-network.json \

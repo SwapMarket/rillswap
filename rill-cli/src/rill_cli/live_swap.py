@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import secrets
 import time
 from dataclasses import dataclass
@@ -489,9 +490,16 @@ class _Session:
         for index, envelope in enumerate(self.inbox):
             if wanted(envelope):
                 return self._pop_inbox(index)
+        duration = self.timeout if timeout is None else timeout
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + duration
         try:
-            async with asyncio.timeout(timeout or self.timeout):
+            async with asyncio.timeout(duration):
                 async for raw in self.connection.events():
+                    # Already-queued invalid/replayed frames need not suspend,
+                    # so the timeout callback alone cannot bound this loop.
+                    if loop.time() >= deadline:
+                        break
                     admitted = self._admit(raw)
                     if admitted is None:
                         continue
@@ -521,6 +529,55 @@ class _Session:
         if answer.message_type != expected:
             raise SwapError(f"unexpected answer {answer.message_type}")
         return answer
+
+
+async def _wait_for_payment(
+    session: _Session,
+    terms: ContractTerms,
+    *,
+    deadline: float,
+    refund_hint: str,
+) -> str:
+    """Dispatch the original provider stream in order under one fixed lifetime.
+
+    Cooperation is not negotiated by the current client. Never skip an action
+    request to a later payment observation, and never echo readiness before
+    a complete signing/completion handler is available.
+    """
+    loop = asyncio.get_running_loop()
+    expected_contract = contract_hash(terms).hex()
+    timeout_error = "provider settlement not observed in time; " + refund_hint
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise SwapError(timeout_error)
+        try:
+            message = await session.receive_next(timeout=remaining)
+        except TimeoutError:
+            raise SwapError(timeout_error) from None
+        except SwapError as error:
+            raise SwapError(f"provider session stopped: {error}; " + refund_hint) from None
+        if loop.time() >= deadline:
+            raise SwapError(timeout_error)
+        if message.contract_hash != expected_contract or message.in_reply_to is not None:
+            raise SwapError("unexpected provider settlement context; " + refund_hint)
+        if message.message_type == "action_request":
+            raise SwapError("cooperation unavailable; payment status unresolved; " + refund_hint)
+        if message.message_type != "observation":
+            raise SwapError("unexpected provider settlement message; " + refund_hint)
+        try:
+            seen = parse_observation(canonicalize(message.payload))
+        except ValueError:
+            raise SwapError("invalid provider settlement observation; " + refund_hint) from None
+        if isinstance(seen, PaymentSettled):
+            preimage = seen.payment_preimage
+            if hashlib.sha256(bytes.fromhex(preimage)).hexdigest() != (
+                terms.invoice_binding.payment_hash
+            ):
+                raise SwapError("provider sent a wrong preimage; " + refund_hint)
+            return preimage
+        if seen.kind == "payment_failed":
+            raise SwapError("provider reports the payment failed; " + refund_hint)
 
 
 async def _answer_cooperative_readiness(  # noqa: PLR0913 - all independent bindings are explicit
@@ -766,6 +823,8 @@ async def run_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
     report: Callable[[str], None] = lambda _line: None,
 ) -> SwapOutcome:
     """Run one BTC to LN swap; see the module docstring for the order."""
+    if not math.isfinite(settle_timeout) or settle_timeout <= 0:
+        raise SwapError("settlement timeout must be finite and positive")
     now = int(time.time())
     binding_invoice = decode_invoice(invoice)
     if binding_invoice.bolt11_sha256 != hashlib.sha256(invoice.encode("ascii")).hexdigest():
@@ -911,53 +970,40 @@ async def run_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
     txid = await asyncio.to_thread(wallet.broadcast, funded.raw_transaction)
     if txid != authorized.txid:
         raise SwapError("Core broadcast another transaction; check the wallet")
+    settlement_deadline = asyncio.get_running_loop().time() + settle_timeout
     report(f"funding broadcast {txid}; waiting for the provider to pay")
 
     refund_hint = (
-        f"funds are committed; refund after block {terms.refund_lock_height} with "
+        "funds are committed; check invoice status; "
+        f"refund after block {terms.refund_lock_height} with "
         f"`rill recover watch-refund --funding-attempt-id {attempt_id} --binding-revision 0` "
         "on the funded recovery file"
     )
-    while True:
-        try:
-            observation = await session.receive(
-                lambda item: (
-                    item.message_type == "observation"
-                    and item.in_reply_to is None
-                    and item.contract_hash == offer.terms.contract_hash
-                ),
-                timeout=settle_timeout,
-            )
-        except TimeoutError:
-            raise SwapError("provider did not pay in time; " + refund_hint) from None
-        seen = parse_observation(canonicalize(observation.payload))
-        if isinstance(seen, PaymentSettled):
-            preimage = seen.payment_preimage
-            if hashlib.sha256(bytes.fromhex(preimage)).hexdigest() != (
-                terms.invoice_binding.payment_hash
-            ):
-                raise SwapError("provider sent a wrong preimage; " + refund_hint)
-            paid_recovery = _recovery_document(
-                **record,  # type: ignore[arg-type]
-                funding=((binding, binding_signature),),
-                preimage=bytes.fromhex(preimage),
-            )
-            try:
-                await asyncio.to_thread(write_recovery, paid_recovery, successor)
-            except Exception:  # noqa: BLE001 - do not misreport known payment as unpaid
-                raise SwapError(
-                    "payment verified but paid recovery snapshot "
-                    "publication could not be confirmed; "
-                    "preserve all recovery files and inspect any .paid snapshot; "
-                    "do not retry payment"
-                ) from None
-            report("paid recovery snapshot written (verified payment preimage retained)")
-            return SwapOutcome(
-                session.session_id,
-                offer.terms.contract_hash,
-                txid,
-                preimage,
-                terms.refund_lock_height,
-            )
-        if seen.kind == "payment_failed":
-            raise SwapError("provider reports the payment failed; " + refund_hint)
+    preimage = await _wait_for_payment(
+        session,
+        terms,
+        deadline=settlement_deadline,
+        refund_hint=refund_hint,
+    )
+    paid_recovery = _recovery_document(
+        **record,  # type: ignore[arg-type]
+        funding=((binding, binding_signature),),
+        preimage=bytes.fromhex(preimage),
+    )
+    try:
+        await asyncio.to_thread(write_recovery, paid_recovery, successor)
+    except Exception:  # noqa: BLE001 - do not misreport known payment as unpaid
+        raise SwapError(
+            "payment verified but paid recovery snapshot "
+            "publication could not be confirmed; "
+            "preserve all recovery files and inspect any .paid snapshot; "
+            "do not retry payment"
+        ) from None
+    report("paid recovery snapshot written (verified payment preimage retained)")
+    return SwapOutcome(
+        session.session_id,
+        offer.terms.contract_hash,
+        txid,
+        preimage,
+        terms.refund_lock_height,
+    )
