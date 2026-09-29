@@ -46,7 +46,7 @@ from rill_core.wire.messages import Envelope
 from rill_core.wire.settlement_messages import FundingBindingPayload
 
 from rill_provider.core_tx_bytes import CoreTransactionUnknownError
-from rill_provider.live_session_store import MAX_CLAIM_ATTEMPTS, StaleSwapError
+from rill_provider.live_session_store import MAX_CLAIM_ATTEMPTS, StaleOwnerError, StaleSwapError
 from rill_provider.lnd_invoice_decode import InvoiceRejectedError
 from rill_provider.lnd_payment_observation import LndNotSyncedError, LndUnavailableError
 from rill_provider.reverse_settlement import HoldInvoiceBackend, ReverseSettlement
@@ -236,6 +236,8 @@ class SettlementEngine:
         for item in self._store.settlement_work():
             try:
                 state = await self._advance(item, now)
+            except StaleOwnerError:
+                raise  # a fenced/uncertain store cannot defer economic work
             except StaleSwapError:
                 continue
             except Exception:  # noqa: BLE001 - one swap's backend trouble never stops others
@@ -286,6 +288,8 @@ class SettlementEngine:
                 )
             except StaleSwapError:
                 continue
+            except StaleOwnerError:
+                raise
             except Exception:  # noqa: BLE001 - one swap's trouble never stops others
                 LOG.warning("unfunded swap closure deferred", exc_info=False)
                 continue
@@ -299,6 +303,8 @@ class SettlementEngine:
                 return
             tip = await asyncio.to_thread(self._chain.tip_height)
             released = self._store.release_expired_exposure(tip)
+        except StaleOwnerError:
+            raise
         except Exception:  # noqa: BLE001 - retried next tick; nothing is released
             LOG.warning("exposure release deferred", exc_info=False)
             return
@@ -317,6 +323,8 @@ class SettlementEngine:
             try:
                 depth = await asyncio.to_thread(self._chain.confirmations, txid)
                 self._store.release_claim(session_id, txid, confirmations=depth)
+            except StaleOwnerError:
+                raise
             except Exception:  # noqa: BLE001 - retried next tick; nothing is released
                 LOG.warning("claim reservation release deferred", exc_info=False)
 
@@ -480,6 +488,8 @@ class SettlementEngine:
             return item.state
         try:
             spend = self._claim(item, terms, binding, fee)
+        except StaleOwnerError:
+            raise
         except Exception:  # noqa: BLE001 - e.g. dust bound; keep the recorded attempts
             LOG.warning("claim fee bump could not be built")
             return item.state
