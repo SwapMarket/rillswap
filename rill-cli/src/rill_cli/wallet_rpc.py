@@ -18,7 +18,7 @@ from rill_core.errors import ValidationError
 from rill_core.networks import backend_names, require_funding_release
 from rill_core.settlement import FundingPrevout, PlannedFundingOutput
 
-from rill_cli.recovery_core_observation import _cookie
+from rill_cli.recovery_core_observation import _cookie, _matches_signet_challenge
 
 if TYPE_CHECKING:
     from rill_core.wire.types import NetworkIdentity
@@ -150,6 +150,7 @@ class WalletRpc:
             or info.get("initialblockdownload") is not False
             or type(info.get("blocks")) is not int
             or info["blocks"] < 0
+            or not _matches_signet_challenge(info, self._network)
         ):
             raise WalletRpcError("Core wallet chain is unavailable or differs from configuration")
         if self._call("getblockhash", 0, wallet=False) != self._network.genesis_hash:

@@ -2,7 +2,8 @@
 
 This is not chain reconciliation, a spendable funding proof, or permission to
 sign. The operator asserts complete deployment identity. Core attests only
-its chain label and genesis, not the configured namespace or policy profile.
+its chain label, genesis, and signet challenge (on signet), not the configured
+namespace or policy profile.
 """
 
 from __future__ import annotations
@@ -119,6 +120,15 @@ def _tip(value: object, chain: str) -> tuple[str, int]:
     ):
         raise RecoveryCoreProtocolError("Core has no usable named tip on the configured chain")
     return value["bestblockhash"], value["blocks"]
+
+
+def _matches_signet_challenge(info: object, network: NetworkIdentity) -> bool:
+    """Require Core's exact consensus script, not the shared signet genesis alone."""
+    return network.name != "signet" or (
+        isinstance(info, dict)
+        and type(info.get("signet_challenge")) is str
+        and info["signet_challenge"] == network.signet_challenge
+    )
 
 
 def _exact_sats(value: object, expected: int) -> bool:
@@ -266,7 +276,12 @@ class RecoveryCoreReader:
                 follow_redirects=False,
                 timeout=httpx.Timeout(READ_SECONDS, connect=CONNECT_SECONDS),
             ) as client:
-                tip_hash, height = _tip(self._rpc(client, "getblockchaininfo", [], 1), self._chain)
+                first_info = self._rpc(client, "getblockchaininfo", [], 1)
+                tip_hash, height = _tip(first_info, self._chain)
+                if not _matches_signet_challenge(first_info, self._network):
+                    raise RecoveryCoreProtocolError(
+                        "Core signet challenge differs from configuration"
+                    )
                 if self._rpc(client, "getblockhash", [0], 2) != self._network.genesis_hash:
                     raise RecoveryCoreProtocolError("Core genesis differs from configured network")
                 output = self._rpc(
@@ -318,9 +333,12 @@ class RecoveryCoreReader:
                     mempool_tip, mempool_confirms = _outpoint(mempool_out, binding, height)
                     if mempool_tip != tip_hash or mempool_confirms != confirmations:
                         raise RecoveryCoreUnavailableError("mempool-aware outpoint sample changed")
-                last_hash, last_height = _tip(
-                    self._rpc(client, "getblockchaininfo", [], 6), self._chain
-                )
+                last_info = self._rpc(client, "getblockchaininfo", [], 6)
+                last_hash, last_height = _tip(last_info, self._chain)
+                if not _matches_signet_challenge(last_info, self._network):
+                    raise RecoveryCoreProtocolError(
+                        "Core signet challenge differs from configuration"
+                    )
                 # Resample the lookup height to reject observable inconsistency.
                 # Matching samples prove neither ancestry to the named tip nor
                 # an atomic snapshot under repeated rapid reorganization.

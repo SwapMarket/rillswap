@@ -20,6 +20,9 @@ Backend checks must compare Core's chain and genesis, its `signet_challenge` on
 signet, and LND's actual chain identity. The shared testnet3/testnet4 invoice
 prefix alone is not sufficient network evidence. Missing or unknown evidence
 must refuse new financial actions, not trigger scans or migrations.
+Signet Core RPC must expose `signet_challenge` in `getblockchaininfo` (as in
+Core v29 and v30); older backends without that evidence cannot fund or provide
+trusted online recovery observations. Existing recovery records are unchanged.
 
 Sources:
 

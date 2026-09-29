@@ -91,11 +91,19 @@ def _replies(
                 200, headers={"Content-Encoding": "gzip"}, stream=httpx.ByteStream(b"invalid")
             )
         info = {
-            "chain": "regtest",
+            "chain": "signet" if network.name == "signet" else "regtest",
             "blocks": 100,
             "bestblockhash": tip,
             "initialblockdownload": False,
         }
+        if network.name == "signet":
+            info["signet_challenge"] = network.signet_challenge
+            if change == "challenge-missing" and identifier == 1:
+                del info["signet_challenge"]
+            elif change == "challenge-null" and identifier == 1:
+                info["signet_challenge"] = None
+            elif (change, identifier) in {("challenge-wrong", 1), ("challenge-second", 6)}:
+                info["signet_challenge"] = "00"
         if change == "tip-changed" and identifier == 6:
             info["bestblockhash"] = "33" * 32
         result: object = {
@@ -180,6 +188,36 @@ def _reader(  # noqa: PLR0913 - test seam controls independent inputs
     return observation.RecoveryCoreReader(
         port=18443, cookie_path=_cookie(tmp_path), network=network
     )
+
+
+@pytest.mark.parametrize(
+    "change", ["none", "challenge-missing", "challenge-null", "challenge-wrong", "challenge-second"]
+)
+def test_signet_candidate_requires_matching_challenge_in_both_tip_samples(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    from rill_core.wire.types import NetworkIdentity  # noqa: PLC0415 - fixture-only network
+
+    terms, binding, _ = _context()
+    network = NetworkIdentity.model_validate_json(
+        (Path(__file__).parents[2] / "rill-docs/networks/signet.json").read_bytes()
+    )
+    terms = terms.model_copy(update={"network_identity": network})
+    requests: list[dict[str, Any]] = []
+    reader = _reader(tmp_path, monkeypatch, binding, network, requests, change=change)
+    monkeypatch.setattr(
+        observation, "check_funding_binding_transaction", lambda *_a, **_kw: object()
+    )
+    if change != "none":
+        with pytest.raises(observation.RecoveryCoreReadError, match="evidence unavailable"):
+            reader.observe(binding, terms, keys=object())  # type: ignore[arg-type]
+        methods = [entry["method"] for entry in requests]
+        if change == "challenge-second":
+            assert methods[-1] == "getblockchaininfo"  # no final block sample
+        else:
+            assert methods == ["getblockchaininfo"]  # no outpoint/tx read
+    else:
+        assert reader.observe(binding, terms, keys=object()).network_identity == network  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("change", ["none", "at-tip"])

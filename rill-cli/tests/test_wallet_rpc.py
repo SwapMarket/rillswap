@@ -163,6 +163,67 @@ def test_wrong_genesis_never_reaches_funding(
     assert not {call["method"] for call in calls} & WALLET_EFFECTS
 
 
+@pytest.mark.parametrize(
+    "challenge",
+    [None, "null", False, 1, "00", "AA", "uppercase", "whitespace"],
+)
+def test_signet_challenge_must_match_before_wallet_effect(
+    core: tuple[WalletRpc, list[dict[str, Any]]],
+    answers: dict[str, Any],
+    challenge: object,
+) -> None:
+    base, calls = core
+    network = NetworkIdentity.model_validate_json(
+        (Path(__file__).parents[2] / "rill-docs/networks/signet.json").read_bytes()
+    )
+    wallet = WalletRpc(
+        port=int(base._url.rsplit(":", 1)[1]),  # noqa: SLF001 - reuse test server
+        cookie_path=base._cookie_path,  # noqa: SLF001
+        wallet="w",
+        network=network,
+    )
+    info = answers["getblockchaininfo"]
+    info["chain"] = "signet"
+    answers["getblockhash"] = network.genesis_hash  # shared by default and custom signets
+    if challenge is not None:
+        info["signet_challenge"] = (
+            None
+            if challenge == "null"
+            else network.signet_challenge.upper()
+            if challenge == "uppercase"
+            else network.signet_challenge + " "
+            if challenge == "whitespace"
+            else challenge
+        )
+    with pytest.raises(WalletRpcError, match="wallet chain"):
+        wallet.broadcast(b"\x02\x00")
+    assert [call["method"] for call in calls] == ["getblockchaininfo"]
+
+
+def test_matching_signet_challenge_permits_wallet_effect(
+    core: tuple[WalletRpc, list[dict[str, Any]]], answers: dict[str, Any]
+) -> None:
+    base, calls = core
+    network = NetworkIdentity.model_validate_json(
+        (Path(__file__).parents[2] / "rill-docs/networks/signet.json").read_bytes()
+    )
+    wallet = WalletRpc(
+        port=int(base._url.rsplit(":", 1)[1]),  # noqa: SLF001
+        cookie_path=base._cookie_path,  # noqa: SLF001
+        wallet="w",
+        network=network,
+    )
+    answers["getblockchaininfo"].update(chain="signet", signet_challenge=network.signet_challenge)
+    answers["getblockhash"] = network.genesis_hash
+    answers["sendrawtransaction"] = "aa" * 32
+    assert wallet.broadcast(b"\x02\x00") == "aa" * 32
+    assert [call["method"] for call in calls] == [
+        "getblockchaininfo",
+        "getblockhash",
+        "sendrawtransaction",
+    ]
+
+
 @pytest.mark.parametrize("info", [{}, None, {"chain": "regtest", "blocks": True}])
 def test_missing_or_partial_attestation_never_authorizes_broadcast(
     core: tuple[WalletRpc, list[dict[str, Any]]],
