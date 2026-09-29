@@ -138,6 +138,7 @@ def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
     paid_path = tmp_path / "swap.age.paid"
     wallet = FakeWallet()
     recoveries: list[bytes] = []
+    attempted_paid: list[bytes] = []
     sent: list[dict[str, Any]] = []
     policy_store = HandshakePolicy(
         profile="btc-to-ln/v1",
@@ -218,6 +219,8 @@ def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
         )
 
         def write_recovery(document: bytes, previous: bytes | None) -> None:
+            if len(recoveries) == 2:
+                attempted_paid.append(document)
             if len(recoveries) == 2 and paid_publication == "collision":
                 paid_path.write_bytes(b"existing paid snapshot")
             with monkeypatch.context() as patch:
@@ -301,17 +304,9 @@ def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
             if paid_publication == "collision":
                 assert paid_path.read_bytes() == b"existing paid snapshot"
             else:
-                paid = json.loads(recoveries[1])
-                paid["monotonic_knowledge"] = {
-                    "preimage_known": True,
-                    "preimage": PREIMAGE,
-                    "dangerous_signature_issued": False,
-                }
-                from rill_core.wire.canonical import canonicalize  # noqa: PLC0415
-
                 verify_export_ciphertext(
                     paid_path.read_bytes(),
-                    canonicalize(paid),
+                    attempted_paid[0],
                     NETWORK,
                     credentials=credentials,
                     crypto=crypto,
