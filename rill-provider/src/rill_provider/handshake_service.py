@@ -173,6 +173,7 @@ class HandshakeService:
         self._deadline_wall_anchor, self._deadline_monotonic_anchor = self._now(), time.monotonic()
         self._deadline_high_water = self._deadline_wall_anchor
         self._tip_lookup: asyncio.Task[int] | None = None
+        self._tip_lookup_started: float | None = None
         # These maps are never reconstructed from signed outbox or inbox rows.
         self._readiness_probes: dict[str, ReadinessChallenge] = {}
         self._readiness_ready: dict[str, ReadinessChallenge] = {}
@@ -194,13 +195,17 @@ class HandshakeService:
         return self._deadline_high_water
 
     async def start_cooperative_readiness(
-        self, session_id: str, *, deadline_height: int, relays: Sequence[Relay] = ()
+        self,
+        session_id: str,
+        *,
+        deadline_height: int | None = None,
+        relays: Sequence[Relay] = (),
+        window: ClaimProbeWindow | None = None,
     ) -> str | None:
         """Probe one newly paid featured original session at most once per owner.
 
-        A future PAID transition caller must choose a conservative height from
-        fresh chain evidence. No historic ADMITTED scan may call this method.
-        This method does not delay the legacy unilateral settlement path.
+        Live callers must supply the PAID transition's original probe window;
+        older primitive-only callers may supply a height without claim deferral.
         """
         if (
             self._readiness_closed
@@ -209,28 +214,79 @@ class HandshakeService:
         ):
             return None
         self._readiness_issued.add(session_id)  # failed preparation cannot renew the budget
-        started_at = self._deadline_now()
-        tip = await self._sample_tip()
+        started_at = self._deadline_now() if window is None else window.started_at
+        deadline_at = started_at + COOPERATION_BUDGET_SECONDS
+        if window is not None:
+            deadline_height = self._live_probe_height(session_id, window, deadline_height)
+            if deadline_height is None:
+                return None
+        tip = await (self._fresh_probe_tip() if window is not None else self._sample_tip())
         if (
             self._readiness_closed
             or not self._deadline_healthy
             or tip is None
             or type(deadline_height) is not int
             or tip >= deadline_height
+            or self._deadline_now() >= deadline_at
+            or (
+                window is not None
+                and (
+                    self._settlement is None
+                    or self._settlement.probe_window(session_id) != window
+                    or time.monotonic() >= window.started_monotonic + COOPERATION_BUDGET_SECONDS
+                )
+            )
         ):
+            if window is not None and self._settlement is not None:
+                self._settlement.abandon_probe(session_id)
             return None
-        challenge = self._store.issue_cooperative_readiness(
-            session_id,
-            signer=self._transport,
-            started_at=started_at,
-            now=self._deadline_now(),
-            deadline_at=started_at + COOPERATION_BUDGET_SECONDS,
-            deadline_height=deadline_height,
-        )
+        try:
+            challenge = self._store.issue_cooperative_readiness(
+                session_id,
+                signer=self._transport,
+                started_at=started_at,
+                now=self._deadline_now(),
+                deadline_at=deadline_at,
+                deadline_height=deadline_height,
+            )
+        except StaleOwnerError:
+            raise
+        except LiveSessionStoreError:
+            if window is not None and self._settlement is not None:
+                self._settlement.abandon_probe(session_id)
+            return None
         self._readiness_probes[session_id] = challenge
         if relays:
             await self._send_pending(challenge.request_id, relays)
         return challenge.request_id
+
+    def _live_probe_height(
+        self, session_id: str, window: ClaimProbeWindow, requested: int | None
+    ) -> int | None:
+        """Bind the original budget and signed chain cutoff to this owner."""
+        settlement = self._settlement
+        if (
+            settlement is None
+            or window.session_id != session_id
+            or window.owner_generation != self._store.generation
+            or window.deadline_at != window.started_at + COOPERATION_BUDGET_SECONDS
+            or window.abandoned
+            or settlement.probe_window(session_id) != window
+            or time.monotonic() >= window.started_monotonic + COOPERATION_BUDGET_SECONDS
+            or self._deadline_now() >= window.deadline_at
+        ):
+            return None
+        try:
+            cutoff = self._store.cooperative_height_cutoff(session_id, window.contract_hash)
+        except StaleOwnerError:
+            raise
+        except LiveSessionStoreError:
+            settlement.abandon_probe(session_id)
+            return None
+        if cutoff is None or (requested is not None and requested != cutoff):
+            settlement.abandon_probe(session_id)
+            return None
+        return cutoff
 
     def take_cooperative_readiness(self, session_id: str) -> ReadinessChallenge | None:
         """Consume one original-session echo before preparing the exact fallback."""
@@ -251,9 +307,13 @@ class HandshakeService:
             if now >= challenge.deadline_at:
                 self._store.retire_cooperative_readiness(challenge)
                 del self._readiness_probes[session_id]
+                if self._settlement is not None and self._settlement.probe_window(session_id):
+                    self._settlement.abandon_probe(session_id)
         for session_id, challenge in tuple(self._readiness_ready.items()):
             if now >= challenge.deadline_at:
                 del self._readiness_ready[session_id]
+                if self._settlement is not None and self._settlement.probe_window(session_id):
+                    self._settlement.abandon_probe(session_id)
 
     def _abandon_readiness(self) -> None:
         """Discard process-local authorization when this service stops."""
@@ -314,6 +374,7 @@ class HandshakeService:
         if self._settlement is not None:
             for session_id, moved in (await self._settlement.tick(now)).items():
                 LOG.info("swap %s moved to %s", session_id[:16], moved)
+                await self._begin_paid_probe(session_id, moved, relays)
         due = sorted(  # least recently attempted first (never attempted = 0)
             (
                 entry.message_id
@@ -333,6 +394,14 @@ class HandshakeService:
             if message_id not in {entry.message_id for entry in self._store.pending_outbox()}:
                 del state.attempts[message_id]
 
+    async def _begin_paid_probe(self, session_id: str, moved: str, relays: Sequence[Relay]) -> None:
+        """Send a challenge only for this owner's fresh PAID transition gate."""
+        if moved != "PAID" or not self._probe_supervision_needed or self._settlement is None:
+            return
+        window = self._settlement.probe_window(session_id)
+        if window is not None and not window.abandoned:
+            await self.start_cooperative_readiness(session_id, relays=relays, window=window)
+
     async def _refresh_tip(self) -> None:
         if self._chain_tip is None:
             return
@@ -346,6 +415,7 @@ class HandshakeService:
             return None
         task = self._tip_lookup
         if task is None or task.done():
+            self._tip_lookup_started = time.monotonic()
             task = asyncio.create_task(asyncio.to_thread(self._chain_tip))
             self._tip_lookup = task
 
@@ -360,6 +430,27 @@ class HandshakeService:
         except Exception:  # noqa: BLE001 - no proof of tip, never start another pending RPC
             return None
         return height if type(height) is int and height >= 0 else None
+
+    async def _fresh_probe_tip(self) -> int | None:
+        """Refuse an old shared RPC result, including a late timed-out worker."""
+        if (
+            self._tip_lookup is not None
+            and not self._tip_lookup.done()
+            and (
+                self._tip_lookup_started is None
+                or time.monotonic() - self._tip_lookup_started >= TIP_LOOKUP_WAIT_SECONDS
+            )
+        ):
+            return None  # do not launch a second thread alongside the old lookup
+        height = await self._sample_tip()
+        started = self._tip_lookup_started
+        if (
+            height is None
+            or started is None
+            or time.monotonic() - started >= TIP_LOOKUP_WAIT_SECONDS
+        ):
+            return None
+        return height
 
     async def _announce(self, epochs: tuple[str, ...], now: int) -> None:
         policy, state = self._policy, self._state

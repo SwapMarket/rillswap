@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import TYPE_CHECKING
+import time
 from unittest.mock import AsyncMock, Mock
 
-from rill_provider.handshake_service import HandshakeService
-from rill_provider.live_session_store import CooperativeResultAdmission, ReadinessChallenge
+import pytest
 
-if TYPE_CHECKING:
-    import pytest
+from rill_provider.handshake_service import HandshakeService
+from rill_provider.live_session_store import (
+    CooperativeResultAdmission,
+    LiveSessionStoreError,
+    ReadinessChallenge,
+)
+from rill_provider.settlement_engine import ClaimProbeWindow
 
 
 def _service(store: Mock, clock: list[int]) -> HandshakeService:
@@ -188,5 +192,86 @@ def test_shutdown_during_echo_tip_lookup_cannot_admit_reply(
         release.set()
         assert await pending == "refused"
         store.admit_cooperative_readiness.assert_not_called()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "failure", ["none", "height", "old_lookup", "late_time", "cutoff_unavailable"]
+)
+def test_live_probe_reuses_paid_window_and_requires_fresh_evidence(
+    failure: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        clock = [1012]
+        session, contract = "aa" * 32, "dd" * 32
+        window = ClaimProbeWindow(session, contract, 1, 1000, 1030, time.monotonic() - 1)
+        challenge = ReadinessChallenge(session, "bb" * 32, "cc" * 32, contract, 1, 1000, 1030, 1094)
+        store = Mock(generation=1)
+        store.cooperative_height_cutoff.return_value = 1094
+        if failure == "cutoff_unavailable":
+            store.cooperative_height_cutoff.side_effect = LiveSessionStoreError("locked")
+        store.issue_cooperative_readiness.return_value = challenge
+        service = _service(store, clock)
+        settlement = Mock(probe_window=Mock(return_value=window))
+        service._settlement = settlement  # noqa: SLF001 - original PAID transition
+        if failure == "height":
+            service._chain_tip = lambda: 1094  # noqa: SLF001 - fresh tip reaches cutoff
+        if failure == "late_time":
+
+            async def advanced_clock() -> int:
+                clock[0] = 1030
+                return 1090
+
+            monkeypatch.setattr(service, "_fresh_probe_tip", advanced_clock)
+        pending: asyncio.Task[object] | None = None
+        if failure == "old_lookup":
+            pending = asyncio.create_task(asyncio.Event().wait())
+            service._tip_lookup = pending  # type: ignore[assignment]  # noqa: SLF001
+            service._tip_lookup_started = time.monotonic() - 3  # noqa: SLF001
+        try:
+            result = await service.start_cooperative_readiness(session, window=window)
+        finally:
+            if pending is not None:
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+        if failure != "none":
+            assert result is None
+            settlement.abandon_probe.assert_called_once_with(session)
+            store.issue_cooperative_readiness.assert_not_called()
+            return
+        assert result == challenge.request_id
+        assert store.issue_cooperative_readiness.call_args.kwargs == {
+            "signer": service._transport,  # noqa: SLF001 - expected exact signer custody
+            "started_at": 1000,
+            "now": 1012,
+            "deadline_at": 1030,
+            "deadline_height": 1094,
+        }
+        store.issue_cooperative_readiness.assert_called_once()
+        settlement.abandon_probe.assert_not_called()
+
+    asyncio.run(scenario())
+
+
+def test_only_newly_registered_paid_transition_starts_a_live_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        session, contract = "aa" * 32, "dd" * 32
+        window = ClaimProbeWindow(session, contract, 1, 1000, 1030, time.monotonic())
+        store = Mock(generation=1)
+        settlement = Mock(probe_window=Mock(return_value=window))
+        service = _service(store, [1000])
+        service._settlement = settlement  # noqa: SLF001 - fresh registered transition fixture
+        start = AsyncMock(return_value="bb" * 32)
+        monkeypatch.setattr(service, "start_cooperative_readiness", start)
+        await service._begin_paid_probe(session, "PAID", [])  # noqa: SLF001 - historical PAID
+        start.assert_not_awaited()
+        service._probe_supervision_needed = True  # noqa: SLF001 - fresh accepted + binding
+        await service._begin_paid_probe(session, "PAYING", [])  # noqa: SLF001
+        start.assert_not_awaited()
+        await service._begin_paid_probe(session, "PAID", [])  # noqa: SLF001
+        start.assert_awaited_once_with(session, relays=[], window=window)
 
     asyncio.run(scenario())
