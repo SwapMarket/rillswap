@@ -55,7 +55,12 @@ one provider, reached over a Nostr relay. It runs these steps in order:
    signed binding) is written, and only then is the transaction bound and
    broadcast.
 6. Wait for the provider's `payment_settled` observation and check that the
-   preimage hashes to the invoice's payment hash.
+   preimage hashes to the invoice's payment hash. Publish a verified encrypted
+   `<output>.paid` successor retaining that preimage before reporting success.
+   All three files are create-only; keep the newest verified snapshot. A paid
+   snapshot collision or write failure does not mean the invoice is unpaid.
+   Publication failure may leave a valid `.paid` file. Preserve all snapshots,
+   inspect any `.paid` file, and do not retry payment.
 
 ```sh
 rill swap btc-to-ln \

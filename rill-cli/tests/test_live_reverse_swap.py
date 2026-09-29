@@ -19,11 +19,12 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from rill_core.recovery.inspection import inspect_recovery_plaintext, inspect_recovery_successor
 from rill_core.wire.messages import InvoiceBinding
 from test_live_swap import NATIVE, NETWORK, PROVIDER_TESTS, TIP, FakeWallet
 
+from rill_cli.age_container import X25519Credentials, verify_export_ciphertext
 from rill_cli.live_reverse_swap import ReverseSwapLimits, run_reverse_swap
+from rill_cli.swap_command import _write_recovery_snapshot
 from rill_cli.wallet_rpc import ConfirmedOutput
 
 if TYPE_CHECKING:
@@ -216,6 +217,8 @@ def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(  # noqa:
     from rill_provider.settlement_engine import SettlementEngine  # noqa: PLC0415
 
     custody, unlock = x25519.Identity.generate(), x25519.Identity.generate()
+    credentials = X25519Credentials(str(unlock.to_public()), str(unlock))
+    output = tmp_path / "swap.age"
     hold, chain = FakeHold(), FakeChain()
     recoveries: list[bytes] = []
     policy_store = HandshakePolicy(
@@ -272,10 +275,14 @@ def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(  # noqa:
         )
 
         def write_recovery(document: bytes, previous: bytes | None) -> None:
-            if previous is None:
-                inspect_recovery_plaintext(document, NETWORK, crypto=crypto)
-            else:
-                inspect_recovery_successor(previous, document, NETWORK, crypto=crypto)
+            _write_recovery_snapshot(
+                output, document, previous, NETWORK, credentials=credentials, crypto=crypto
+            )
+            target = output if previous is None else tmp_path / "swap.age.funded"
+            verify_export_ciphertext(
+                target.read_bytes(), document, NETWORK, credentials=credentials, crypto=crypto
+            )
+            assert not (tmp_path / "swap.age.paid").exists()
             recoveries.append(document)
 
         stop = asyncio.Event()

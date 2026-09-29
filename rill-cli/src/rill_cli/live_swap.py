@@ -937,6 +937,21 @@ async def run_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
                 terms.invoice_binding.payment_hash
             ):
                 raise SwapError("provider sent a wrong preimage; " + refund_hint)
+            paid_recovery = _recovery_document(
+                **record,  # type: ignore[arg-type]
+                funding=((binding, binding_signature),),
+                preimage=bytes.fromhex(preimage),
+            )
+            try:
+                await asyncio.to_thread(write_recovery, paid_recovery, successor)
+            except Exception:  # noqa: BLE001 - do not misreport known payment as unpaid
+                raise SwapError(
+                    "payment verified but paid recovery snapshot "
+                    "publication could not be confirmed; "
+                    "preserve all recovery files and inspect any .paid snapshot; "
+                    "do not retry payment"
+                ) from None
+            report("paid recovery snapshot written (verified payment preimage retained)")
             return SwapOutcome(
                 session.session_id,
                 offer.terms.contract_hash,

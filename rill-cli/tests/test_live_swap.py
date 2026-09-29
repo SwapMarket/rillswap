@@ -19,12 +19,14 @@ from typing import Any
 
 import pytest
 from pyrage import x25519
-from rill_core.recovery.inspection import inspect_recovery_plaintext, inspect_recovery_successor
 from rill_core.settlement import FundingPrevout, PlannedFundingOutput
 from rill_core.wire.messages import InvoiceBinding
 from rill_core.wire.types import NetworkIdentity
 
-from rill_cli.live_swap import SwapLimits, run_swap
+from rill_cli import publication, swap_command
+from rill_cli.age_container import X25519Credentials, verify_export_ciphertext
+from rill_cli.live_swap import SwapError, SwapLimits, SwapOutcome, run_swap
+from rill_cli.swap_command import _write_recovery_snapshot
 from rill_cli.wallet_rpc import WalletFunding
 
 PROVIDER_TESTS = Path(__file__).resolve().parents[2] / "rill-provider" / "tests"
@@ -97,8 +99,9 @@ class FakeWallet:
 @pytest.mark.native_crypto
 @NATIVE
 @pytest.mark.parametrize("epoch_bound", [False, True])
+@pytest.mark.parametrize("paid_publication", ["success", "collision", "uncertain"])
 def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
-    tmp_path: Path, *, epoch_bound: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, epoch_bound: bool, paid_publication: str
 ) -> None:
     sys.path.insert(0, str(PROVIDER_TESTS))
     from fake_relay import FakeRelay  # type: ignore[import-not-found]  # noqa: PLC0415
@@ -130,6 +133,9 @@ def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
     now = int(time.time())
     binding = _invoice(now)
     custody, unlock = x25519.Identity.generate(), x25519.Identity.generate()
+    credentials = X25519Credentials(str(unlock.to_public()), str(unlock))
+    output = tmp_path / "swap.age"
+    paid_path = tmp_path / "swap.age.paid"
     wallet = FakeWallet()
     recoveries: list[bytes] = []
     sent: list[dict[str, Any]] = []
@@ -140,7 +146,7 @@ def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
         capabilities=frozenset({"core/v1", "recovery/v1"}),
     )
 
-    async def scenario(crypto: Context) -> None:
+    async def scenario(crypto: Context) -> None:  # noqa: PLR0915 - one live publication lifecycle
         relay = FakeRelay()
         url = await relay.start()
         identity = ProviderIdentity.provision(
@@ -212,10 +218,21 @@ def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
         )
 
         def write_recovery(document: bytes, previous: bytes | None) -> None:
-            if previous is None:
-                inspect_recovery_plaintext(document, NETWORK, crypto=crypto)
-            else:
-                inspect_recovery_successor(previous, document, NETWORK, crypto=crypto)
+            if len(recoveries) == 2 and paid_publication == "collision":
+                paid_path.write_bytes(b"existing paid snapshot")
+            with monkeypatch.context() as patch:
+                if len(recoveries) == 2 and paid_publication == "uncertain":
+                    real_fsync = publication.os.fsync
+
+                    def fail_fsync(fd: int) -> None:
+                        if paid_path.exists():
+                            raise OSError("post-link fsync failure")
+                        real_fsync(fd)
+
+                    patch.setattr(publication.os, "fsync", fail_fsync)
+                _write_recovery_snapshot(
+                    output, document, previous, NETWORK, credentials=credentials, crypto=crypto
+                )
             recoveries.append(document)
 
         stop = asyncio.Event()
@@ -241,25 +258,94 @@ def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
             try:
                 await asyncio.sleep(0.5)  # first announcement
                 async with RelayConnection(url) as connection:
-                    outcome = await run_swap(
-                        connection,
-                        identity=identity,
-                        network=NETWORK,
-                        invoice=INVOICE,
-                        decode_invoice=lambda _invoice: binding,
-                        wallet=wallet,
-                        write_recovery=write_recovery,
-                        limits=SwapLimits(max_success_fee_sat=1_000),
-                        crypto=crypto,
-                        timeout=10,
-                        settle_timeout=10,
-                    )
+
+                    async def swap() -> SwapOutcome:
+                        return await run_swap(
+                            connection,
+                            identity=identity,
+                            network=NETWORK,
+                            invoice=INVOICE,
+                            decode_invoice=lambda _invoice: binding,
+                            wallet=wallet,
+                            write_recovery=write_recovery,
+                            limits=SwapLimits(max_success_fee_sat=1_000),
+                            crypto=crypto,
+                            timeout=10,
+                            settle_timeout=10,
+                        )
+
+                    if paid_publication != "success":
+                        with pytest.raises(
+                            SwapError, match="publication could not be confirmed"
+                        ) as error:
+                            await swap()
+                        assert "inspect any .paid snapshot" in str(error.value)
+                        assert "do not retry payment" in str(error.value)
+                    else:
+                        outcome = await swap()
             finally:
                 stop.set()
                 await runner
                 await relay.stop()
+        for document, suffix in zip(recoveries, ("", ".funded", ".paid"), strict=False):
+            verify_export_ciphertext(
+                output.with_name(output.name + suffix).read_bytes(),
+                document,
+                NETWORK,
+                credentials=credentials,
+                crypto=crypto,
+            )
+        if paid_publication != "success":
+            assert len(recoveries) == 2
+            assert json.loads(recoveries[1])["monotonic_knowledge"]["preimage_known"] is False
+            if paid_publication == "collision":
+                assert paid_path.read_bytes() == b"existing paid snapshot"
+            else:
+                paid = json.loads(recoveries[1])
+                paid["monotonic_knowledge"] = {
+                    "preimage_known": True,
+                    "preimage": PREIMAGE,
+                    "dangerous_signature_issued": False,
+                }
+                from rill_core.wire.canonical import canonicalize  # noqa: PLC0415
+
+                verify_export_ciphertext(
+                    paid_path.read_bytes(),
+                    canonicalize(paid),
+                    NETWORK,
+                    credentials=credentials,
+                    crypto=crypto,
+                )
+            return
         assert outcome.payment_preimage == PREIMAGE
-        assert len(recoveries) == 2  # terms first, then the funded snapshot
+        assert len(recoveries) == 3  # terms, funded, and learned-preimage successor
+        assert json.loads(recoveries[2])["monotonic_knowledge"] == {
+            "preimage_known": True,
+            "preimage": PREIMAGE,
+            "dangerous_signature_issued": False,
+        }
+        assert (
+            json.loads(recoveries[2])["funding_history"]
+            == json.loads(recoveries[1])["funding_history"]
+        )
+        wrong_preimage = json.loads(recoveries[2])
+        wrong_preimage["monotonic_knowledge"]["preimage"] = "00" * 32
+
+        def forbidden_encrypt(*_args: Any, **_kwargs: Any) -> bytes:  # noqa: ANN401
+            raise AssertionError("invalid successor must fail before encryption")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(swap_command, "encrypt_verified_plaintext", forbidden_encrypt)
+            with pytest.raises(ValueError, match="invalid or nonmonotonic recovery successor"):
+                _write_recovery_snapshot(
+                    tmp_path / "invalid.age",
+                    json.dumps(wrong_preimage).encode(),
+                    recoveries[1],
+                    NETWORK,
+                    credentials=credentials,
+                    crypto=crypto,
+                )
+        assert not (tmp_path / "invalid.age.paid").exists()
         context = json.loads(recoveries[0])["verification_context"]
         expected_features = [EPOCH_SESSION_FEATURE] if epoch_bound else []
         assert context["handshake_init"]["required_features"] == expected_features

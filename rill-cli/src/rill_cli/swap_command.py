@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rill_core.recovery import inspect_recovery_successor
+from rill_core.wire.canonical import parse_json_strict
 from rill_crypto import Context
 from rill_provider.lnd_invoice_decode import LndInvoiceDecoder
 from rill_provider.relay_client import RelayConnection, require_relay_route
@@ -93,7 +94,7 @@ def _common_arguments(command: argparse.ArgumentParser) -> None:
     command.add_argument(
         "--recovery-output",
         required=True,
-        help="create-only recovery file; the funded snapshot adds '.funded'",
+        help="create-only recovery file; later snapshots add '.funded' and '.paid'",
     )
     command.add_argument("--timeout", type=float, default=60.0, help="per-answer seconds")
     command.add_argument("--settle-timeout", type=float, default=3600.0)
@@ -107,6 +108,63 @@ def _funded_path(path: Path) -> Path:
     return path.with_name(path.name + ".funded")
 
 
+def _snapshot_path(path: Path, document: bytes, previous: bytes | None) -> Path:
+    """Select distinct create-only destinations, never overwrite learned knowledge.
+
+    Cryptographic successor verification is mandatory before publication;
+    this function chooses a destination only and grants no financial authority.
+    """
+    if previous is None:
+        return path
+    prior = parse_json_strict(previous)
+    current = parse_json_strict(document)
+    if not isinstance(prior, dict) or not isinstance(current, dict):
+        raise TypeError("recovery snapshot must be an object")
+    if prior.get("funding_history") == []:
+        return _funded_path(path)
+    prior_knowledge = prior.get("monotonic_knowledge")
+    current_knowledge = current.get("monotonic_knowledge")
+    if (
+        not isinstance(prior.get("funding_history"), list)
+        or not prior.get("funding_history")
+        or current.get("funding_history") != prior.get("funding_history")
+        or not isinstance(prior_knowledge, dict)
+        or not isinstance(current_knowledge, dict)
+        or prior_knowledge.get("preimage_known") is not False
+        or current_knowledge.get("preimage_known") is not True
+    ):
+        raise ValueError("unsupported recovery snapshot transition")
+    return path.with_name(path.name + ".paid")
+
+
+def _write_recovery_snapshot(  # noqa: PLR0913 - explicit local publication dependencies
+    output: Path,
+    document: bytes,
+    previous: bytes | None,
+    network: NetworkIdentity,
+    *,
+    credentials: X25519Credentials,
+    crypto: Context,
+) -> None:
+    """Verify, encrypt, and durably publish a create-only recovery successor."""
+    target = _snapshot_path(output, document, previous)
+    if previous is not None:
+        inspect_recovery_successor(previous, document, network, crypto=crypto)
+    ciphertext = encrypt_verified_plaintext(
+        document, network, credentials=credentials, crypto=crypto
+    )
+
+    def readback(stored: bytes) -> OfflineRecoveryInspection:
+        report = verify_export_ciphertext(
+            stored, document, network, credentials=credentials, crypto=crypto
+        )
+        if previous is None:
+            return report
+        return inspect_recovery_successor(previous, document, network, crypto=crypto)
+
+    publish_new_ciphertext(str(target), ciphertext, verify_from_disk=readback)
+
+
 def run(args: argparse.Namespace, network: NetworkIdentity, identity: str) -> str:
     """Run the swap; return the final report line."""
     output = Path(args.recovery_output)
@@ -117,20 +175,9 @@ def run(args: argparse.Namespace, network: NetworkIdentity, identity: str) -> st
     with Context(library_path=args.crypto_library) as crypto:
 
         def write_recovery(document: bytes, previous: bytes | None) -> None:
-            ciphertext = encrypt_verified_plaintext(
-                document, network, credentials=credentials, crypto=crypto
+            _write_recovery_snapshot(
+                output, document, previous, network, credentials=credentials, crypto=crypto
             )
-
-            def readback(stored: bytes) -> OfflineRecoveryInspection:
-                report = verify_export_ciphertext(
-                    stored, document, network, credentials=credentials, crypto=crypto
-                )
-                if previous is None:
-                    return report
-                return inspect_recovery_successor(previous, document, network, crypto=crypto)
-
-            target = output if previous is None else _funded_path(output)
-            publish_new_ciphertext(str(target), ciphertext, verify_from_disk=readback)
 
         decoder = LndInvoiceDecoder(
             host="127.0.0.1",
