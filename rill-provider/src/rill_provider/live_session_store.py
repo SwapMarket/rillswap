@@ -3367,6 +3367,12 @@ class LiveSessionStore:
             raise LiveSessionStoreError("claim transition needs the exact claim")
         try:
             with self._write() as connection:
+                if (from_state, to_state) == ("PAID", "CLAIMING") and not _immediate_claim_allowed(
+                    connection, session_id
+                ):
+                    raise LiveSessionStoreError(  # noqa: TRY301 - refuse bypass of arbitration
+                        "claim arbitration requires transaction selection"
+                    )
                 if to_state == "CLAIMED" and connection.execute(
                     "SELECT raw FROM claim_attempts WHERE session_id=? AND txid=?",
                     (session_id, claim_txid),
@@ -3411,6 +3417,20 @@ class LiveSessionStore:
             raise
         except Exception:  # noqa: BLE001 - never echo storage or crypto details
             raise LiveSessionStoreError("swap transition refused") from None
+
+    def immediate_claim_allowed(self, session_id: str) -> bool:
+        """Only absent or unprepared admission permits the legacy unilateral path.
+
+        A prepared or closed arbitration must be reconciled and selected first;
+        the PAID to CLAIMING transition checks this again in its write transaction.
+        """
+        try:
+            with self._write() as connection:
+                return _immediate_claim_allowed(connection, session_id)
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("claim arbitration unavailable") from None
 
     def claim_attempts(self, session_id: str) -> tuple[ClaimAttempt, ...]:
         """Return every recorded claim attempt of one CLAIMING swap, oldest first."""
@@ -3986,6 +4006,14 @@ class LiveSessionStore:
         return SwapInspectionPage(
             tuple(result), result[-1].session_id if len(rows) > limit else None
         )
+
+
+def _immediate_claim_allowed(connection: sqlite3.Connection, session_id: str) -> bool:
+    """Missing admission is legacy, but prepared or closed arbitration is not."""
+    row = connection.execute(
+        "SELECT state FROM claim_arbitration WHERE session_id=?", (session_id,)
+    ).fetchone()
+    return row is None or row == ("ADMITTED",)
 
 
 def _configure(connection: sqlite3.Connection) -> None:

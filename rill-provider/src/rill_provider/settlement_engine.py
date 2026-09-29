@@ -339,7 +339,9 @@ class SettlementEngine:
         )
         return to_state
 
-    async def _advance(self, item: SettlementItem, now: int) -> str:  # noqa: PLR0911 - one step per state
+    async def _advance(  # noqa: PLR0911, PLR0912 - one ordered lifecycle per state
+        self, item: SettlementItem, now: int
+    ) -> str:
         terms = offered_terms(Envelope.model_validate_json(item.terms_offer, strict=True))
         if terms.profile_id == "ln-to-btc/v1":
             return item.state if self._reverse is None else await self._reverse.advance(item, now)
@@ -390,6 +392,8 @@ class SettlementEngine:
             )
             return await self._advance(_with_state(item, "PAID", preimage=outcome.preimage), now)
         if item.state == "PAID" and item.preimage is not None:
+            if not self._store.immediate_claim_allowed(item.session_id):
+                return item.state  # selection/recovery owns every prepared window
             tip = await asyncio.to_thread(self._chain.tip_height)
             spend = await self._initial_claim(item, terms, binding)
             self._move(
