@@ -13,6 +13,7 @@ import json
 import logging
 import time
 from collections import OrderedDict
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -51,7 +52,7 @@ if TYPE_CHECKING:
     from rill_core.wire.types import NetworkIdentity, ProfileId
     from rill_crypto import Context
 
-    from rill_provider.live_session_store import LiveSessionStore, RequestContext
+    from rill_provider.live_session_store import LiveSessionStore, PreparedFallback, RequestContext
     from rill_provider.lnd_hold_invoice import LndHoldInvoices
     from rill_provider.provider_identity import ProviderIdentity
     from rill_provider.settlement_engine import SettlementEngine
@@ -161,6 +162,7 @@ class HandshakeService:
         self._settlement = settlement
         self._hold_invoices = hold_invoices
         self._state = _State()
+        self._deadline_healthy = True
 
     def _now(self) -> int:
         return int(self._clock())
@@ -319,6 +321,8 @@ class HandshakeService:
 
     async def handle(self, event: bytes, relays: Sequence[Relay]) -> str:  # noqa: PLR0911, PLR0912 - one disposition per outcome
         """Route one untrusted relay event; return a content-free disposition."""
+        if not self._deadline_healthy:
+            return "unavailable"  # do not mark as seen; replay is safe after restart
         if not self._first_sight(event):
             return "duplicate"
         store = self._store
@@ -545,8 +549,87 @@ class HandshakeService:
         await self._send_pending(answer.response_message_id, relays)
         return "request-replay" if answer.replay else "request-answered"
 
+    def _start_deadline_supervision(  # noqa: PLR0915 - one supervisor owns selection and dispatch
+        self, stop: asyncio.Event
+    ) -> tuple[set[asyncio.Task[None]], asyncio.Task[None] | None]:
+        """Recover before relay admissions; never wait for a Core RPC on a deadline."""
+        settlement = self._settlement
+        if settlement is None:
+            return set(), None
+        wall_anchor, monotonic_anchor = self._now(), time.monotonic()
+
+        def deadline_now() -> int:
+            # A backward wall-clock adjustment cannot extend an open window
+            # during this owner's lifetime. Restart closes old windows instead.
+            return max(self._now(), wall_anchor + int(time.monotonic() - monotonic_anchor))
+
+        # Acquisition closes old WAITING rows, but never broadcasts them. Do
+        # not admit a new relay request before valid old-owner fallback bundles
+        # have been selected. Submission runs separately from relay/tick I/O.
+        broadcasts: set[asyncio.Task[None]] = set()
+        in_flight: set[tuple[str, str]] = set()
+        retry_after: dict[tuple[str, str], float] = {}
+
+        def unhealthy() -> None:
+            self._deadline_healthy = False
+            settlement.disable_new_exposure()
+
+        def dispatch(candidate: PreparedFallback) -> None:
+            key = (candidate.session_id, candidate.txid)
+            if key in in_flight or time.monotonic() < retry_after.get(key, 0):
+                return
+            in_flight.add(key)
+            retry_after[key] = time.monotonic() + 15
+            task = asyncio.create_task(settlement.broadcast_selected_fallback(candidate))
+            broadcasts.add(task)
+
+            def complete(done: asyncio.Task[None]) -> None:
+                broadcasts.discard(done)
+                in_flight.discard(key)
+                if not done.cancelled() and done.exception() is not None:
+                    LOG.warning("fallback submission task failed for %s", key[0][:16])
+
+            task.add_done_callback(complete)
+
+        try:
+            for candidate in settlement.select_due_fallbacks(deadline_now(), closed_only=True):
+                dispatch(candidate)
+        except StaleOwnerError:
+            raise
+        except Exception:  # noqa: BLE001 - selected rows remain discoverable below
+            unhealthy()
+            LOG.warning("startup fallback selection deferred; admissions disabled")
+
+        async def supervise() -> None:
+            while not stop.is_set():
+                try:
+                    for candidate in settlement.select_due_fallbacks(deadline_now()):
+                        dispatch(candidate)
+                except StaleOwnerError:
+                    unhealthy()
+                    stop.set()
+                    return  # no more writes or submissions from this owner
+                except Exception:  # noqa: BLE001 - retry original deadline, never select early
+                    unhealthy()
+                    LOG.warning("deadline selector unhealthy; retrying without shortening windows")
+                try:
+                    for candidate in settlement.recorded_fallbacks():
+                        dispatch(candidate)
+                except StaleOwnerError:
+                    unhealthy()
+                    stop.set()
+                    return
+                except Exception:  # noqa: BLE001 - retry recorded claim discovery
+                    unhealthy()
+                    LOG.warning("recorded fallback discovery unavailable; retrying")
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=0.25)
+
+        return broadcasts, asyncio.create_task(supervise())
+
     async def run(self, stop: asyncio.Event, *, tick_seconds: float = 15.0) -> None:
         """Serve until ``stop`` is set, reconnecting relays with backoff."""
+        broadcasts, deadline_task = self._start_deadline_supervision(stop)
         connected: dict[str, RelayConnection] = {}
         inbound: asyncio.Queue[bytes] = asyncio.Queue(1024)
 
@@ -590,9 +673,14 @@ class HandshakeService:
                     disposition = await self.handle(event, list(connected.values()))
                     LOG.info("relay event: %s", disposition)
         finally:
-            for task in tasks:
+            for task in [*tasks, *broadcasts, *(() if deadline_task is None else (deadline_task,))]:
                 task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(
+                *tasks,
+                *broadcasts,
+                *(() if deadline_task is None else (deadline_task,)),
+                return_exceptions=True,
+            )
 
 
 async def _next_or_stop(

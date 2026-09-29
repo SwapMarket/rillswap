@@ -598,6 +598,24 @@ class ClaimAttempt:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedFallback:
+    """Persisted claim candidate; enumeration alone never authorizes spending."""
+
+    session_id: str
+    contract_hash: str
+    state: str
+    owner_generation: int
+    deadline_at: int
+    deadline_height: int
+    raw: bytes
+    txid: str
+    fee_sat: int
+    terms_offer: bytes
+    funding_binding: bytes
+    preimage: str
+
+
+@dataclass(frozen=True, slots=True)
 class SwapInspection:
     """Offline custody summary, never live chain evidence or dispatch authority."""
 
@@ -3431,6 +3449,171 @@ class LiveSessionStore:
             raise
         except Exception:  # noqa: BLE001 - never echo storage details
             raise LiveSessionStoreError("claim arbitration unavailable") from None
+
+    def prepared_fallbacks(self, *, closed_only: bool = False) -> tuple[PreparedFallback, ...]:
+        """Return affirmative bundles attached to PAID swaps for validation.
+
+        A newly acquired owner sees the prior owner's WAITING rows as CLOSED.
+        Omit rows that are unprepared, already selected, or cooperatively closed;
+        absence from this list is never permission to sign a different claim.
+        """
+        try:
+            with self._write() as connection:
+                rows = connection.execute(
+                    "SELECT a.session_id,a.contract_hash,a.state,a.owner_generation,"
+                    "a.deadline_at,a.deadline_height,a.fallback_raw,a.fallback_txid,"
+                    "a.fallback_fee_sat,w.terms_offer,w.funding_binding,w.preimage "
+                    "FROM claim_arbitration a JOIN swaps w ON w.session_id=a.session_id "
+                    "WHERE ((a.state='CLOSED' AND a.owner_generation<?) OR "
+                    "(a.state='WAITING' AND a.owner_generation=? AND ?=0)) "
+                    "AND a.version=1 AND a.cooperative_raw IS NULL "
+                    "AND a.fallback_raw IS NOT NULL AND w.state='PAID' "
+                    "AND w.contract_hash=a.contract_hash AND w.preimage IS NOT NULL "
+                    "AND w.funding_binding IS NOT NULL AND w.claim_tx IS NULL "
+                    "AND w.claim_txid IS NULL AND NOT EXISTS "
+                    "(SELECT 1 FROM claim_attempts c WHERE c.session_id=w.session_id) "
+                    "ORDER BY a.deadline_at,a.session_id",
+                    (self._generation, self._generation, int(closed_only)),
+                ).fetchall()
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("prepared claims unavailable") from None
+        return tuple(PreparedFallback(*row) for row in rows)
+
+    def recorded_fallbacks(self) -> tuple[PreparedFallback, ...]:
+        """Discover selected attempt-zero claims even after selection crashed its caller.
+
+        These rows are already CLAIMING; enumeration grants no new signing or
+        selection authority. The caller still verifies the persisted exact raw.
+        """
+        try:
+            with self._write() as connection:
+                rows = connection.execute(
+                    "SELECT a.session_id,a.contract_hash,a.state,a.owner_generation,"
+                    "a.deadline_at,a.deadline_height,a.fallback_raw,a.fallback_txid,"
+                    "a.fallback_fee_sat,w.terms_offer,w.funding_binding,w.preimage "
+                    "FROM claim_arbitration a JOIN swaps w ON w.session_id=a.session_id "
+                    "JOIN claim_attempts c ON c.session_id=w.session_id AND c.attempt=0 "
+                    "WHERE a.state='CLOSED' AND a.version=1 AND a.cooperative_raw IS NULL "
+                    "AND a.owner_generation IS NOT NULL AND w.state='CLAIMING' "
+                    "AND w.contract_hash=a.contract_hash AND w.preimage IS NOT NULL "
+                    "AND w.funding_binding IS NOT NULL AND c.raw=a.fallback_raw "
+                    "AND c.txid=a.fallback_txid AND c.fee_sat=a.fallback_fee_sat "
+                    "ORDER BY a.session_id"
+                ).fetchall()
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("recorded fallbacks unavailable") from None
+        return tuple(PreparedFallback(*row) for row in rows)
+
+    def select_prepared_fallback(
+        self,
+        candidate: PreparedFallback,
+        *,
+        signer: EnvelopeSigner,
+        now: int,
+        height: int | None,
+    ) -> None:
+        """Select one validated exact fallback, record attempt 0, then permit broadcast.
+
+        The caller must validate the signed raw against the accepted terms and
+        funding, including the computed txid and fee, before this transition.
+        A current-owner WAITING window needs an expired time or height.
+        Prior-owner CLOSED windows already lost their cooperative opportunity.
+        """
+        if (
+            not isinstance(candidate, PreparedFallback)
+            or type(now) is not int
+            or now < 0
+            or (height is not None and (type(height) is not int or height <= 0))
+        ):
+            raise LiveSessionStoreError("prepared claim selection refused")
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT a.state,a.owner_generation,a.contract_hash,a.deadline_at,"
+                    "a.deadline_height,a.fallback_raw,a.fallback_txid,a.fallback_fee_sat,"
+                    "a.cooperative_raw,w.state,w.contract_hash,w.terms_offer,"
+                    "w.funding_binding,w.preimage,w.claim_tx,w.claim_txid "
+                    "FROM claim_arbitration a JOIN swaps w ON w.session_id=a.session_id "
+                    "WHERE a.session_id=? AND a.version=1",
+                    (candidate.session_id,),
+                ).fetchone()
+                if (
+                    row
+                    != (
+                        candidate.state,
+                        candidate.owner_generation,
+                        candidate.contract_hash,
+                        candidate.deadline_at,
+                        candidate.deadline_height,
+                        candidate.raw,
+                        candidate.txid,
+                        candidate.fee_sat,
+                        None,
+                        "PAID",
+                        candidate.contract_hash,
+                        candidate.terms_offer,
+                        candidate.funding_binding,
+                        candidate.preimage,
+                        None,
+                        None,
+                    )
+                    or connection.execute(
+                        "SELECT 1 FROM claim_attempts WHERE session_id=? LIMIT 1",
+                        (candidate.session_id,),
+                    ).fetchone()
+                ):
+                    raise StaleSwapError("prepared claim changed")  # noqa: TRY301
+                old_owner = candidate.state == "CLOSED" and (
+                    0 < candidate.owner_generation < self._generation
+                )
+                expired_window = candidate.state == "WAITING" and (
+                    candidate.owner_generation == self._generation
+                    and (
+                        now >= candidate.deadline_at
+                        or (height is not None and height >= candidate.deadline_height)
+                    )
+                )
+                if not (old_owner or expired_window):
+                    raise LiveSessionStoreError("prepared claim not selectable")  # noqa: TRY301
+                if (
+                    connection.execute(
+                        "UPDATE swaps SET state='CLAIMING',claim_tx=?,claim_txid=?,updated_at=? "
+                        "WHERE session_id=? AND state='PAID' AND claim_tx IS NULL "
+                        "AND claim_txid IS NULL",
+                        (candidate.raw, candidate.txid, now, candidate.session_id),
+                    ).rowcount
+                    != 1
+                ):
+                    raise StaleSwapError("prepared claim changed")  # noqa: TRY301
+                connection.execute(
+                    "INSERT INTO claim_attempts VALUES (?,0,?,?,?,?)",
+                    (
+                        candidate.session_id,
+                        candidate.txid,
+                        candidate.raw,
+                        candidate.fee_sat,
+                        height,
+                    ),
+                )
+                connection.execute(
+                    "UPDATE claim_arbitration SET state='CLOSED' WHERE session_id=?",
+                    (candidate.session_id,),
+                )
+                self._record_observation(
+                    connection,
+                    candidate.session_id,
+                    {"kind": "claim_broadcast", "claim_txid": candidate.txid},
+                    signer,
+                    now,
+                )
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage or crypto details
+            raise LiveSessionStoreError("prepared claim selection refused") from None
 
     def claim_attempts(self, session_id: str) -> tuple[ClaimAttempt, ...]:
         """Return every recorded claim attempt of one CLAIMING swap, oldest first."""

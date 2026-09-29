@@ -42,11 +42,18 @@ from rill_core.settlement.unilateral import (
     validate_unilateral_spend,
 )
 from rill_core.wire.canonical import canonicalize, parse_model_json
+from rill_core.wire.hashes import contract_hash
 from rill_core.wire.messages import Envelope
 from rill_core.wire.settlement_messages import FundingBindingPayload
 
 from rill_provider.core_tx_bytes import CoreTransactionUnknownError
-from rill_provider.live_session_store import MAX_CLAIM_ATTEMPTS, StaleOwnerError, StaleSwapError
+from rill_provider.live_session_store import (
+    MAX_CLAIM_ATTEMPTS,
+    LiveSessionStoreError,
+    PreparedFallback,
+    StaleOwnerError,
+    StaleSwapError,
+)
 from rill_provider.lnd_invoice_decode import InvoiceRejectedError
 from rill_provider.lnd_payment_observation import LndNotSyncedError, LndUnavailableError
 from rill_provider.reverse_settlement import HoldInvoiceBackend, ReverseSettlement
@@ -189,10 +196,86 @@ class SettlementEngine:
             )
         )
         self._claim_cursor = ""  # fair paging of the historical claim sweep
+        self._new_exposure_allowed = True
+
+    def disable_new_exposure(self) -> None:
+        """Latch off new BTC-to-LN sends after deadline supervision fails."""
+        self._new_exposure_allowed = False
 
     def _fee_limit(self, success_fee_sat: int) -> int:
         """Routing fees may use at most the success fee and the operator cap."""
         return min(self._settings.max_routing_fee_sat, success_fee_sat)
+
+    def select_due_fallbacks(
+        self, now: int, *, closed_only: bool = False
+    ) -> tuple[PreparedFallback, ...]:
+        """Validate exact stored claims and select before any network submission.
+
+        This synchronous operation does not wait for Core, LN, or relays. A
+        restarted owner may select only a previous generation's CLOSED bundle;
+        a live deadline may select only its own expired WAITING bundle.
+        """
+        selected: list[PreparedFallback] = []
+        for candidate in self._store.prepared_fallbacks(closed_only=closed_only):
+            if candidate.state == "WAITING" and now < candidate.deadline_at:
+                continue  # height-based expiry requires fresh chain evidence elsewhere
+            try:
+                self._validate_prepared_fallback(candidate)
+            except Exception:  # noqa: BLE001 - bad bundle stays blocked for operator review
+                LOG.warning(
+                    "prepared fallback refused for %s; operator attention required",
+                    candidate.session_id[:16],
+                )  # do not log the signed transaction, preimage, or parser details
+                continue
+            try:
+                self._store.select_prepared_fallback(
+                    candidate, signer=self._crypto, now=now, height=None
+                )
+            except StaleSwapError:
+                continue  # re-read the new durable state on the next pass
+            # Store failure (including StaleOwnerError) cannot be deferred:
+            # do not begin serving with a possibly unselected paid swap.
+            selected.append(candidate)
+        return tuple(selected)
+
+    def _validate_prepared_fallback(self, candidate: PreparedFallback) -> None:
+        terms = offered_terms(Envelope.model_validate_json(candidate.terms_offer, strict=True))
+        funding = Envelope.model_validate_json(candidate.funding_binding, strict=True)
+        binding = parse_model_json(FundingBindingPayload, canonicalize(funding.payload)).binding
+        if (
+            terms.profile_id != "btc-to-ln/v1"
+            or contract_hash(terms).hex() != candidate.contract_hash
+            or binding.contract_hash != candidate.contract_hash
+            or funding.contract_hash != candidate.contract_hash
+            or hashlib.sha256(bytes.fromhex(candidate.preimage)).hexdigest()
+            != terms.invoice_binding.payment_hash
+        ):
+            raise LiveSessionStoreError("prepared claim binding mismatch")
+        verified = validate_unilateral_spend(
+            candidate.raw, self._authorization(terms, binding), verifier=self._crypto
+        )
+        if (
+            verified.raw_transaction != candidate.raw
+            or verified.txid != candidate.txid
+            or verified.fee_sat != candidate.fee_sat
+        ):
+            raise LiveSessionStoreError("prepared claim validation mismatch")
+
+    def recorded_fallbacks(self) -> tuple[PreparedFallback, ...]:
+        """Read durable selected work for the independent submission lane."""
+        return self._store.recorded_fallbacks()
+
+    async def broadcast_selected_fallback(self, candidate: PreparedFallback) -> None:
+        """Submit an already recorded attempt outside the deadline selector."""
+        try:
+            self._validate_prepared_fallback(candidate)
+        except Exception:  # noqa: BLE001 - persisted bytes must not be trusted on restart
+            LOG.warning("recorded fallback failed validation for %s", candidate.session_id[:16])
+            return
+        try:
+            await asyncio.to_thread(self._chain.broadcast, candidate.raw, candidate.txid)
+        except Exception:  # noqa: BLE001 - durable CLAIMING is retried by the normal sweep
+            LOG.warning("selected fallback not accepted yet for %s", candidate.session_id[:16])
 
     def route_ready(
         self,
@@ -353,7 +436,7 @@ class SettlementEngine:
         timing = terms.timing_policy.model_dump()
         expiry_height = int(timing["max_outgoing_htlc_expiry_height"])
         if item.state == "FUNDING_SEEN":
-            if item.blocked:
+            if item.blocked or not self._new_exposure_allowed:
                 return item.state
             seen = await asyncio.to_thread(
                 self._chain.observe_candidate_outpoint, binding, terms, keys=self._crypto
@@ -541,7 +624,7 @@ class SettlementEngine:
         # PAYING is a durable intent, not durable chain evidence. After an
         # interrupted attempt, reconcile LND first, but never start a new
         # payment against a stale confirmation or newly blocked session.
-        if item.blocked or item.payment_dispatch != "UNSENT":
+        if item.blocked or item.payment_dispatch != "UNSENT" or not self._new_exposure_allowed:
             return outcome
         seen = await asyncio.to_thread(
             self._chain.observe_candidate_outpoint, binding, terms, keys=self._crypto
@@ -569,7 +652,7 @@ class SettlementEngine:
             # An older accepted invoice can be outside the supported routing
             # subset. No dispatch grant has been consumed or request sent.
             return None
-        if not self._store.commit_payment_dispatch(
+        if not self._new_exposure_allowed or not self._store.commit_payment_dispatch(
             item.session_id, invoice.payment_hash, payment.dispatch_record
         ):
             return outcome
