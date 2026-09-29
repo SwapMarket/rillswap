@@ -4126,6 +4126,34 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - never echo storage details
             raise LiveSessionStoreError("claim admission unavailable") from None
 
+    def cooperative_height_cutoff(self, session_id: str, contract: str) -> int | None:
+        """Return the signed new-window cutoff only for a PAID admission."""
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT a.version,a.state,a.contract_hash,w.state,w.contract_hash,"
+                    "w.terms_offer FROM claim_arbitration a JOIN swaps w "
+                    "ON w.session_id=a.session_id WHERE a.session_id=?",
+                    (session_id,),
+                ).fetchone()
+                if row is None or row[:5] != (1, "ADMITTED", contract, "PAID", contract):
+                    return None
+                terms = _offer_terms(row[5])
+                if (
+                    COOPERATIVE_CLAIM_FEATURE not in self._policy.features
+                    or COOPERATIVE_CLAIM_FEATURE not in terms.required_features
+                    or contract_hash(terms).hex() != contract
+                    or terms.network_identity != self._network
+                    or terms.profile_id != "btc-to-ln/v1"
+                ):
+                    return None
+                cutoff = _cooperative_height_cutoff(terms)
+                return cutoff if cutoff > 0 else None
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - no unverified height bound
+            raise LiveSessionStoreError("cooperative height unavailable") from None
+
     def issue_cooperative_readiness(  # noqa: PLR0913 - fixed time/height probe budget
         self,
         session_id: str,
@@ -4210,7 +4238,7 @@ class LiveSessionStore:
                     or contract_hash(terms).hex() != admitted_hash
                     or binding_envelope.contract_hash != admitted_hash
                     or binding.contract_hash != admitted_hash
-                    or deadline_height > terms.refund_lock_height
+                    or deadline_height > _cooperative_height_cutoff(terms)
                     or hashlib.sha256(bytes.fromhex(preimage)).hexdigest()
                     != terms.invoice_binding.payment_hash
                 ):
@@ -4376,7 +4404,7 @@ class LiveSessionStore:
                     or binding.contract_hash != recorded_hash
                     or hashlib.sha256(bytes.fromhex(preimage)).hexdigest()
                     != terms.invoice_binding.payment_hash
-                    or deadline_height > terms.refund_lock_height
+                    or deadline_height > _cooperative_height_cutoff(terms)
                 ):
                     raise LiveSessionStoreError("claim window authority unavailable")  # noqa: TRY301
                 authorization = UnilateralAuthorization.from_terms(
@@ -5742,6 +5770,11 @@ def _offer_terms(offer: bytes) -> ContractTerms:
     return parse_model_json(
         TermsOfferPayload, canonicalize(_canonical_envelope(offer).payload)
     ).terms.contract_terms
+
+
+def _cooperative_height_cutoff(terms: ContractTerms) -> int:
+    """Leave signed confirmation blocks before the client's first refund block."""
+    return terms.refund_lock_height - terms.timing_policy.claim_confirmation_blocks
 
 
 def _offered_payment_hash(offer: bytes) -> str:

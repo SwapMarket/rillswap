@@ -196,7 +196,7 @@ def test_preparation_refuses_absent_or_nonadmitted_arbitration(
             "started_at": 1000,
             "now": 1002,
             "deadline_at": 1020,
-            "deadline_height": 1100,
+            "deadline_height": 1094,
         }
         with pytest.raises(LiveSessionStoreError, match="not admitted"):
             store.prepare_claim_window(session, **parameters)
@@ -296,6 +296,7 @@ def test_restart_validates_signed_fallback_before_selecting(  # noqa: PLR0915 - 
                 {"fallback_fee_sat": spend.fee_sat + 1},
                 {"fallback_txid": "cd" * 32},
                 {"deadline_at": 1031},
+                {"deadline_height": 1095},
             ):
                 parameters = {
                     "fallback_raw": spend.raw_transaction,
@@ -304,7 +305,7 @@ def test_restart_validates_signed_fallback_before_selecting(  # noqa: PLR0915 - 
                     "started_at": 1000,
                     "now": 1002,
                     "deadline_at": 1020,
-                    "deadline_height": 1100,
+                    "deadline_height": 1094,
                 }
                 with pytest.raises(LiveSessionStoreError):
                     store.prepare_claim_window(session, **(parameters | refused))

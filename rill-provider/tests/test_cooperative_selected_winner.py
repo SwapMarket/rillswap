@@ -107,7 +107,7 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0912, P
             started_at=1000,
             now=1000,
             deadline_at=1020,
-            deadline_height=1100,
+            deadline_height=1094,
         )
         cooperation_id = b"\xe1" * 32
         with pytest.raises(LiveSessionStoreError, match="window height unavailable"):
@@ -118,14 +118,14 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0912, P
                 now=1000,
                 tip_height=None,  # type: ignore[arg-type] - runtime boundary rejects untyped caller
                 deadline_at=1020,
-                deadline_height=1100,
+                deadline_height=1094,
             )
         assert store._connection.execute(  # noqa: SLF001
             "SELECT count(*) FROM cooperation_attempts WHERE session_id=?", (session,)
         ).fetchone() == (0,)
         if winner == "burn_after_close":
             (candidate,) = store.prepared_fallbacks()
-            store.select_prepared_fallback(candidate, signer=crypto, now=1000, height=1100)
+            store.select_prepared_fallback(candidate, signer=crypto, now=1000, height=1094)
         if winner == "burn_after_close":
             with pytest.raises(LiveSessionStoreError, match="cooperative window unavailable"):
                 store.burn_selected_cooperative_claim(
@@ -135,7 +135,7 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0912, P
                     now=1000,
                     tip_height=1090,
                     deadline_at=1020,
-                    deadline_height=1100,
+                    deadline_height=1094,
                 )
             assert store._connection.execute(  # noqa: SLF001
                 "SELECT count(*) FROM cooperation_attempts WHERE session_id=?", (session,)
@@ -148,7 +148,7 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0912, P
             now=1000,
             tip_height=1090,
             deadline_at=1020,
-            deadline_height=1100,
+            deadline_height=1094,
         )
         with pytest.raises(LiveSessionStoreError, match="window height unavailable"):
             store.begin_selected_cooperative_proposal(
@@ -162,12 +162,12 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0912, P
         if winner in ("begin_after_close", "nonce_race"):
             (candidate,) = store.prepared_fallbacks()
             if winner == "begin_after_close":
-                store.select_prepared_fallback(candidate, signer=crypto, now=1001, height=1100)
+                store.select_prepared_fallback(candidate, signer=crypto, now=1001, height=1094)
             else:
                 original = store._commit_cooperative_proposal_nonce_impl  # noqa: SLF001
 
                 def close_before_nonce(*args: object, **kwargs: object) -> str:
-                    store.select_prepared_fallback(candidate, signer=crypto, now=1001, height=1100)
+                    store.select_prepared_fallback(candidate, signer=crypto, now=1001, height=1094)
                     return original(*args, **kwargs)  # type: ignore[arg-type]
 
                 monkeypatch.setattr(
@@ -187,7 +187,7 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0912, P
         )
         assert not store.pending_sendable(proposal_id, now=1001)
         assert store.pending_sendable(proposal_id, now=1001, tip_height=1090)
-        assert not store.pending_sendable(proposal_id, now=1001, tip_height=1100)
+        assert not store.pending_sendable(proposal_id, now=1001, tip_height=1094)
         assert not store.pending_sendable(proposal_id, now=1020, tip_height=1090)
         if winner == "expired_without_selection":
             assert store.reconcile_expired_cooperative_proposals(1019) == 0
@@ -242,7 +242,7 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0912, P
         )
         if winner == "late_result":
             (candidate,) = store.prepared_fallbacks()
-            store.select_prepared_fallback(candidate, signer=crypto, now=1003, height=1100)
+            store.select_prepared_fallback(candidate, signer=crypto, now=1003, height=1094)
             with pytest.raises(LiveSessionStoreError, match="no longer current"):
                 store._admit_cooperative_result(  # noqa: SLF001 - stale signed client reply
                     canonicalize(signed.model_dump(mode="json")), now=1004
@@ -275,7 +275,7 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0912, P
         )
         if winner == "fallback":
             (candidate,) = store.prepared_fallbacks()
-            store.select_prepared_fallback(candidate, signer=crypto, now=1003, height=1100)
+            store.select_prepared_fallback(candidate, signer=crypto, now=1003, height=1094)
             with pytest.raises(LiveSessionStoreError, match="arbitration unavailable"):
                 store.commit_selected_cooperative_claim(
                     session, cooperation_id, observation, now=1004

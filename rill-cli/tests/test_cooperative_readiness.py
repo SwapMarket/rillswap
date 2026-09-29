@@ -143,7 +143,7 @@ def _request(terms: ContractTerms, init: HandshakeInit, accept: HandshakeAccept)
                     "challenge": "cc" * 32,
                     "payment_preimage": PREIMAGE,
                     "deadline_at": 1020,
-                    "deadline_height": 1100,
+                    "deadline_height": 1094,
                 },
                 "required_features": [COOPERATIVE_CLAIM_FEATURE],
                 "extensions": {},
@@ -164,6 +164,7 @@ def _request(terms: ContractTerms, init: HandshakeInit, accept: HandshakeAccept)
         ("old request", {"payload": {"deadline_at": 999}}),
         ("far future", {"payload": {"deadline_at": 1031}}),
         ("unsafe height", {"payload": {"deadline_height": 1090}}),
+        ("refund margin", {"payload": {"deadline_height": 1095}}),
         ("wrong preimage", {"payload": {"payment_preimage": "22" * 32}}),
     ],
 )

@@ -483,7 +483,9 @@ async def _answer_cooperative_readiness(  # noqa: PLR0913 - all independent bind
         or now < 0
         or tip_height < 0
         or not now < payload.deadline_at <= now + 30
-        or not tip_height < payload.deadline_height <= terms.refund_lock_height
+        or not tip_height
+        < payload.deadline_height
+        <= (terms.refund_lock_height - terms.timing_policy.claim_confirmation_blocks)
         or hashlib.sha256(bytes.fromhex(payload.payment_preimage)).hexdigest()
         != terms.invoice_binding.payment_hash
         or (observed_preimage is not None and payload.payment_preimage != observed_preimage)

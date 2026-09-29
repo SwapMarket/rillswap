@@ -36,7 +36,7 @@ def test_probe_requires_admission_and_is_abandoned_after_owner_restart(
             "started_at": 1000,
             "now": 1001,
             "deadline_at": 1020,
-            "deadline_height": 1100,
+            "deadline_height": 1094,
         }
         with pytest.raises(LiveSessionStoreError, match="not admitted"):
             store.issue_cooperative_readiness(session, **kwargs)
@@ -49,9 +49,13 @@ def test_probe_requires_admission_and_is_abandoned_after_owner_restart(
                 "VALUES (?, ?, 1, 'ADMITTED')",
                 (session, digest),
             )
+        assert store.cooperative_height_cutoff(session, digest) == 1094
+        assert store.cooperative_height_cutoff(session, "ff" * 32) is None
         for invalid in ({"deadline_at": 1031}, {"now": 1020}, {"deadline_height": 0}):
             with pytest.raises(LiveSessionStoreError, match="deadline unavailable"):
                 store.issue_cooperative_readiness(session, **(kwargs | invalid))
+        with pytest.raises(LiveSessionStoreError, match="authority unavailable"):
+            store.issue_cooperative_readiness(session, **(kwargs | {"deadline_height": 1095}))
         assert store.pending_outbox() == ()
         probe = store.issue_cooperative_readiness(session, **kwargs)
         assert (probe.session_id, probe.contract_hash, probe.owner_generation) == (
@@ -69,14 +73,14 @@ def test_probe_requires_admission_and_is_abandoned_after_owner_restart(
         payload = parse_cooperative_payload("action_request", canonicalize(envelope.payload))
         assert isinstance(payload, CooperativeClaimReadyRequest)
         assert payload.challenge == probe.challenge
-        assert (payload.deadline_at, payload.deadline_height) == (1020, 1100)
+        assert (payload.deadline_at, payload.deadline_height) == (1020, 1094)
         assert not store.pending_sendable(probe.request_id, now=1002, tip_height=1090)
         assert store.pending_sendable(probe.request_id, now=1002, tip_height=1090, readiness=probe)
         assert not store.pending_sendable(
             probe.request_id, now=1020, tip_height=1090, readiness=probe
         )
         assert not store.pending_sendable(
-            probe.request_id, now=1002, tip_height=1100, readiness=probe
+            probe.request_id, now=1002, tip_height=1094, readiness=probe
         )
         assert store._connection.execute(  # noqa: SLF001
             "SELECT state FROM claim_arbitration WHERE session_id=?", (session,)
@@ -141,7 +145,7 @@ def test_signed_readiness_echo_is_authenticated_and_never_prepares_a_claim(
             started_at=1000,
             now=1000,
             deadline_at=1020,
-            deadline_height=1100,
+            deadline_height=1094,
         )
         request = Envelope.model_validate_json(
             store.pending_outbox()[0].canonical_bytes, strict=True
