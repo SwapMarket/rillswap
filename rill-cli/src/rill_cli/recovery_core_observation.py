@@ -243,6 +243,16 @@ class RecoveryCoreReader:
         # Auth) remains reachable from this public error's context or cause.
         raise category("selected Core evidence unavailable; no absence or authority proof")
 
+    def _attest_session(self, client: httpx.Client) -> tuple[str, int]:
+        """Check actual Core identity for each newly opened recovery RPC session."""
+        info = self._rpc(client, "getblockchaininfo", [], 1)
+        tip_hash, height = _tip(info, self._chain)
+        if not _matches_signet_challenge(info, self._network):
+            raise RecoveryCoreProtocolError("Core signet challenge differs from configuration")
+        if self._rpc(client, "getblockhash", [0], 2) != self._network.genesis_hash:
+            raise RecoveryCoreProtocolError("Core genesis differs from configured network")
+        return tip_hash, height
+
     def _observe(
         self,
         binding: FundingBinding,
@@ -276,14 +286,7 @@ class RecoveryCoreReader:
                 follow_redirects=False,
                 timeout=httpx.Timeout(READ_SECONDS, connect=CONNECT_SECONDS),
             ) as client:
-                first_info = self._rpc(client, "getblockchaininfo", [], 1)
-                tip_hash, height = _tip(first_info, self._chain)
-                if not _matches_signet_challenge(first_info, self._network):
-                    raise RecoveryCoreProtocolError(
-                        "Core signet challenge differs from configuration"
-                    )
-                if self._rpc(client, "getblockhash", [0], 2) != self._network.genesis_hash:
-                    raise RecoveryCoreProtocolError("Core genesis differs from configured network")
+                tip_hash, height = self._attest_session(client)
                 output = self._rpc(
                     client, "gettxout", [binding.funding_txid, binding.contract_vout, False], 3
                 )

@@ -299,22 +299,22 @@ def core_collaborators(
     def chain() -> ChainView | None:
         try:
             with client() as session:
-                info = reader._rpc(session, "getblockchaininfo", [], 1)  # noqa: SLF001
+                _, height = reader._attest_session(session)  # noqa: SLF001 - same RPC boundary
+                if height == 0:
+                    return None
                 # Chain-only: our own unconfirmed refund must not look like a spend.
                 out = reader._rpc(  # noqa: SLF001
-                    session, "gettxout", [funding_txid, contract_vout, False], 2
+                    session, "gettxout", [funding_txid, contract_vout, False], 3
                 )
         except Exception:  # noqa: BLE001 - transport or node failure is not evidence
             LOG.info("Core chain view unavailable; waiting")
-            return None
-        height = info.get("blocks") if isinstance(info, dict) else None
-        if type(height) is not int or height <= 0:
             return None
         return ChainView(height, isinstance(out, dict))
 
     def confirmations(txid: str) -> int | None:
         try:
             with client() as session:
+                reader._attest_session(session)  # noqa: SLF001 - no unauthenticated Core reads
                 result = reader._rpc(session, "getrawtransaction", [txid, True], 3)  # noqa: SLF001
         except Exception:  # noqa: BLE001 - unknown or unavailable: no evidence
             return None
@@ -324,6 +324,7 @@ def core_collaborators(
     def submit(raw: bytes, txid: str) -> bool:
         try:
             with client() as session:
+                reader._attest_session(session)  # noqa: SLF001 - before leaking spend bytes
                 preflight = reader._rpc(  # noqa: SLF001
                     session, "testmempoolaccept", [[raw.hex()]], 4, submission=True
                 )
