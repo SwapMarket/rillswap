@@ -12,6 +12,8 @@ from rill_core.wire.cooperative_messages import (
     CooperativeClaimComplete,
     CooperativeClaimDeclined,
     CooperativeClaimPropose,
+    CooperativeClaimReady,
+    CooperativeClaimReadyRequest,
     CooperativeClaimSigned,
     CooperativeClaimVerified,
     check_cooperative_action_context,
@@ -37,11 +39,25 @@ PROPOSE = {
     "deadline_at": 1700000000,
     "deadline_height": 1000,
 }
+READY_REQUEST = {
+    "action": "cooperative_claim_ready",
+    "challenge": "05" * 32,
+    "payment_preimage": "04" * 32,
+    "deadline_at": 1700000000,
+    "deadline_height": 1000,
+}
+READY_RESULT = {
+    "action": "cooperative_claim_ready",
+    "challenge": "05" * 32,
+    "status": "ready",
+}
 
 
 @pytest.mark.parametrize(
     ("message_type", "payload", "model"),
     [
+        ("action_request", READY_REQUEST, CooperativeClaimReadyRequest),
+        ("action_result", READY_RESULT, CooperativeClaimReady),
         ("action_request", PROPOSE, CooperativeClaimPropose),
         (
             "action_result",
@@ -311,3 +327,112 @@ def test_legacy_signed_contract_does_not_authorize_cooperative_action() -> None:
         check_cooperative_action_context(
             proposal, terms, init, accept.model_copy(update={"required_features": ()})
         )
+
+
+def test_readiness_is_exact_feature_bound_provider_request_and_client_echo() -> None:
+    terms, init, accept = _signed_context("btc-to-ln/v1")
+    request = _envelope(terms, init, READY_REQUEST, sender=accept.provider_session_xonly_key)
+    result = _envelope(
+        terms,
+        init,
+        READY_RESULT,
+        sender=init.client_session_xonly_key,
+        message_type="action_result",
+        reply_to=request.message_id,
+        message_id="bb" * 32,
+    )
+    assert isinstance(
+        check_cooperative_action_context(request, terms, init, accept),
+        CooperativeClaimReadyRequest,
+    )
+    assert isinstance(
+        check_cooperative_action_context(result, terms, init, accept, prior_request=request),
+        CooperativeClaimReady,
+    )
+    for tampered in (
+        result.model_copy(update={"in_reply_to": "ff" * 32}),
+        result.model_copy(update={"sender_session_key": accept.provider_session_xonly_key}),
+        result.model_copy(update={"payload": {**READY_RESULT, "challenge": "ff" * 32}}),
+        result.model_copy(update={"required_features": ()}),
+        result.model_copy(update={"session_id": "ff" * 32}),
+    ):
+        with pytest.raises(ValueError, match=r"readiness|sender role|signed feature"):
+            check_cooperative_action_context(tampered, terms, init, accept, prior_request=request)
+    with pytest.raises(ValueError, match="exact request"):
+        check_cooperative_action_context(
+            result,
+            terms,
+            init,
+            accept,
+            prior_request=_envelope(terms, init, PROPOSE, sender=accept.provider_session_xonly_key),
+        )
+    with pytest.raises(ValueError, match="sender role"):
+        check_cooperative_action_context(
+            request.model_copy(update={"sender_session_key": init.client_session_xonly_key}),
+            terms,
+            init,
+            accept,
+        )
+    for payload in (
+        {"action": "cooperative_claim_propose", "cooperation_id": ID, "status": "declined"},
+        {"action": "cooperative_claim_complete", "cooperation_id": ID, "status": "verified"},
+    ):
+        incompatible = result.model_copy(update={"payload": payload})
+        with pytest.raises(ValueError, match="different attempt"):
+            check_cooperative_action_context(
+                incompatible, terms, init, accept, prior_request=request
+            )
+    reverse_terms, reverse_init, reverse_accept = _signed_context("ln-to-btc/v1")
+    reverse = _envelope(
+        reverse_terms,
+        reverse_init,
+        READY_REQUEST,
+        sender=reverse_init.client_session_xonly_key,
+    )
+    with pytest.raises(ValueError, match="only for provider claims"):
+        check_cooperative_action_context(reverse, reverse_terms, reverse_init, reverse_accept)
+    reverse_reply = _envelope(
+        reverse_terms,
+        reverse_init,
+        READY_RESULT,
+        sender=reverse_accept.provider_session_xonly_key,
+        message_type="action_result",
+        reply_to=reverse.message_id,
+    )
+    with pytest.raises(ValueError, match="exact request"):
+        check_cooperative_action_context(
+            reverse_reply, reverse_terms, reverse_init, reverse_accept, prior_request=reverse
+        )
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("challenge", "aa" * 31),
+        ("challenge", "AA" * 32),
+        ("deadline_at", True),
+        ("deadline_height", "1000"),
+        ("status", "ready"),
+        ("unexpected", "ignored"),
+    ],
+)
+def test_readiness_request_rejects_malformed_payload(key: str, value: object) -> None:
+    with pytest.raises(ValueError, match=r"validation error|request unsupported"):
+        parse_cooperative_payload("action_request", canonicalize({**READY_REQUEST, key: value}))
+    with pytest.raises(ValueError, match="result unsupported"):
+        parse_cooperative_payload("action_result", canonicalize(READY_REQUEST))
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("challenge", "aa" * 31),
+        ("challenge", "AA" * 32),
+        ("status", "signed"),
+        ("unexpected", "ignored"),
+        ("deadline_at", 1700000000),
+    ],
+)
+def test_readiness_result_rejects_malformed_payload(key: str, value: object) -> None:
+    with pytest.raises(ValueError, match=r"validation error|result unsupported"):
+        parse_cooperative_payload("action_result", canonicalize({**READY_RESULT, key: value}))

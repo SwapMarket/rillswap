@@ -33,6 +33,24 @@ type PartialSignature = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}
 type UnsignedTransaction = Annotated[str, StringConstraints(pattern=r"^(?:[0-9a-f]{2}){60,1000}$")]
 
 
+class CooperativeClaimReadyRequest(StrictModel):
+    """Ask the original client to prove recent availability, without nonce exposure."""
+
+    action: Literal["cooperative_claim_ready"]
+    challenge: Hex32
+    payment_preimage: Hex32
+    deadline_at: ExactInteger
+    deadline_height: ExactInteger
+
+
+class CooperativeClaimReady(StrictModel):
+    """Echo one provider challenge; parsing never proves current ownership."""
+
+    action: Literal["cooperative_claim_ready"]
+    challenge: Hex32
+    status: Literal["ready"]
+
+
 class CooperativeClaimPropose(StrictModel):
     """The claimant offers a frozen transaction and burns its own nonce first."""
 
@@ -80,7 +98,9 @@ class CooperativeClaimVerified(StrictModel):
 
 
 type CooperativeAction = (
-    CooperativeClaimPropose
+    CooperativeClaimReadyRequest
+    | CooperativeClaimReady
+    | CooperativeClaimPropose
     | CooperativeClaimSigned
     | CooperativeClaimDeclined
     | CooperativeClaimComplete
@@ -88,7 +108,7 @@ type CooperativeAction = (
 )
 
 
-def parse_cooperative_payload(
+def parse_cooperative_payload(  # noqa: PLR0912 - closed wire action dispatch
     message_type: Literal["action_request", "action_result"], document: bytes
 ) -> CooperativeAction:
     """Parse only a closed payload shape, never infer signed feature authority."""
@@ -98,14 +118,18 @@ def parse_cooperative_payload(
     action = parsed.get("action")
     status = parsed.get("status")
     if message_type == "action_request":
-        if action == "cooperative_claim_propose" and status is None:
-            model: type[CooperativeAction] = CooperativeClaimPropose
+        if action == "cooperative_claim_ready" and status is None:
+            model: type[CooperativeAction] = CooperativeClaimReadyRequest
+        elif action == "cooperative_claim_propose" and status is None:
+            model = CooperativeClaimPropose
         elif action == "cooperative_claim_complete" and status is None:
             model = CooperativeClaimComplete
         else:
             raise ValueError("cooperative action request unsupported")
     elif message_type == "action_result":
-        if action == "cooperative_claim_propose" and status == "signed":
+        if action == "cooperative_claim_ready" and status == "ready":
+            model = CooperativeClaimReady
+        elif action == "cooperative_claim_propose" and status == "signed":
             model = CooperativeClaimSigned
         elif action == "cooperative_claim_propose" and status == "declined":
             model = CooperativeClaimDeclined
@@ -118,7 +142,7 @@ def parse_cooperative_payload(
     return model.model_validate_json(canonicalize(parsed), strict=True)
 
 
-def check_cooperative_action_context(
+def check_cooperative_action_context(  # noqa: PLR0912 - one closed role/reply policy
     envelope: Envelope,
     terms: ContractTerms,
     initiation: HandshakeInit,
@@ -170,13 +194,17 @@ def check_cooperative_action_context(
         if terms.claimant == "client"
         else initiation.client_session_xonly_key
     )
-    is_request = isinstance(payload, (CooperativeClaimPropose, CooperativeClaimComplete))
+    is_request = isinstance(
+        payload, (CooperativeClaimReadyRequest, CooperativeClaimPropose, CooperativeClaimComplete)
+    )
     expected_key = claimant_key if is_request else cosigner_key
     if envelope.sender_session_key != expected_key:
         raise ValueError("cooperative action sender role is incorrect")
-    if isinstance(payload, CooperativeClaimPropose):
+    if isinstance(payload, (CooperativeClaimReadyRequest, CooperativeClaimPropose)):
+        if isinstance(payload, CooperativeClaimReadyRequest) and terms.profile_id != "btc-to-ln/v1":
+            raise ValueError("readiness is only for provider claims")
         if envelope.in_reply_to is not None or prior_request is not None:
-            raise ValueError("cooperative proposal must start a new action")
+            raise ValueError("cooperative request must start a new action")
         return payload
     if prior_request is None or prior_request.message_type != "action_request":
         raise ValueError("cooperative action has no prior proposal/request")
@@ -192,6 +220,17 @@ def check_cooperative_action_context(
     ):
         raise ValueError("cooperative action refers to a different signed request")
     previous = parse_cooperative_payload("action_request", canonicalize(prior_request.payload))
+    if isinstance(payload, CooperativeClaimReady):
+        if (
+            terms.profile_id != "btc-to-ln/v1"
+            or not isinstance(previous, CooperativeClaimReadyRequest)
+            or envelope.in_reply_to != prior_request.message_id
+            or previous.challenge != payload.challenge
+        ):
+            raise ValueError("readiness does not answer its exact request")
+        return payload
+    if not isinstance(previous, (CooperativeClaimPropose, CooperativeClaimComplete)):
+        raise ValueError("cooperative action refers to a different attempt")  # noqa: TRY004 - invalid wire association
     if previous.cooperation_id != payload.cooperation_id:
         raise ValueError("cooperative action refers to a different attempt")
     if isinstance(payload, CooperativeClaimComplete):
