@@ -602,6 +602,20 @@ class ClaimAttempt:
 
 
 @dataclass(frozen=True, slots=True)
+class RecordedUnilateralClaim:
+    """Affirmatively selected attempt whose exact bytes can be redispatched."""
+
+    session_id: str
+    contract_hash: str
+    raw: bytes
+    txid: str
+    fee_sat: int | None
+    terms_offer: bytes
+    funding_binding: bytes
+    preimage: str
+
+
+@dataclass(frozen=True, slots=True)
 class PreparedFallback:
     """Persisted claim candidate; enumeration alone never authorizes spending."""
 
@@ -4743,6 +4757,39 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - never echo storage details
             raise LiveSessionStoreError("claim attempts unavailable") from None
         return tuple(ClaimAttempt(*row) for row in rows)
+
+    def recorded_unilateral_claims(
+        self, *, session_id: str | None = None
+    ) -> tuple[RecordedUnilateralClaim, ...]:
+        """List only exact durable script-path winners, never an unselected PAID row.
+
+        Old and new selected claims are both eligible. An absent arbitration
+        row is not claim authority here: the CLAIMING state, matching signed
+        attempt, and verified bytes are affirmative evidence of selection.
+        """
+        if session_id is not None and (
+            type(session_id) is not str or HEX32.fullmatch(session_id) is None
+        ):
+            raise LiveSessionStoreError("recorded claim session unsupported")
+        selected = "AND w.session_id=?" if session_id is not None else ""
+        try:
+            with self._write() as connection:
+                rows = connection.execute(
+                    "SELECT DISTINCT w.session_id,w.contract_hash,w.claim_tx,w.claim_txid,"
+                    "c.fee_sat,w.terms_offer,w.funding_binding,w.preimage "
+                    "FROM swaps w JOIN claim_attempts c ON c.session_id=w.session_id "
+                    "AND c.raw=w.claim_tx AND c.txid=w.claim_txid "
+                    "LEFT JOIN claim_arbitration a ON a.session_id=w.session_id "
+                    "WHERE w.state='CLAIMING' AND w.claim_tx IS NOT NULL "
+                    "AND (a.session_id IS NULL OR (a.version=1 AND a.state='ADMITTED' "
+                    "AND a.contract_hash=w.contract_hash)) " + selected + " ORDER BY w.session_id",
+                    () if session_id is None else (session_id,),
+                ).fetchall()
+                return tuple(RecordedUnilateralClaim(*row) for row in rows)
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - no unverified selected bytes escape
+            raise LiveSessionStoreError("recorded unilateral claims unavailable") from None
 
     def selected_cooperative_claim(self, session_id: str) -> ClaimAttempt | None:
         """Return exact selected key-path attempt zero or quarantine conflicting state."""

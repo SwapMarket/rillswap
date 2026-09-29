@@ -54,6 +54,7 @@ from rill_provider.live_session_store import (
     CooperativeWinner,
     LiveSessionStoreError,
     PreparedFallback,
+    RecordedUnilateralClaim,
     StaleOwnerError,
     StaleSwapError,
 )
@@ -275,14 +276,48 @@ class SettlementEngine:
         return True
 
     async def recover_expired_probe(self, window: ClaimProbeWindow, now: int) -> None:
-        """Attempt unilateral selection independently of a hung settlement tick."""
+        """Durably select a floor-fee claim without Core or Lightning RPC waits."""
         current = self.probe_window(window.session_id)
         if current != window or window not in self.expired_probe_windows():
             return
         items = self._store.settlement_work(session_id=window.session_id)
-        if len(items) != 1 or items[0].state != "PAID" or items[0].preimage is None:
+        if len(items) != 1:
             return
-        await self._advance(items[0], now)
+        item = items[0]
+        if item.state != "PAID":
+            self._claim_probes.pop(window.session_id, None)
+            return  # a selected claim or terminal swap owns recovery now
+        if item.preimage is None:
+            return  # inconsistent PAID state must not invent a preimage
+        if not self._store.immediate_claim_allowed(window.session_id):
+            self._claim_probes.pop(window.session_id, None)
+            return  # prepared or selected arbitration owns the fallback
+        terms = offered_terms(Envelope.model_validate_json(item.terms_offer, strict=True))
+        if terms.profile_id != "btc-to-ln/v1" or contract_hash(terms).hex() != window.contract_hash:
+            raise LiveSessionStoreError("due probe contract changed")
+        if item.funding_binding is None:
+            raise LiveSessionStoreError("due probe funding missing")
+        funding = Envelope.model_validate_json(item.funding_binding, strict=True)
+        binding = parse_model_json(FundingBindingPayload, canonicalize(funding.payload)).binding
+        if (
+            funding.contract_hash != window.contract_hash
+            or binding.contract_hash != window.contract_hash
+            or hashlib.sha256(bytes.fromhex(item.preimage)).hexdigest()
+            != terms.invoice_binding.payment_hash
+        ):
+            raise LiveSessionStoreError("due probe binding changed")
+        spend = await self._initial_claim(item, terms, binding, use_estimate=False)
+        self._move(
+            item,
+            "CLAIMING",
+            now,
+            claim_tx=spend.raw_transaction,
+            claim_txid=spend.txid,
+            claim_fee_sat=spend.fee_sat,
+            claim_height=None,
+            observation={"kind": "claim_broadcast", "claim_txid": spend.txid},
+        )
+        self._claim_probes.pop(window.session_id, None)
 
     def disable_new_exposure(self) -> None:
         """Latch off new BTC-to-LN sends after deadline supervision fails."""
@@ -350,6 +385,51 @@ class SettlementEngine:
     def recorded_fallbacks(self) -> tuple[PreparedFallback, ...]:
         """Read durable selected work for the independent submission lane."""
         return self._store.recorded_fallbacks()
+
+    def recorded_unilateral_claims(self) -> tuple[RecordedUnilateralClaim, ...]:
+        """Rediscover selected script-path claims, including old ADMITTED rows."""
+        return self._store.recorded_unilateral_claims()
+
+    def _validate_recorded_unilateral(self, claim: RecordedUnilateralClaim) -> None:
+        terms = offered_terms(Envelope.model_validate_json(claim.terms_offer, strict=True))
+        funding = Envelope.model_validate_json(claim.funding_binding, strict=True)
+        binding = parse_model_json(FundingBindingPayload, canonicalize(funding.payload)).binding
+        if (
+            terms.profile_id != "btc-to-ln/v1"
+            or terms.network_identity != self._store.network_identity
+            or contract_hash(terms).hex() != claim.contract_hash
+            or funding.contract_hash != claim.contract_hash
+            or binding.contract_hash != claim.contract_hash
+            or hashlib.sha256(bytes.fromhex(claim.preimage)).hexdigest()
+            != terms.invoice_binding.payment_hash
+        ):
+            raise LiveSessionStoreError("recorded unilateral binding mismatch")
+        verified = validate_unilateral_spend(
+            claim.raw, self._authorization(terms, binding), verifier=self._crypto
+        )
+        if (
+            verified.raw_transaction != claim.raw
+            or verified.txid != claim.txid
+            or (claim.fee_sat is not None and verified.fee_sat != claim.fee_sat)
+        ):
+            raise LiveSessionStoreError("recorded unilateral spend mismatch")
+
+    async def broadcast_recorded_unilateral(self, claim: RecordedUnilateralClaim) -> None:
+        """Broadcast only the still-selected, validated durable script-path bytes."""
+        try:
+            current = self._store.recorded_unilateral_claims(session_id=claim.session_id)
+            if current != (claim,):
+                return
+            self._validate_recorded_unilateral(claim)
+        except StaleOwnerError:
+            raise
+        except Exception:  # noqa: BLE001 - corrupted or stale custody must not be submitted
+            LOG.warning("recorded unilateral claim invalid for %s", claim.session_id[:16])
+            return
+        try:
+            await asyncio.to_thread(self._chain.broadcast, claim.raw, claim.txid)
+        except Exception:  # noqa: BLE001 - CLAIMING remains durable and discoverable
+            LOG.warning("selected unilateral claim not accepted yet for %s", claim.session_id[:16])
 
     def recover_cooperative_winners(self, now: int) -> tuple[CooperativeWinner, ...]:
         """Promote affirmative old PAID winners before accepting new work."""
@@ -933,7 +1013,12 @@ class SettlementEngine:
         return UnilateralAuthorization.from_terms(terms, funding, "claim", keys=self._crypto)
 
     async def _initial_claim(
-        self, item: SettlementItem, terms: ContractTerms, binding: FundingBinding
+        self,
+        item: SettlementItem,
+        terms: ContractTerms,
+        binding: FundingBinding,
+        *,
+        use_estimate: bool = True,
     ) -> ValidatedUnilateralSpend:
         """Build attempt 0 at the node's feerate estimate, never below the configured floor.
 
@@ -944,6 +1029,8 @@ class SettlementEngine:
         ceiling = max_spendable_fee(self._authorization(terms, binding))
         floor = min(self._settings.claim_fee_sat, ceiling)
         spend = self._claim(item, terms, binding, floor)
+        if not use_estimate:
+            return spend  # deadline recovery never waits for fee advice
         try:
             rate = await asyncio.to_thread(self._chain.fee_rate_sat_vb, CLAIM_ESTIMATE_TARGET)
         except Exception:  # noqa: BLE001 - advice only; never defer a timelocked spend for it

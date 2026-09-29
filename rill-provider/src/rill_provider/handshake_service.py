@@ -27,7 +27,9 @@ from rill_provider.live_session_store import (
     FIRST_REQUEST_SEQUENCE,
     Answer,
     CooperativeWinner,
+    LiveSessionStore,
     LiveSessionStoreError,
+    RecordedUnilateralClaim,
     SessionBlockedError,
     SessionExpiredError,
     StaleOwnerError,
@@ -54,7 +56,6 @@ if TYPE_CHECKING:
     from rill_crypto import Context
 
     from rill_provider.live_session_store import (
-        LiveSessionStore,
         PreparedFallback,
         ReadinessChallenge,
         RequestContext,
@@ -853,7 +854,13 @@ class HandshakeService:
             self._deadline_healthy = False
             settlement.disable_new_exposure()
 
-        def dispatch(candidate: PreparedFallback | CooperativeWinner) -> None:
+        # This lane requires real durable custody; lightweight service fakes
+        # exercise the older fallback lanes without pretending to be SQLite.
+        unilateral_custody = isinstance(self._store, LiveSessionStore)
+
+        def dispatch(
+            candidate: PreparedFallback | CooperativeWinner | RecordedUnilateralClaim,
+        ) -> None:
             key = (candidate.session_id, candidate.txid)
             if key in in_flight or time.monotonic() < retry_after.get(key, 0):
                 return
@@ -862,7 +869,11 @@ class HandshakeService:
             task = asyncio.create_task(
                 settlement.broadcast_cooperative_winner(candidate)
                 if isinstance(candidate, CooperativeWinner)
-                else settlement.broadcast_selected_fallback(candidate)
+                else (
+                    settlement.broadcast_recorded_unilateral(candidate)
+                    if isinstance(candidate, RecordedUnilateralClaim)
+                    else settlement.broadcast_selected_fallback(candidate)
+                )
             )
             broadcasts.add(task)
 
@@ -873,6 +884,11 @@ class HandshakeService:
                     LOG.warning("fallback submission task failed for %s", key[0][:16])
 
             task.add_done_callback(complete)
+
+        def dispatch_recorded_unilateral() -> None:
+            if unilateral_custody:
+                for claim in settlement.recorded_unilateral_claims():
+                    dispatch(claim)
 
         def recover_probe(window: ClaimProbeWindow) -> None:
             session_id = window.session_id
@@ -913,6 +929,14 @@ class HandshakeService:
         except Exception:  # noqa: BLE001 - recover again in the deadline loop
             unhealthy()
             LOG.warning("startup cooperative winner recovery deferred; admissions disabled")
+        if unilateral_custody:
+            try:
+                dispatch_recorded_unilateral()
+            except StaleOwnerError:
+                raise
+            except Exception:  # noqa: BLE001 - startup dispatch is retried independently
+                unhealthy()
+                LOG.warning("startup unilateral discovery deferred; admissions disabled")
 
         async def supervise() -> None:
             while not stop.is_set():
@@ -938,6 +962,7 @@ class HandshakeService:
                         dispatch(winner)
                     for winner in settlement.recorded_cooperative_winners():
                         dispatch(winner)
+                    dispatch_recorded_unilateral()
                 except StaleOwnerError:
                     unhealthy()
                     stop.set()

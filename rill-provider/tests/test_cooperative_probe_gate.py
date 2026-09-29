@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import os
 import time
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -15,10 +16,12 @@ from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE
 from test_cooperation_burn import FixtureEnvelopeSigner, _featured_paid_swap
 from test_live_session_store import Harness
 
+from rill_provider import live_session_store as live
 from rill_provider.handshake_service import HandshakeService
 from rill_provider.live_session_store import (
     FIRST_REQUEST_SEQUENCE,
     Answer,
+    LiveSessionStore,
     RequestAnswer,
 )
 from rill_provider.lnd_payment_send import PaymentOutcome
@@ -31,6 +34,34 @@ from rill_provider.settlement_engine import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def _insert_first_request(harness: Harness, store: LiveSessionStore, session: str) -> None:
+    """Populate the synthetic fixture's funded-work inbox join."""
+    (client_key,) = store._connection.execute(  # noqa: SLF001
+        "SELECT client_key FROM sessions WHERE session_id=?", (session,)
+    ).fetchone()
+    first_request = copy.deepcopy(harness.envelopes[2])
+    first_request.update(
+        message_type="quote_request",
+        message_id="fe" * 32,
+        sequence=FIRST_REQUEST_SEQUENCE,
+        in_reply_to=None,
+        contract_hash=None,
+        payload={"invoice": "fixture"},
+    )
+    store._connection.execute(  # noqa: SLF001 - synthetic authenticated inbox only
+        "INSERT INTO inbox VALUES (?,?,?,?,?,?,?)",
+        (
+            session,
+            client_key,
+            "fe" * 32,
+            FIRST_REQUEST_SEQUENCE,
+            b"\x00" * 32,
+            canonicalize(first_request),
+            100,
+        ),
+    )
 
 
 def test_approved_new_session_gate_does_not_reinterpret_historical_admission(
@@ -51,30 +82,7 @@ def test_approved_new_session_gate_does_not_reinterpret_historical_admission(
                 "VALUES (?, ?, 1, 'ADMITTED')",
                 (session, digest),
             )
-            (client_key,) = connection.execute(
-                "SELECT client_key FROM sessions WHERE session_id=?", (session,)
-            ).fetchone()
-            first_request = copy.deepcopy(harness.envelopes[2])
-            first_request.update(
-                message_type="quote_request",
-                message_id="fe" * 32,
-                sequence=FIRST_REQUEST_SEQUENCE,
-                in_reply_to=None,
-                contract_hash=None,
-                payload={"invoice": "fixture"},
-            )
-            connection.execute(
-                "INSERT INTO inbox VALUES (?,?,?,?,?,?,?)",
-                (
-                    session,
-                    client_key,
-                    "fe" * 32,
-                    FIRST_REQUEST_SEQUENCE,
-                    b"\x00" * 32,
-                    canonicalize(first_request),
-                    100,
-                ),
-            )
+            _insert_first_request(harness, store, session)
         assert store.admitted_featured_claim(session, digest)
         assert not store.admitted_featured_claim(session, "ff" * 32)
         chain = Mock(tip_height=Mock(return_value=1090))
@@ -147,6 +155,168 @@ def test_probe_is_not_inferred_from_an_older_owner(
         assert restarted.admitted_featured_claim(session, digest)
         assert engine.probe_window(session) is None
         assert engine.expired_probe_windows() == ()
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
+)
+def test_due_probe_records_real_unilateral_before_any_core_rpc(  # noqa: PLR0915 - one interrupted-owner lifecycle
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rill_crypto import Context  # noqa: PLC0415 - opt-in native signing
+
+    harness = Harness(tmp_path, monkeypatch)
+    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.provision()
+    with (
+        Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
+        harness.acquire() as store,
+    ):
+        session, _, _ = _featured_paid_swap(harness, store)
+        store._crypto = crypto  # noqa: SLF001 - real native signature and verification
+        store._public_keys = crypto  # noqa: SLF001
+        monkeypatch.setattr(live, "_new_session_scalar", lambda: (5).to_bytes(32, "big"))
+        with store._write() as connection:  # noqa: SLF001 - native contract key custody
+            store._contract_key(connection, session)  # noqa: SLF001
+        (digest,) = store._connection.execute(  # noqa: SLF001
+            "SELECT contract_hash FROM swaps WHERE session_id=?", (session,)
+        ).fetchone()
+        with store._connection as connection:  # noqa: SLF001 - synthetic signed feature admission
+            connection.execute(
+                "INSERT INTO claim_arbitration (session_id,contract_hash,version,state) "
+                "VALUES (?, ?, 1, 'ADMITTED')",
+                (session, digest),
+            )
+            _insert_first_request(harness, store, session)
+            connection.execute(
+                "UPDATE swaps SET state='PAYING',preimage=NULL WHERE session_id=?", (session,)
+            )
+        chain = Mock()
+        chain.tip_height.side_effect = RuntimeError("Core tip hung")
+        chain.fee_rate_sat_vb.side_effect = RuntimeError("Core fee hung")
+        chain.broadcast.side_effect = RuntimeError("Core broadcast hung")
+        lightning = Mock(track=Mock(return_value=PaymentOutcome("SUCCEEDED", "42" * 32)))
+        engine = SettlementEngine(store, chain, lightning, crypto)
+        assert engine.register_new_featured_session(session, digest)
+        assert asyncio.run(engine._advance(store.settlement_work(session_id=session)[0], 1002)) == (  # noqa: SLF001
+            "PAID"
+        )
+        window = engine.probe_window(session)
+        assert window is not None
+        engine.abandon_probe(session)
+        (due,) = engine.expired_probe_windows()
+        asyncio.run(engine.recover_expired_probe(due, 1003))
+        assert store._connection.execute(  # noqa: SLF001
+            "SELECT state FROM swaps WHERE session_id=?", (session,)
+        ).fetchone() == ("CLAIMING",)
+        (attempt,) = store.claim_attempts(session)
+        assert attempt.attempt == 0
+        assert attempt.first_seen_height is None
+        assert attempt.fee_sat is not None
+        assert store._connection.execute(  # noqa: SLF001
+            "SELECT claim_tx,claim_txid FROM swaps WHERE session_id=?", (session,)
+        ).fetchone() == (attempt.raw, attempt.txid)
+        assert engine.probe_window(session) is None
+        assert engine.expired_probe_windows() == ()
+        chain.tip_height.assert_not_called()
+        chain.fee_rate_sat_vb.assert_not_called()
+        chain.broadcast.assert_not_called()
+        selected = engine.recorded_unilateral_claims()
+        assert len(selected) == 1
+        assert (selected[0].raw, selected[0].txid, selected[0].fee_sat) == (
+            attempt.raw,
+            attempt.txid,
+            attempt.fee_sat,
+        )
+        asyncio.run(
+            engine.broadcast_recorded_unilateral(replace(selected[0], raw=b"unverified claim"))
+        )
+        chain.broadcast.assert_not_called()
+
+    # An interrupted owner loses its in-memory gate, but an affirmative,
+    # selected attempt remains available to the independent submission lane.
+    with (
+        Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
+        harness.acquire() as restarted,
+    ):
+        restarted._crypto = crypto  # noqa: SLF001 - native verifier on recovered owner
+        restarted._public_keys = crypto  # noqa: SLF001
+        chain = Mock()
+        engine = SettlementEngine(restarted, chain, Mock(), crypto)
+        assert engine.probe_window(session) is None
+        assert engine.expired_probe_windows() == ()
+        (recorded,) = engine.recorded_unilateral_claims()
+        assert recorded.raw == attempt.raw
+        assert recorded.txid == attempt.txid
+        asyncio.run(engine.broadcast_recorded_unilateral(recorded))
+        chain.broadcast.assert_called_once_with(attempt.raw, attempt.txid)
+        chain.broadcast.reset_mock()
+
+        async def dispatch_while_tick_hangs() -> None:
+            loop = asyncio.get_running_loop()
+            stop, tick_entered, broadcasted, release_tick = (asyncio.Event() for _ in range(4))
+
+            def broadcast(raw: bytes, txid: str) -> str:
+                assert (raw, txid) == (attempt.raw, attempt.txid)
+                loop.call_soon_threadsafe(broadcasted.set)
+                return txid
+
+            chain.broadcast.side_effect = broadcast
+            service = HandshakeService(
+                restarted,
+                Mock(),
+                crypto,
+                Mock(relay_urls=()),
+                clock=lambda: 1003,
+                settlement=engine,
+            )
+
+            async def hung_tick(_relays: object) -> None:
+                tick_entered.set()
+                await release_tick.wait()
+
+            monkeypatch.setattr(service, "tick", hung_tick)
+            running = asyncio.create_task(service.run(stop, tick_seconds=10))
+            try:
+                await asyncio.wait_for(tick_entered.wait(), timeout=2)
+                await asyncio.wait_for(broadcasted.wait(), timeout=2)
+            finally:
+                stop.set()
+                release_tick.set()
+                await asyncio.wait_for(running, timeout=2)
+
+        asyncio.run(dispatch_while_tick_hangs())
+        chain.broadcast.assert_called_once_with(attempt.raw, attempt.txid)
+        # Older selected attempts may have NULL fee metadata. The native spend
+        # proves its actual fee without trusting that migration-era column.
+        chain.broadcast.reset_mock()
+        with restarted._connection as connection:  # noqa: SLF001 - old-format fee fixture
+            connection.execute(
+                "UPDATE claim_attempts SET fee_sat=NULL WHERE session_id=? AND attempt=0",
+                (session,),
+            )
+        (legacy,) = engine.recorded_unilateral_claims()
+        assert legacy.fee_sat is None
+        asyncio.run(engine.broadcast_recorded_unilateral(legacy))
+        chain.broadcast.assert_called_once_with(attempt.raw, attempt.txid)
+        with restarted._connection as connection:  # noqa: SLF001 - corrupt selected attempt fixture
+            connection.execute(
+                "UPDATE claim_attempts SET raw=? WHERE session_id=? AND attempt=0",
+                (b"not the selected transaction", session),
+            )
+        assert engine.recorded_unilateral_claims() == ()
+        asyncio.run(engine.broadcast_recorded_unilateral(recorded))
+        chain.broadcast.assert_called_once()
+        with restarted._connection as connection:  # noqa: SLF001 - matching corrupt custody
+            connection.execute(
+                "UPDATE swaps SET claim_tx=? WHERE session_id=?",
+                (b"not the selected transaction", session),
+            )
+        (corrupt,) = engine.recorded_unilateral_claims()
+        asyncio.run(engine.broadcast_recorded_unilateral(corrupt))
+        chain.broadcast.assert_called_once()  # matching rows alone do not authorize a spend
 
 
 def test_supervisor_recovers_due_probe_while_settlement_tick_is_hung(
