@@ -54,6 +54,7 @@ from rill_core.wire.messages import (
     Envelope,
     FundingBinding,
     HandshakeAccept,
+    HandshakeAcceptPayload,
     HandshakeInit,
 )
 from rill_core.wire.quotes import (
@@ -264,6 +265,7 @@ class _Session:
         self.session_id = secrets.token_hex(32)
         self.sequence = 0
         self.provider_key: str | None = None
+        self._expected_accept: tuple[Envelope, HandshakeInit, str] | None = None
         self.seen: set[str] = set()
         self.inbox: list[Envelope] = []
 
@@ -330,6 +332,44 @@ class _Session:
             ]
         )
 
+    def expect_accept(self, request: Envelope, initiation: HandshakeInit, identity: str) -> None:
+        """Do not bind an unsigned accept until its identity signature verifies."""
+        if self.provider_key is not None or self._expected_accept is not None:
+            raise SwapError("handshake already started")
+        self._expected_accept = (request, initiation, identity)
+
+    def _authenticate_initial_accept(self, envelope: Envelope) -> bool:
+        """Bind only the identity-authenticated provider session key."""
+        if envelope.message_type != "handshake_accept" or self._expected_accept is None:
+            return False
+        request, initiation, identity = self._expected_accept
+        try:
+            if (
+                envelope.sequence != 0
+                or envelope.signature is not None
+                or envelope.in_reply_to != request.message_id
+                or envelope.contract_hash is not None
+                or set(envelope.required_features) - {EPOCH_SESSION_FEATURE}
+            ):
+                return False
+            payload = parse_model_json(HandshakeAcceptPayload, canonicalize(envelope.payload))
+            accepted = payload.accept
+            accepted.validate_against(
+                initiation, supported_features=frozenset({EPOCH_SESSION_FEATURE})
+            )
+            if accepted.provider_session_xonly_key != envelope.sender_session_key:
+                return False
+            self.crypto.schnorr_verify(
+                bytes.fromhex(identity),
+                handshake_accept_hash(accepted),
+                bytes.fromhex(payload.provider_identity_signature),
+            )
+        except Exception:  # noqa: BLE001 - invalid accept cannot establish a provider
+            return False
+        self.provider_key = envelope.sender_session_key
+        self._expected_accept = None
+        return True
+
     def _admit(self, raw: bytes) -> Envelope | None:
         try:
             frame = _decode_gift_wrap_candidate(
@@ -350,7 +390,12 @@ class _Session:
             or (self.provider_key is not None and envelope.sender_session_key != self.provider_key)
         ):
             return None
-        if envelope.message_type != "handshake_accept":
+        if self.provider_key is None:
+            if not self._authenticate_initial_accept(envelope):
+                return None
+        else:
+            if envelope.message_type == "handshake_accept":
+                return None  # only the first identity-authenticated accept binds the session
             try:
                 self.crypto.schnorr_verify(
                     bytes.fromhex(envelope.sender_session_key),
@@ -566,6 +611,7 @@ async def _handshake(
         else {},
     )
     request = session.envelope("handshake_init", init.model_dump(mode="json"), signed=False)
+    session.expect_accept(request, init, identity)
     await session.listen()
     await session.send(request, epoch)
     answer = await session.reply_to(request, "handshake_accept")

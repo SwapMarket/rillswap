@@ -7,11 +7,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from rill_core.wire.hashes import (
     COOPERATIVE_CLAIM_FEATURE,
+    EPOCH_SESSION_FEATURE,
     contract_hash,
     handshake_init_hash,
     unsigned_envelope_hash,
@@ -25,6 +27,83 @@ FIXTURE = (
 )
 PREIMAGE = "11" * 32
 PROVIDER_SIGNATURE = "77" * 64
+
+
+def test_untrusted_accept_does_not_bind_a_provider_or_poison_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rill_cli import live_swap  # noqa: PLC0415 - patch only this process's transport decoder
+
+    context = json.loads(FIXTURE.read_text())["verification_context"]
+    init = HandshakeInit.model_validate_json(json.dumps(context["handshake_init"]), strict=True)
+    accept = HandshakeAccept.model_validate_json(
+        json.dumps(context["handshake_accept"]), strict=True
+    )
+    crypto = Mock(public_key=lambda _secret: bytes.fromhex("02" + "11" * 32))
+
+    def verify(_key: bytes, _digest: bytes, signature: bytes) -> None:
+        if signature != bytes.fromhex(PROVIDER_SIGNATURE):
+            raise ValueError("not signed by provider identity")
+
+    crypto.schnorr_verify.side_effect = verify
+    session = _Session(Mock(), crypto, init.network_identity, timeout=1)
+    session.session_id = init.session_id
+    session.key = init.client_session_xonly_key
+    request = session.envelope("handshake_init", init.model_dump(mode="json"), signed=False)
+    session.expect_accept(request, init, accept.provider_identity_xonly_key)
+    correct = request.model_copy(
+        update={
+            "message_type": "handshake_accept",
+            "message_id": "aa" * 32,
+            "sender_session_key": accept.provider_session_xonly_key,
+            "sequence": 0,
+            "in_reply_to": request.message_id,
+            "payload": {
+                "accept": accept.model_dump(mode="json"),
+                "provider_identity_signature": PROVIDER_SIGNATURE,
+            },
+        }
+    )
+    frames = {
+        b"wrong-signature": correct.model_copy(
+            update={"payload": correct.payload | {"provider_identity_signature": "00" * 64}}
+        ),
+        b"wrong-reply": correct.model_copy(update={"in_reply_to": "ff" * 32}),
+        b"wrong-sequence": correct.model_copy(update={"sequence": 1}),
+        b"wrong-key": correct.model_copy(
+            update={"sender_session_key": init.client_session_xonly_key}
+        ),
+        b"extra-payload": correct.model_copy(update={"payload": correct.payload | {"x": 1}}),
+        b"unknown-feature": correct.model_copy(
+            update={"required_features": ("unknown-feature/v1",)}
+        ),
+        b"pre-accept": correct.model_copy(
+            update={"message_type": "observation", "signature": PROVIDER_SIGNATURE}
+        ),
+        b"correct": correct,
+    }
+    monkeypatch.setattr(
+        live_swap,
+        "_decode_gift_wrap_candidate",
+        lambda raw, **_kwargs: SimpleNamespace(
+            envelope=frames[raw], seal_author_xonly_key=frames[raw].sender_session_key
+        ),
+    )
+    for raw in tuple(frames)[:-1]:
+        assert session._admit(raw) is None  # noqa: SLF001 - signed envelope ingress boundary
+        assert session.provider_key is None
+        assert not session.seen
+    frames[b"supported-outer"] = correct.model_copy(
+        update={
+            "required_features": (EPOCH_SESSION_FEATURE,),
+            "extensions": {"example.invalid/optional": {"enabled": True}},
+        }
+    )
+    assert session._admit(b"supported-outer") == frames[b"supported-outer"]  # noqa: SLF001
+    assert session.provider_key == accept.provider_session_xonly_key
+    assert session.seen == {correct.message_id}
+    assert session._admit(b"correct") is None  # noqa: SLF001 - exact message ID replay
+    assert session._admit(b"wrong-reply") is None  # noqa: SLF001 - no second accept
 
 
 def _context() -> tuple[ContractTerms, HandshakeInit, HandshakeAccept]:
