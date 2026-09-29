@@ -30,7 +30,12 @@ from rill_core.settlement import (
     reconstruct_taproot_contract,
 )
 from rill_core.wire.canonical import canonicalize, parse_model_json
+from rill_core.wire.cooperative_messages import (
+    CooperativeClaimReadyRequest,
+    check_cooperative_action_context,
+)
 from rill_core.wire.hashes import (
+    COOPERATIVE_CLAIM_FEATURE,
     EPOCH_SESSION_EXTENSION,
     EPOCH_SESSION_FEATURE,
     HANDSHAKE_FEATURES_EXTENSION,
@@ -262,7 +267,7 @@ class _Session:
         self.seen: set[str] = set()
         self.inbox: list[Envelope] = []
 
-    def envelope(
+    def envelope(  # noqa: PLR0913 - explicit per-envelope negotiated features
         self,
         message_type: str,
         payload: dict[str, Any],
@@ -270,6 +275,7 @@ class _Session:
         in_reply_to: str | None = None,
         contract: str | None = None,
         signed: bool = True,
+        required_features: tuple[str, ...] = (),
     ) -> Envelope:
         unsigned = Envelope.model_validate_json(
             canonicalize(
@@ -286,7 +292,7 @@ class _Session:
                     "contract_hash": contract,
                     "message_type": message_type,
                     "payload": payload,
-                    "required_features": [],
+                    "required_features": list(required_features),
                     "extensions": {},
                     "signature": None,
                 }
@@ -390,6 +396,67 @@ class _Session:
         if answer.message_type != expected:
             raise SwapError(f"unexpected answer {answer.message_type}")
         return answer
+
+
+async def _answer_cooperative_readiness(  # noqa: PLR0913 - all independent bindings are explicit
+    session: _Session,
+    request: Envelope,
+    *,
+    terms: ContractTerms,
+    init: HandshakeInit,
+    accept: HandshakeAccept,
+    provider_key: str,
+    observed_preimage: str | None,
+    now: int,
+    tip_height: int,
+) -> str:
+    """Answer one authenticated original-session readiness request, no nonce.
+
+    This helper does not establish receive ordering or consent to a proposal.
+    Its caller must admit the request from the original relay session exactly
+    once, not from a recovery file, and retain the swap's bounded lifetime.
+    """
+    if (
+        request.sender_session_key != provider_key
+        or session.provider_key != provider_key
+        or session.session_id != init.session_id
+        or request.message_type != "action_request"
+    ):
+        raise SwapError("readiness is not from this provider session")
+    try:
+        session.crypto.schnorr_verify(
+            bytes.fromhex(provider_key),
+            unsigned_envelope_hash(request),
+            bytes.fromhex(request.signature or ""),
+        )
+        payload = check_cooperative_action_context(request, terms, init, accept)
+    except Exception:  # noqa: BLE001 - a signed but invalid request grants no effect
+        raise SwapError("cooperative readiness refused") from None
+    if not isinstance(payload, CooperativeClaimReadyRequest) or (
+        type(now) is not int
+        or type(tip_height) is not int
+        or now < 0
+        or tip_height < 0
+        or not now < payload.deadline_at <= now + 30
+        or not tip_height < payload.deadline_height <= terms.refund_lock_height
+        or hashlib.sha256(bytes.fromhex(payload.payment_preimage)).hexdigest()
+        != terms.invoice_binding.payment_hash
+        or (observed_preimage is not None and payload.payment_preimage != observed_preimage)
+    ):
+        raise SwapError("cooperative readiness refused")
+    reply = session.envelope(
+        "action_result",
+        {
+            "action": "cooperative_claim_ready",
+            "challenge": payload.challenge,
+            "status": "ready",
+        },
+        in_reply_to=request.message_id,
+        contract=contract_hash(terms).hex(),
+        required_features=(COOPERATIVE_CLAIM_FEATURE,),
+    )
+    await session.send(reply, provider_key)
+    return payload.payment_preimage
 
 
 def _recovery_document(  # noqa: PLR0913 - one record's explicit parts
