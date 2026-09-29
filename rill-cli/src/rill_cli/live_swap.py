@@ -84,6 +84,11 @@ type ProfileId = Literal["btc-to-ln/v1", "ln-to-btc/v1"]
 ENCRYPTION_SUITES = ("noise-xk-secp256k1-chachapoly-sha256/v1",)
 CAPABILITIES = ("core/v1", "recovery/v1")
 NIP59_BACKDATE_SECONDS = 2 * 24 * 60 * 60
+MAX_PROVIDER_SEQUENCE_WINDOW = 16
+MAX_PROVIDER_PENDING_BYTES = 256 * 1024
+MAX_PROVIDER_MESSAGES = 4096
+MAX_PROVIDER_INBOX_MESSAGES = 64
+MAX_PROVIDER_INBOX_BYTES = 256 * 1024
 GIFT_WRAP_KIND = 1059
 MAX_DISCOVERY_EVENTS = 256
 
@@ -268,6 +273,12 @@ class _Session:
         self._expected_accept: tuple[Envelope, HandshakeInit, str] | None = None
         self.seen: set[str] = set()
         self.inbox: list[Envelope] = []
+        self._inbox_bytes = 0
+        self._provider_next = 0
+        self._provider_by_id: dict[str, bytes] = {}
+        self._provider_by_sequence: dict[int, tuple[str, bytes]] = {}
+        self._provider_pending: dict[int, tuple[Envelope, int]] = {}
+        self._provider_pending_bytes = 0
 
     def envelope(  # noqa: PLR0913 - explicit per-envelope negotiated features
         self,
@@ -385,7 +396,6 @@ class _Session:
         envelope = frame.envelope
         if (
             envelope.session_id != self.session_id
-            or envelope.message_id in self.seen
             or frame.seal_author_xonly_key != envelope.sender_session_key
             or (self.provider_key is not None and envelope.sender_session_key != self.provider_key)
         ):
@@ -404,7 +414,70 @@ class _Session:
                 )
             except Exception:  # noqa: BLE001 - unsigned or forged
                 return None
+        return self._order_provider(envelope)
+
+    def _order_provider(self, envelope: Envelope) -> Envelope | None:
+        """Admit authenticated provider bytes only across a contiguous stream."""
+        if envelope.message_type == "handshake_accept":
+            self.seen.add(envelope.message_id)
+            self._provider_by_id[envelope.message_id] = unsigned_envelope_hash(envelope)
+            self._provider_by_sequence[0] = (
+                envelope.message_id,
+                self._provider_by_id[envelope.message_id],
+            )
+            self._provider_next = 1
+            return envelope
+        digest = unsigned_envelope_hash(envelope)
+        existing_id = self._provider_by_id.get(envelope.message_id)
+        existing_sequence = self._provider_by_sequence.get(envelope.sequence)
+        if (existing_id is not None and existing_id != digest) or (
+            existing_sequence is not None and existing_sequence != (envelope.message_id, digest)
+        ):
+            raise SwapError("provider signed a conflicting sequence or message ID")
+        if existing_id is not None:
+            return None  # exact replay cannot repeat a client effect
+        if (
+            envelope.sequence < self._provider_next
+            or envelope.sequence > self._provider_next + MAX_PROVIDER_SEQUENCE_WINDOW
+            or len(self._provider_by_id) >= MAX_PROVIDER_MESSAGES
+        ):
+            raise SwapError("provider sequence outside the bounded live window")
+        size = len(canonicalize(envelope.model_dump(mode="json")))
+        if envelope.sequence != self._provider_next and (
+            len(self._provider_pending) >= MAX_PROVIDER_SEQUENCE_WINDOW
+            or self._provider_pending_bytes + size > MAX_PROVIDER_PENDING_BYTES
+        ):
+            raise SwapError("provider future-message buffer exhausted")
         self.seen.add(envelope.message_id)
+        self._provider_by_id[envelope.message_id] = digest
+        self._provider_by_sequence[envelope.sequence] = (envelope.message_id, digest)
+        if envelope.sequence != self._provider_next:
+            self._provider_pending[envelope.sequence] = (envelope, size)
+            self._provider_pending_bytes += size
+            return None
+        self._provider_next += 1
+        while pending := self._provider_pending.pop(self._provider_next, None):
+            ready, buffered_size = pending
+            self._provider_pending_bytes -= buffered_size
+            self._buffer_inbox(ready)
+            self._provider_next += 1
+        return envelope
+
+    def _buffer_inbox(self, envelope: Envelope) -> None:
+        """Keep selectively deferred messages within a small process budget."""
+        size = len(canonicalize(envelope.model_dump(mode="json")))
+        if (
+            len(self.inbox) >= MAX_PROVIDER_INBOX_MESSAGES
+            or self._inbox_bytes + size > MAX_PROVIDER_INBOX_BYTES
+        ):
+            raise SwapError("provider live inbox exhausted")
+        self.inbox.append(envelope)
+        self.inbox.sort(key=lambda item: item.sequence)
+        self._inbox_bytes += size
+
+    def _pop_inbox(self, index: int) -> Envelope:
+        envelope = self.inbox.pop(index)
+        self._inbox_bytes -= len(canonicalize(envelope.model_dump(mode="json")))
         return envelope
 
     async def receive(
@@ -415,7 +488,7 @@ class _Session:
     ) -> Envelope:
         for index, envelope in enumerate(self.inbox):
             if wanted(envelope):
-                return self.inbox.pop(index)
+                return self._pop_inbox(index)
         try:
             async with asyncio.timeout(timeout or self.timeout):
                 async for raw in self.connection.events():
@@ -424,10 +497,17 @@ class _Session:
                         continue
                     if wanted(admitted):
                         return admitted
-                    self.inbox.append(admitted)
+                    self._buffer_inbox(admitted)
+                    for index, ready in enumerate(self.inbox):
+                        if wanted(ready):
+                            return self._pop_inbox(index)
         except TimeoutError:
             pass
         raise TimeoutError
+
+    async def receive_next(self, *, timeout: float | None = None) -> Envelope:  # noqa: ASYNC109
+        """Take the first admitted provider message, never skipping an earlier one."""
+        return await self.receive(lambda _item: True, timeout=timeout)
 
     async def reply_to(self, request: Envelope, expected: str) -> Envelope:
         try:

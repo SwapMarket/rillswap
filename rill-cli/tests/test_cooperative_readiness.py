@@ -80,6 +80,14 @@ def test_untrusted_accept_does_not_bind_a_provider_or_poison_replay(
         b"pre-accept": correct.model_copy(
             update={"message_type": "observation", "signature": PROVIDER_SIGNATURE}
         ),
+        b"provider-one": correct.model_copy(
+            update={
+                "message_type": "observation",
+                "sequence": 1,
+                "message_id": "f1" * 32,
+                "signature": PROVIDER_SIGNATURE,
+            }
+        ),
         b"correct": correct,
     }
     monkeypatch.setattr(
@@ -89,7 +97,7 @@ def test_untrusted_accept_does_not_bind_a_provider_or_poison_replay(
             envelope=frames[raw], seal_author_xonly_key=frames[raw].sender_session_key
         ),
     )
-    for raw in tuple(frames)[:-1]:
+    for raw in tuple(frames)[:-2]:
         assert session._admit(raw) is None  # noqa: SLF001 - signed envelope ingress boundary
         assert session.provider_key is None
         assert not session.seen
@@ -102,8 +110,15 @@ def test_untrusted_accept_does_not_bind_a_provider_or_poison_replay(
     assert session._admit(b"supported-outer") == frames[b"supported-outer"]  # noqa: SLF001
     assert session.provider_key == accept.provider_session_xonly_key
     assert session.seen == {correct.message_id}
+    assert session._provider_next == 1  # noqa: SLF001 - accept establishes sequence one
     assert session._admit(b"correct") is None  # noqa: SLF001 - exact message ID replay
     assert session._admit(b"wrong-reply") is None  # noqa: SLF001 - no second accept
+    assert session._provider_next == 1  # noqa: SLF001 - replay cannot reset the stream
+    assert session.seen == {correct.message_id}
+    assert session._admit(b"provider-one") == frames[b"provider-one"]  # noqa: SLF001
+    assert session._provider_next == 2  # noqa: SLF001
+    assert session._admit(b"correct") is None  # noqa: SLF001 - stale unsigned replay
+    assert session._provider_next == 2  # noqa: SLF001 - no reopened sequence zero
 
 
 def _context() -> tuple[ContractTerms, HandshakeInit, HandshakeAccept]:
