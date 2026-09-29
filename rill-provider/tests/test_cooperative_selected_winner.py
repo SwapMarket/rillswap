@@ -45,6 +45,7 @@ if TYPE_CHECKING:
         "begin_after_close",
         "nonce_race",
         "expired_without_selection",
+        "late_result",
     ],
 )
 def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0912, PLR0915 - native custody lifecycle
@@ -239,6 +240,20 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0912, P
                 ).hex()
             }
         )
+        if winner == "late_result":
+            (candidate,) = store.prepared_fallbacks()
+            store.select_prepared_fallback(candidate, signer=crypto, now=1003, height=1100)
+            with pytest.raises(LiveSessionStoreError, match="no longer current"):
+                store._admit_cooperative_result(  # noqa: SLF001 - stale signed client reply
+                    canonicalize(signed.model_dump(mode="json")), now=1004
+                )
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT state FROM cooperation_attempts WHERE session_id=?", (session,)
+            ).fetchone() == ("NONCE_READY",)
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT count(*) FROM inbox WHERE session_id=?", (session,)
+            ).fetchone() == (0,)
+            return
         assert (
             store._admit_cooperative_result(  # noqa: SLF001
                 canonicalize(signed.model_dump(mode="json")), now=1002

@@ -2890,6 +2890,25 @@ class LiveSessionStore:
                         or re.fullmatch(r"[0-9a-f]{64}", preimage) is None
                     ):
                         raise LiveSessionStoreError("cooperative proposal no longer current")  # noqa: TRY301
+                    arbitration = connection.execute(
+                        "SELECT state,owner_generation,contract_hash,deadline_at,"
+                        "deadline_height FROM claim_arbitration WHERE session_id=? AND version=1",
+                        (outer.session_id,),
+                    ).fetchone()
+                    if arbitration is not None and (
+                        arbitration
+                        != (
+                            "WAITING",
+                            self._generation,
+                            recorded_hash,
+                            deadline_at,
+                            binding.get("deadline_height"),
+                        )
+                        or swap_state != "PAID"
+                    ):
+                        raise LiveSessionStoreError(  # noqa: TRY301 - old internal tests have no window
+                            "cooperative proposal no longer current"
+                        )
                     terms = _offer_terms(offer_bytes)
                     funding = parse_model_json(
                         FundingBindingPayload,
