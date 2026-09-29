@@ -1049,7 +1049,31 @@ class LiveSessionStore:
             self.close()
             raise StaleOwnerError("commit outcome uncertain; ownership released") from None
 
-    def _burn_cooperative_claim(  # noqa: PLR0913 - frozen attempt identity and two deadlines
+    def burn_selected_cooperative_claim(  # noqa: PLR0913 - frozen live attempt identity
+        self,
+        session_id: str,
+        cooperation_id: bytes,
+        plan: CooperativeClaimPlan,
+        *,
+        now: int,
+        tip_height: int,
+        deadline_at: int,
+        deadline_height: int,
+    ) -> None:
+        """Burn a live attempt only inside this owner's prepared window."""
+        if type(tip_height) is not int:
+            raise LiveSessionStoreError("cooperative window height unavailable")
+        self._burn_cooperative_claim_impl(
+            session_id,
+            cooperation_id,
+            plan,
+            now=now,
+            deadline_at=deadline_at,
+            deadline_height=deadline_height,
+            window_tip=tip_height,
+        )
+
+    def _burn_cooperative_claim(  # noqa: PLR0913 - retained internal primitive
         self,
         session_id: str,
         cooperation_id: bytes,
@@ -1058,6 +1082,27 @@ class LiveSessionStore:
         now: int,
         deadline_at: int,
         deadline_height: int,
+    ) -> None:
+        self._burn_cooperative_claim_impl(
+            session_id,
+            cooperation_id,
+            plan,
+            now=now,
+            deadline_at=deadline_at,
+            deadline_height=deadline_height,
+            window_tip=None,
+        )
+
+    def _burn_cooperative_claim_impl(  # noqa: PLR0913 - one custody transition
+        self,
+        session_id: str,
+        cooperation_id: bytes,
+        plan: CooperativeClaimPlan,
+        *,
+        now: int,
+        deadline_at: int,
+        deadline_height: int,
+        window_tip: int | None,
     ) -> None:
         """Reserve one immutable ID before any native MuSig nonce allocation.
 
@@ -1155,6 +1200,17 @@ class LiveSessionStore:
                     != terms.invoice_binding.payment_hash
                 ):
                     raise LiveSessionStoreError("cooperative authority unavailable")  # noqa: TRY301
+                if window_tip is not None:
+                    _require_waiting_cooperation(
+                        connection,
+                        session_id,
+                        recorded_hash,
+                        self._generation,
+                        now=now,
+                        deadline_at=deadline_at,
+                        deadline_height=deadline_height,
+                        tip_height=window_tip,
+                    )
                 funding = plan.authorization.funding
                 if terms.profile_id == "btc-to-ln/v1":
                     if state not in ("PAID", "CLAIMING") or binding_bytes is None:
@@ -1235,6 +1291,20 @@ class LiveSessionStore:
         *,
         signer: EnvelopeSigner,
         now: int,
+    ) -> str:
+        return self._commit_cooperative_proposal_nonce_impl(
+            session_id, cooperation_id, public_nonce, signer=signer, now=now, window_tip=None
+        )
+
+    def _commit_cooperative_proposal_nonce_impl(  # noqa: PLR0913 - exact nonce custody inputs
+        self,
+        session_id: str,
+        cooperation_id: bytes,
+        public_nonce: bytes,
+        *,
+        signer: EnvelopeSigner,
+        now: int,
+        window_tip: int | None,
     ) -> str:
         """Commit a native public nonce and signed BTC-to-LN proposal before exposure.
 
@@ -1317,6 +1387,22 @@ class LiveSessionStore:
                     != binding.get("funding_script_pubkey")
                 ):
                     raise LiveSessionStoreError("cooperative nonce binding changed")  # noqa: TRY301
+                if window_tip is not None:
+                    window_deadline = binding.get("deadline_height")
+                    if type(window_deadline) is not int:
+                        raise LiveSessionStoreError(  # noqa: TRY301
+                            "cooperative window deadline unavailable"
+                        )
+                    _require_waiting_cooperation(
+                        connection,
+                        session_id,
+                        recorded_hash,
+                        self._generation,
+                        now=now,
+                        deadline_at=deadline_at,
+                        deadline_height=window_deadline,
+                        tip_height=window_tip,
+                    )
                 # Production supplies native rill-crypto.Context and checks both
                 # nonce points before any signed envelope can leave the store.
                 cast("Context", self._crypto).musig_public_nonce_validate(public_nonce)
@@ -1359,12 +1445,36 @@ class LiveSessionStore:
             raise LiveSessionStoreError("cooperative nonce commit refused") from None
         return message_id
 
-    def _begin_and_commit_cooperative_proposal(  # noqa: PLR0912 - custody and burn checks share one transaction
+    def begin_selected_cooperative_proposal(
         self,
         session_id: str,
         cooperation_id: bytes,
         *,
         now: int,
+        tip_height: int,
+    ) -> str:
+        """Allocate and publish a nonce only while this owner's window is open."""
+        if type(tip_height) is not int:
+            raise LiveSessionStoreError("cooperative window height unavailable")
+        return self._begin_cooperative_proposal_impl(
+            session_id, cooperation_id, now=now, window_tip=tip_height
+        )
+
+    def _begin_and_commit_cooperative_proposal(
+        self, session_id: str, cooperation_id: bytes, *, now: int
+    ) -> str:
+        """Retained internal custody primitive; never call for live arbitration."""
+        return self._begin_cooperative_proposal_impl(
+            session_id, cooperation_id, now=now, window_tip=None
+        )
+
+    def _begin_cooperative_proposal_impl(  # noqa: PLR0912, PLR0915 - one custody transition
+        self,
+        session_id: str,
+        cooperation_id: bytes,
+        *,
+        now: int,
+        window_tip: int | None,
     ) -> str:
         """Allocate one store-owned native handle after burn, then commit its nonce.
 
@@ -1448,6 +1558,22 @@ class LiveSessionStore:
                     != binding.get("network_identity")
                 ):
                     raise LiveSessionStoreError("cooperative signer terms changed")  # noqa: TRY301
+                if window_tip is not None:
+                    window_deadline = binding.get("deadline_height")
+                    if type(window_deadline) is not int:
+                        raise LiveSessionStoreError(  # noqa: TRY301
+                            "cooperative window deadline unavailable"
+                        )
+                    _require_waiting_cooperation(
+                        connection,
+                        session_id,
+                        recorded_hash,
+                        self._generation,
+                        now=now,
+                        deadline_at=deadline_at,
+                        deadline_height=window_deadline,
+                        tip_height=window_tip,
+                    )
                 user_key = binding.get("user_key")
                 tweak = binding.get("tap_tweak")
                 message = binding.get("signature_hash")
@@ -1496,8 +1622,17 @@ class LiveSessionStore:
             # The private storage primitive rechecks the current owner, state,
             # funding, preimage and deadline in its own durable write. It may
             # only publish the exact nonce bound to the live handle above.
-            return self._commit_cooperative_proposal_nonce(
-                session_id, cooperation_id, public_nonce, signer=crypto, now=now
+            if window_tip is None:
+                return self._commit_cooperative_proposal_nonce(
+                    session_id, cooperation_id, public_nonce, signer=crypto, now=now
+                )
+            return self._commit_cooperative_proposal_nonce_impl(
+                session_id,
+                cooperation_id,
+                public_nonce,
+                signer=crypto,
+                now=now,
+                window_tip=window_tip,
             )
         except BaseException as error:
             live = self._cooperation_handles.pop(cooperation_id, None)
@@ -4648,6 +4783,35 @@ def _immediate_claim_allowed(connection: sqlite3.Connection, session_id: str) ->
         "SELECT state FROM claim_arbitration WHERE session_id=?", (session_id,)
     ).fetchone()
     return row is None or row == ("ADMITTED",)
+
+
+def _require_waiting_cooperation(  # noqa: PLR0913 - exact owner, contract, and deadlines
+    connection: sqlite3.Connection,
+    session_id: str,
+    digest: str,
+    generation: int,
+    *,
+    now: int,
+    deadline_at: int,
+    deadline_height: int,
+    tip_height: int,
+) -> None:
+    """Authorize one live nonce effect against the currently prepared window."""
+    if (
+        type(now) is not int
+        or type(tip_height) is not int
+        or tip_height <= 0
+        or tip_height >= deadline_height
+        or now >= deadline_at
+        or connection.execute(
+            "SELECT state,owner_generation,contract_hash,deadline_at,deadline_height,"
+            "cooperative_raw,cooperative_txid FROM claim_arbitration WHERE session_id=? "
+            "AND version=1",
+            (session_id,),
+        ).fetchone()
+        != ("WAITING", generation, digest, deadline_at, deadline_height, None, None)
+    ):
+        raise LiveSessionStoreError("cooperative window unavailable")
 
 
 def _configure(connection: sqlite3.Connection) -> None:

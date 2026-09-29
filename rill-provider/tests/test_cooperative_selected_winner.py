@@ -34,9 +34,19 @@ if TYPE_CHECKING:
     reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
 )
 @pytest.mark.parametrize(
-    "winner", ["cooperative", "prior_paid", "fallback", "uncertain_written", "uncertain_rolledback"]
+    "winner",
+    [
+        "cooperative",
+        "prior_paid",
+        "fallback",
+        "uncertain_written",
+        "uncertain_rolledback",
+        "burn_after_close",
+        "begin_after_close",
+        "nonce_race",
+    ],
 )
-def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0915 - one native custody lifecycle
+def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0912, PLR0915 - native custody lifecycle
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, winner: str
 ) -> None:
     from rill_crypto import Context  # noqa: PLC0415 - opt-in native dependency
@@ -98,11 +108,80 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0915 - 
             deadline_height=1100,
         )
         cooperation_id = b"\xe1" * 32
-        store._burn_cooperative_claim(  # noqa: SLF001 - internal fixture setup
-            session, cooperation_id, plan, now=1000, deadline_at=1020, deadline_height=1100
+        with pytest.raises(LiveSessionStoreError, match="window height unavailable"):
+            store.burn_selected_cooperative_claim(
+                session,
+                cooperation_id,
+                plan,
+                now=1000,
+                tip_height=None,  # type: ignore[arg-type] - runtime boundary rejects untyped caller
+                deadline_at=1020,
+                deadline_height=1100,
+            )
+        assert store._connection.execute(  # noqa: SLF001
+            "SELECT count(*) FROM cooperation_attempts WHERE session_id=?", (session,)
+        ).fetchone() == (0,)
+        if winner == "burn_after_close":
+            (candidate,) = store.prepared_fallbacks()
+            store.select_prepared_fallback(candidate, signer=crypto, now=1000, height=1100)
+        if winner == "burn_after_close":
+            with pytest.raises(LiveSessionStoreError, match="cooperative window unavailable"):
+                store.burn_selected_cooperative_claim(
+                    session,
+                    cooperation_id,
+                    plan,
+                    now=1000,
+                    tip_height=1090,
+                    deadline_at=1020,
+                    deadline_height=1100,
+                )
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT count(*) FROM cooperation_attempts WHERE session_id=?", (session,)
+            ).fetchone() == (0,)
+            return
+        store.burn_selected_cooperative_claim(
+            session,
+            cooperation_id,
+            plan,
+            now=1000,
+            tip_height=1090,
+            deadline_at=1020,
+            deadline_height=1100,
         )
-        proposal_id = store._begin_and_commit_cooperative_proposal(  # noqa: SLF001
-            session, cooperation_id, now=1001
+        with pytest.raises(LiveSessionStoreError, match="window height unavailable"):
+            store.begin_selected_cooperative_proposal(
+                session,
+                cooperation_id,
+                now=1001,
+                tip_height=None,  # type: ignore[arg-type] - runtime boundary rejects untyped caller
+            )
+        assert cooperation_id not in store._allocated_cooperation_ids  # noqa: SLF001
+        assert store.pending_outbox() == ()
+        if winner in ("begin_after_close", "nonce_race"):
+            (candidate,) = store.prepared_fallbacks()
+            if winner == "begin_after_close":
+                store.select_prepared_fallback(candidate, signer=crypto, now=1001, height=1100)
+            else:
+                original = store._commit_cooperative_proposal_nonce_impl  # noqa: SLF001
+
+                def close_before_nonce(*args: object, **kwargs: object) -> str:
+                    store.select_prepared_fallback(candidate, signer=crypto, now=1001, height=1100)
+                    return original(*args, **kwargs)  # type: ignore[arg-type]
+
+                monkeypatch.setattr(
+                    store, "_commit_cooperative_proposal_nonce_impl", close_before_nonce
+                )
+            with pytest.raises(LiveSessionStoreError, match="cooperative window unavailable"):
+                store.begin_selected_cooperative_proposal(
+                    session, cooperation_id, now=1001, tip_height=1090
+                )
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT state FROM cooperation_attempts WHERE session_id=?", (session,)
+            ).fetchone() == ("BURNED",)
+            assert store._cooperation_handles == {}  # noqa: SLF001 - no leaked native handle
+            return
+        proposal_id = store.begin_selected_cooperative_proposal(
+            session, cooperation_id, now=1001, tip_height=1090
         )
         proposal = Envelope.model_validate_json(store.pending_outbox()[0].canonical_bytes)
         provider_nonce = bytes.fromhex(str(proposal.payload["public_nonce"]))
