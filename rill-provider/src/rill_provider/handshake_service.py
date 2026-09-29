@@ -477,12 +477,18 @@ class HandshakeService:
             LOG.warning("chain tip unavailable; quotes answered capacity_unavailable")
 
     async def _sample_tip(self) -> int | None:
+        height, _ = await self._sample_tip_with_age()
+        return height
+
+    async def _sample_tip_with_age(self) -> tuple[int | None, float | None]:
         """Share one outstanding Core lookup, without canceling a timed-out worker."""
         if self._chain_tip is None:
-            return None
+            return None, None
         task = self._tip_lookup
+        started: float | None
         if task is None or task.done():
-            self._tip_lookup_started = time.monotonic()
+            started = time.monotonic()
+            self._tip_lookup_started = started
             task = asyncio.create_task(asyncio.to_thread(self._chain_tip))
             self._tip_lookup = task
 
@@ -492,13 +498,19 @@ class HandshakeService:
                         done.exception()  # avoid an unobserved late RPC failure
 
             task.add_done_callback(consume)
+        else:
+            started = self._tip_lookup_started
         try:
             height = await asyncio.wait_for(asyncio.shield(task), TIP_LOOKUP_WAIT_SECONDS)
         except Exception:  # noqa: BLE001 - no proof of tip, never start another pending RPC
-            return None
-        return height if type(height) is int and height >= 0 else None
+            return None, started
+        return (height if type(height) is int and height >= 0 else None), started
 
     async def _fresh_probe_tip(self) -> int | None:
+        height, _ = await self._fresh_tip_evidence()
+        return height
+
+    async def _fresh_tip_evidence(self) -> tuple[int | None, float | None]:
         """Refuse an old shared RPC result, including a late timed-out worker."""
         if (
             self._tip_lookup is not None
@@ -508,16 +520,15 @@ class HandshakeService:
                 or time.monotonic() - self._tip_lookup_started >= TIP_LOOKUP_WAIT_SECONDS
             )
         ):
-            return None  # do not launch a second thread alongside the old lookup
-        height = await self._sample_tip()
-        started = self._tip_lookup_started
+            return None, None  # never launch a second thread alongside the old lookup
+        height, started = await self._sample_tip_with_age()
         if (
             height is None
             or started is None
             or time.monotonic() - started >= TIP_LOOKUP_WAIT_SECONDS
         ):
-            return None
-        return height
+            return None, None
+        return height, started
 
     async def _announce(self, epochs: tuple[str, ...], now: int) -> None:
         policy, state = self._policy, self._state
@@ -897,6 +908,7 @@ class HandshakeService:
         retry_after: dict[tuple[str, str], float] = {}
         probe_in_flight: set[str] = set()
         probe_retry_after: dict[str, float] = {}
+        height_evidence: tuple[int, float] | None = None
 
         def unhealthy() -> None:
             self._deadline_healthy = False
@@ -986,6 +998,28 @@ class HandshakeService:
                 unhealthy()
                 LOG.warning("startup unilateral discovery deferred; admissions disabled")
 
+        async def sample_height() -> None:
+            """Keep Core lookups off the wall-clock selection path."""
+            nonlocal height_evidence
+            while not stop.is_set():
+                try:
+                    if settlement.has_current_waiting_claim():
+                        tip, started = await self._fresh_tip_evidence()
+                        height_evidence = (
+                            (tip, started)
+                            if tip is not None and tip > 0 and started is not None
+                            else None
+                        )
+                    else:
+                        height_evidence = None
+                except Exception:  # noqa: BLE001 - no stale height can authorize selection
+                    height_evidence = None
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=0.25)
+
+        if self._chain_tip is not None:
+            broadcasts.add(asyncio.create_task(sample_height()))
+
         async def supervise() -> None:
             while not stop.is_set():
                 try:
@@ -994,7 +1028,19 @@ class HandshakeService:
                     if self._probe_supervision_needed:
                         for window in settlement.expired_probe_windows():
                             recover_probe(window)
-                    for candidate in settlement.select_due_fallbacks(self._deadline_now()):
+                    current = height_evidence
+                    height = (
+                        current[0]
+                        if current is not None
+                        and time.monotonic() - current[1] < TIP_LOOKUP_WAIT_SECONDS
+                        else None
+                    )
+                    due = (
+                        settlement.select_due_fallbacks(self._deadline_now())
+                        if height is None
+                        else settlement.select_due_fallbacks(self._deadline_now(), height=height)
+                    )
+                    for candidate in due:
                         dispatch(candidate)
                 except StaleOwnerError:
                     unhealthy()

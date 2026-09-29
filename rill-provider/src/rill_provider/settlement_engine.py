@@ -405,7 +405,7 @@ class SettlementEngine:
         return min(self._settings.max_routing_fee_sat, success_fee_sat)
 
     def select_due_fallbacks(
-        self, now: int, *, closed_only: bool = False
+        self, now: int, *, closed_only: bool = False, height: int | None = None
     ) -> tuple[PreparedFallback, ...]:
         """Validate exact stored claims and select before any network submission.
 
@@ -413,10 +413,18 @@ class SettlementEngine:
         restarted owner may select only a previous generation's CLOSED bundle;
         a live deadline may select only its own expired WAITING bundle.
         """
+        if height is not None and (type(height) is not int or height < 0):
+            raise LiveSessionStoreError("fallback height unavailable")
+        if height == 0:
+            height = None  # Core genesis is not height-expiry evidence, never block time expiry
         selected: list[PreparedFallback] = []
         for candidate in self._store.prepared_fallbacks(closed_only=closed_only):
-            if candidate.state == "WAITING" and now < candidate.deadline_at:
-                continue  # height-based expiry requires fresh chain evidence elsewhere
+            if (
+                candidate.state == "WAITING"
+                and now < candidate.deadline_at
+                and (height is None or height < candidate.deadline_height)
+            ):
+                continue
             try:
                 self._validate_prepared_fallback(candidate)
             except Exception:  # noqa: BLE001 - bad bundle stays blocked for operator review
@@ -427,7 +435,7 @@ class SettlementEngine:
                 continue
             try:
                 self._store.select_prepared_fallback(
-                    candidate, signer=self._crypto, now=now, height=None
+                    candidate, signer=self._crypto, now=now, height=height
                 )
             except StaleSwapError:
                 continue  # re-read the new durable state on the next pass
@@ -462,6 +470,10 @@ class SettlementEngine:
     def recorded_fallbacks(self) -> tuple[PreparedFallback, ...]:
         """Read durable selected work for the independent submission lane."""
         return self._store.recorded_fallbacks()
+
+    def has_current_waiting_claim(self) -> bool:
+        """Avoid continuous Core polling when there is no live height deadline."""
+        return self._store.has_current_waiting_claim()
 
     def recorded_unilateral_claims(self) -> tuple[RecordedUnilateralClaim, ...]:
         """Rediscover selected script-path claims, including old ADMITTED rows."""

@@ -174,7 +174,9 @@ def test_signed_echo_enters_waiting_only_via_original_live_service(  # noqa: PLR
     os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
     reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
 )
-@pytest.mark.parametrize("outcome", ["committed", "height_expired", "abandoned"])
+@pytest.mark.parametrize(
+    "outcome", ["committed", "zero_height_wall", "height_expired", "abandoned"]
+)
 def test_echo_prepares_exact_fallback_with_original_deadlines_or_refuses(  # noqa: PLR0915 - one real paid owner fixture
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str
 ) -> None:
@@ -236,7 +238,7 @@ def test_echo_prepares_exact_fallback_with_original_deadlines_or_refuses(  # noq
                 engine.abandon_probe(session)
             return height if outcome == "height_expired" else height - 1
 
-        if outcome == "committed":
+        if outcome in ("committed", "zero_height_wall"):
             asyncio.run(
                 engine.prepare_cooperative_window(
                     challenge, sample_tip=fresh_tip, now=lambda: window.started_at + 1
@@ -251,6 +253,14 @@ def test_echo_prepares_exact_fallback_with_original_deadlines_or_refuses(  # noq
             assert store.claim_attempts(session) == ()
             assert not store.immediate_claim_allowed(session)
             assert engine.select_due_fallbacks(window.deadline_at - 1) == ()
+            if outcome == "zero_height_wall":
+                (selected,) = engine.select_due_fallbacks(window.deadline_at, height=0)
+            else:
+                assert engine.select_due_fallbacks(window.deadline_at - 1, height=height - 1) == ()
+                (selected,) = engine.select_due_fallbacks(window.deadline_at - 1, height=height)
+            assert selected.txid == fallback.txid
+            assert store.recorded_fallbacks()[0].txid == fallback.txid
+            assert engine.select_due_fallbacks(window.deadline_at - 1, height=height) == ()
         else:
             with pytest.raises(LiveSessionStoreError, match="deadline unavailable"):
                 asyncio.run(

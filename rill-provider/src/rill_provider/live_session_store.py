@@ -4467,6 +4467,22 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - never echo storage or crypto details
             raise LiveSessionStoreError("claim window refused") from None
 
+    def has_current_waiting_claim(self) -> bool:
+        """Report whether this owner has any height-supervisable WAITING window."""
+        try:
+            with self._write() as connection:
+                return bool(
+                    connection.execute(
+                        "SELECT 1 FROM claim_arbitration WHERE state='WAITING' "
+                        "AND version=1 AND owner_generation=? LIMIT 1",
+                        (self._generation,),
+                    ).fetchone()
+                )
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - no missing state can justify a Core query
+            raise LiveSessionStoreError("waiting claim availability unavailable") from None
+
     def prepared_fallbacks(self, *, closed_only: bool = False) -> tuple[PreparedFallback, ...]:
         """Return affirmative bundles attached to PAID swaps for validation.
 
