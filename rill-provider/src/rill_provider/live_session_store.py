@@ -4110,6 +4110,22 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - never echo storage details
             raise LiveSessionStoreError("claim arbitration unavailable") from None
 
+    def admitted_featured_claim(self, session_id: str, contract: str) -> bool:
+        """Check affirmative agreement, never infer original-session liveness."""
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT a.version,a.state,a.contract_hash,w.contract_hash "
+                    "FROM claim_arbitration a JOIN swaps w ON w.session_id=a.session_id "
+                    "WHERE a.session_id=?",
+                    (session_id,),
+                ).fetchone()
+                return bool(row == (1, "ADMITTED", contract, contract))
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("claim admission unavailable") from None
+
     def issue_cooperative_readiness(  # noqa: PLR0913 - fixed time/height probe budget
         self,
         session_id: str,

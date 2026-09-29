@@ -122,6 +122,20 @@ CLAIM_ESTIMATE_TARGET = 6  # confirmation target asked of Core for the first cla
 INCREMENTAL_RELAY_SAT_VB = 1  # BIP125 rule 4 at Core's default incremental relay fee
 READINESS_BUDGET_SECONDS = 10.0  # one shared bound for the whole offer preflight
 READINESS_SYNC_DELAY = 1.0
+COOPERATIVE_PROBE_SECONDS = 30
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimProbeWindow:
+    """Owner-process-only pre-echo claim deferral, never restartable authority."""
+
+    session_id: str
+    contract_hash: str
+    owner_generation: int
+    started_at: int
+    deadline_at: int
+    started_monotonic: float
+    abandoned: bool = False
 
 
 class LightningBackend(Protocol):
@@ -200,6 +214,75 @@ class SettlementEngine:
         )
         self._claim_cursor = ""  # fair paging of the historical claim sweep
         self._new_exposure_allowed = True
+        self._new_featured_sessions: dict[str, tuple[str, int]] = {}
+        self._claim_probes: dict[str, ClaimProbeWindow] = {}
+
+    def register_new_featured_session(self, session_id: str, contract: str) -> bool:
+        """Remember one current-process original session, not a stored ADMITTED row.
+
+        Caller must have authenticated both a new acceptance and first funding
+        binding under this owner. Relayed replay or restart never recreates it.
+        """
+        if not self._new_exposure_allowed or not self._store.admitted_featured_claim(
+            session_id, contract
+        ):
+            return False
+        if session_id in self._new_featured_sessions or session_id in self._claim_probes:
+            return False
+        self._new_featured_sessions[session_id] = (contract, self._store.generation)
+        return True
+
+    def probe_window(self, session_id: str) -> ClaimProbeWindow | None:
+        """Return only the live gate held by this owner (never from SQLite)."""
+        window = self._claim_probes.get(session_id)
+        if window is None or window.owner_generation != self._store.generation:
+            return None
+        return window
+
+    def expired_probe_windows(self) -> tuple[ClaimProbeWindow, ...]:
+        """List gates requiring independent unilateral recovery."""
+        now = time.monotonic()
+        return tuple(
+            window
+            for window in self._claim_probes.values()
+            if window.owner_generation == self._store.generation
+            and (window.abandoned or now >= window.started_monotonic + COOPERATIVE_PROBE_SECONDS)
+        )
+
+    def abandon_probe(self, session_id: str) -> None:
+        """Irreversibly stop deferral after failed tip, echo or preparation."""
+        window = self.probe_window(session_id)
+        if window is not None:
+            self._claim_probes[session_id] = replace(window, abandoned=True)
+
+    def _activate_probe(self, session_id: str, terms: ContractTerms) -> bool:
+        eligible = self._new_featured_sessions.pop(session_id, None)
+        if eligible != (contract_hash(terms).hex(), self._store.generation):
+            return False
+        if not self._new_exposure_allowed or not self._store.admitted_featured_claim(
+            session_id, eligible[0]
+        ):
+            return False
+        started_at = int(time.time())
+        self._claim_probes[session_id] = ClaimProbeWindow(
+            session_id,
+            eligible[0],
+            self._store.generation,
+            started_at,
+            started_at + COOPERATIVE_PROBE_SECONDS,
+            time.monotonic(),
+        )
+        return True
+
+    async def recover_expired_probe(self, window: ClaimProbeWindow, now: int) -> None:
+        """Attempt unilateral selection independently of a hung settlement tick."""
+        current = self.probe_window(window.session_id)
+        if current != window or window not in self.expired_probe_windows():
+            return
+        items = self._store.settlement_work(session_id=window.session_id)
+        if len(items) != 1 or items[0].state != "PAID" or items[0].preimage is None:
+            return
+        await self._advance(items[0], now)
 
     def disable_new_exposure(self) -> None:
         """Latch off new BTC-to-LN sends after deadline supervision fails."""
@@ -549,8 +632,17 @@ class SettlementEngine:
                 preimage=outcome.preimage,
                 observation={"kind": "payment_settled", "payment_preimage": outcome.preimage},
             )
+            if self._activate_probe(item.session_id, terms):
+                return "PAID"  # explicit new original session; echo handled outside this tick
             return await self._advance(_with_state(item, "PAID", preimage=outcome.preimage), now)
         if item.state == "PAID" and item.preimage is not None:
+            probe = self.probe_window(item.session_id)
+            if (
+                probe is not None
+                and not probe.abandoned
+                and (time.monotonic() < probe.started_monotonic + COOPERATIVE_PROBE_SECONDS)
+            ):
+                return item.state
             if not self._store.immediate_claim_allowed(item.session_id):
                 return item.state  # selection/recovery owns every prepared window
             tip = await asyncio.to_thread(self._chain.tip_height)
@@ -565,6 +657,7 @@ class SettlementEngine:
                 claim_height=tip,
                 observation={"kind": "claim_broadcast", "claim_txid": spend.txid},
             )
+            self._claim_probes.pop(item.session_id, None)
             return await self._advance(
                 _with_state(
                     item, "CLAIMING", claim_tx=spend.raw_transaction, claim_txid=spend.txid

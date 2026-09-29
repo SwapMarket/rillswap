@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from rill_core.wire.canonical import canonicalize
-from rill_core.wire.messages import InvoiceBinding
+from rill_core.wire.messages import Envelope, InvoiceBinding
 from rill_core.wire.quotes import parse_quote_request
 from rill_core.wire.reverse_quotes import ReverseFirmQuoteRequest
 
@@ -50,7 +50,6 @@ from rill_provider.settlement_policy import answer_client_request
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from rill_core.wire.messages import Envelope
     from rill_core.wire.types import NetworkIdentity, ProfileId
     from rill_crypto import Context
 
@@ -62,7 +61,7 @@ if TYPE_CHECKING:
     )
     from rill_provider.lnd_hold_invoice import LndHoldInvoices
     from rill_provider.provider_identity import ProviderIdentity
-    from rill_provider.settlement_engine import SettlementEngine
+    from rill_provider.settlement_engine import ClaimProbeWindow, SettlementEngine
 
 LOG = logging.getLogger(__name__)
 NIP59_BACKDATE_SECONDS = 2 * 24 * 60 * 60
@@ -179,6 +178,8 @@ class HandshakeService:
         self._readiness_ready: dict[str, ReadinessChallenge] = {}
         self._readiness_issued: set[str] = set()
         self._readiness_closed = False
+        self._fresh_featured_accepts: dict[str, tuple[str, float]] = {}
+        self._probe_supervision_needed = False
 
     def _now(self) -> int:
         return int(self._clock())
@@ -289,6 +290,9 @@ class HandshakeService:
     async def tick(self, relays: Sequence[Relay]) -> None:
         """Rotate epochs, refresh the announcement, resubscribe, retry the outbox."""
         self._expire_readiness()
+        for session_id, (_, expires) in tuple(self._fresh_featured_accepts.items()):
+            if time.monotonic() >= expires:
+                del self._fresh_featured_accepts[session_id]
         policy, state, now = self._policy, self._state, self._now()
         epochs = self._store.rotate_epochs(
             now=now,
@@ -716,6 +720,24 @@ class HandshakeService:
             raise
         if sent != ["terms_offer"]:  # refused, or a replay: this invoice binds nothing
             await self._cancel_hold(terms.hold)
+        if not answer.replay and sent == ["ack"] and self._settlement is not None:
+            request = Envelope.model_validate_json(document, strict=True)
+            digest = request.contract_hash
+            if digest is not None and request.message_type == "terms_accept":
+                if self._store.admitted_featured_claim(request.session_id, digest):
+                    self._fresh_featured_accepts[request.session_id] = (
+                        digest,
+                        time.monotonic() + policy.handshake_timeout,
+                    )
+            elif digest is not None and request.message_type == "funding_binding":
+                fresh = self._fresh_featured_accepts.pop(request.session_id, None)
+                if (
+                    fresh is not None
+                    and fresh[0] == digest
+                    and time.monotonic() < fresh[1]
+                    and self._settlement.register_new_featured_session(request.session_id, digest)
+                ):
+                    self._probe_supervision_needed = True
         # A replay re-sends the recorded answer (RS-001 stable replay).
         await self._send_pending(answer.response_message_id, relays)
         return "request-replay" if answer.replay else "request-answered"
@@ -733,6 +755,8 @@ class HandshakeService:
         broadcasts: set[asyncio.Task[None]] = set()
         in_flight: set[tuple[str, str]] = set()
         retry_after: dict[tuple[str, str], float] = {}
+        probe_in_flight: set[str] = set()
+        probe_retry_after: dict[str, float] = {}
 
         def unhealthy() -> None:
             self._deadline_healthy = False
@@ -756,6 +780,27 @@ class HandshakeService:
                 in_flight.discard(key)
                 if not done.cancelled() and done.exception() is not None:
                     LOG.warning("fallback submission task failed for %s", key[0][:16])
+
+            task.add_done_callback(complete)
+
+        def recover_probe(window: ClaimProbeWindow) -> None:
+            session_id = window.session_id
+            if session_id in probe_in_flight or time.monotonic() < probe_retry_after.get(
+                session_id, 0
+            ):
+                return
+            probe_in_flight.add(session_id)
+            probe_retry_after[session_id] = time.monotonic() + 1
+            task = asyncio.create_task(
+                settlement.recover_expired_probe(window, self._deadline_now())
+            )
+            broadcasts.add(task)
+
+            def complete(done: asyncio.Task[None]) -> None:
+                broadcasts.discard(done)
+                probe_in_flight.discard(session_id)
+                if not done.cancelled() and done.exception() is not None:
+                    LOG.warning("due claim probe recovery deferred for %s", session_id[:16])
 
             task.add_done_callback(complete)
 
@@ -783,6 +828,9 @@ class HandshakeService:
                 try:
                     self._expire_readiness()
                     self._store.reconcile_expired_cooperative_proposals(self._deadline_now())
+                    if self._probe_supervision_needed:
+                        for window in settlement.expired_probe_windows():
+                            recover_probe(window)
                     for candidate in settlement.select_due_fallbacks(self._deadline_now()):
                         dispatch(candidate)
                 except StaleOwnerError:
