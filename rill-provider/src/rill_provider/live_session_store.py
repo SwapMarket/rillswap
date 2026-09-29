@@ -2745,7 +2745,7 @@ class LiveSessionStore:
             raise SessionBlockedError("conflicting signed cooperative result is durable")
         return CooperativeResultAdmission(outer.session_id, outer.message_id, status, replay=False)
 
-    def _commit_cooperative_claim_partial(  # noqa: PLR0912, PLR0915 - one-shot custody transition
+    def commit_selected_cooperative_claim(
         self,
         session_id: str,
         cooperation_id: bytes,
@@ -2753,11 +2753,41 @@ class LiveSessionStore:
         *,
         now: int,
     ) -> str:
+        """Select the exact key-path winner atomically before exposing our partial.
+
+        This checked live entry point requires the current owner's prepared
+        WAITING window. Only a verified completion may close that window.
+        """
+        return self._complete_cooperative_claim(
+            session_id, cooperation_id, observation, now=now, select_winner=True
+        )
+
+    def _commit_cooperative_claim_partial(
+        self,
+        session_id: str,
+        cooperation_id: bytes,
+        observation: CooperativeClaimObservation,
+        *,
+        now: int,
+    ) -> str:
+        """Retained internal custody primitive; never call for live arbitration."""
+        return self._complete_cooperative_claim(
+            session_id, cooperation_id, observation, now=now, select_winner=False
+        )
+
+    def _complete_cooperative_claim(  # noqa: PLR0912, PLR0915 - one-shot custody transition
+        self,
+        session_id: str,
+        cooperation_id: bytes,
+        observation: CooperativeClaimObservation,
+        *,
+        now: int,
+        select_winner: bool,
+    ) -> str:
         """Consume one live handle and commit the signed completion before exposure.
 
-        INTERNAL ONLY. A future runtime must obtain a fresh, named-tip,
-        mempool-aware sample immediately before invocation and independently
-        schedule unilateral fallback. This method never broadcasts.
+        The live wrapper requires a fresh, named-tip, mempool-aware sample
+        immediately before invocation. This method never broadcasts.
         """
         from rill_crypto import Context  # noqa: PLC0415 - native signer only
 
@@ -2858,6 +2888,32 @@ class LiveSessionStore:
                     or deadline_height <= 0
                 ):
                     raise LiveSessionStoreError("cooperative signing plan malformed")  # noqa: TRY301
+                if select_winner:
+                    arbitration = connection.execute(
+                        "SELECT state,owner_generation,contract_hash,deadline_at,"
+                        "deadline_height,cooperative_raw,cooperative_txid "
+                        "FROM claim_arbitration WHERE session_id=? AND version=1",
+                        (session_id,),
+                    ).fetchone()
+                    if (
+                        arbitration
+                        != (
+                            "WAITING",
+                            self._generation,
+                            recorded_hash,
+                            deadline_at,
+                            deadline_height,
+                            None,
+                            None,
+                        )
+                        or swap_state != "PAID"
+                        or connection.execute(
+                            "SELECT 1 FROM claim_attempts WHERE session_id=? LIMIT 1", (session_id,)
+                        ).fetchone()
+                    ):
+                        raise LiveSessionStoreError(  # noqa: TRY301
+                            "cooperative arbitration unavailable"
+                        )
                 retained = parse_model_json(
                     FundingBindingPayload,
                     canonicalize(_canonical_envelope(funding_bytes).payload),
@@ -2988,7 +3044,25 @@ class LiveSessionStore:
                     user_partial_signature=bytes.fromhex(result.partial_signature),
                     provider_partial_signature=partial,
                 )
-                finalize_cooperative_claim(plan, signature, verifier=crypto)
+                completed = finalize_cooperative_claim(plan, signature, verifier=crypto)
+                if (
+                    select_winner
+                    and connection.execute(
+                        "UPDATE claim_arbitration SET state='CLOSED',cooperative_raw=?,"
+                        "cooperative_txid=? WHERE session_id=? AND version=1 "
+                        "AND state='WAITING' AND owner_generation=? AND contract_hash=? "
+                        "AND cooperative_raw IS NULL AND cooperative_txid IS NULL",
+                        (
+                            completed.raw_transaction,
+                            completed.txid,
+                            session_id,
+                            self._generation,
+                            recorded_hash,
+                        ),
+                    ).rowcount
+                    != 1
+                ):
+                    raise LiveSessionStoreError("cooperative selection refused")  # noqa: TRY301
                 completion = {
                     "action": "cooperative_claim_complete",
                     "cooperation_id": cooperation_id.hex(),
