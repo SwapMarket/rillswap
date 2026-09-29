@@ -55,6 +55,8 @@ from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_mode
 from rill_core.wire.cooperative_messages import (
     CooperativeClaimDeclined,
     CooperativeClaimPropose,
+    CooperativeClaimReady,
+    CooperativeClaimReadyRequest,
     CooperativeClaimSigned,
     check_cooperative_action_context,
     parse_cooperative_payload,
@@ -2813,7 +2815,12 @@ class LiveSessionStore:
             raise LiveSessionStoreError("cooperative admission refused") from None
 
     def _admit_cooperative_result(  # noqa: PLR0912, PLR0915 - one signed admission transaction
-        self, document: bytes, *, now: int
+        self,
+        document: bytes,
+        *,
+        now: int,
+        readiness: ReadinessChallenge | None = None,
+        tip_height: int | None = None,
     ) -> CooperativeResultAdmission:
         """Record one authenticated client disposition without signing or replying.
 
@@ -2827,6 +2834,15 @@ class LiveSessionStore:
         """
         if type(now) is not int or now < 0:
             raise LiveSessionStoreError("cooperative result time unsupported")
+        if readiness is not None and (
+            not isinstance(readiness, ReadinessChallenge)
+            or readiness.owner_generation != self._generation
+            or type(tip_height) is not int
+            or tip_height <= 0
+            or tip_height >= readiness.deadline_height
+            or not readiness.started_at <= now < readiness.deadline_at
+        ):
+            raise LiveSessionStoreError("readiness token unavailable")
         abandon: bytes | None = None
         conflict = False
         status = ""
@@ -2862,8 +2878,24 @@ class LiveSessionStore:
                         replay = parse_cooperative_payload(
                             "action_result", canonicalize(outer.payload)
                         )
-                        if not isinstance(
+                        if readiness is not None and (
+                            not isinstance(replay, CooperativeClaimReady)
+                            or outer.session_id != readiness.session_id
+                            or outer.in_reply_to != readiness.request_id
+                            or replay.challenge != readiness.challenge
+                        ):
+                            raise LiveSessionStoreError("readiness replay not correlated")  # noqa: TRY301
+                        if readiness is None and not isinstance(
                             replay, (CooperativeClaimSigned, CooperativeClaimDeclined)
+                        ):
+                            raise LiveSessionStoreError("cooperative replay type unsupported")  # noqa: TRY301
+                        if not isinstance(
+                            replay,
+                            (
+                                CooperativeClaimReady,
+                                CooperativeClaimSigned,
+                                CooperativeClaimDeclined,
+                            ),
                         ):
                             raise LiveSessionStoreError("cooperative replay type unsupported")  # noqa: TRY301
                         return CooperativeResultAdmission(
@@ -2891,6 +2923,34 @@ class LiveSessionStore:
                     payload = parse_cooperative_payload(
                         "action_result", canonicalize(outer.payload)
                     )
+                    if isinstance(payload, CooperativeClaimReady):
+                        if readiness is None:
+                            raise LiveSessionStoreError(  # noqa: TRY301
+                                "readiness token unavailable"
+                            )
+                        self._check_readiness_echo(connection, outer, readiness, now=now)
+                        connection.execute(
+                            "INSERT INTO inbox VALUES (?,?,?,?,?,?,?)",
+                            (
+                                outer.session_id,
+                                client,
+                                outer.message_id,
+                                outer.sequence,
+                                digest,
+                                document,
+                                revision + 1,
+                            ),
+                        )
+                        connection.execute(
+                            "UPDATE sessions SET next_client_seq=?,revision=?,active_at=? "
+                            "WHERE session_id=?",
+                            (client_seq + 1, revision + 1, now, outer.session_id),
+                        )
+                        return CooperativeResultAdmission(
+                            outer.session_id, outer.message_id, payload.status, replay=False
+                        )
+                    if readiness is not None:
+                        raise LiveSessionStoreError("readiness reply unsupported")  # noqa: TRY301
                     if not isinstance(payload, (CooperativeClaimSigned, CooperativeClaimDeclined)):
                         raise LiveSessionStoreError("cooperative result status unsupported")  # noqa: TRY301
                     status = payload.status
@@ -3072,6 +3132,113 @@ class LiveSessionStore:
         if conflict:
             raise SessionBlockedError("conflicting signed cooperative result is durable")
         return CooperativeResultAdmission(outer.session_id, outer.message_id, status, replay=False)
+
+    def admit_cooperative_readiness(
+        self,
+        document: bytes,
+        challenge: ReadinessChallenge,
+        *,
+        now: int,
+        tip_height: int,
+    ) -> CooperativeResultAdmission:
+        """Record a signed echo only for a current in-memory owner's challenge.
+
+        The caller must consume its challenge after the first non-replay result.
+        This inbox receipt itself never authorizes nonce exposure or waiting.
+        """
+        return self._admit_cooperative_result(
+            document, now=now, readiness=challenge, tip_height=tip_height
+        )
+
+    def _check_readiness_echo(
+        self,
+        connection: sqlite3.Connection,
+        outer: Envelope,
+        challenge: ReadinessChallenge,
+        *,
+        now: int,
+    ) -> None:
+        """Require a paid feature-bound swap and the exact signed owner request."""
+        if outer.session_id != challenge.session_id or outer.in_reply_to != challenge.request_id:
+            raise LiveSessionStoreError("readiness reply not correlated")
+        row = connection.execute(
+            "SELECT a.state,a.version,a.contract_hash,w.state,w.contract_hash,"
+            "w.terms_offer,w.funding_binding,w.preimage,w.claim_tx,w.claim_txid,"
+            "s.init_bytes,s.accept_bytes FROM claim_arbitration a "
+            "JOIN swaps w ON w.session_id=a.session_id "
+            "JOIN sessions s ON s.session_id=a.session_id WHERE a.session_id=?",
+            (challenge.session_id,),
+        ).fetchone()
+        if row is None or row[:3] != ("ADMITTED", 1, challenge.contract_hash):
+            raise LiveSessionStoreError("readiness admission unavailable")
+        (
+            _,
+            _,
+            _,
+            state,
+            contract,
+            offer,
+            funding_bytes,
+            preimage,
+            claim_tx,
+            claim_txid,
+            init_bytes,
+            accept_bytes,
+        ) = row
+        if (
+            state != "PAID"
+            or contract != challenge.contract_hash
+            or funding_bytes is None
+            or claim_tx is not None
+            or claim_txid is not None
+            or not isinstance(preimage, str)
+            or re.fullmatch(r"[0-9a-f]{64}", preimage) is None
+            or connection.execute(
+                "SELECT 1 FROM claim_attempts WHERE session_id=? LIMIT 1",
+                (challenge.session_id,),
+            ).fetchone()
+        ):
+            raise LiveSessionStoreError("readiness swap unavailable")
+        terms = _offer_terms(offer)
+        if (
+            contract_hash(terms).hex() != contract
+            or terms.network_identity != self._network
+            or COOPERATIVE_CLAIM_FEATURE not in terms.required_features
+            or hashlib.sha256(bytes.fromhex(preimage)).hexdigest()
+            != terms.invoice_binding.payment_hash
+        ):
+            raise LiveSessionStoreError("readiness terms unavailable")
+        retained = connection.execute(
+            "SELECT canonical_bytes FROM outbox WHERE session_id=? AND message_id=?",
+            (challenge.session_id, challenge.request_id),
+        ).fetchone()
+        if retained is None:
+            raise LiveSessionStoreError("readiness request missing")
+        request = _canonical_envelope(retained[0])
+        original = parse_cooperative_payload("action_request", canonicalize(request.payload))
+        if not isinstance(original, CooperativeClaimReadyRequest) or (
+            original.challenge != challenge.challenge
+            or original.payment_preimage != preimage
+            or original.deadline_at != challenge.deadline_at
+            or original.deadline_height != challenge.deadline_height
+            or challenge.deadline_at > challenge.started_at + COOPERATION_BUDGET_SECONDS
+            or now >= challenge.deadline_at
+        ):
+            raise LiveSessionStoreError("readiness request changed")
+        initiation = parse_model_json(
+            HandshakeInit, canonicalize(_canonical_envelope(init_bytes).payload)
+        )
+        acceptance = parse_model_json(
+            HandshakeAccept, canonicalize(_canonical_envelope(accept_bytes).payload["accept"])
+        )
+        checked = check_cooperative_action_context(
+            outer, terms, initiation, acceptance, prior_request=request
+        )
+        if (
+            not isinstance(checked, CooperativeClaimReady)
+            or checked.challenge != challenge.challenge
+        ):
+            raise LiveSessionStoreError("readiness reply changed")
 
     def commit_selected_cooperative_claim(
         self,

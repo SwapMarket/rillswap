@@ -11,12 +11,12 @@ from rill_core.wire.cooperative_messages import (
     CooperativeClaimReadyRequest,
     parse_cooperative_payload,
 )
-from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE
+from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE, unsigned_envelope_hash
 from rill_core.wire.messages import Envelope
 from test_cooperation_burn import FixtureEnvelopeSigner, _featured_paid_swap
 from test_live_session_store import Harness
 
-from rill_provider.live_session_store import LiveSessionStoreError
+from rill_provider.live_session_store import LiveSessionStoreError, SessionBlockedError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -103,3 +103,131 @@ def test_probe_requires_admission_and_is_abandoned_after_owner_restart(
             "SELECT state FROM claim_arbitration WHERE session_id=?", (session,)
         ).fetchone() == ("ADMITTED",)
         assert restarted.immediate_claim_allowed(session)
+
+
+def test_signed_readiness_echo_is_authenticated_and_never_prepares_a_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, monkeypatch)
+    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.provision()
+    with harness.acquire() as store:
+        session, _, _ = _featured_paid_swap(harness, store)
+        with store._connection as connection:  # noqa: SLF001 - synthetic authenticated admission
+            (digest,) = connection.execute(
+                "SELECT contract_hash FROM swaps WHERE session_id=?", (session,)
+            ).fetchone()
+            connection.execute(
+                "INSERT INTO claim_arbitration (session_id,contract_hash,version,state) "
+                "VALUES (?, ?, 1, 'ADMITTED')",
+                (session, digest),
+            )
+            connection.execute(
+                "UPDATE sessions SET next_client_seq=2 WHERE session_id=?", (session,)
+            )
+        signer = FixtureEnvelopeSigner(harness, store._public_keys)  # noqa: SLF001
+        probe = store.issue_cooperative_readiness(
+            session,
+            signer=signer,
+            started_at=1000,
+            now=1000,
+            deadline_at=1020,
+            deadline_height=1100,
+        )
+        request = Envelope.model_validate_json(
+            store.pending_outbox()[0].canonical_bytes, strict=True
+        )
+        client_key = harness.source["verification_context"]["handshake_init"][
+            "client_session_xonly_key"
+        ]
+
+        def signed_result(*, message_id: str = "d1" * 32, **updates: object) -> bytes:
+            bare = request.model_copy(
+                update={
+                    "message_type": "action_result",
+                    "message_id": message_id,
+                    "sender_session_key": client_key,
+                    "sequence": 2,
+                    "in_reply_to": probe.request_id,
+                    "payload": {
+                        "action": "cooperative_claim_ready",
+                        "challenge": probe.challenge,
+                        "status": "ready",
+                    },
+                    "signature": None,
+                    **updates,
+                }
+            )
+            signature = b"\x81" * 64
+            harness.crypto.permitted.add(
+                (bytes.fromhex(client_key), unsigned_envelope_hash(bare), signature)
+            )
+            return canonicalize(
+                bare.model_copy(update={"signature": signature.hex()}).model_dump(mode="json")
+            )
+
+        for document, kwargs in (
+            (signed_result(message_id="d2" * 32, in_reply_to="ff" * 32), {}),
+            (
+                signed_result(
+                    message_id="d3" * 32,
+                    payload={
+                        "action": "cooperative_claim_ready",
+                        "challenge": "ee" * 32,
+                        "status": "ready",
+                    },
+                ),
+                {},
+            ),
+            (signed_result(message_id="d4" * 32), {"now": 1020}),
+            (signed_result(message_id="d5" * 32), {"tip_height": 1100}),
+            (signed_result(message_id="d7" * 32, sender_session_key="ff" * 32), {}),
+            (signed_result(message_id="d8" * 32, required_features=()), {}),
+            (
+                canonicalize(
+                    Envelope.model_validate_json(signed_result(message_id="d9" * 32))
+                    .model_copy(update={"signature": "00" * 64})
+                    .model_dump(mode="json")
+                ),
+                {},
+            ),
+        ):
+            with pytest.raises(LiveSessionStoreError):
+                store.admit_cooperative_readiness(
+                    document,
+                    probe,
+                    now=kwargs.get("now", 1002),
+                    tip_height=kwargs.get("tip_height", 1090),
+                )
+        assert store._connection.execute(  # noqa: SLF001
+            "SELECT count(*) FROM inbox WHERE session_id=?", (session,)
+        ).fetchone() == (0,)
+        reply = signed_result()
+        with pytest.raises(LiveSessionStoreError, match="token unavailable"):
+            store._admit_cooperative_result(reply, now=1002)  # noqa: SLF001 - old API cannot admit readiness
+        assert store._connection.execute(  # noqa: SLF001
+            "SELECT count(*) FROM inbox WHERE session_id=?", (session,)
+        ).fetchone() == (0,)
+        admitted = store.admit_cooperative_readiness(reply, probe, now=1002, tip_height=1090)
+        assert admitted.status == "ready"
+        assert not admitted.replay
+        replay = store.admit_cooperative_readiness(reply, probe, now=1003, tip_height=1090)
+        assert replay.replay
+        assert store._connection.execute(  # noqa: SLF001
+            "SELECT state FROM claim_arbitration WHERE session_id=?", (session,)
+        ).fetchone() == ("ADMITTED",)
+        assert store._connection.execute(  # noqa: SLF001
+            "SELECT count(*) FROM cooperation_attempts WHERE session_id=?", (session,)
+        ).fetchone() == (0,)
+        with pytest.raises(SessionBlockedError, match="conflicting signed"):
+            store.admit_cooperative_readiness(
+                signed_result(message_id="d6" * 32), probe, now=1003, tip_height=1090
+            )
+        assert store._connection.execute(  # noqa: SLF001
+            "SELECT blocked FROM sessions WHERE session_id=?", (session,)
+        ).fetchone() == (1,)
+    with (
+        harness.acquire() as restarted,
+        pytest.raises(LiveSessionStoreError, match="token unavailable"),
+    ):
+        restarted.admit_cooperative_readiness(reply, probe, now=1004, tip_height=1090)
