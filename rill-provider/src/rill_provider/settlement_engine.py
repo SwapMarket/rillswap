@@ -35,20 +35,23 @@ from typing import TYPE_CHECKING, Protocol
 from rill_core.settlement.unilateral import (
     FundingOutput,
     UnilateralAuthorization,
+    ValidatedCooperativeClaim,
     ValidatedUnilateralSpend,
     build_unilateral_spend,
     finalize_unilateral_spend,
     max_spendable_fee,
+    validate_cooperative_claim,
     validate_unilateral_spend,
 )
 from rill_core.wire.canonical import canonicalize, parse_model_json
-from rill_core.wire.hashes import contract_hash
+from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE, contract_hash
 from rill_core.wire.messages import Envelope
 from rill_core.wire.settlement_messages import FundingBindingPayload
 
 from rill_provider.core_tx_bytes import CoreTransactionUnknownError
 from rill_provider.live_session_store import (
     MAX_CLAIM_ATTEMPTS,
+    CooperativeWinner,
     LiveSessionStoreError,
     PreparedFallback,
     StaleOwnerError,
@@ -64,7 +67,7 @@ if TYPE_CHECKING:
     from rill_core.wire.messages import ContractTerms, FundingBinding, InvoiceBinding
 
     from rill_provider.core_tx_bytes import CandidateFundingOutpoint, FundedOutput, SpendScan
-    from rill_provider.live_session_store import LiveSessionStore, SettlementItem
+    from rill_provider.live_session_store import ClaimAttempt, LiveSessionStore, SettlementItem
     from rill_provider.lnd_payment_send import PaymentOutcome, PreparedPayment
     from rill_provider.payment_dispatch_record import PaymentAuthority
 
@@ -264,6 +267,79 @@ class SettlementEngine:
     def recorded_fallbacks(self) -> tuple[PreparedFallback, ...]:
         """Read durable selected work for the independent submission lane."""
         return self._store.recorded_fallbacks()
+
+    def recover_cooperative_winners(self, now: int) -> tuple[CooperativeWinner, ...]:
+        """Promote affirmative old PAID winners before accepting new work."""
+        promoted: list[CooperativeWinner] = []
+        for winner in self._store.cooperative_winners():
+            if winner.state != "PAID":
+                continue
+            try:
+                validated = self._validate_cooperative_winner(winner)
+            except Exception:  # noqa: BLE001 - invalid persisted bytes cannot be dispatched
+                LOG.warning(
+                    "cooperative winner invalid for %s; operator attention required",
+                    winner.session_id[:16],
+                )
+                continue
+            try:
+                self._store.promote_cooperative_winner(
+                    winner, fee_sat=validated.fee_sat, signer=self._crypto, now=now
+                )
+            except StaleSwapError:
+                continue
+            promoted.append(winner)
+        return tuple(promoted)
+
+    def recorded_cooperative_winners(self) -> tuple[CooperativeWinner, ...]:
+        """Return selected key-path claims for independent broadcast retries."""
+        return tuple(w for w in self._store.cooperative_winners() if w.state == "CLAIMING")
+
+    def _validate_cooperative_winner(self, winner: CooperativeWinner) -> ValidatedCooperativeClaim:
+        terms = offered_terms(Envelope.model_validate_json(winner.terms_offer, strict=True))
+        funding = Envelope.model_validate_json(winner.funding_binding, strict=True)
+        binding = parse_model_json(FundingBindingPayload, canonicalize(funding.payload)).binding
+        if (
+            terms.profile_id != "btc-to-ln/v1"
+            or terms.network_identity != self._store.network_identity
+            or contract_hash(terms).hex() != winner.contract_hash
+            or funding.contract_hash != winner.contract_hash
+            or binding.contract_hash != winner.contract_hash
+            or hashlib.sha256(bytes.fromhex(winner.preimage)).hexdigest()
+            != terms.invoice_binding.payment_hash
+        ):
+            raise LiveSessionStoreError("cooperative winner binding mismatch")
+        verified = validate_cooperative_claim(
+            winner.raw, self._authorization(terms, binding), verifier=self._crypto
+        )
+        if verified.raw_transaction != winner.raw or verified.txid != winner.txid:
+            raise LiveSessionStoreError("cooperative winner validation mismatch")
+        return verified
+
+    async def broadcast_cooperative_winner(self, winner: CooperativeWinner) -> None:
+        """Submit only the validated, recorded exact key-path winner."""
+        try:
+            verified = self._validate_cooperative_winner(winner)
+            selected = self._store.selected_cooperative_claim(winner.session_id)
+        except StaleOwnerError:
+            raise
+        except Exception:  # noqa: BLE001 - never publish inconsistent custody
+            LOG.warning("recorded cooperative claim invalid for %s", winner.session_id[:16])
+            return
+        if (
+            selected is None
+            or selected.raw != winner.raw
+            or selected.txid != winner.txid
+            or selected.fee_sat != verified.fee_sat
+        ):
+            LOG.warning("recorded cooperative claim differs for %s", winner.session_id[:16])
+            return
+        try:
+            await asyncio.to_thread(self._chain.broadcast, winner.raw, winner.txid)
+        except Exception:  # noqa: BLE001 - durable CLAIMING remains retryable
+            LOG.warning(
+                "selected cooperative claim not accepted yet for %s", winner.session_id[:16]
+            )
 
     async def broadcast_selected_fallback(self, candidate: PreparedFallback) -> None:
         """Submit an already recorded attempt outside the deadline selector."""
@@ -499,7 +575,7 @@ class SettlementEngine:
             return await self._claiming(item, terms, binding, now)
         return item.state
 
-    async def _claiming(  # noqa: PLR0911, PLR0912 - one ordered escalation step
+    async def _claiming(  # noqa: PLR0911, PLR0912, PLR0915 - one ordered escalation step
         self, item: SettlementItem, terms: ContractTerms, binding: FundingBinding, now: int
     ) -> str:
         """Confirm any recorded claim, else rebroadcast and bump the fee on schedule.
@@ -508,6 +584,10 @@ class SettlementEngine:
         checked because any of them may confirm. A transport or index failure is
         not evidence, so it ends the step without bumping.
         """
+        if COOPERATIVE_CLAIM_FEATURE in terms.required_features:
+            cooperative = self._store.selected_cooperative_claim(item.session_id)
+            if cooperative is not None:
+                return await self._claiming_cooperative(item, terms, binding, cooperative, now)
         attempts = self._store.claim_attempts(item.session_id)
         if not attempts:
             LOG.error("claiming swap has no recorded claim; operator attention required")
@@ -592,6 +672,54 @@ class SettlementEngine:
             await asyncio.to_thread(self._chain.broadcast, spend.raw_transaction, spend.txid)
         except Exception:  # noqa: BLE001 - recorded; rebroadcast next tick
             LOG.info("claim replacement not accepted yet")
+        return item.state
+
+    async def _claiming_cooperative(
+        self,
+        item: SettlementItem,
+        terms: ContractTerms,
+        binding: FundingBinding,
+        selected: ClaimAttempt,
+        now: int,
+    ) -> str:
+        """Rebroadcast the exact selected key-path spend; never unilaterally replace it."""
+        try:
+            verified = validate_cooperative_claim(
+                selected.raw, self._authorization(terms, binding), verifier=self._crypto
+            )
+        except Exception:  # noqa: BLE001 - bad stored claim cannot be broadcast
+            LOG.warning("cooperative claim validation refused; operator attention required")
+            return item.state
+        if (
+            verified.txid != selected.txid
+            or verified.fee_sat != selected.fee_sat
+            or item.claim_tx != selected.raw
+            or item.claim_txid != selected.txid
+        ):
+            LOG.error("cooperative claim state differs; operator attention required")
+            return item.state
+        try:
+            await asyncio.to_thread(self._chain.broadcast, selected.raw, selected.txid)
+        except Exception:  # noqa: BLE001 - recorded attempt is retried on the next tick
+            LOG.info("cooperative claim not accepted yet")
+        try:
+            depth = await asyncio.to_thread(self._chain.confirmations, selected.txid)
+        except CoreTransactionUnknownError:
+            depth = 0
+        if depth >= terms.settlement_confirmations:
+            return self._move(item, "CLAIMED", now, claim_tx=selected.raw, claim_txid=selected.txid)
+        if depth >= 1:
+            if item.outpoint_spent_height is not None:
+                self._store.observe_outpoint_spent(item.session_id, None)
+            return item.state
+        tip = await asyncio.to_thread(self._chain.tip_height)
+        unspent = await asyncio.to_thread(
+            self._chain.outpoint_unspent, binding.funding_txid, binding.contract_vout
+        )
+        if not unspent:
+            return await self._maybe_lost(item, terms, binding, tip, now)
+        if item.outpoint_spent_height is not None:
+            self._store.observe_outpoint_spent(item.session_id, None)
         return item.state
 
     async def _pay(  # noqa: PLR0911 - explicit exposure guards before the sole send

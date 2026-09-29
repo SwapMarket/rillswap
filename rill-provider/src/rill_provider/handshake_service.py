@@ -25,6 +25,7 @@ from rill_core.wire.reverse_quotes import ReverseFirmQuoteRequest
 from rill_provider.live_session_store import (
     FIRST_REQUEST_SEQUENCE,
     Answer,
+    CooperativeWinner,
     LiveSessionStoreError,
     SessionBlockedError,
     SessionExpiredError,
@@ -574,13 +575,17 @@ class HandshakeService:
             self._deadline_healthy = False
             settlement.disable_new_exposure()
 
-        def dispatch(candidate: PreparedFallback) -> None:
+        def dispatch(candidate: PreparedFallback | CooperativeWinner) -> None:
             key = (candidate.session_id, candidate.txid)
             if key in in_flight or time.monotonic() < retry_after.get(key, 0):
                 return
             in_flight.add(key)
             retry_after[key] = time.monotonic() + 15
-            task = asyncio.create_task(settlement.broadcast_selected_fallback(candidate))
+            task = asyncio.create_task(
+                settlement.broadcast_cooperative_winner(candidate)
+                if isinstance(candidate, CooperativeWinner)
+                else settlement.broadcast_selected_fallback(candidate)
+            )
             broadcasts.add(task)
 
             def complete(done: asyncio.Task[None]) -> None:
@@ -599,6 +604,14 @@ class HandshakeService:
         except Exception:  # noqa: BLE001 - selected rows remain discoverable below
             unhealthy()
             LOG.warning("startup fallback selection deferred; admissions disabled")
+        try:
+            for winner in settlement.recover_cooperative_winners(deadline_now()):
+                dispatch(winner)
+        except StaleOwnerError:
+            raise
+        except Exception:  # noqa: BLE001 - recover again in the deadline loop
+            unhealthy()
+            LOG.warning("startup cooperative winner recovery deferred; admissions disabled")
 
         async def supervise() -> None:
             while not stop.is_set():
@@ -615,6 +628,10 @@ class HandshakeService:
                 try:
                     for candidate in settlement.recorded_fallbacks():
                         dispatch(candidate)
+                    for winner in settlement.recover_cooperative_winners(deadline_now()):
+                        dispatch(winner)
+                    for winner in settlement.recorded_cooperative_winners():
+                        dispatch(winner)
                 except StaleOwnerError:
                     unhealthy()
                     stop.set()

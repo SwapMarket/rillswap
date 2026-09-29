@@ -617,6 +617,20 @@ class PreparedFallback:
 
 
 @dataclass(frozen=True, slots=True)
+class CooperativeWinner:
+    """Affirmative, selected key-path bytes with the accepted authority snapshot."""
+
+    session_id: str
+    contract_hash: str
+    state: str
+    raw: bytes
+    txid: str
+    terms_offer: bytes
+    funding_binding: bytes
+    preimage: str
+
+
+@dataclass(frozen=True, slots=True)
 class SwapInspection:
     """Offline custody summary, never live chain evidence or dispatch authority."""
 
@@ -998,6 +1012,11 @@ class LiveSessionStore:
     def generation(self) -> int:
         """Owner generation; increases on every acquire."""
         return self._generation
+
+    @property
+    def network_identity(self) -> NetworkIdentity:
+        """The pinned network authority of this acquired store."""
+        return self._network
 
     @contextmanager
     def _write(self) -> Iterator[sqlite3.Connection]:
@@ -2829,7 +2848,7 @@ class LiveSessionStore:
                     "SELECT a.binding,a.owner_generation,a.created_at,a.deadline_at,a.state,"
                     "a.local_nonce,a.peer_nonce,a.nonce_response_id,s.phase,s.blocked,"
                     "s.client_key,w.state,w.contract_hash,w.terms_offer,w.funding_binding,"
-                    "w.preimage FROM cooperation_attempts a "
+                    "w.preimage,w.claim_tx,w.claim_txid FROM cooperation_attempts a "
                     "JOIN sessions s ON s.session_id=a.session_id "
                     "JOIN swaps w ON w.session_id=a.session_id "
                     "WHERE a.session_id=? AND a.cooperation_id=?",
@@ -2854,6 +2873,8 @@ class LiveSessionStore:
                     offer_bytes,
                     funding_bytes,
                     preimage,
+                    claim_tx,
+                    claim_txid,
                 ) = row
                 binding = parse_json_strict(binding_bytes)
                 if not isinstance(binding, dict) or (
@@ -2907,6 +2928,8 @@ class LiveSessionStore:
                             None,
                         )
                         or swap_state != "PAID"
+                        or claim_tx is not None
+                        or claim_txid is not None
                         or connection.execute(
                             "SELECT 1 FROM claim_attempts WHERE session_id=? LIMIT 1", (session_id,)
                         ).fetchone()
@@ -3063,6 +3086,35 @@ class LiveSessionStore:
                     != 1
                 ):
                     raise LiveSessionStoreError("cooperative selection refused")  # noqa: TRY301
+                if select_winner:
+                    if (
+                        connection.execute(
+                            "UPDATE swaps SET state='CLAIMING',claim_tx=?,claim_txid=?,"
+                            "updated_at=? "
+                            "WHERE session_id=? AND state='PAID' AND claim_tx IS NULL "
+                            "AND claim_txid IS NULL",
+                            (completed.raw_transaction, completed.txid, now, session_id),
+                        ).rowcount
+                        != 1
+                    ):
+                        raise StaleSwapError("cooperative claim changed")  # noqa: TRY301
+                    connection.execute(
+                        "INSERT INTO claim_attempts VALUES (?,0,?,?,?,?)",
+                        (
+                            session_id,
+                            completed.txid,
+                            completed.raw_transaction,
+                            completed.fee_sat,
+                            observation.tip_height,
+                        ),
+                    )
+                    self._record_observation(
+                        connection,
+                        session_id,
+                        {"kind": "claim_broadcast", "claim_txid": completed.txid},
+                        crypto,
+                        now,
+                    )
                 completion = {
                     "action": "cooperative_claim_complete",
                     "cooperation_id": cooperation_id.hex(),
@@ -3727,6 +3779,117 @@ class LiveSessionStore:
             raise LiveSessionStoreError("recorded fallbacks unavailable") from None
         return tuple(PreparedFallback(*row) for row in rows)
 
+    def cooperative_winners(self) -> tuple[CooperativeWinner, ...]:
+        """Discover affirmative key-path winners, including older PAID rows."""
+        try:
+            with self._write() as connection:
+                rows = connection.execute(
+                    "SELECT a.session_id,a.contract_hash,w.state,a.cooperative_raw,"
+                    "a.cooperative_txid,w.terms_offer,w.funding_binding,w.preimage "
+                    "FROM claim_arbitration a JOIN swaps w ON w.session_id=a.session_id "
+                    "JOIN cooperation_attempts c ON c.session_id=a.session_id "
+                    "WHERE a.version=1 AND a.state='CLOSED' "
+                    "AND a.cooperative_raw IS NOT NULL AND a.cooperative_txid IS NOT NULL "
+                    "AND c.state='COMPLETE' AND c.partial_response_id IS NOT NULL "
+                    "AND w.contract_hash=a.contract_hash AND w.funding_binding IS NOT NULL "
+                    "AND w.preimage IS NOT NULL AND "
+                    "((w.state='PAID' AND w.claim_tx IS NULL AND w.claim_txid IS NULL "
+                    "AND NOT EXISTS (SELECT 1 FROM claim_attempts q "
+                    "WHERE q.session_id=w.session_id)) "
+                    "OR (w.state='CLAIMING' AND w.claim_tx=a.cooperative_raw "
+                    "AND w.claim_txid=a.cooperative_txid "
+                    "AND (SELECT count(*) FROM claim_attempts q WHERE q.session_id=w.session_id)=1 "
+                    "AND EXISTS (SELECT 1 FROM claim_attempts q WHERE q.session_id=w.session_id "
+                    "AND q.attempt=0 AND q.raw=a.cooperative_raw AND q.txid=a.cooperative_txid))) "
+                    "ORDER BY a.session_id"
+                ).fetchall()
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("cooperative winners unavailable") from None
+        return tuple(CooperativeWinner(*row) for row in rows)
+
+    def promote_cooperative_winner(
+        self,
+        winner: CooperativeWinner,
+        *,
+        fee_sat: int,
+        signer: EnvelopeSigner,
+        now: int,
+    ) -> None:
+        """Recover older CLOSED+PAID signed winners without recreating a signature."""
+        if (
+            not isinstance(winner, CooperativeWinner)
+            or winner.state != "PAID"
+            or type(fee_sat) is not int
+            or fee_sat < 0
+            or type(now) is not int
+            or now < 0
+        ):
+            raise LiveSessionStoreError("cooperative promotion refused")
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT a.state,a.version,a.contract_hash,a.cooperative_raw,"
+                    "a.cooperative_txid,w.state,w.contract_hash,w.terms_offer,"
+                    "w.funding_binding,w.preimage,w.claim_tx,w.claim_txid "
+                    "FROM claim_arbitration a JOIN swaps w ON w.session_id=a.session_id "
+                    "WHERE a.session_id=?",
+                    (winner.session_id,),
+                ).fetchone()
+                if (
+                    row
+                    != (
+                        "CLOSED",
+                        1,
+                        winner.contract_hash,
+                        winner.raw,
+                        winner.txid,
+                        "PAID",
+                        winner.contract_hash,
+                        winner.terms_offer,
+                        winner.funding_binding,
+                        winner.preimage,
+                        None,
+                        None,
+                    )
+                    or connection.execute(
+                        "SELECT 1 FROM claim_attempts WHERE session_id=? LIMIT 1",
+                        (winner.session_id,),
+                    ).fetchone()
+                    or not connection.execute(
+                        "SELECT 1 FROM cooperation_attempts WHERE session_id=? "
+                        "AND state='COMPLETE' AND partial_response_id IS NOT NULL LIMIT 1",
+                        (winner.session_id,),
+                    ).fetchone()
+                ):
+                    raise StaleSwapError("cooperative winner changed")  # noqa: TRY301
+                if (
+                    connection.execute(
+                        "UPDATE swaps SET state='CLAIMING',claim_tx=?,claim_txid=?,updated_at=? "
+                        "WHERE session_id=? AND state='PAID' AND claim_tx IS NULL "
+                        "AND claim_txid IS NULL",
+                        (winner.raw, winner.txid, now, winner.session_id),
+                    ).rowcount
+                    != 1
+                ):
+                    raise StaleSwapError("cooperative winner changed")  # noqa: TRY301
+                connection.execute(
+                    "INSERT INTO claim_attempts VALUES (?,0,?,?,?,NULL)",
+                    (winner.session_id, winner.txid, winner.raw, fee_sat),
+                )
+                self._record_observation(
+                    connection,
+                    winner.session_id,
+                    {"kind": "claim_broadcast", "claim_txid": winner.txid},
+                    signer,
+                    now,
+                )
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage or crypto details
+            raise LiveSessionStoreError("cooperative promotion refused") from None
+
     def select_prepared_fallback(
         self,
         candidate: PreparedFallback,
@@ -3848,6 +4011,63 @@ class LiveSessionStore:
             raise LiveSessionStoreError("claim attempts unavailable") from None
         return tuple(ClaimAttempt(*row) for row in rows)
 
+    def selected_cooperative_claim(self, session_id: str) -> ClaimAttempt | None:
+        """Return exact selected key-path attempt zero or quarantine conflicting state."""
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT a.state,a.version,a.contract_hash,a.cooperative_raw,"
+                    "a.cooperative_txid,w.state,w.contract_hash,w.claim_tx,w.claim_txid,"
+                    "c.raw,c.txid,c.fee_sat,c.first_seen_height "
+                    "FROM claim_arbitration a JOIN swaps w ON w.session_id=a.session_id "
+                    "LEFT JOIN claim_attempts c ON c.session_id=w.session_id AND c.attempt=0 "
+                    "WHERE a.session_id=? AND a.cooperative_raw IS NOT NULL",
+                    (session_id,),
+                ).fetchone()
+                if row is None:
+                    return None
+                (
+                    state,
+                    version,
+                    contract,
+                    raw,
+                    txid,
+                    swap_state,
+                    swap_contract,
+                    swap_raw,
+                    swap_txid,
+                    attempt_raw,
+                    attempt_txid,
+                    fee,
+                    height,
+                ) = row
+                if (
+                    state != "CLOSED"
+                    or version != 1
+                    or contract != swap_contract
+                    or swap_state != "CLAIMING"
+                    or raw != swap_raw
+                    or txid != swap_txid
+                    or raw != attempt_raw
+                    or txid != attempt_txid
+                    or type(fee) is not int
+                    or connection.execute(
+                        "SELECT count(*) FROM claim_attempts WHERE session_id=?", (session_id,)
+                    ).fetchone()
+                    != (1,)
+                    or not connection.execute(
+                        "SELECT 1 FROM cooperation_attempts WHERE session_id=? "
+                        "AND state='COMPLETE' AND partial_response_id IS NOT NULL LIMIT 1",
+                        (session_id,),
+                    ).fetchone()
+                ):
+                    raise LiveSessionStoreError("cooperative claim history inconsistent")  # noqa: TRY301
+                return ClaimAttempt(0, txid, raw, fee, height)
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("cooperative claim history unavailable") from None
+
     def observe_claim_attempt(
         self, session_id: str, attempt: int, *, fee_sat: int, height: int
     ) -> None:
@@ -3888,6 +4108,14 @@ class LiveSessionStore:
             raise LiveSessionStoreError("claim attempt budget exhausted")
         try:
             with self._write() as connection:
+                if connection.execute(
+                    "SELECT 1 FROM claim_arbitration WHERE session_id=? "
+                    "AND state='CLOSED' AND cooperative_raw IS NOT NULL",
+                    (session_id,),
+                ).fetchone():
+                    raise LiveSessionStoreError(  # noqa: TRY301 - key-path winner is not replaceable
+                        "cooperative claim replacement refused"
+                    )
                 (latest,) = connection.execute(
                     "SELECT MAX(a.attempt) FROM claim_attempts a JOIN swaps w "
                     "ON w.session_id=a.session_id WHERE a.session_id=? AND w.state='CLAIMING'",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sqlite3
 from dataclasses import replace
@@ -18,6 +19,7 @@ from test_cooperation_burn import _featured_paid_swap
 from test_live_session_store import Harness
 
 from rill_provider import live_session_store as live
+from rill_provider.core_tx_bytes import CoreTransactionUnknownError
 from rill_provider.live_session_store import LiveSessionStoreError, SettlementItem
 from rill_provider.settlement_engine import SettlementEngine
 from rill_provider.settlement_policy import offered_terms
@@ -32,7 +34,7 @@ if TYPE_CHECKING:
     reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
 )
 @pytest.mark.parametrize(
-    "winner", ["cooperative", "fallback", "uncertain_written", "uncertain_rolledback"]
+    "winner", ["cooperative", "prior_paid", "fallback", "uncertain_written", "uncertain_rolledback"]
 )
 def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0915 - one native custody lifecycle
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, winner: str
@@ -169,7 +171,7 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0915 - 
             assert store._connection.execute(  # noqa: SLF001
                 "SELECT cooperative_raw FROM claim_arbitration WHERE session_id=?", (session,)
             ).fetchone() == (None,)
-        elif winner == "cooperative":
+        elif winner in ("cooperative", "prior_paid"):
             completion_id = store.commit_selected_cooperative_claim(
                 session, cooperation_id, observation, now=1004
             )
@@ -186,6 +188,26 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0915 - 
             ).fetchone() == (completion_id,)
             assert any(entry.message_id == completion_id for entry in store.pending_outbox())
             assert store.recorded_fallbacks() == ()
+            assert store.selected_cooperative_claim(session).raw == raw
+            with pytest.raises(LiveSessionStoreError, match="replacement refused"):
+                store.record_claim_attempt(
+                    session,
+                    attempt=1,
+                    txid="ff" * 32,
+                    raw=b"forbidden",
+                    fee_sat=400,
+                    height=1091,
+                )
+            if winner == "prior_paid":
+                # Characterize the earlier v13 implementation: winner selected
+                # and completion durable, but the swap still said PAID.
+                with store._connection as connection:  # noqa: SLF001
+                    connection.execute("DELETE FROM claim_attempts WHERE session_id=?", (session,))
+                    connection.execute(
+                        "UPDATE swaps SET state='PAID',claim_tx=NULL,claim_txid=NULL "
+                        "WHERE session_id=?",
+                        (session,),
+                    )
         else:
 
             class UncertainCompletion:
@@ -222,6 +244,20 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0915 - 
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as verifier,
         harness.acquire() as resumed,
     ):
+        if winner == "prior_paid":
+            resumed._public_keys = verifier  # noqa: SLF001 - native custody on reacquisition
+            resumed._crypto = verifier  # noqa: SLF001
+            assert resumed._connection.execute(  # noqa: SLF001
+                "SELECT state FROM swaps WHERE session_id=?", (session,)
+            ).fetchone() == ("PAID",)
+            assert (
+                len(
+                    SettlementEngine(resumed, Mock(), Mock(), verifier).recover_cooperative_winners(
+                        1005
+                    )
+                )
+                == 1
+            )
         if winner != "uncertain_rolledback":
             assert resumed.prepared_fallbacks(closed_only=True) == ()
         assert len(resumed.recorded_fallbacks()) == (1 if winner == "fallback" else 0)
@@ -230,15 +266,50 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0915 - 
             "WHERE session_id=?",
             (session,),
         ).fetchone()
-        if winner in ("cooperative", "uncertain_written"):
+        if winner in ("cooperative", "prior_paid", "uncertain_written"):
             assert row[0] == "CLOSED"
             assert (
                 validate_cooperative_claim(row[1], plan.authorization, verifier=verifier).txid
                 == row[2]
             )
+            selected = resumed.selected_cooperative_claim(session)
+            assert selected is not None
+            assert (selected.raw, selected.txid) == row[1:]
             assert resumed._connection.execute(  # noqa: SLF001
                 "SELECT state FROM cooperation_attempts WHERE cooperation_id=?", (cooperation_id,)
             ).fetchone() == ("COMPLETE",)
+            if winner == "cooperative":
+                chain = Mock()
+                chain.confirmations.return_value = terms.settlement_confirmations
+                engine = SettlementEngine(resumed, chain, Mock(), verifier)
+                claiming = replace(item, state="CLAIMING", claim_tx=row[1], claim_txid=row[2])
+                assert asyncio.run(engine._claiming(claiming, terms, binding, 1005)) == "CLAIMED"  # noqa: SLF001
+                chain.broadcast.assert_called_once_with(row[1], row[2])
+                assert resumed._connection.execute(  # noqa: SLF001
+                    "SELECT state FROM swaps WHERE session_id=?", (session,)
+                ).fetchone() == ("CLAIMED",)
+            elif winner == "uncertain_written":
+                chain = Mock()
+                chain.broadcast.side_effect = OSError("Core unavailable")
+                chain.confirmations.side_effect = CoreTransactionUnknownError(-5)
+                chain.tip_height.return_value = 1090
+                chain.outpoint_unspent.return_value = True
+                engine = SettlementEngine(resumed, chain, Mock(), verifier)
+                claiming = replace(item, state="CLAIMING", claim_tx=row[1], claim_txid=row[2])
+                assert asyncio.run(engine._claiming(claiming, terms, binding, 1005)) == "CLAIMING"  # noqa: SLF001
+                assert resumed._connection.execute(  # noqa: SLF001
+                    "SELECT count(*) FROM claim_attempts WHERE session_id=?", (session,)
+                ).fetchone() == (1,)
+                (recorded,) = engine.recorded_cooperative_winners()
+                assert chain.broadcast.call_count == 1
+                with resumed._connection as connection:  # noqa: SLF001 - malformed persisted history
+                    connection.execute(
+                        "UPDATE claim_attempts SET fee_sat=fee_sat+1 WHERE session_id=?",
+                        (session,),
+                    )
+                asyncio.run(engine.broadcast_cooperative_winner(recorded))
+                assert asyncio.run(engine._claiming(claiming, terms, binding, 1006)) == "CLAIMING"  # noqa: SLF001
+                assert chain.broadcast.call_count == 1  # both lanes quarantine the bad fee
         else:
             assert row == ("CLOSED", None, None)
             if winner == "uncertain_rolledback":
