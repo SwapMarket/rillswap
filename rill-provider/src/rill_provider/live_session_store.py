@@ -48,6 +48,7 @@ from rill_core.settlement import (
     finalize_cooperative_claim,
     reconstruct_taproot_contract,
 )
+from rill_core.settlement.unilateral import validate_unilateral_spend
 from rill_core.wire import verify_static_handshake_accept, verify_static_handshake_transcript
 from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_model_json
 from rill_core.wire.cooperative_messages import (
@@ -3449,6 +3450,150 @@ class LiveSessionStore:
             raise
         except Exception:  # noqa: BLE001 - never echo storage details
             raise LiveSessionStoreError("claim arbitration unavailable") from None
+
+    def prepare_claim_window(  # noqa: PLR0913 - signed fallback and immutable deadline bundle
+        self,
+        session_id: str,
+        *,
+        fallback_raw: bytes,
+        fallback_txid: str,
+        fallback_fee_sat: int,
+        started_at: int,
+        now: int,
+        deadline_at: int,
+        deadline_height: int,
+    ) -> None:
+        """Commit an authenticated ADMITTED swap's verified fallback before waiting.
+
+        The caller anchors the 30-second budget before any preparation awaits.
+        No nonce, response, or claim broadcast can be authorized by this method.
+        A failed/uncertain commit must be reconciled from the store, never
+        retried with a refreshed deadline.
+        """
+        if (
+            type(started_at) is not int
+            or type(now) is not int
+            or type(deadline_at) is not int
+            or type(deadline_height) is not int
+            or started_at < 0
+            or not started_at <= now < deadline_at <= started_at + COOPERATION_BUDGET_SECONDS
+            or deadline_height <= 0
+            or not isinstance(fallback_raw, bytes)
+            or not fallback_raw
+            or type(fallback_txid) is not str
+            or HEX32.fullmatch(fallback_txid) is None
+            or type(fallback_fee_sat) is not int
+            or fallback_fee_sat < 0
+        ):
+            raise LiveSessionStoreError("prepared claim parameters refused")
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT a.state,a.version,a.contract_hash,s.phase,s.blocked,"
+                    "w.state,w.contract_hash,w.terms_offer,w.funding_binding,w.preimage,"
+                    "w.claim_tx,w.claim_txid FROM claim_arbitration a "
+                    "JOIN swaps w ON w.session_id=a.session_id "
+                    "JOIN sessions s ON s.session_id=a.session_id WHERE a.session_id=?",
+                    (session_id,),
+                ).fetchone()
+                if row is None or row[:2] != ("ADMITTED", 1):
+                    raise LiveSessionStoreError("claim window not admitted")  # noqa: TRY301
+                (
+                    _,
+                    _,
+                    admitted_hash,
+                    phase,
+                    blocked,
+                    state,
+                    recorded_hash,
+                    offer,
+                    funding_bytes,
+                    preimage,
+                    claim_tx,
+                    claim_txid,
+                ) = row
+                if (
+                    phase != "ACCEPTED"
+                    or blocked
+                    or state != "PAID"
+                    or admitted_hash != recorded_hash
+                    or funding_bytes is None
+                    or not isinstance(preimage, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", preimage) is None
+                    or claim_tx is not None
+                    or claim_txid is not None
+                    or connection.execute(
+                        "SELECT 1 FROM claim_attempts WHERE session_id=? LIMIT 1", (session_id,)
+                    ).fetchone()
+                    or connection.execute(
+                        "SELECT 1 FROM cooperation_attempts WHERE session_id=? LIMIT 1",
+                        (session_id,),
+                    ).fetchone()
+                ):
+                    raise LiveSessionStoreError("claim window unavailable")  # noqa: TRY301
+                terms = _offer_terms(offer)
+                funding = _canonical_envelope(funding_bytes)
+                binding = parse_model_json(
+                    FundingBindingPayload, canonicalize(funding.payload)
+                ).binding
+                if (
+                    COOPERATIVE_CLAIM_FEATURE not in self._policy.features
+                    or COOPERATIVE_CLAIM_FEATURE not in terms.required_features
+                    or terms.profile_id != "btc-to-ln/v1"
+                    or terms.network_identity != self._network
+                    or contract_hash(terms).hex() != recorded_hash
+                    or funding.contract_hash != recorded_hash
+                    or binding.contract_hash != recorded_hash
+                    or hashlib.sha256(bytes.fromhex(preimage)).hexdigest()
+                    != terms.invoice_binding.payment_hash
+                    or deadline_height > terms.refund_lock_height
+                ):
+                    raise LiveSessionStoreError("claim window authority unavailable")  # noqa: TRY301
+                authorization = UnilateralAuthorization.from_terms(
+                    terms,
+                    FundingOutput(
+                        bytes.fromhex(binding.funding_txid),
+                        binding.contract_vout,
+                        int(binding.contract_value_sat),
+                        bytes.fromhex(binding.contract_script_pubkey),
+                    ),
+                    "claim",
+                    keys=cast("TaprootKeyOperations", self._public_keys),
+                )
+                verified = validate_unilateral_spend(
+                    fallback_raw, authorization, verifier=self._crypto
+                )
+                if (
+                    verified.raw_transaction != fallback_raw
+                    or verified.txid != fallback_txid
+                    or verified.fee_sat != fallback_fee_sat
+                ):
+                    raise LiveSessionStoreError("claim window fallback mismatch")  # noqa: TRY301
+                if (
+                    connection.execute(
+                        "UPDATE claim_arbitration SET state='WAITING',owner_generation=?,"
+                        "prepared_at=?,deadline_at=?,deadline_height=?,fallback_raw=?,"
+                        "fallback_txid=?,fallback_fee_sat=? WHERE session_id=? "
+                        "AND state='ADMITTED' AND version=1 AND contract_hash=?",
+                        (
+                            self._generation,
+                            started_at,
+                            deadline_at,
+                            deadline_height,
+                            fallback_raw,
+                            fallback_txid,
+                            fallback_fee_sat,
+                            session_id,
+                            recorded_hash,
+                        ),
+                    ).rowcount
+                    != 1
+                ):
+                    raise StaleSwapError("claim window changed")  # noqa: TRY301
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage or crypto details
+            raise LiveSessionStoreError("claim window refused") from None
 
     def prepared_fallbacks(self, *, closed_only: bool = False) -> tuple[PreparedFallback, ...]:
         """Return affirmative bundles attached to PAID swaps for validation.

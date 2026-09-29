@@ -181,13 +181,59 @@ def test_exact_prepared_fallback_is_selected_atomically(
             store.select_prepared_fallback(candidate, signer=signer, now=1021, height=1100)
 
 
+def test_preparation_refuses_absent_or_nonadmitted_arbitration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, monkeypatch)
+    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.provision()
+    with harness.acquire() as store:
+        session, _, _ = _featured_paid_swap(harness, store)
+        parameters = {
+            "fallback_raw": b"synthetic claim never verified",
+            "fallback_txid": "ab" * 32,
+            "fallback_fee_sat": 300,
+            "started_at": 1000,
+            "now": 1002,
+            "deadline_at": 1020,
+            "deadline_height": 1100,
+        }
+        with pytest.raises(LiveSessionStoreError, match="not admitted"):
+            store.prepare_claim_window(session, **parameters)
+        (digest,) = store._connection.execute(  # noqa: SLF001
+            "SELECT contract_hash FROM swaps WHERE session_id=?", (session,)
+        ).fetchone()
+        with store._connection as connection:  # noqa: SLF001 - synthetic eligibility fixture
+            connection.execute(
+                "INSERT INTO claim_arbitration VALUES "
+                "(?, ?, 1, 'WAITING', ?, 1000, 1020, 1100, ?, ?, 300, NULL, NULL)",
+                (session, digest, store.generation, b"signed", "ab" * 32),
+            )
+        for state in ("WAITING", "CLOSED"):
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT state FROM claim_arbitration WHERE session_id=?", (session,)
+            ).fetchone() == (state,)
+            with pytest.raises(LiveSessionStoreError, match="not admitted"):
+                store.prepare_claim_window(session, **parameters)
+            with store._connection as connection:  # noqa: SLF001
+                connection.execute(
+                    "UPDATE claim_arbitration SET state='CLOSED' WHERE session_id=?", (session,)
+                )
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT state FROM swaps WHERE session_id=?", (session,)
+            ).fetchone() == ("PAID",)
+        assert store._connection.execute(  # noqa: SLF001
+            "SELECT count(*) FROM claim_attempts WHERE session_id=?", (session,)
+        ).fetchone() == (0,)
+
+
 @pytest.mark.native_crypto
 @pytest.mark.skipif(
     os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
     reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
 )
 @pytest.mark.parametrize("damage", ["none", "fee", "raw"])
-def test_restart_validates_signed_fallback_before_selecting(
+def test_restart_validates_signed_fallback_before_selecting(  # noqa: PLR0915 - one native lifecycle
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
 ) -> None:
     """Synthetic featured admission; actual script signature and verifier are native."""
@@ -232,11 +278,45 @@ def test_restart_validates_signed_fallback_before_selecting(
         raw = spend.raw_transaction if damage != "raw" else b"corrupt"
         fee = spend.fee_sat if damage != "fee" else spend.fee_sat + 1
         with store._connection as connection:  # noqa: SLF001 - interrupted prior owner
-            connection.execute(
-                "INSERT INTO claim_arbitration VALUES "
-                "(?, ?, 1, 'WAITING', ?, 1000, 1020, 1100, ?, ?, ?, NULL, NULL)",
-                (session, digest, store.generation, raw, spend.txid, fee),
-            )
+            if damage == "none":
+                connection.execute(
+                    "INSERT INTO claim_arbitration (session_id,contract_hash,version,state) "
+                    "VALUES (?, ?, 1, 'ADMITTED')",
+                    (session, digest),
+                )
+            else:
+                connection.execute(
+                    "INSERT INTO claim_arbitration VALUES "
+                    "(?, ?, 1, 'WAITING', ?, 1000, 1020, 1100, ?, ?, ?, NULL, NULL)",
+                    (session, digest, store.generation, raw, spend.txid, fee),
+                )
+        if damage == "none":
+            for refused in (
+                {"fallback_raw": b"corrupt"},
+                {"fallback_fee_sat": spend.fee_sat + 1},
+                {"fallback_txid": "cd" * 32},
+                {"deadline_at": 1031},
+            ):
+                parameters = {
+                    "fallback_raw": spend.raw_transaction,
+                    "fallback_txid": spend.txid,
+                    "fallback_fee_sat": spend.fee_sat,
+                    "started_at": 1000,
+                    "now": 1002,
+                    "deadline_at": 1020,
+                    "deadline_height": 1100,
+                }
+                with pytest.raises(LiveSessionStoreError):
+                    store.prepare_claim_window(session, **(parameters | refused))
+                assert store._connection.execute(  # noqa: SLF001
+                    "SELECT state FROM claim_arbitration WHERE session_id=?", (session,)
+                ).fetchone() == ("ADMITTED",)
+            store.prepare_claim_window(session, **parameters)
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT state,deadline_at,owner_generation,fallback_raw "
+                "FROM claim_arbitration WHERE session_id=?",
+                (session,),
+            ).fetchone() == ("WAITING", 1020, store.generation, spend.raw_transaction)
     with (
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
         harness.acquire() as restarted,
