@@ -4099,7 +4099,7 @@ class LiveSessionStore:
         try:
             with self._write() as connection:
                 row = connection.execute(
-                    "SELECT k.compressed_key, k.secret_age FROM contract_keys k "
+                    "SELECT k.compressed_key, k.secret_age, w.state FROM contract_keys k "
                     "JOIN swaps w ON w.session_id = k.session_id "
                     "WHERE k.session_id=? "
                     "AND w.state IN ('PAID', 'CLAIMING', 'FUNDED', 'REFUNDING')",
@@ -4107,7 +4107,11 @@ class LiveSessionStore:
                 ).fetchone()
                 if row is None or type(digest) is not bytes or len(digest) != 32:  # noqa: PLR2004
                     raise LiveSessionStoreError("no claimable swap")  # noqa: TRY301
-                compressed, sealed = row
+                compressed, sealed, state = row
+                if state == "PAID" and not _immediate_claim_allowed(connection, session_id):
+                    raise LiveSessionStoreError(  # noqa: TRY301 - no signing after window opens
+                        "claim arbitration requires transaction selection"
+                    )
                 plaintext = pyrage.decrypt(sealed, [self._custody_identity])
                 record = json.loads(plaintext)
                 scalar = bytes.fromhex(record["secret_scalar"])

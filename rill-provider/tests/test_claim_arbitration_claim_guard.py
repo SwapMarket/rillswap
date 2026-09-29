@@ -317,6 +317,8 @@ def test_restart_validates_signed_fallback_before_selecting(  # noqa: PLR0915 - 
                 "FROM claim_arbitration WHERE session_id=?",
                 (session,),
             ).fetchone() == ("WAITING", 1020, store.generation, spend.raw_transaction)
+            with pytest.raises(LiveSessionStoreError, match="requires transaction selection"):
+                store.sign_with_contract_key(session, b"\x19" * 32, crypto)
     with (
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
         harness.acquire() as restarted,
@@ -325,6 +327,8 @@ def test_restart_validates_signed_fallback_before_selecting(  # noqa: PLR0915 - 
         restarted._public_keys = crypto  # noqa: SLF001
         chain = Mock()
         engine = SettlementEngine(restarted, chain, Mock(), crypto)
+        with pytest.raises(LiveSessionStoreError, match="requires transaction selection"):
+            restarted.sign_with_contract_key(session, b"\x19" * 32, crypto)
         selected = engine.select_due_fallbacks(1010, closed_only=True)
         if damage != "none":
             assert selected == ()
@@ -340,6 +344,11 @@ def test_restart_validates_signed_fallback_before_selecting(  # noqa: PLR0915 - 
             assert restarted._connection.execute(  # noqa: SLF001
                 "SELECT state,claim_tx FROM swaps WHERE session_id=?", (session,)
             ).fetchone() == ("CLAIMING", spend.raw_transaction)
+            crypto.schnorr_verify(
+                bytes.fromhex(terms.provider_contract_compressed_key)[1:],
+                b"\x19" * 32,
+                restarted.sign_with_contract_key(session, b"\x19" * 32, crypto),
+            )
             asyncio.run(engine.broadcast_selected_fallback(selected[0]))
             chain.broadcast.assert_called_once_with(spend.raw_transaction, spend.txid)
     if damage == "none":
