@@ -1935,7 +1935,12 @@ class LiveSessionStore:
             raise LiveSessionStoreError("outbox wrap refused") from None
 
     def pending_sendable(  # noqa: PLR0911 - one fail-closed proposal authorization
-        self, message_id: str, *, now: int, tip_height: int | None = None
+        self,
+        message_id: str,
+        *,
+        now: int,
+        tip_height: int | None = None,
+        readiness: ReadinessChallenge | None = None,
     ) -> bool:
         """Allow ordinary outbox replay; proposal replay needs a live window.
 
@@ -1958,10 +1963,55 @@ class LiveSessionStore:
                     envelope.message_type == "action_request"
                     and envelope.payload.get("action") == "cooperative_claim_ready"
                 ):
-                    # Outbox history alone never restores a process-local probe.
-                    # A future live caller must pass a current-owner token to
-                    # an explicitly authorized dispatch path.
-                    return False
+                    if (
+                        readiness is None
+                        or not isinstance(readiness, ReadinessChallenge)
+                        or readiness.request_id != message_id
+                        or readiness.session_id != session_id
+                        or readiness.owner_generation != self._generation
+                        or type(now) is not int
+                        or type(tip_height) is not int
+                        or tip_height <= 0
+                        or tip_height >= readiness.deadline_height
+                        or not readiness.started_at <= now < readiness.deadline_at
+                    ):
+                        return False
+                    payload = parse_cooperative_payload(
+                        "action_request", canonicalize(envelope.payload)
+                    )
+                    if not isinstance(payload, CooperativeClaimReadyRequest) or (
+                        payload.challenge != readiness.challenge
+                        or payload.deadline_at != readiness.deadline_at
+                        or payload.deadline_height != readiness.deadline_height
+                        or envelope.contract_hash != readiness.contract_hash
+                    ):
+                        return False
+                    row = connection.execute(
+                        "SELECT a.state,a.version,a.contract_hash,s.phase,s.blocked,"
+                        "w.state,w.contract_hash,w.preimage,w.claim_tx,w.claim_txid "
+                        "FROM claim_arbitration a JOIN swaps w ON w.session_id=a.session_id "
+                        "JOIN sessions s ON s.session_id=a.session_id WHERE a.session_id=?",
+                        (session_id,),
+                    ).fetchone()
+                    return (
+                        row
+                        == (
+                            "ADMITTED",
+                            1,
+                            readiness.contract_hash,
+                            "ACCEPTED",
+                            0,
+                            "PAID",
+                            readiness.contract_hash,
+                            payload.payment_preimage,
+                            None,
+                            None,
+                        )
+                        and not connection.execute(
+                            "SELECT 1 FROM claim_attempts WHERE session_id=? LIMIT 1",
+                            (session_id,),
+                        ).fetchone()
+                    )
                 if (
                     envelope.message_type != "action_request"
                     or envelope.payload.get("action") != "cooperative_claim_propose"
@@ -2946,6 +2996,11 @@ class LiveSessionStore:
                             "WHERE session_id=?",
                             (client_seq + 1, revision + 1, now, outer.session_id),
                         )
+                        connection.execute(
+                            "UPDATE outbox SET delivery_state='RECONCILED' "
+                            "WHERE session_id=? AND message_id=? AND delivery_state='PENDING'",
+                            (outer.session_id, readiness.request_id),
+                        )
                         return CooperativeResultAdmission(
                             outer.session_id, outer.message_id, payload.status, replay=False
                         )
@@ -3209,10 +3264,10 @@ class LiveSessionStore:
         ):
             raise LiveSessionStoreError("readiness terms unavailable")
         retained = connection.execute(
-            "SELECT canonical_bytes FROM outbox WHERE session_id=? AND message_id=?",
+            "SELECT canonical_bytes,delivery_state FROM outbox WHERE session_id=? AND message_id=?",
             (challenge.session_id, challenge.request_id),
         ).fetchone()
-        if retained is None:
+        if retained is None or retained[1] != "PENDING":
             raise LiveSessionStoreError("readiness request missing")
         request = _canonical_envelope(retained[0])
         original = parse_cooperative_payload("action_request", canonicalize(request.payload))
@@ -4174,6 +4229,41 @@ class LiveSessionStore:
             deadline_at,
             deadline_height,
         )
+
+    def retire_cooperative_readiness(self, challenge: ReadinessChallenge) -> None:
+        """Stop retrying this owner's expired or abandoned readiness request."""
+        if (
+            not isinstance(challenge, ReadinessChallenge)
+            or challenge.owner_generation != self._generation
+        ):
+            raise LiveSessionStoreError("readiness owner unavailable")
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT canonical_bytes FROM outbox WHERE session_id=? AND message_id=?",
+                    (challenge.session_id, challenge.request_id),
+                ).fetchone()
+                if row is None:
+                    raise LiveSessionStoreError("readiness request missing")  # noqa: TRY301
+                request = _canonical_envelope(row[0])
+                payload = parse_cooperative_payload("action_request", canonicalize(request.payload))
+                if (
+                    not isinstance(payload, CooperativeClaimReadyRequest)
+                    or payload.challenge != challenge.challenge
+                    or payload.deadline_at != challenge.deadline_at
+                    or payload.deadline_height != challenge.deadline_height
+                    or request.contract_hash != challenge.contract_hash
+                ):
+                    raise LiveSessionStoreError("readiness request changed")  # noqa: TRY301
+                connection.execute(
+                    "UPDATE outbox SET delivery_state='RECONCILED' "
+                    "WHERE session_id=? AND message_id=? AND delivery_state='PENDING'",
+                    (challenge.session_id, challenge.request_id),
+                )
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo signed request details
+            raise LiveSessionStoreError("readiness retirement refused") from None
 
     def prepare_claim_window(  # noqa: PLR0913 - signed fallback and immutable deadline bundle
         self,

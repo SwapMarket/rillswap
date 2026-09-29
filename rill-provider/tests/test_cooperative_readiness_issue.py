@@ -71,6 +71,13 @@ def test_probe_requires_admission_and_is_abandoned_after_owner_restart(
         assert payload.challenge == probe.challenge
         assert (payload.deadline_at, payload.deadline_height) == (1020, 1100)
         assert not store.pending_sendable(probe.request_id, now=1002, tip_height=1090)
+        assert store.pending_sendable(probe.request_id, now=1002, tip_height=1090, readiness=probe)
+        assert not store.pending_sendable(
+            probe.request_id, now=1020, tip_height=1090, readiness=probe
+        )
+        assert not store.pending_sendable(
+            probe.request_id, now=1002, tip_height=1100, readiness=probe
+        )
         assert store._connection.execute(  # noqa: SLF001
             "SELECT state FROM claim_arbitration WHERE session_id=?", (session,)
         ).fetchone() == ("ADMITTED",)
@@ -92,6 +99,8 @@ def test_probe_requires_admission_and_is_abandoned_after_owner_restart(
                 ],
             )
     with harness.acquire() as restarted:
+        with pytest.raises(LiveSessionStoreError, match="owner unavailable"):
+            restarted.retire_cooperative_readiness(probe)
         assert {entry.message_id for entry in restarted.pending_outbox()} == {
             "a1" * 32,
             "a2" * 32,
@@ -211,8 +220,16 @@ def test_signed_readiness_echo_is_authenticated_and_never_prepares_a_claim(
         admitted = store.admit_cooperative_readiness(reply, probe, now=1002, tip_height=1090)
         assert admitted.status == "ready"
         assert not admitted.replay
+        assert store.pending_outbox() == ()
         replay = store.admit_cooperative_readiness(reply, probe, now=1003, tip_height=1090)
         assert replay.replay
+        with pytest.raises(LiveSessionStoreError, match="request missing"):
+            store.admit_cooperative_readiness(
+                signed_result(message_id="da" * 32, sequence=3),
+                probe,
+                now=1003,
+                tip_height=1090,
+            )
         assert store._connection.execute(  # noqa: SLF001
             "SELECT state FROM claim_arbitration WHERE session_id=?", (session,)
         ).fetchone() == ("ADMITTED",)

@@ -23,6 +23,7 @@ from rill_core.wire.quotes import parse_quote_request
 from rill_core.wire.reverse_quotes import ReverseFirmQuoteRequest
 
 from rill_provider.live_session_store import (
+    COOPERATION_BUDGET_SECONDS,
     FIRST_REQUEST_SEQUENCE,
     Answer,
     CooperativeWinner,
@@ -53,7 +54,12 @@ if TYPE_CHECKING:
     from rill_core.wire.types import NetworkIdentity, ProfileId
     from rill_crypto import Context
 
-    from rill_provider.live_session_store import LiveSessionStore, PreparedFallback, RequestContext
+    from rill_provider.live_session_store import (
+        LiveSessionStore,
+        PreparedFallback,
+        ReadinessChallenge,
+        RequestContext,
+    )
     from rill_provider.lnd_hold_invoice import LndHoldInvoices
     from rill_provider.provider_identity import ProviderIdentity
     from rill_provider.settlement_engine import SettlementEngine
@@ -168,6 +174,11 @@ class HandshakeService:
         self._deadline_wall_anchor, self._deadline_monotonic_anchor = self._now(), time.monotonic()
         self._deadline_high_water = self._deadline_wall_anchor
         self._tip_lookup: asyncio.Task[int] | None = None
+        # These maps are never reconstructed from signed outbox or inbox rows.
+        self._readiness_probes: dict[str, ReadinessChallenge] = {}
+        self._readiness_ready: dict[str, ReadinessChallenge] = {}
+        self._readiness_issued: set[str] = set()
+        self._readiness_closed = False
 
     def _now(self) -> int:
         return int(self._clock())
@@ -180,6 +191,77 @@ class HandshakeService:
             self._deadline_wall_anchor + int(time.monotonic() - self._deadline_monotonic_anchor),
         )
         return self._deadline_high_water
+
+    async def start_cooperative_readiness(
+        self, session_id: str, *, deadline_height: int, relays: Sequence[Relay] = ()
+    ) -> str | None:
+        """Probe one newly paid featured original session at most once per owner.
+
+        A future PAID transition caller must choose a conservative height from
+        fresh chain evidence. No historic ADMITTED scan may call this method.
+        This method does not delay the legacy unilateral settlement path.
+        """
+        if (
+            self._readiness_closed
+            or not self._deadline_healthy
+            or session_id in self._readiness_issued
+        ):
+            return None
+        self._readiness_issued.add(session_id)  # failed preparation cannot renew the budget
+        started_at = self._deadline_now()
+        tip = await self._sample_tip()
+        if (
+            self._readiness_closed
+            or not self._deadline_healthy
+            or tip is None
+            or type(deadline_height) is not int
+            or tip >= deadline_height
+        ):
+            return None
+        challenge = self._store.issue_cooperative_readiness(
+            session_id,
+            signer=self._transport,
+            started_at=started_at,
+            now=self._deadline_now(),
+            deadline_at=started_at + COOPERATION_BUDGET_SECONDS,
+            deadline_height=deadline_height,
+        )
+        self._readiness_probes[session_id] = challenge
+        if relays:
+            await self._send_pending(challenge.request_id, relays)
+        return challenge.request_id
+
+    def take_cooperative_readiness(self, session_id: str) -> ReadinessChallenge | None:
+        """Consume one original-session echo before preparing the exact fallback."""
+        challenge = self._readiness_ready.pop(session_id, None)
+        if (
+            challenge is None
+            or self._readiness_closed
+            or self._deadline_now() >= challenge.deadline_at
+        ):
+            return None
+        if challenge.owner_generation != self._store.generation or not self._deadline_healthy:
+            return None
+        return challenge
+
+    def _expire_readiness(self) -> None:
+        now = self._deadline_now()
+        for session_id, challenge in tuple(self._readiness_probes.items()):
+            if now >= challenge.deadline_at:
+                self._store.retire_cooperative_readiness(challenge)
+                del self._readiness_probes[session_id]
+        for session_id, challenge in tuple(self._readiness_ready.items()):
+            if now >= challenge.deadline_at:
+                del self._readiness_ready[session_id]
+
+    def _abandon_readiness(self) -> None:
+        """Discard process-local authorization when this service stops."""
+        self._readiness_closed = True
+        for challenge in tuple(self._readiness_probes.values()):
+            with suppress(LiveSessionStoreError):
+                self._store.retire_cooperative_readiness(challenge)
+        self._readiness_probes.clear()
+        self._readiness_ready.clear()
 
     async def _publish(self, event: bytes, relays: Sequence[Relay]) -> bool:
         results = await asyncio.gather(
@@ -206,6 +288,7 @@ class HandshakeService:
 
     async def tick(self, relays: Sequence[Relay]) -> None:
         """Rotate epochs, refresh the announcement, resubscribe, retry the outbox."""
+        self._expire_readiness()
         policy, state, now = self._policy, self._state, self._now()
         epochs = self._store.rotate_epochs(
             now=now,
@@ -337,21 +420,37 @@ class HandshakeService:
         self._state.attempts[message_id] = self._now()
         now = self._deadline_now()
         tip: int | None = None
+        readiness = next(
+            (probe for probe in self._readiness_probes.values() if probe.request_id == message_id),
+            None,
+        )
+        if readiness is not None and self._readiness_closed:
+            return
         if not self._store.pending_sendable(message_id, now=now):
             tip = await self._sample_tip()
             if tip is None:
                 # No independent tip, so no proposal disclosure. Keep the
                 # underlying RPC single-flight if the waiter merely timed out.
                 return
-            if not self._store.pending_sendable(
-                message_id, now=self._deadline_now(), tip_height=tip
-            ):
+            if not self._pending_sendable(message_id, tip=tip, readiness=readiness):
                 return
         wrap = self._store.wrap_pending(message_id, transport=self._transport)
-        if not self._store.pending_sendable(message_id, now=self._deadline_now(), tip_height=tip):
+        if not self._pending_sendable(message_id, tip=tip, readiness=readiness):
             return  # arbitration may have closed before wrapping finished
+        if readiness is not None and self._readiness_closed:
+            return
         if not await self._publish(wrap, relays):
             LOG.warning("outbox wrap not accepted by any relay; will retry")
+
+    def _pending_sendable(
+        self, message_id: str, *, tip: int | None, readiness: ReadinessChallenge | None
+    ) -> bool:
+        now = self._deadline_now()
+        if readiness is not None:
+            return self._store.pending_sendable(
+                message_id, now=now, tip_height=tip, readiness=readiness
+            )
+        return self._store.pending_sendable(message_id, now=now, tip_height=tip)
 
     def _first_sight(self, event: bytes) -> bool:
         try:
@@ -368,7 +467,7 @@ class HandshakeService:
 
     async def handle(self, event: bytes, relays: Sequence[Relay]) -> str:  # noqa: PLR0911, PLR0912 - one disposition per outcome
         """Route one untrusted relay event; return a content-free disposition."""
-        if not self._deadline_healthy:
+        if not self._deadline_healthy or self._readiness_closed:
             return "unavailable"  # do not mark as seen; replay is safe after restart
         if not self._first_sight(event):
             return "duplicate"
@@ -395,6 +494,31 @@ class HandshakeService:
                     await self._resubscribe(relays)
                     return "confirm-replay" if admitted.replay else "confirm-admitted"
                 if message_type == "action_result":
+                    envelope = json.loads(document)
+                    payload = envelope.get("payload")
+                    if (
+                        isinstance(payload, dict)
+                        and payload.get("action") == "cooperative_claim_ready"
+                    ):
+                        session_id = envelope.get("session_id")
+                        challenge = (
+                            self._readiness_probes.get(session_id)
+                            if isinstance(session_id, str)
+                            else None
+                        )
+                        if challenge is None:
+                            return "refused"  # stored requests never recreate a live token
+                        tip = await self._sample_tip()
+                        if tip is None or self._readiness_closed or not self._deadline_healthy:
+                            return "refused"
+                        result = store.admit_cooperative_readiness(
+                            document, challenge, now=self._deadline_now(), tip_height=tip
+                        )
+                        if result.replay:
+                            return "result-replay"  # a replay never restores eligibility
+                        del self._readiness_probes[challenge.session_id]
+                        self._readiness_ready[challenge.session_id] = challenge
+                        return "readiness-admitted"
                     result = store._admit_cooperative_result(document, now=now)  # noqa: SLF001 - store-owned admission; no signer or reply
                     return "result-replay" if result.replay else "result-admitted"
                 return await self._answer(document, relays, now)
@@ -657,6 +781,7 @@ class HandshakeService:
         async def supervise() -> None:
             while not stop.is_set():
                 try:
+                    self._expire_readiness()
                     self._store.reconcile_expired_cooperative_proposals(self._deadline_now())
                     for candidate in settlement.select_due_fallbacks(self._deadline_now()):
                         dispatch(candidate)
@@ -732,6 +857,7 @@ class HandshakeService:
                     disposition = await self.handle(event, list(connected.values()))
                     LOG.info("relay event: %s", disposition)
         finally:
+            self._readiness_closed = True  # fence operations suspended before cleanup awaits
             for task in [*tasks, *broadcasts, *(() if deadline_task is None else (deadline_task,))]:
                 task.cancel()
             await asyncio.gather(
@@ -740,6 +866,7 @@ class HandshakeService:
                 *(() if deadline_task is None else (deadline_task,)),
                 return_exceptions=True,
             )
+            self._abandon_readiness()
 
 
 async def _next_or_stop(
