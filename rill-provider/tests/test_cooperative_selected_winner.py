@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
@@ -25,6 +26,7 @@ from rill_provider.settlement_engine import SettlementEngine
 from rill_provider.settlement_policy import offered_terms
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 
@@ -46,9 +48,19 @@ if TYPE_CHECKING:
         "nonce_race",
         "expired_without_selection",
         "late_result",
+        "burn_lock_expiry",
+        "begin_lock_expiry",
+        "before_native_expiry",
+        "after_native_expiry",
+        "commit_lock_expiry",
+        "proposal_sign_expiry",
+        "clock_unavailable",
+        "noncallable_clock",
+        "after_native_clock_failure",
+        "proposal_sign_clock_failure",
     ],
 )
-def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0912, PLR0915 - native custody lifecycle
+def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0911, PLR0912, PLR0915 - native custody lifecycle
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, winner: str
 ) -> None:
     from rill_crypto import Context  # noqa: PLC0415 - opt-in native dependency
@@ -110,12 +122,20 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0912, P
             deadline_height=1094,
         )
         cooperation_id = b"\xe1" * 32
+        clock_now = 1000
+        clock_failed = False
+
+        def clock() -> int:
+            if clock_failed:
+                raise OSError("test-only clock failure")
+            return clock_now
+
         with pytest.raises(LiveSessionStoreError, match="window height unavailable"):
             store.burn_selected_cooperative_claim(
                 session,
                 cooperation_id,
                 plan,
-                now=1000,
+                now=clock,
                 tip_height=None,  # type: ignore[arg-type] - runtime boundary rejects untyped caller
                 deadline_at=1020,
                 deadline_height=1094,
@@ -123,6 +143,21 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0912, P
         assert store._connection.execute(  # noqa: SLF001
             "SELECT count(*) FROM cooperation_attempts WHERE session_id=?", (session,)
         ).fetchone() == (0,)
+        if winner == "noncallable_clock":
+            for invalid_clock in (None, 1000, True):
+                with pytest.raises(LiveSessionStoreError, match="clock unavailable"):
+                    store.burn_selected_cooperative_claim(
+                        session,
+                        cooperation_id,
+                        plan,
+                        now=invalid_clock,  # type: ignore[arg-type] - fail-closed runtime input
+                        tip_height=1090,
+                        deadline_at=1020,
+                        deadline_height=1094,
+                    )
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT count(*) FROM cooperation_attempts WHERE session_id=?", (session,)
+            ).fetchone() == (0,)
         if winner == "burn_after_close":
             (candidate,) = store.prepared_fallbacks()
             store.select_prepared_fallback(candidate, signer=crypto, now=1000, height=1094)
@@ -132,7 +167,7 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0912, P
                     session,
                     cooperation_id,
                     plan,
-                    now=1000,
+                    now=clock,
                     tip_height=1090,
                     deadline_at=1020,
                     deadline_height=1094,
@@ -141,24 +176,68 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0912, P
                 "SELECT count(*) FROM cooperation_attempts WHERE session_id=?", (session,)
             ).fetchone() == (0,)
             return
+        if winner == "burn_lock_expiry":
+            original_write = store._write  # noqa: SLF001 - model elapsed SQLite acquisition
+
+            @contextmanager
+            def delayed_burn_write() -> Iterator[sqlite3.Connection]:
+                nonlocal clock_now
+                with original_write() as connection:
+                    clock_now = 1020
+                    yield connection
+
+            monkeypatch.setattr(store, "_write", delayed_burn_write)
+            with pytest.raises(LiveSessionStoreError, match="cooperative window unavailable"):
+                store.burn_selected_cooperative_claim(
+                    session,
+                    cooperation_id,
+                    plan,
+                    now=clock,
+                    tip_height=1090,
+                    deadline_at=1020,
+                    deadline_height=1094,
+                )
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT count(*) FROM cooperation_attempts WHERE session_id=?", (session,)
+            ).fetchone() == (0,)
+            assert store.pending_outbox() == ()
+            assert store._allocated_cooperation_ids == set()  # noqa: SLF001
+            return
         store.burn_selected_cooperative_claim(
             session,
             cooperation_id,
             plan,
-            now=1000,
+            now=clock,
             tip_height=1090,
             deadline_at=1020,
             deadline_height=1094,
         )
+        clock_now = 1001
         with pytest.raises(LiveSessionStoreError, match="window height unavailable"):
             store.begin_selected_cooperative_proposal(
                 session,
                 cooperation_id,
-                now=1001,
+                now=clock,
                 tip_height=None,  # type: ignore[arg-type] - runtime boundary rejects untyped caller
             )
         assert cooperation_id not in store._allocated_cooperation_ids  # noqa: SLF001
         assert store.pending_outbox() == ()
+        if winner == "noncallable_clock":
+            for invalid_clock in (None, 1001, True):
+                with pytest.raises(LiveSessionStoreError, match="clock unavailable"):
+                    store.begin_selected_cooperative_proposal(
+                        session,
+                        cooperation_id,
+                        now=invalid_clock,  # type: ignore[arg-type] - fail-closed runtime input
+                        tip_height=1090,
+                    )
+            assert cooperation_id not in store._allocated_cooperation_ids  # noqa: SLF001
+            assert store._cooperation_handles == {}  # noqa: SLF001
+            assert store.pending_outbox() == ()
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT state FROM cooperation_attempts WHERE session_id=?", (session,)
+            ).fetchone() == ("BURNED",)
+            return
         if winner in ("begin_after_close", "nonce_race"):
             (candidate,) = store.prepared_fallbacks()
             if winner == "begin_after_close":
@@ -175,15 +254,108 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0912, P
                 )
             with pytest.raises(LiveSessionStoreError, match="cooperative window unavailable"):
                 store.begin_selected_cooperative_proposal(
-                    session, cooperation_id, now=1001, tip_height=1090
+                    session, cooperation_id, now=clock, tip_height=1090
                 )
             assert store._connection.execute(  # noqa: SLF001
                 "SELECT state FROM cooperation_attempts WHERE session_id=?", (session,)
             ).fetchone() == ("BURNED",)
             assert store._cooperation_handles == {}  # noqa: SLF001 - no leaked native handle
             return
+        if winner in {
+            "begin_lock_expiry",
+            "before_native_expiry",
+            "after_native_expiry",
+            "commit_lock_expiry",
+            "proposal_sign_expiry",
+            "clock_unavailable",
+            "after_native_clock_failure",
+            "proposal_sign_clock_failure",
+        }:
+            original_write = store._write  # noqa: SLF001
+            write_count = 0
+
+            @contextmanager
+            def delayed_begin_write() -> Iterator[sqlite3.Connection]:
+                nonlocal clock_now, write_count
+                with original_write() as connection:
+                    write_count += 1
+                    if (winner == "begin_lock_expiry" and write_count == 1) or (
+                        winner == "commit_lock_expiry" and write_count == 2
+                    ):
+                        clock_now = 1020
+                    yield connection
+
+            monkeypatch.setattr(store, "_write", delayed_begin_write)
+            original_public_key = crypto.public_key
+            original_begin = crypto.musig_begin
+            original_sign = crypto.schnorr_sign
+            native_calls = 0
+
+            def delayed_public_key(secret: bytes) -> bytes:
+                nonlocal clock_now
+                result = original_public_key(secret)
+                if winner == "before_native_expiry":
+                    clock_now = 1020
+                return result
+
+            def delayed_native_begin(**kwargs: Any) -> Any:  # noqa: ANN401 - native keyword boundary
+                nonlocal clock_now, native_calls, clock_failed
+                native_calls += 1
+                result = original_begin(**kwargs)
+                if winner == "after_native_expiry":
+                    clock_now = 1020
+                if winner == "after_native_clock_failure":
+                    clock_failed = True
+                return result
+
+            def delayed_sign(secret: bytes, message: bytes, aux: bytes) -> bytes:
+                nonlocal clock_now, clock_failed
+                result = original_sign(secret, message, aux)
+                if winner == "proposal_sign_expiry":
+                    clock_now = 1020
+                if winner == "proposal_sign_clock_failure":
+                    clock_failed = True
+                return result
+
+            monkeypatch.setattr(crypto, "public_key", delayed_public_key)
+            monkeypatch.setattr(crypto, "musig_begin", delayed_native_begin)
+            monkeypatch.setattr(crypto, "schnorr_sign", delayed_sign)
+
+            def unavailable_clock() -> int:
+                raise OSError("test-only clock failure")
+
+            with pytest.raises(
+                LiveSessionStoreError,
+                match=(
+                    r"cooperative (nonce (allocation )?unavailable|"
+                    r"deadline elapsed|clock unavailable)"
+                ),
+            ):
+                store.begin_selected_cooperative_proposal(
+                    session,
+                    cooperation_id,
+                    now=unavailable_clock if winner == "clock_unavailable" else clock,
+                    tip_height=1090,
+                )
+            assert native_calls == int(
+                winner
+                in {
+                    "after_native_expiry",
+                    "commit_lock_expiry",
+                    "proposal_sign_expiry",
+                    "after_native_clock_failure",
+                    "proposal_sign_clock_failure",
+                }
+            )
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT state FROM cooperation_attempts WHERE session_id=?", (session,)
+            ).fetchone() == ("BURNED",)
+            assert store.pending_outbox() == ()
+            assert store._cooperation_handles == {}  # noqa: SLF001
+            assert (cooperation_id in store._allocated_cooperation_ids) == bool(native_calls)  # noqa: SLF001
+            return
         proposal_id = store.begin_selected_cooperative_proposal(
-            session, cooperation_id, now=1001, tip_height=1090
+            session, cooperation_id, now=clock, tip_height=1090
         )
         assert not store.pending_sendable(proposal_id, now=1001)
         assert store.pending_sendable(proposal_id, now=1001, tip_height=1090)

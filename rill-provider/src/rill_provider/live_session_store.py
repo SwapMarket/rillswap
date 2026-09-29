@@ -1121,22 +1121,29 @@ class LiveSessionStore:
         cooperation_id: bytes,
         plan: CooperativeClaimPlan,
         *,
-        now: int,
+        now: Callable[[], int],
         tip_height: int,
         deadline_at: int,
         deadline_height: int,
     ) -> None:
-        """Burn a live attempt only inside this owner's prepared window."""
+        """Burn a live attempt only inside this owner's prepared window.
+
+        The clock is refreshed under write authority; time spent acquiring
+        SQLite or validating the plan never renews the retained deadline.
+        """
         if type(tip_height) is not int:
             raise LiveSessionStoreError("cooperative window height unavailable")
+        if not callable(now):
+            raise LiveSessionStoreError("cooperative clock unavailable")
         self._burn_cooperative_claim_impl(
             session_id,
             cooperation_id,
             plan,
-            now=now,
+            now=_cooperative_now(0, now),
             deadline_at=deadline_at,
             deadline_height=deadline_height,
             window_tip=tip_height,
+            clock=now,
         )
 
     def _burn_cooperative_claim(  # noqa: PLR0913 - retained internal primitive
@@ -1159,7 +1166,7 @@ class LiveSessionStore:
             window_tip=None,
         )
 
-    def _burn_cooperative_claim_impl(  # noqa: PLR0913 - one custody transition
+    def _burn_cooperative_claim_impl(  # noqa: PLR0912, PLR0913, PLR0915 - one custody transition
         self,
         session_id: str,
         cooperation_id: bytes,
@@ -1169,6 +1176,7 @@ class LiveSessionStore:
         deadline_at: int,
         deadline_height: int,
         window_tip: int | None,
+        clock: Callable[[], int] | None = None,
     ) -> None:
         """Reserve one immutable ID before any native MuSig nonce allocation.
 
@@ -1194,6 +1202,7 @@ class LiveSessionStore:
             raise LiveSessionStoreError("cooperative attempt parameters refused")
         try:
             with self._write() as connection:
+                now = _cooperative_now(now, clock)
                 row = connection.execute(
                     "SELECT s.init_bytes, s.accept_bytes, s.transcript_digest, s.phase, "
                     "s.blocked, w.contract_hash, w.terms_offer, w.terms_accept, w.state, "
@@ -1331,6 +1340,9 @@ class LiveSessionStore:
                         "deadline_height": deadline_height,
                     }
                 )
+                now = _cooperative_now(now, clock)
+                if now >= deadline_at:
+                    raise LiveSessionStoreError("cooperative deadline elapsed")  # noqa: TRY301
                 connection.execute(
                     "INSERT INTO cooperation_attempts "
                     "(cooperation_id, session_id, owner_generation, binding, "
@@ -1371,6 +1383,7 @@ class LiveSessionStore:
         signer: EnvelopeSigner,
         now: int,
         window_tip: int | None,
+        clock: Callable[[], int] | None = None,
     ) -> str:
         """Commit a native public nonce and signed BTC-to-LN proposal before exposure.
 
@@ -1390,6 +1403,7 @@ class LiveSessionStore:
             raise LiveSessionStoreError("cooperative nonce parameters refused")
         try:
             with self._write() as connection:
+                now = _cooperative_now(now, clock)
                 row = connection.execute(
                     "SELECT a.binding,a.owner_generation,a.created_at,a.deadline_at,a.state,"
                     "s.phase,s.blocked,w.state,w.preimage,w.contract_hash,"
@@ -1486,6 +1500,9 @@ class LiveSessionStore:
                     ),
                     strict=True,
                 )
+                now = _cooperative_now(now, clock)
+                if now >= deadline_at:
+                    raise LiveSessionStoreError("cooperative deadline elapsed")  # noqa: TRY301
                 message_id = self._record_observation(
                     connection,
                     session_id,
@@ -1505,6 +1522,11 @@ class LiveSessionStore:
                     != 1
                 ):
                     raise LiveSessionStoreError("cooperative nonce state changed")  # noqa: TRY301
+                now = _cooperative_now(now, clock)
+                if now >= deadline_at:
+                    # Roll back the local outbox and NONCE_READY update if
+                    # signing/storage consumed the remainder of the budget.
+                    raise LiveSessionStoreError("cooperative deadline elapsed")  # noqa: TRY301
         except LiveSessionStoreError:
             raise
         except Exception:  # noqa: BLE001 - never echo nonce or stored state
@@ -1516,14 +1538,25 @@ class LiveSessionStore:
         session_id: str,
         cooperation_id: bytes,
         *,
-        now: int,
+        now: Callable[[], int],
         tip_height: int,
     ) -> str:
-        """Allocate and publish a nonce only while this owner's window is open."""
+        """Allocate and persist a nonce while this owner's window is open.
+
+        Refresh the irreversible clock after SQLite acquisition, just before
+        native allocation, and around proposal persistence. Delivery must
+        still independently recheck time and height through pending_sendable.
+        """
         if type(tip_height) is not int:
             raise LiveSessionStoreError("cooperative window height unavailable")
+        if not callable(now):
+            raise LiveSessionStoreError("cooperative clock unavailable")
         return self._begin_cooperative_proposal_impl(
-            session_id, cooperation_id, now=now, window_tip=tip_height
+            session_id,
+            cooperation_id,
+            now=_cooperative_now(0, now),
+            window_tip=tip_height,
+            clock=now,
         )
 
     def _begin_and_commit_cooperative_proposal(
@@ -1541,6 +1574,7 @@ class LiveSessionStore:
         *,
         now: int,
         window_tip: int | None,
+        clock: Callable[[], int] | None = None,
     ) -> str:
         """Allocate one store-owned native handle after burn, then commit its nonce.
 
@@ -1567,6 +1601,7 @@ class LiveSessionStore:
             raise LiveSessionStoreError("cooperative nonce allocation already attempted")
         try:
             with self._write() as connection:
+                now = _cooperative_now(now, clock)
                 row = connection.execute(
                     "SELECT a.binding,a.owner_generation,a.created_at,a.deadline_at,a.state,"
                     "s.phase,s.blocked,w.state,w.contract_hash,w.terms_offer,"
@@ -1671,6 +1706,9 @@ class LiveSessionStore:
                 try:
                     if crypto.public_key(scalar).hex() != compressed:
                         raise LiveSessionStoreError("cooperative contract key differs")
+                    now = _cooperative_now(now, clock)
+                    if now >= deadline_at:
+                        raise LiveSessionStoreError("cooperative deadline elapsed")
                     # The burn committed in an earlier transaction. Never
                     # remove this tombstone, including if native begin raises.
                     self._allocated_cooperation_ids.add(cooperation_id)
@@ -1699,6 +1737,7 @@ class LiveSessionStore:
                 signer=crypto,
                 now=now,
                 window_tip=window_tip,
+                clock=clock,
             )
         except BaseException as error:
             live = self._cooperation_handles.pop(cooperation_id, None)
@@ -5444,6 +5483,23 @@ def _immediate_claim_allowed(connection: sqlite3.Connection, session_id: str) ->
         "SELECT state FROM claim_arbitration WHERE session_id=?", (session_id,)
     ).fetchone()
     return row is None or row == ("ADMITTED",)
+
+
+def _cooperative_now(previous: int, clock: Callable[[], int] | None) -> int:
+    """Refresh live time without allowing a correction to reopen eligibility.
+
+    Retained internal test primitives use a fixed timestamp. Selected live
+    APIs require a clock anchored to monotonic elapsed time by their owner.
+    """
+    if clock is None:
+        return previous
+    try:
+        current = clock()
+    except Exception:  # noqa: BLE001 - failed owner clocks grant no nonce effect
+        raise LiveSessionStoreError("cooperative clock unavailable") from None
+    if type(current) is not int or current < 0:
+        raise LiveSessionStoreError("cooperative clock unavailable")
+    return max(previous, current)
 
 
 def _require_waiting_cooperation(  # noqa: PLR0913 - exact owner, contract, and deadlines
