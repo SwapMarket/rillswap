@@ -104,16 +104,14 @@ class ClaimWatcher:
                 raise TimeoutError
             self._sleep(self._poll)
 
-    def step(self) -> tuple[ClaimOutcome, str | None] | None:  # noqa: PLR0911 - closed rules
+    def step(self) -> tuple[ClaimOutcome, str | None] | None:
         """One poll: finish, wait, rebroadcast, or sign and send a replacement."""
         view = self._chain()
-        if view is None:
-            return None
-        if not view.unspent_on_chain:
+        if view is None or not view.unspent_on_chain:
             for attempt in reversed(self.attempts):
                 if self._confirmations(attempt.txid):
                     return "claim_confirmed", attempt.txid
-            return "outpoint_spent_elsewhere", None
+            return None if view is None else ("outpoint_spent_elsewhere", None)
         if self._start is None:
             self._start = view.tip_height
         latest = self.attempts[-1] if self.attempts else None

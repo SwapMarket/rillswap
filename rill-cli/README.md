@@ -329,13 +329,18 @@ exceptions are not translated. Neither signal classification nor a returned
 txid proves chain inclusion or makes a second attempt safe.
 
 `rill recover watch-refund` is the automatic form for a swap the provider
-never paid: it polls until the refund confirms, the invoice settles, or the
-contract output is spent by something else. Before every attempt it asks your
-own LND (`--lnd-port`, `--lnd-tls-cert`, `--lnd-invoice-macaroon`, an
+never paid: it polls until the refund confirms or the invoice settles. Before
+every attempt it asks your own LND (`--lnd-port`, `--lnd-tls-cert`,
+`--lnd-invoice-macaroon`, an
 `invoices:read` macaroon) for the invoice state and **refuses to refund a
 SETTLED invoice** (the provider paid you; refunding would take their funds).
-Missing LND or Core evidence only waits. After the refund lock height, it
-signs the refund at `--initial-fee-sat`, rising linearly to `--max-fee-sat`
+Missing LND or Core evidence only waits. Core `gettxout` returning null means
+the selected output is absent, not that a foreign spender was identified;
+the watcher keeps polling and checks whether a previously recorded refund
+confirmed. A non-null output must match the selected signed funding value,
+script, confirmations, and chain tip before it can authorize a new attempt.
+After the refund lock height, it signs the refund at `--initial-fee-sat`,
+rising linearly to `--max-fee-sat`
 (capped by the signed `max_refund_fee_sat` and the dust floor of the
 refund output) over `--escalate-blocks`
 blocks, replacing the unconfirmed attempt by opt-in RBF when a new block has
@@ -343,8 +348,9 @@ passed and the fee beats the previous one by 1 sat/vB. Every signed attempt
 is written to a create-only `refund-NN-<txid>.json` in `--intent-dir` before
 it is sent; those files are the state, so a restart reloads and verifies
 them and never signs a lower fee. The final JSON names every attempt and the
-outcome (`refund_confirmed` with its depth, `invoice_settled`, or
-`outpoint_spent_elsewhere`, which usually means the provider claimed).
+outcome (`refund_confirmed` with its depth or `invoice_settled`; the watcher
+also understands an explicitly supplied `outpoint_spent_elsewhere` view, but
+the live Core adapter does not infer a foreign spend from UTXO absence).
 
 ```sh
 rill recover watch-refund --network signet.json --crypto-library /path/librill_crypto.so \

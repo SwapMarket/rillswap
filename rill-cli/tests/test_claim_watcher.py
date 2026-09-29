@@ -99,6 +99,18 @@ def test_an_unavailable_chain_view_waits() -> None:
     assert chain.sent == []
 
 
+def test_unknown_outpoint_still_detects_our_confirmed_claim() -> None:
+    chain = Chain()
+    watcher = _watcher(chain, chain=lambda: None)
+    assert watcher.step() is None
+    assert watcher.attempts == []
+    active = _watcher(chain)
+    assert active.step() is None
+    chain.mined = active.attempts[0].txid
+    active._chain = lambda: None  # noqa: SLF001 - Core no longer sees a chain UTXO
+    assert active.step() == ("claim_confirmed", chain.mined)
+
+
 def test_timeout_and_bounds() -> None:
     chain = Chain()
     with pytest.raises(TimeoutError):

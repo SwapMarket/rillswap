@@ -1147,14 +1147,18 @@ def test_watch_claim_signs_from_the_recovery_file_until_the_claim_confirms(
     recovery = tmp_path / "selected.age"
     recovery.write_bytes(pyrage.encrypt(canonicalize(package), [identity.to_public()]))
     binding = FundingBinding.model_validate(package["funding_history"][0]["binding"])
+    selected_binding = binding
     sent: list[tuple[bytes, str]] = []
 
-    def collaborators(_reader: object, *, funding_txid: str, contract_vout: int) -> tuple:  # type: ignore[type-arg]
-        assert (funding_txid, contract_vout) == (binding.funding_txid, binding.contract_vout)
+    def collaborators(_reader: object, *, binding: FundingBinding) -> tuple:  # type: ignore[type-arg]
+        assert (binding.funding_txid, binding.contract_vout) == (
+            selected_binding.funding_txid,
+            selected_binding.contract_vout,
+        )
         return (
             lambda: refund_watcher.ChainView(1000, not sent),
             lambda txid: (
-                2 if txid == funding_txid else (1 if sent and txid == sent[0][1] else None)
+                2 if txid == binding.funding_txid else (1 if sent and txid == sent[0][1] else None)
             ),
             lambda raw, txid: sent.append((raw, txid)) is None,
         )

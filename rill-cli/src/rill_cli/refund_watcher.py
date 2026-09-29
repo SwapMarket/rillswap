@@ -19,7 +19,7 @@ import httpx
 from rill_core.settlement.unilateral import SchnorrVerifier, validate_unilateral_spend
 from rill_core.wire.canonical import canonicalize, parse_json_strict
 
-from rill_cli.recovery_core_observation import CONNECT_SECONDS, READ_SECONDS, _cookie
+from rill_cli.recovery_core_observation import CONNECT_SECONDS, READ_SECONDS, _cookie, _outpoint
 from rill_cli.refund_publication import MAX_INTENT_BYTES, publish_new_broadcast_intent
 
 if TYPE_CHECKING:
@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from rill_core.settlement.unilateral import UnilateralAuthorization
+    from rill_core.wire.messages import FundingBinding
     from rill_provider.lnd_invoice_observation import LndInvoiceObserver
 
     from rill_cli.recovery_core_observation import RecoveryCoreReader
@@ -207,16 +208,14 @@ class RefundWatcher:
         if invoice == "SETTLED":
             return self._outcome("invoice_settled", refund="refused: the provider paid")
         view = self._chain()
-        if view is None:
-            return None
-        if not view.unspent_on_chain:
+        if view is None or not view.unspent_on_chain:
             for attempt in reversed(self.attempts):
                 depth = self._confirmations(attempt.txid)
                 if depth:
                     return self._outcome(
                         "refund_confirmed", refund_txid=attempt.txid, confirmations=depth
                     )
-            return self._outcome("outpoint_spent_elsewhere")
+            return None if view is None else self._outcome("outpoint_spent_elsewhere")
         if view.tip_height <= self._lock_height:
             return None
         latest = self.attempts[-1] if self.attempts else None
@@ -276,7 +275,7 @@ class RefundWatcher:
 
 
 def core_collaborators(
-    reader: RecoveryCoreReader, *, funding_txid: str, contract_vout: int
+    reader: RecoveryCoreReader, *, binding: FundingBinding
 ) -> tuple[
     Callable[[], ChainView | None], Callable[[str], int | None], Callable[[bytes, str], bool]
 ]:
@@ -299,19 +298,22 @@ def core_collaborators(
     def chain() -> ChainView | None:
         try:
             with client() as session:
-                _, height = reader._attest_session(session)  # noqa: SLF001 - same RPC boundary
+                tip_hash, height = reader._attest_session(session)  # noqa: SLF001 - same RPC boundary
                 if height == 0:
                     return None
                 # Chain-only: our own unconfirmed refund must not look like a spend.
                 out = reader._rpc(  # noqa: SLF001
-                    session, "gettxout", [funding_txid, contract_vout, False], 3
+                    session, "gettxout", [binding.funding_txid, binding.contract_vout, False], 3
                 )
-                if out is not None and not isinstance(out, dict):
-                    return None  # malformed result cannot prove spent or unspent
+                if out is None:
+                    return None  # absence does not identify a spender or a missing funding tx
+                outpoint_tip, _ = _outpoint(out, binding, height)
+                if outpoint_tip != tip_hash:
+                    return None  # the output sample differs from the attested tip
         except Exception:  # noqa: BLE001 - transport or node failure is not evidence
             LOG.info("Core chain view unavailable; waiting")
             return None
-        return ChainView(height, isinstance(out, dict))
+        return ChainView(height, unspent_on_chain=True)
 
     def confirmations(txid: str) -> int | None:
         try:

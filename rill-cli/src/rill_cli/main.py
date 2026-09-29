@@ -634,9 +634,7 @@ def _watch_claim(  # noqa: PLR0913 - explicit wiring of the collaborators
         bytes.fromhex(binding.contract_script_pubkey),
     )
     authorization = UnilateralAuthorization.from_terms(terms, funding, "claim", keys=crypto)
-    chain, confirmations, submit = refund_watcher.core_collaborators(
-        reader, funding_txid=binding.funding_txid, contract_vout=binding.contract_vout
-    )
+    chain, confirmations, submit = refund_watcher.core_collaborators(reader, binding=binding)
     ciphertext = Path(args.file).read_bytes()
 
     def sign(fee: int, tip: int) -> tuple[bytes, str, int, int]:
@@ -702,9 +700,7 @@ def _watch_refund(  # noqa: PLR0913 - explicit wiring of the collaborators
     if not intent_dir.is_dir():
         raise RecoveryCLIError("intent directory must exist")
     attempts = refund_watcher.load_attempts(intent_dir, authorization, verifier=crypto)
-    chain, confirmations, submit = refund_watcher.core_collaborators(
-        reader, funding_txid=binding.funding_txid, contract_vout=binding.contract_vout
-    )
+    chain, confirmations, submit = refund_watcher.core_collaborators(reader, binding=binding)
     observer = LndInvoiceObserver(
         host="127.0.0.1",
         port=args.lnd_port,

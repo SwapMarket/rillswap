@@ -133,6 +133,19 @@ def test_missing_invoice_or_chain_evidence_only_waits(
         assert world.submitted == []
 
 
+def test_unknown_outpoint_still_detects_our_confirmed_refund(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = _World()
+    watcher = _watcher(tmp_path, world, monkeypatch)
+    watcher.step()
+    world.view = None  # Core gettxout null or an unavailable sample
+    world.depths[watcher.attempts[0].txid] = 2
+    outcome = watcher.step()
+    assert outcome is not None
+    assert (outcome["outcome"], outcome["confirmations"]) == ("refund_confirmed", 2)
+
+
 def test_each_attempt_is_recorded_before_its_send_and_reloads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

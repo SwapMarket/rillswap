@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
 from rill_core.wire.types import NetworkIdentity
+from test_recovery_core_observation import _context
 
 from rill_cli import recovery_core_observation as observation
 from rill_cli.refund_watcher import ChainView, core_collaborators
@@ -18,7 +20,7 @@ if TYPE_CHECKING:
 
 NETWORKS = Path(__file__).parents[2] / "rill-docs/networks"
 TXID = "ac" * 32
-FUNDING = "de" * 32
+BINDING = _context()[1]
 
 
 def _callbacks(  # noqa: PLR0913 - independent node identity fault knobs
@@ -53,16 +55,30 @@ def _callbacks(  # noqa: PLR0913 - independent node identity fault knobs
         result: object = {
             "getblockchaininfo": info,
             "getblockhash": network.genesis_hash if genesis is None else genesis,
-            "gettxout": {"confirmations": 1} if outpoint is ... else outpoint,
+            "gettxout": {
+                "bestblock": "ab" * 32,
+                "confirmations": 1,
+                "value": Decimal(BINDING.contract_value_sat) / Decimal(100_000_000),
+                "scriptPubKey": {"hex": BINDING.contract_script_pubkey},
+                "coinbase": False,
+            }
+            if outpoint is ...
+            else outpoint,
             "getrawtransaction": {"txid": TXID, "confirmations": 2},
             "testmempoolaccept": [{"allowed": True, "txid": TXID}],
             "sendrawtransaction": TXID,
         }[method]
+        encoded = (
+            json.dumps(
+                {"jsonrpc": "2.0", "id": identifier, "result": result},
+                default=lambda value: f"#{value}#" if isinstance(value, Decimal) else value,
+            )
+            .replace('"#', "")
+            .replace('#"', "")
+        )
         return httpx.Response(
             200,
-            stream=httpx.ByteStream(
-                json.dumps({"jsonrpc": "2.0", "id": identifier, "result": result}).encode()
-            ),
+            stream=httpx.ByteStream(encoded.encode()),
         )
 
     transport = httpx.MockTransport(handle)
@@ -76,7 +92,7 @@ def _callbacks(  # noqa: PLR0913 - independent node identity fault knobs
     cookie.write_text("__cookie__:secret")
     cookie.chmod(0o600)
     reader = observation.RecoveryCoreReader(port=18443, cookie_path=cookie, network=network)
-    return core_collaborators(reader, funding_txid=FUNDING, contract_vout=0), methods
+    return core_collaborators(reader, binding=BINDING), methods
 
 
 @pytest.mark.parametrize(
@@ -147,6 +163,48 @@ def test_watcher_attests_each_session_then_allows_expected_rpcs(
 
 @pytest.mark.parametrize("outpoint", [False, 0, "spent", [], ["unspent"]])
 def test_malformed_utxo_response_is_not_evidence_of_a_foreign_spend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outpoint: object
+) -> None:
+    network = NetworkIdentity.model_validate_json(
+        (NETWORKS / "regtest-rillswap-e2e-v1.json").read_bytes()
+    )
+    (view, _, _), methods = _callbacks(
+        tmp_path, monkeypatch, network, challenge=..., chain="regtest", outpoint=outpoint
+    )
+    assert view() is None
+    assert methods == ["getblockchaininfo", "getblockhash", "gettxout"]
+
+
+@pytest.mark.parametrize(
+    "outpoint",
+    [
+        None,
+        {},
+        {"bestblock": "ab" * 32, "confirmations": 1},
+        {
+            "bestblock": "ab" * 32,
+            "confirmations": 1,
+            "value": Decimal(BINDING.contract_value_sat) / Decimal(100_000_000),
+            "scriptPubKey": {"hex": "ff"},
+            "coinbase": False,
+        },
+        {
+            "bestblock": "ab" * 32,
+            "confirmations": 1,
+            "value": Decimal(int(BINDING.contract_value_sat) + 1) / Decimal(100_000_000),
+            "scriptPubKey": {"hex": BINDING.contract_script_pubkey},
+            "coinbase": False,
+        },
+        {
+            "bestblock": "cd" * 32,
+            "confirmations": 1,
+            "value": Decimal(BINDING.contract_value_sat) / Decimal(100_000_000),
+            "scriptPubKey": {"hex": BINDING.contract_script_pubkey},
+            "coinbase": False,
+        },
+    ],
+)
+def test_absent_or_unbound_outpoint_does_not_claim_a_foreign_spend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outpoint: object
 ) -> None:
     network = NetworkIdentity.model_validate_json(
