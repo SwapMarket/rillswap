@@ -72,6 +72,7 @@ from rill_core.wire.types import (
 MAX_RECOVERY_BYTES = 128 * 1024
 COOPERATIVE_RESERVATION_EXTENSION = "rillswap/cooperative-claim-reservation"
 REVERSE_FALLBACK_EXTENSION = "rillswap/reverse-claim-fallback"
+REVERSE_DISCLOSURE_EXTENSION = "rillswap/reverse-preimage-disclosure"
 FUNDING_ATTEMPT_HEX_LENGTH = 64
 SCHNORR_AUXILIARY_BYTES = 32
 PURPOSE_KEY_COUNT = 6
@@ -198,6 +199,14 @@ class _ReverseClaimFallback(StrictModel):
             strict=True, min_length=2, max_length=MAX_RECOVERY_BYTES, pattern=r"^(?:[0-9a-f]{2})+$"
         ),
     ]
+
+
+class _ReversePreimageDisclosure(StrictModel):
+    """Possible disclosure reservation, never payment or live signing authority."""
+
+    version: Annotated[int, Field(strict=True, ge=1, le=1)]
+    funding_binding_hash: Hex32
+    proposal: Envelope
 
 
 @dataclass(frozen=True, slots=True)
@@ -561,13 +570,15 @@ def _require_successor(
 def _require_extension_successor(
     previous: _RecoveryPlaintext, candidate: _RecoveryPlaintext, crypto: RecoveryCrypto
 ) -> None:
-    """Permit the two direction-specific append-once records, preserving all others."""
+    """Permit named append-once evidence records, preserving all others."""
     earlier = dict(previous.extensions)
     later = dict(candidate.extensions)
     prior_marker = earlier.pop(COOPERATIVE_RESERVATION_EXTENSION, None)
     marker = later.pop(COOPERATIVE_RESERVATION_EXTENSION, None)
     prior_fallback = earlier.pop(REVERSE_FALLBACK_EXTENSION, None)
     fallback = later.pop(REVERSE_FALLBACK_EXTENSION, None)
+    prior_disclosure = earlier.pop(REVERSE_DISCLOSURE_EXTENSION, None)
+    disclosure = later.pop(REVERSE_DISCLOSURE_EXTENSION, None)
     _require(canonicalize(earlier) == canonicalize(later), "recovery extensions changed")
     if COOPERATIVE_RESERVATION_EXTENSION in previous.extensions:
         _require(canonicalize(prior_marker) == canonicalize(marker), "reservation changed")
@@ -605,6 +616,33 @@ def _require_extension_successor(
             prepared.funding_binding_hash
             == funding_binding_hash(candidate.funding_history[-1].binding).hex(),
             "fallback does not select latest funding",
+        )
+    if REVERSE_DISCLOSURE_EXTENSION in previous.extensions:
+        _require(
+            canonicalize(prior_disclosure) == canonicalize(disclosure),
+            "reverse disclosure changed",
+        )
+    elif REVERSE_DISCLOSURE_EXTENSION in candidate.extensions:
+        _require(REVERSE_FALLBACK_EXTENSION in previous.extensions, "disclosure before fallback")
+        _require(
+            previous.funding_history == candidate.funding_history,
+            "disclosure changed funding",
+        )
+        _require(
+            previous.monotonic_knowledge == candidate.monotonic_knowledge,
+            "disclosure changed knowledge",
+        )
+        reserved = _ReversePreimageDisclosure.model_validate_json(
+            canonicalize(disclosure), strict=True
+        )
+        payload = CooperativeClaimPropose.model_validate_json(
+            canonicalize(reserved.proposal.payload), strict=True
+        )
+        _require(candidate.updated_at < payload.deadline_at, "disclosure recorded after deadline")
+        _require(
+            reserved.funding_binding_hash
+            == funding_binding_hash(candidate.funding_history[-1].binding).hex(),
+            "disclosure does not select latest funding",
         )
 
 
@@ -728,7 +766,8 @@ def _inspect(
     ):
         _require(stored == reconstructed_value, "Taproot artifact")
     _check_static_history(record, crypto)
-    _inspect_reverse_fallback(record, crypto)
+    prepared = _inspect_reverse_fallback(record, crypto)
+    _inspect_reverse_disclosure(record, prepared, crypto)
     _inspect_cooperative_reservation(record, crypto)
     return OfflineRecoveryInspection(
         network_name=record.network_identity.name,
@@ -761,10 +800,12 @@ def _check_static_history(record: _RecoveryPlaintext, crypto: RecoveryCrypto) ->
     )
 
 
-def _inspect_reverse_fallback(record: _RecoveryPlaintext, crypto: RecoveryCrypto) -> None:
+def _inspect_reverse_fallback(
+    record: _RecoveryPlaintext, crypto: RecoveryCrypto
+) -> _ReverseClaimFallback | None:
     """Validate private historical claim bytes without any live authority inference."""
     if REVERSE_FALLBACK_EXTENSION not in record.extensions:
-        return
+        return None
     fallback = _ReverseClaimFallback.model_validate_json(
         canonicalize(record.extensions[REVERSE_FALLBACK_EXTENSION]), strict=True
     )
@@ -786,6 +827,66 @@ def _inspect_reverse_fallback(record: _RecoveryPlaintext, crypto: RecoveryCrypto
         record.contract_terms, funding, "claim", keys=crypto
     )
     validate_unilateral_spend(bytes.fromhex(fallback.transaction), authorization, verifier=crypto)
+    return fallback
+
+
+def _inspect_reverse_disclosure(
+    record: _RecoveryPlaintext, prepared: _ReverseClaimFallback | None, crypto: RecoveryCrypto
+) -> None:
+    """Validate possible historical disclosure, without live authority inference.
+
+    Neither these signed bytes nor their timestamp prove timely publication,
+    transmission, payment, nonce uniqueness, or retention of a native secret.
+    A missing marker (including a restored predecessor) proves nothing. This
+    evidence never resumes cooperation or disables explicit unilateral recovery.
+    """
+    if REVERSE_DISCLOSURE_EXTENSION not in record.extensions:
+        return
+    reserved = _ReversePreimageDisclosure.model_validate_json(
+        canonicalize(record.extensions[REVERSE_DISCLOSURE_EXTENSION]), strict=True
+    )
+    _require(
+        record.profile_id == "ln-to-btc/v1" and record.monotonic_knowledge.preimage_known,
+        "disclosure requires prepared reverse claim",
+    )
+    if prepared is None:
+        raise ValidationError("disclosure requires prepared reverse claim")
+    _require(
+        reserved.funding_binding_hash == prepared.funding_binding_hash,
+        "disclosure fallback binding changed",
+    )
+    context = record.verification_context
+    proposal = reserved.proposal
+    verify_static_signed_envelope(
+        canonicalize(proposal.model_dump(mode="json")),
+        expected_session_id=context.handshake_init.session_id,
+        expected_profile=record.profile_id,
+        expected_network=record.network_identity,
+        expected_sender_key=context.client_session_xonly_key,
+        supported_features={EPOCH_SESSION_FEATURE, COOPERATIVE_CLAIM_FEATURE},
+        crypto=crypto,
+    )
+    payload = check_cooperative_action_context(
+        proposal, record.contract_terms, context.handshake_init, context.handshake_accept
+    )
+    if not isinstance(payload, CooperativeClaimPropose):
+        raise ValidationError("disclosure is not a proposal")
+    _require(
+        payload.payment_preimage == record.monotonic_knowledge.preimage
+        and payload.deadline_at > 0
+        and 0
+        < payload.deadline_height
+        <= record.contract_terms.refund_lock_height
+        - record.contract_terms.timing_policy.claim_confirmation_blocks,
+        "disclosure preimage or cutoff changed",
+    )
+    bindings = [
+        entry.binding
+        for entry in record.funding_history
+        if funding_binding_hash(entry.binding).hex() == reserved.funding_binding_hash
+    ]
+    _require(len(bindings) == 1, "disclosure binding unavailable or ambiguous")
+    _reservation_plan(record.contract_terms, bindings[0], payload, crypto)
 
 
 def _inspect_cooperative_reservation(record: _RecoveryPlaintext, crypto: RecoveryCrypto) -> None:

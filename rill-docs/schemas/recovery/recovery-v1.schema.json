@@ -110,6 +110,9 @@
             },
             "rillswap/reverse-claim-fallback": {
               "$ref": "#/$defs/reverseClaimFallback"
+            },
+            "rillswap/reverse-preimage-disclosure": {
+              "$ref": "#/$defs/reversePreimageDisclosure"
             }
           }
         }
@@ -117,6 +120,28 @@
     }
   },
   "$defs": {
+    "reversePreimageDisclosure": {
+      "description": "Possible disclosure reservation only, not transmission, payment, publication, nonce custody, or live signing authority. RS-007 native semantic and successor verification is required.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "funding_binding_hash", "proposal"],
+      "properties": {
+        "version": { "type": "integer", "const": 1 },
+        "funding_binding_hash": { "$ref": "../wire/common-v1.schema.json#/$defs/hex32" },
+        "proposal": {
+          "allOf": [
+            { "$ref": "../wire/envelope-v1.schema.json" },
+            {
+              "properties": {
+                "profile_id": { "const": "ln-to-btc/v1" },
+                "message_type": { "const": "action_request" },
+                "signature": { "$ref": "../wire/common-v1.schema.json#/$defs/signature64" }
+              }
+            }
+          ]
+        }
+      }
+    },
     "reverseClaimFallback": {
       "description": "Private prepared reverse client claim, not payment, publication, chain, or disclosure authority. RS-007 native semantic validation is required.",
       "type": "object",

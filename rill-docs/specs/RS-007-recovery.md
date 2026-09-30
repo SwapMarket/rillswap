@@ -143,6 +143,47 @@ publication and fresh original-session payment/funding authority, then durably
 reserve possible preimage disclosure before transmission. This artifact is not
 that disclosure reservation and does not enable reverse readiness or cooperation.
 
+### 3.3 Reverse possible-preimage-disclosure reservation
+
+The distinct extension `rillswap/reverse-preimage-disclosure` is a closed object:
+
+* `version`: the exact integer `1` (not a boolean).
+* `funding_binding_hash`: the RS-001 hash of exactly one authenticated retained
+  binding, matching the private reverse claim fallback.
+* `proposal`: the complete client-session-signed `cooperative_claim_propose`
+  envelope, including its nonce identifiers, transaction, preimage, and deadlines.
+
+Inspection verifies original reverse roles, session, network, contract, negotiated
+features, envelope signature, matching known preimage, and deadline bounds. It
+reconstructs and validates the cooperative transaction against the selected binding.
+The private fallback must independently pass native verification for that binding.
+No stored redundant transaction digest is required. Message IDs remain nonce IDs,
+not envelope hashes.
+
+Insertion requires an existing fallback in the predecessor, selects the latest
+binding, and leaves funding history, monotonic knowledge, secrets, and unrelated
+extensions unchanged. Its timestamp must precede the proposal deadline. Adding a
+fallback and disclosure reservation simultaneously is forbidden. Either existing
+value of `dangerous_signature_issued` is preserved: an envelope signature and public
+nonce are not issuance of a cooperative spend signature. The reservation is immutable
+after insertion, including after expiry; valid funding history may subsequently grow
+without authorizing a new attempt or changing the historical binding.
+
+This record conservatively means disclosure is possible, even if no transmission
+occurred. Signed bytes and recorded timestamps prove neither durable publication nor
+its ordering, transmission, receipt, payment, nonce uniqueness, secret nonce custody,
+or live signing authority. A live producer MUST acknowledge durable encrypted
+publication of the exact successor before any preimage-bearing transmission, then
+recheck original-session authority and the original nonrenewing deadline. The format
+alone does not implement that live boundary.
+
+Missing markers (including previous-release installations and restored predecessors)
+prove nothing and trigger no backfill, payment retry, scanning, cooperation, or other
+automatic work. Partial, malformed, and unsupported markers fail inspection rather
+than being silently discarded. Valid historical evidence never resumes cooperation
+and never disables independently authorized, explicitly selected unilateral recovery.
+No format-version bump or migration is required for this named, versioned extension.
+
 ## 4. Import and use
 
 The top-level format identifier and specification version are immutable exact
