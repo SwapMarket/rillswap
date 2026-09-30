@@ -106,7 +106,8 @@ Receives on-chain BTC by paying a provider's hold invoice from your own LND
 5. Pay the hold invoice (`--lnd-macaroon` needs offchain read and write) on a
    route whose final hop expires no earlier than the terms'
    `min_incoming_htlc_expiry_height`, within `--max-routing-fee-sat`.
-6. Wait for the provider's session-signed `funding_binding`, check it and the
+6. Consume the original provider stream in FIFO order while waiting for its
+   session-signed `funding_binding`, check it and the
    exact funding transaction against the terms, and write the funded snapshot
    (`<output>.funded`).
 7. Once Core shows the contract output at the signed depth, sign the claim
@@ -115,6 +116,17 @@ Receives on-chain BTC by paying a provider's hold invoice from your own LND
    maximum by `refund_lock_height - claim_confirmation_blocks`; after that
    nothing new is signed. The command returns when the claim confirms. The
    provider settles the hold from the preimage in the claim witness.
+
+The reverse funding wait owns one settlement consumer and one absolute wait
+deadline. Earlier action requests, foreign contexts, unexpected replies, or
+malformed observations cannot be skipped to a later binding. Nonterminal
+observations never renew the wait, and buffered funding at expiry is not
+processed. Timeout means funding was not observed, not proof that the provider
+never funded. Check `lncli listpayments` and do not retry payment automatically.
+Nonfinite or nonpositive settlement timeout values are refused before discovery
+or payment. Funding, depth, and claim watching still use separate budgets;
+this increment does not establish one overall reverse lifetime or activate
+reverse cooperative signing.
 
 ```sh
 rill swap ln-to-btc \

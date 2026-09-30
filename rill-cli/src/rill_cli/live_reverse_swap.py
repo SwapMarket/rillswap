@@ -217,35 +217,53 @@ async def _await_funding(  # noqa: PLR0913 - explicit waiting bounds
     script: bytes,
     crypto: Context,
 ) -> tuple[FundingBinding, str, bytes]:
-    """Wait for the signed funding_binding; a swap_aborted notice ends the swap."""
+    """Own the original FIFO until funding under one nonrenewing wait budget.
+
+    Never skip an earlier action or foreign context to a later binding. Reverse
+    cooperation is not available here; no readiness or signing is attempted.
+    """
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise SwapError("funding timeout must be finite and positive")
     deadline = time.monotonic() + timeout
-    while True:
-        try:
-            message = await session.receive(
-                lambda item: (
-                    item.message_type in ("funding_binding", "observation")
-                    and item.in_reply_to is None
-                    and item.contract_hash == contract
-                ),
-                timeout=max(0.1, deadline - time.monotonic()),
-            )
-        except TimeoutError:
-            raise SwapError(
-                "provider did not fund in time; the held payment fails back when the "
-                "provider cancels the hold, check `lncli listpayments`"
-            ) from None
-        if message.message_type == "funding_binding":
-            return _check_funding(
-                message,
-                terms=terms,
-                contract=contract,
-                provider_key=provider_key,
-                script=script,
-                crypto=crypto,
-            )
-        seen = parse_observation(canonicalize(message.payload))
-        if seen.kind == "swap_aborted":
-            raise SwapError(f"provider aborted before funding ({seen.reason}); nothing is at risk")
+    timeout_error = (
+        "provider funding not observed in time; check `lncli listpayments`; "
+        "the held payment fails back when the provider cancels the hold; do not retry payment"
+    )
+    context_hint = "funding status unresolved; check `lncli listpayments`; do not retry payment"
+    async with session.settlement_stream():
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SwapError(timeout_error)
+            try:
+                message = await session.receive_next(timeout=remaining)
+            except TimeoutError:
+                raise SwapError(timeout_error) from None
+            except SwapError:
+                raise SwapError("provider session stopped; " + context_hint) from None
+            if time.monotonic() >= deadline:
+                raise SwapError(timeout_error)
+            if message.in_reply_to is not None or message.contract_hash != contract:
+                raise SwapError("unexpected provider funding context; " + context_hint)
+            if message.message_type == "funding_binding":
+                return _check_funding(
+                    message,
+                    terms=terms,
+                    contract=contract,
+                    provider_key=provider_key,
+                    script=script,
+                    crypto=crypto,
+                )
+            if message.message_type != "observation":
+                raise SwapError("unexpected provider funding message; " + context_hint)
+            try:
+                seen = parse_observation(canonicalize(message.payload))
+            except ValueError:
+                raise SwapError("invalid provider funding observation; " + context_hint) from None
+            if seen.kind == "swap_aborted":
+                raise SwapError(
+                    f"provider aborted before funding ({seen.reason}); nothing is at risk"
+                )
 
 
 async def _await_depth(  # noqa: PLR0913 - explicit waiting bounds
@@ -349,6 +367,8 @@ async def run_reverse_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
     report: Callable[[str], None] = lambda _line: None,
 ) -> ReverseSwapOutcome:
     """Run one LN to BTC swap; see the module docstring for the order."""
+    if not math.isfinite(settle_timeout) or settle_timeout <= 0:
+        raise SwapError("settlement timeout must be finite and positive")
     now = int(time.time())
     preimage = secrets.token_bytes(32)
     payment_hash = hashlib.sha256(preimage).hexdigest()
