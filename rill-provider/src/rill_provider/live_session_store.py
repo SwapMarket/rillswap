@@ -3382,15 +3382,24 @@ class LiveSessionStore:
         cooperation_id: bytes,
         observation: CooperativeClaimObservation,
         *,
-        now: int,
+        now: Callable[[], int],
     ) -> str:
         """Select the exact key-path winner atomically before exposing our partial.
 
         This checked live entry point requires the current owner's prepared
         WAITING window. Only a verified completion may close that window.
+        Refresh the owner clock around lock acquisition, native consumption,
+        and persistence; acquisition never renews the sample or deadline.
         """
+        if not callable(now):
+            raise LiveSessionStoreError("cooperative clock unavailable")
         return self._complete_cooperative_claim(
-            session_id, cooperation_id, observation, now=now, select_winner=True
+            session_id,
+            cooperation_id,
+            observation,
+            now=_cooperative_now(0, now),
+            select_winner=True,
+            clock=now,
         )
 
     def _commit_cooperative_claim_partial(
@@ -3406,7 +3415,7 @@ class LiveSessionStore:
             session_id, cooperation_id, observation, now=now, select_winner=False
         )
 
-    def _complete_cooperative_claim(  # noqa: PLR0912, PLR0915 - one-shot custody transition
+    def _complete_cooperative_claim(  # noqa: PLR0912, PLR0913, PLR0915 - one-shot custody transition
         self,
         session_id: str,
         cooperation_id: bytes,
@@ -3414,6 +3423,7 @@ class LiveSessionStore:
         *,
         now: int,
         select_winner: bool,
+        clock: Callable[[], int] | None = None,
     ) -> str:
         """Consume one live handle and commit the signed completion before exposure.
 
@@ -3456,6 +3466,7 @@ class LiveSessionStore:
         consumed = False
         try:
             with self._write() as connection:
+                now = _cooperative_completion_now(now, clock, observation)
                 row = connection.execute(
                     "SELECT a.binding,a.owner_generation,a.created_at,a.deadline_at,a.state,"
                     "a.local_nonce,a.peer_nonce,a.nonce_response_id,s.phase,s.blocked,"
@@ -3652,6 +3663,9 @@ class LiveSessionStore:
                     signer_index=0,
                     partial_signature=bytes.fromhex(result.partial_signature),
                 )
+                now = _cooperative_completion_now(now, clock, observation)
+                if not created_at <= now < deadline_at:
+                    raise LiveSessionStoreError("cooperative deadline elapsed")  # noqa: TRY301
                 # Popping BEFORE native consumption makes every failure one-shot.
                 handle = self._cooperation_handles.pop(cooperation_id)
                 consumed = True
@@ -3680,6 +3694,9 @@ class LiveSessionStore:
                     provider_partial_signature=partial,
                 )
                 completed = finalize_cooperative_claim(plan, signature, verifier=crypto)
+                now = _cooperative_completion_now(now, clock, observation)
+                if not created_at <= now < deadline_at:
+                    raise LiveSessionStoreError("cooperative deadline elapsed")  # noqa: TRY301
                 if (
                     select_winner
                     and connection.execute(
@@ -3754,6 +3771,9 @@ class LiveSessionStore:
                     != 1
                 ):
                     raise LiveSessionStoreError("cooperative signing state changed")  # noqa: TRY301
+                now = _cooperative_completion_now(now, clock, observation)
+                if not created_at <= now < deadline_at:
+                    raise LiveSessionStoreError("cooperative deadline elapsed")  # noqa: TRY301
         except BaseException as error:
             if consumed and os.getpid() == self._pid and self._lock_fd is not None:
                 # A rollback cannot restore a consumed native handle.
@@ -5528,6 +5548,16 @@ def _cooperative_now(previous: int, clock: Callable[[], int] | None) -> int:
     if type(current) is not int or current < 0:
         raise LiveSessionStoreError("cooperative clock unavailable")
     return max(previous, current)
+
+
+def _cooperative_completion_now(
+    previous: int, clock: Callable[[], int] | None, observation: CooperativeClaimObservation
+) -> int:
+    """Keep the independently validated sample fresh through native/storage work."""
+    current = _cooperative_now(previous, clock)
+    if not 0 <= current - observation.sampled_at <= COOPERATION_OBSERVATION_MAX_AGE_SECONDS:
+        raise LiveSessionStoreError("cooperative signing observation expired")
+    return current
 
 
 def _require_waiting_cooperation(  # noqa: PLR0913 - exact owner, contract, and deadlines

@@ -58,6 +58,15 @@ if TYPE_CHECKING:
         "noncallable_clock",
         "after_native_clock_failure",
         "proposal_sign_clock_failure",
+        "completion_lock_deadline",
+        "completion_lock_age",
+        "completion_before_partial_deadline",
+        "completion_after_partial_deadline",
+        "completion_persistence_deadline",
+        "completion_persistence_age",
+        "completion_clock_failure",
+        "completion_noncallable_clock",
+        "completion_age_exactly_five",
     ],
 )
 def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0911, PLR0912, PLR0915 - native custody lifecycle
@@ -445,19 +454,131 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0911, P
             mempool_unspent=True,
             fee_floor_sat=0,
         )
+        clock_now = 1004
+        if winner.startswith("completion_"):
+            prior_outbox = store._connection.execute(  # noqa: SLF001 - compare all durable rows
+                "SELECT * FROM outbox ORDER BY message_id"
+            ).fetchall()
+            if winner == "completion_noncallable_clock":
+                for invalid_clock in (None, 1004, True):
+                    with pytest.raises(LiveSessionStoreError, match="clock unavailable"):
+                        store.commit_selected_cooperative_claim(
+                            session,
+                            cooperation_id,
+                            observation,
+                            now=invalid_clock,  # type: ignore[arg-type] - runtime guard
+                        )
+                assert cooperation_id in store._cooperation_handles  # noqa: SLF001
+                assert store._connection.execute(  # noqa: SLF001
+                    "SELECT state FROM cooperation_attempts WHERE session_id=?",
+                    (session,),
+                ).fetchone() == ("SIGNING",)
+                return
+            if winner == "completion_age_exactly_five":
+                clock_now = 1008
+                completion_id = store.commit_selected_cooperative_claim(
+                    session,
+                    cooperation_id,
+                    observation,
+                    now=clock,
+                )
+                assert store.pending_sendable(completion_id, now=1025)
+                assert cooperation_id not in store._cooperation_handles  # noqa: SLF001
+                return
+            if winner.endswith("deadline"):
+                clock_now = 1019
+                observation = replace(observation, sampled_at=1019)
+            expired_at = 1020 if winner.endswith("deadline") else 1009
+            original_write = store._write  # noqa: SLF001 - acquisition delay injection
+
+            @contextmanager
+            def delayed_completion_write() -> Iterator[sqlite3.Connection]:
+                nonlocal clock_now
+                with original_write() as connection:
+                    if winner.startswith("completion_lock_"):
+                        clock_now = expired_at
+                    yield connection
+
+            monkeypatch.setattr(store, "_write", delayed_completion_write)
+            original_verify = crypto.musig_partial_verify
+            original_sign = crypto.schnorr_sign
+            signs = 0
+
+            def verify_and_expire(**kwargs: Any) -> None:  # noqa: ANN401 - exact native boundary
+                nonlocal clock_now, clock_failed
+                original_verify(**kwargs)
+                if winner == "completion_before_partial_deadline" and kwargs["signer_index"] == 0:
+                    clock_now = expired_at
+                if winner == "completion_after_partial_deadline" and kwargs["signer_index"] == 1:
+                    clock_now = expired_at
+                if winner == "completion_clock_failure" and kwargs["signer_index"] == 1:
+                    clock_failed = True
+
+            def completion_sign_and_expire(secret: bytes, message: bytes, aux: bytes) -> bytes:
+                nonlocal signs, clock_now
+                signed = original_sign(secret, message, aux)
+                signs += 1
+                if winner.startswith("completion_persistence_") and signs == 2:
+                    clock_now = expired_at
+                return signed
+
+            monkeypatch.setattr(crypto, "musig_partial_verify", verify_and_expire)
+            monkeypatch.setattr(crypto, "schnorr_sign", completion_sign_and_expire)
+            with pytest.raises(
+                LiveSessionStoreError,
+                match=(
+                    r"cooperative (signing (observation expired|custody unavailable)|"
+                    r"deadline elapsed|clock unavailable)"
+                ),
+            ):
+                store.commit_selected_cooperative_claim(
+                    session,
+                    cooperation_id,
+                    observation,
+                    now=clock,
+                )
+            consumed = winner not in {
+                "completion_lock_deadline",
+                "completion_lock_age",
+                "completion_before_partial_deadline",
+            }
+            assert (cooperation_id in store._cooperation_handles) == (not consumed)  # noqa: SLF001
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT state,partial_signature,partial_response_id "
+                "FROM cooperation_attempts WHERE session_id=?",
+                (session,),
+            ).fetchone() == (("ABANDONED", None, None) if consumed else ("SIGNING", None, None))
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT state,cooperative_raw,cooperative_txid "
+                "FROM claim_arbitration WHERE session_id=?",
+                (session,),
+            ).fetchone() == ("WAITING", None, None)
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT state,claim_tx,claim_txid FROM swaps WHERE session_id=?",
+                (session,),
+            ).fetchone() == ("PAID", None, None)
+            assert store.claim_attempts(session) == ()
+            assert [entry.message_id for entry in store.pending_outbox()] == [proposal_id]
+            assert (
+                store._connection.execute(  # noqa: SLF001
+                    "SELECT * FROM outbox ORDER BY message_id"
+                ).fetchall()
+                == prior_outbox
+            )
+            return
         if winner == "fallback":
             (candidate,) = store.prepared_fallbacks()
             store.select_prepared_fallback(candidate, signer=crypto, now=1003, height=1094)
             with pytest.raises(LiveSessionStoreError, match="arbitration unavailable"):
                 store.commit_selected_cooperative_claim(
-                    session, cooperation_id, observation, now=1004
+                    session, cooperation_id, observation, now=clock
                 )
             assert store._connection.execute(  # noqa: SLF001
                 "SELECT cooperative_raw FROM claim_arbitration WHERE session_id=?", (session,)
             ).fetchone() == (None,)
         elif winner in ("cooperative", "prior_paid"):
             completion_id = store.commit_selected_cooperative_claim(
-                session, cooperation_id, observation, now=1004
+                session, cooperation_id, observation, now=clock
             )
             raw, txid, state = store._connection.execute(  # noqa: SLF001
                 "SELECT cooperative_raw,cooperative_txid,state FROM claim_arbitration "
@@ -523,7 +644,7 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0911, P
             store._connection = proxy  # type: ignore[assignment]  # noqa: SLF001
             with pytest.raises(live.StaleOwnerError, match="commit outcome uncertain"):
                 store.commit_selected_cooperative_claim(
-                    session, cooperation_id, observation, now=1004
+                    session, cooperation_id, observation, now=clock
                 )
             assert proxy.fired
     with (
