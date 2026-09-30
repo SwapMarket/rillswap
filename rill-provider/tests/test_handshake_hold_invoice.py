@@ -7,18 +7,20 @@ opened with, and that an invoice no offer bound is canceled again.
 from __future__ import annotations
 
 import asyncio
-import json
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
 
 import pytest
-from rill_core.wire.messages import InvoiceBinding
+from rill_core.wire.hashes import canonical_model
+from rill_core.wire.messages import Envelope, InvoiceBinding
 from test_quote_policy import CONTRACT, FIRM, SIGNER
 from test_reverse_quote_policy import HASH, HOLD, REVERSE_FIRM, SCHEDULE
 
 from rill_provider.handshake_service import HandshakeService, ServicePolicy
-from rill_provider.live_session_store import Answer
+from rill_provider.live_session_store import Answer, OutboxEntry, RequestAnswer
 from rill_provider.quote_policy import QuoteTerms
+from rill_provider.reverse_operations import ReverseOperations
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -38,7 +40,25 @@ POLICY = ServicePolicy(
 
 
 def _document(payload: dict[str, Any], sequence: int = 2) -> bytes:
-    return json.dumps({"sequence": sequence, "payload": payload | {"extensions": {}}}).encode()
+    return canonical_model(
+        Envelope(
+            protocol="rillswap",
+            wire_version="1",
+            profile_id="ln-to-btc/v1",
+            network_identity=SIGNER.network,
+            session_id="11" * 32,
+            message_id="22" * 32,
+            sender_session_key="33" * 32,
+            sequence=sequence,
+            in_reply_to=None,
+            contract_hash=None,
+            message_type="quote_request",
+            payload=payload | {"extensions": {}},
+            required_features=(),
+            extensions={},
+            signature="66" * 64,
+        )
+    )
 
 
 def _terms(**changes: Any) -> QuoteTerms:  # noqa: ANN401
@@ -60,6 +80,10 @@ def _service(hold: Mock | None, store: Mock | None = None) -> tuple[HandshakeSer
     store.classify_request.return_value = "new"
     store.payment_hash_reserved.return_value = False
     store.firm_capacity_available.return_value = True
+    store.owner_is_open = True
+    store.retain_owner.side_effect = nullcontext
+    store.reverse_operations = ReverseOperations(store)
+    store.pending_outbox.return_value = ()
     service = HandshakeService(
         store,
         Mock(),
@@ -67,6 +91,7 @@ def _service(hold: Mock | None, store: Mock | None = None) -> tuple[HandshakeSer
         POLICY,
         invoice_decoder=lambda _bolt11: HOLD,
         hold_invoices=hold,
+        clock=lambda: 1_700_000_000,
     )
     return service, store
 
@@ -77,9 +102,34 @@ def _hold() -> Mock:
     return hold
 
 
+async def _open(service: HandshakeService, document: bytes, terms: QuoteTerms) -> object:
+    async with service._store.reverse_operations.operation() as operation:  # noqa: SLF001 - component scope
+        return await service._open_hold(document, terms, operation=operation)  # noqa: SLF001
+
+
+def _refusal() -> Envelope:
+    return Envelope(
+        protocol="rillswap",
+        wire_version="1",
+        profile_id="ln-to-btc/v1",
+        network_identity=SIGNER.network,
+        session_id="11" * 32,
+        message_id="00" * 32,
+        sender_session_key="33" * 32,
+        sequence=3,
+        in_reply_to="22" * 32,
+        contract_hash=None,
+        message_type="error",
+        payload={"code": "capacity_unavailable", "message": "firm quote unavailable"},
+        required_features=(),
+        extensions={},
+        signature="44" * 64,
+    )
+
+
 def test_hold_is_opened_for_exactly_h_with_the_schedule_cltv() -> None:
     service, _ = _service(_hold())
-    outcome = asyncio.run(service._open_hold(_document(REVERSE_FIRM), _terms()))  # noqa: SLF001
+    outcome = asyncio.run(_open(service, _document(REVERSE_FIRM), _terms()))
     assert outcome == ("lnbcrt1007u1hold", HOLD)
     service._hold_invoices.add.assert_called_once_with(  # type: ignore[union-attr] # noqa: SLF001
         HASH, value_msat=100_700_000, expiry_seconds=3_600, cltv_expiry_delta=185
@@ -106,7 +156,7 @@ def test_no_hold_is_opened_when_the_offer_could_not_bind_it(
     hold = _hold()
     service, store = _service(hold)
     store.configure_mock(**store_changes)
-    assert asyncio.run(service._open_hold(document, _terms(**terms_changes))) is None  # noqa: SLF001
+    assert asyncio.run(_open(service, document, _terms(**terms_changes))) is None
     hold.add.assert_not_called()
 
 
@@ -114,9 +164,9 @@ def test_backend_failure_only_defers_the_firm_quote() -> None:
     hold = _hold()
     hold.add.side_effect = RuntimeError("boom")
     service, _ = _service(hold)
-    assert asyncio.run(service._open_hold(_document(REVERSE_FIRM), _terms())) == "unavailable"  # noqa: SLF001
+    assert asyncio.run(_open(service, _document(REVERSE_FIRM), _terms())) == "unavailable"
     service, _ = _service(None)  # no adapter configured: never a hold, never an error
-    assert asyncio.run(service._open_hold(_document(REVERSE_FIRM), _terms())) is None  # noqa: SLF001
+    assert asyncio.run(_open(service, _document(REVERSE_FIRM), _terms())) is None
 
 
 @pytest.mark.parametrize(
@@ -134,13 +184,19 @@ def test_unbound_hold_invoices_are_canceled_after_the_answer(
 ) -> None:
     hold = _hold()
     service, store = _service(hold)
+    # Make this test's unbound replay premise explicit: its owned prior reply
+    # is a committed refusal, not unspecified or possibly payable terms.
+    refusal = _refusal()
+    store.pending_outbox.return_value = (
+        OutboxEntry(refusal.message_id, refusal.session_id, canonical_model(refusal)),
+    )
 
     def answer_request(
         _document: bytes, *, responder: Callable[..., Answer], **_kwargs: object
-    ) -> Mock:
+    ) -> RequestAnswer:
         for _ in answers:
             responder(Mock(), (), Mock())
-        return Mock(response_message_id="00" * 32, replay=not answers)
+        return RequestAnswer("11" * 32, "22" * 32, "00" * 32, replay=not answers)
 
     store.answer_request.side_effect = answer_request
     monkeypatch.setattr(

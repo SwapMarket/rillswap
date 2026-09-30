@@ -17,9 +17,10 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
-from rill_core.wire.canonical import canonicalize
+from rill_core.wire.canonical import canonicalize, parse_model_json
+from rill_core.wire.hashes import canonical_model
 from rill_core.wire.messages import Envelope, InvoiceBinding
-from rill_core.wire.quotes import parse_quote_request
+from rill_core.wire.quotes import QuoteError, parse_quote_request
 from rill_core.wire.reverse_quotes import ReverseFirmQuoteRequest
 
 from rill_provider.live_session_store import (
@@ -58,10 +59,12 @@ if TYPE_CHECKING:
     from rill_provider.live_session_store import (
         PreparedFallback,
         ReadinessChallenge,
+        RequestAnswer,
         RequestContext,
     )
     from rill_provider.lnd_hold_invoice import LndHoldInvoices
     from rill_provider.provider_identity import ProviderIdentity
+    from rill_provider.reverse_operations import ReverseOperation
     from rill_provider.settlement_engine import ClaimProbeWindow, SettlementEngine
 
 LOG = logging.getLogger(__name__)
@@ -782,14 +785,18 @@ class HandshakeService:
             LOG.warning("invoice decoding unavailable; firm quote answered capacity_unavailable")
             return "unavailable"
 
-    async def _open_hold(self, document: bytes, terms: QuoteTerms) -> HoldOutcome:
+    async def _open_hold(
+        self, document: bytes, terms: QuoteTerms, *, operation: ReverseOperation
+    ) -> HoldOutcome:
         """Open the hold invoice for a new LN to BTC firm request (RS-004).
 
         Runs before the store transaction, like invoice decoding. The invoice
         is for exactly ``H`` at this payout with the schedule's final CLTV, so
-        the offer can bind its decoding; ``_answer`` cancels it again when the
-        answer is not a terms offer. An unavailable backend only defers.
+        the offer can bind its decoding. Cleanup requires positive committed
+        refusal evidence; unknown admission outcomes leave the invoice intact.
+        An unavailable backend only defers.
         """
+        operation.check()
         envelope = json.loads(document)
         payload = envelope.get("payload")
         if (
@@ -822,7 +829,7 @@ class HandshakeService:
             terms.schedule,
         )
         try:
-            bolt11 = await asyncio.to_thread(
+            bolt11 = await operation.worker(
                 lambda: hold_invoices.add(
                     request.payment_hash,
                     value_msat=hold_invoice_msat(terms, payout),
@@ -830,7 +837,9 @@ class HandshakeService:
                     cltv_expiry_delta=schedule.incoming_htlc_expiry_delta_blocks,
                 )
             )
-            binding = await asyncio.to_thread(decoder, bolt11)
+            binding = await operation.worker(lambda: decoder(bolt11))
+        except LiveSessionStoreError:
+            raise
         except Exception as error:  # noqa: BLE001 - an unavailable backend only defers
             LOG.warning(
                 "hold invoice unavailable (%s); firm quote answered capacity_unavailable",
@@ -839,12 +848,75 @@ class HandshakeService:
             return "unavailable"
         return (bolt11, binding)
 
-    async def _cancel_hold(self, hold: HoldOutcome) -> None:
+    def _matching_unused_hold(  # noqa: PLR0911 - each failed proof independently forbids cleanup
+        self,
+        document: bytes,
+        answer: RequestAnswer,
+        hold: HoldOutcome,
+        *,
+        operation: ReverseOperation,
+    ) -> bool:
+        """Require owned committed refusal, not absence or replay classification.
+
+        ADD must have returned a newly created invoice for this operation.
+        The owned outbox supplies authenticity, not a new signing grant. Message
+        IDs are nonces: consistency means matching IDs and canonical bytes, not
+        deriving a new hash-based ID. Missing/delivered evidence proves nothing.
+        """
+        operation.check()
+        if not isinstance(hold, tuple):
+            return False
+        # Ownership/transaction failures remain fatal, outside the parser guard.
+        pending = self._store.pending_outbox()
+        try:
+            original = parse_model_json(Envelope, document)
+            if (
+                original.session_id != answer.session_id
+                or original.message_id != answer.request_message_id
+                or original.message_type != "quote_request"
+                or original.sequence != FIRST_REQUEST_SEQUENCE
+                or original.profile_id != "ln-to-btc/v1"
+                or original.network_identity != self._policy.network
+            ):
+                return False
+            request = parse_quote_request(canonicalize(original.payload))
+            if not isinstance(request, ReverseFirmQuoteRequest) or (
+                request.payment_hash != hold[1].payment_hash
+            ):
+                return False
+            matches = [entry for entry in pending if entry.message_id == answer.response_message_id]
+            if len(matches) != 1:
+                return False
+            entry = matches[0]
+            response = parse_model_json(Envelope, entry.canonical_bytes)
+            if (
+                canonical_model(response) != entry.canonical_bytes
+                or entry.session_id != answer.session_id
+                or response.session_id != answer.session_id
+                or response.message_id != answer.response_message_id
+                or response.in_reply_to != answer.request_message_id
+                or response.profile_id != "ln-to-btc/v1"
+                or response.network_identity != self._policy.network
+                or response.contract_hash is not None
+                or response.signature is None
+                or response.message_type != "error"
+            ):
+                return False
+            QuoteError.model_validate(response.payload, strict=True)
+        except Exception:  # noqa: BLE001 - inconsistent owned bytes grant no destructive cleanup
+            return False
+        operation.check()
+        return True
+
+    async def _cancel_hold(self, hold: HoldOutcome, *, operation: ReverseOperation) -> None:
+        operation.check()
         if not isinstance(hold, tuple) or self._hold_invoices is None:
             return
         hold_invoices, payment_hash = self._hold_invoices, hold[1].payment_hash
         try:
-            await asyncio.to_thread(lambda: hold_invoices.cancel(payment_hash))
+            await operation.worker(lambda: hold_invoices.cancel(payment_hash))
+        except LiveSessionStoreError:
+            raise
         except Exception as error:  # noqa: BLE001 - the invoice expires on its own
             LOG.warning("unused hold invoice not canceled (%s)", type(error).__name__)
 
@@ -889,8 +961,22 @@ class HandshakeService:
             return replace(terms, invoice="unavailable")
         return terms
 
-    async def _answer(self, document: bytes, relays: Sequence[Relay], now: int) -> str:
+    async def _prepare_answer(
+        self,
+        document: bytes,
+        now: int,
+        *,
+        operation: ReverseOperation | None,
+    ) -> tuple[RequestAnswer, list[str]]:
+        """Own reverse hold creation, committed disposition, and proven cleanup.
+
+        Exceptions provide no rollback certificate. Leave any possibly committed
+        invoice intact and preserve the original error, then drain the operation.
+        Expiry limits payment eligibility, not LND's historical record storage.
+        """
         policy = self._policy
+        if operation is not None:
+            now = max(now, self._deadline_now())
         invoice = await self._decode_invoice(document)
         terms = QuoteTerms(
             amount_bands=policy.amount_bands,
@@ -904,7 +990,13 @@ class HandshakeService:
             profile=policy.profile,
         )
         terms = await self._route_ready(document, terms)
-        terms = replace(terms, hold=await self._open_hold(document, terms))
+        if operation is not None:
+            terms = replace(terms, hold=await self._open_hold(document, terms, operation=operation))
+        # Core/LND preparation can consume wall time; it cannot reserve an old
+        # timestamp or renew a request's existing signed deadline.
+        if operation is not None:
+            now = max(now, self._deadline_now())
+            terms = replace(terms, now=now)
         sent: list[str] = []
 
         def responder(
@@ -914,15 +1006,28 @@ class HandshakeService:
             sent.append(answer.message_type)
             return answer
 
-        try:
-            answer = self._store.answer_request(
-                document, responder=responder, signer=self._transport, now=now
-            )
-        except BaseException:
-            await self._cancel_hold(terms.hold)
-            raise
-        if sent != ["terms_offer"]:  # refused, or a replay: this invoice binds nothing
-            await self._cancel_hold(terms.hold)
+        if operation is not None:
+            operation.check()
+        answer = self._store.answer_request(
+            document, responder=responder, signer=self._transport, now=now
+        )
+        if (
+            operation is not None
+            and sent != ["terms_offer"]
+            and self._matching_unused_hold(document, answer, terms.hold, operation=operation)
+        ):
+            await self._cancel_hold(terms.hold, operation=operation)
+        return answer, sent
+
+    async def _answer(self, document: bytes, relays: Sequence[Relay], now: int) -> str:
+        policy = self._policy
+        if policy.profile == "ln-to-btc/v1":
+            async with self._store.reverse_operations.operation() as operation:
+                answer, sent = await self._prepare_answer(document, now, operation=operation)
+        else:
+            answer, sent = await self._prepare_answer(document, now, operation=None)
+        # Relay delivery and independent unilateral supervision do not own the
+        # reverse economic gate. Committed payable terms never become cleanup.
         if not answer.replay and sent == ["ack"] and self._settlement is not None:
             request = Envelope.model_validate_json(document, strict=True)
             digest = request.contract_hash

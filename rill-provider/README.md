@@ -107,9 +107,18 @@ host. The store cannot verify that attestation. Behavior:
    reloads its row after acquiring it, and retains every Core/LND worker through
    actual completion before releasing physical exclusion. Queued snapshots
    cannot authorize a second cancellation after terminal commitment or skip a
-   newly recorded settlement debt. Hold-invoice creation/disposition and future
-   cooperative proposal admission are not yet integrated; full reverse economic
-   serialization remains an unfinished acceptance gate.
+   newly recorded settlement debt. Reverse hold-invoice creation, decoding,
+   committed disposition, and unused-invoice cancellation share this gate.
+   Quote time is refreshed after acquisition and asynchronous preparation;
+   relay delivery stays outside the gate. Cleanup requires a positively created
+   invoice matching the original request and an exact matching canonical,
+   committed pending ERROR response. Replay, missing or delivered evidence,
+   malformed bytes, cancellation, and admission exceptions authorize no new
+   cancellation. In particular, an uncertain commit can leave payable terms
+   durable, so its invoice remains intact. Payment eligibility expires normally;
+   LND may retain historical invoice records. No absent metadata triggers cleanup
+   on upgrade. Future cooperative proposal admission is not yet integrated;
+   complete cooperative reverse settlement remains an unfinished acceptance gate.
 - Absent, partial, foreign, or newer files are refused before any pragma can
   modify them. Malformed provisioning metadata (UUID or attestation) is also
   refused. The inode numbers of the database and the lock file are recorded
