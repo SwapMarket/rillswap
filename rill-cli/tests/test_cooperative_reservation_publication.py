@@ -13,6 +13,7 @@ from pyrage import x25519
 from rill_core.errors import ValidationError
 from rill_core.recovery import (
     COOPERATIVE_RESERVATION_EXTENSION,
+    construct_selected_recovery_refund,
     inspect_recovery_plaintext,
     inspect_recovery_successor,
 )
@@ -20,6 +21,7 @@ from rill_core.settlement.unilateral import (
     FundingOutput,
     UnilateralAuthorization,
     build_cooperative_claim,
+    validate_unilateral_spend,
 )
 from rill_core.wire.canonical import canonicalize
 from rill_core.wire.hashes import (
@@ -339,3 +341,49 @@ def test_stored_reservation_inspection_never_networks_or_resumes_signing(
     assert captured.err == ""
     assert reserved["user_secret"]["contract_secret_key"] not in captured.out
     assert reserved["monotonic_knowledge"]["preimage"] not in captured.out
+
+
+@pytest.mark.parametrize("reserved_snapshot", [False, True])
+def test_native_reservation_never_blocks_independent_unilateral_refund(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    reserved_snapshot: bool,
+) -> None:
+    with Context(library_path=LIBRARY) as crypto:
+        _, _, paid, reserved = _snapshots(crypto)
+        document = reserved if reserved_snapshot else paid
+        terms = ContractTerms.model_validate_json(
+            canonicalize(document["contract_terms"]), strict=True
+        )
+        binding = document["funding_history"][0]["binding"]
+        funding = FundingOutput(
+            txid=bytes.fromhex(binding["funding_txid"]),
+            output_index=binding["contract_vout"],
+            value_sat=int(binding["contract_value_sat"]),
+            script_pubkey=bytes.fromhex(binding["contract_script_pubkey"]),
+        )
+
+        def forbidden(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("unilateral recovery must never allocate a cooperative nonce")
+
+        monkeypatch.setattr(crypto, "musig_begin", forbidden)
+        monkeypatch.setattr(MusigAttempt, "partial_sign_once", forbidden)
+        monkeypatch.setattr(httpx, "Client", forbidden)
+        raw = construct_selected_recovery_refund(
+            canonicalize(document),
+            terms.network_identity,
+            funding_attempt_id=binding["funding_attempt_id"],
+            binding_revision=0,
+            live_funding=funding,
+            sampled_tip_height=terms.refund_lock_height + 1,
+            fee_sat=300,
+            auxiliary_random=b"\x33" * 32,
+            crypto=crypto,
+        )
+        checked = validate_unilateral_spend(
+            raw,
+            UnilateralAuthorization.from_terms(terms, funding, "refund", keys=crypto),
+            verifier=crypto,
+        )
+        assert checked.fee_sat == 300
+        assert document["monotonic_knowledge"] == paid["monotonic_knowledge"]
