@@ -28,15 +28,18 @@ import asyncio
 import hashlib
 import logging
 import math
+import secrets
 import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
+from rill_core.settlement.funding import FundingBindingTransactionMatch
 from rill_core.settlement.unilateral import (
     FundingOutput,
     UnilateralAuthorization,
     ValidatedCooperativeClaim,
     ValidatedUnilateralSpend,
+    build_cooperative_claim,
     build_unilateral_spend,
     finalize_unilateral_spend,
     max_spendable_fee,
@@ -48,7 +51,7 @@ from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE, contract_hash
 from rill_core.wire.messages import Envelope
 from rill_core.wire.settlement_messages import FundingBindingPayload
 
-from rill_provider.core_tx_bytes import CoreTransactionUnknownError
+from rill_provider.core_tx_bytes import CooperativeClaimOutpoint, CoreTransactionUnknownError
 from rill_provider.live_session_store import (
     MAX_CLAIM_ATTEMPTS,
     CooperativeWinner,
@@ -91,6 +94,12 @@ class ChainBackend(Protocol):
         """Return the exact bound output's confirmations or raise."""
         ...
 
+    def observe_cooperative_claim_outpoint(
+        self, binding: FundingBinding, terms: ContractTerms, *, keys: TaprootKeyOperations
+    ) -> CooperativeClaimOutpoint:
+        """Sample the exact confirmed outpoint with mempool spends considered."""
+        ...
+
     def broadcast(self, raw: bytes, txid: str) -> str:
         """Submit exact bytes idempotently."""
         ...
@@ -127,6 +136,7 @@ INCREMENTAL_RELAY_SAT_VB = 1  # BIP125 rule 4 at Core's default incremental rela
 READINESS_BUDGET_SECONDS = 10.0  # one shared bound for the whole offer preflight
 READINESS_SYNC_DELAY = 1.0
 COOPERATIVE_PROBE_SECONDS = 30
+COOPERATIVE_SAMPLE_SECONDS = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +230,7 @@ class SettlementEngine:
         self._new_exposure_allowed = True
         self._new_featured_sessions: dict[str, tuple[str, int]] = {}
         self._claim_probes: dict[str, ClaimProbeWindow] = {}
+        self._cooperative_sample_task: asyncio.Task[CooperativeClaimOutpoint] | None = None
 
     def register_new_featured_session(self, session_id: str, contract: str) -> bool:
         """Remember one current-process original session, not a stored ADMITTED row.
@@ -400,6 +411,111 @@ class SettlementEngine:
         """Latch off new BTC-to-LN sends after deadline supervision fails."""
         self._new_exposure_allowed = False
 
+    async def _sample_cooperative_outpoint(
+        self, binding: FundingBinding, terms: ContractTerms, *, budget: float
+    ) -> CooperativeClaimOutpoint | None:
+        """Retain one sampler slot until its worker actually finishes.
+
+        Cancellation or timeout of the waiter does not stop a Core worker.
+        Never accumulate another sample behind it or reuse a late result.
+        """
+        if self._cooperative_sample_task is not None:
+            return None
+        started = time.monotonic()
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                self._chain.observe_cooperative_claim_outpoint, binding, terms, keys=self._crypto
+            )
+        )
+        self._cooperative_sample_task = task
+
+        def finished(completed: asyncio.Task[CooperativeClaimOutpoint]) -> None:
+            if not completed.cancelled():
+                completed.exception()  # consume late failures, never reuse results
+            if self._cooperative_sample_task is completed:
+                self._cooperative_sample_task = None
+
+        task.add_done_callback(finished)
+        try:
+            sample = await asyncio.wait_for(asyncio.shield(task), timeout=budget)
+        except Exception:  # noqa: BLE001 - failed evidence grants no nonce effect
+            return None
+        return sample if time.monotonic() - started < budget else None
+
+    async def initiate_cooperative_proposal(
+        self, session_id: str, *, now: Callable[[], int]
+    ) -> str | None:
+        """Queue one BTC-to-LN nonce proposal after fresh bounded preflight.
+
+        None means no attempt was burned. Once burn begins, failures propagate
+        because its durable outcome may be unknown. This never signs a partial
+        or broadcasts; completion needs independent new chain/fee evidence.
+        """
+        if not self._new_exposure_allowed:
+            return None
+        candidates = tuple(
+            item for item in self._store.prepared_fallbacks() if item.session_id == session_id
+        )
+        if len(candidates) != 1:
+            return None
+        (candidate,) = candidates
+        started_at = now()
+        if (
+            candidate.state != "WAITING"
+            or candidate.owner_generation != self._store.generation
+            or type(started_at) is not int
+            or not 0 <= started_at < candidate.deadline_at
+            or candidate.fee_sat < self._settings.claim_fee_sat
+        ):
+            return None
+        terms, binding = self._validate_prepared_fallback(candidate)
+        if (
+            terms.network_identity != self._store.network_identity
+            or COOPERATIVE_CLAIM_FEATURE not in terms.required_features
+        ):
+            return None
+        plan = build_cooperative_claim(
+            self._authorization(terms, binding), fee_sat=candidate.fee_sat
+        )
+        sample_deadline = time.monotonic() + COOPERATIVE_SAMPLE_SECONDS
+        sample = await self._sample_cooperative_outpoint(
+            binding,
+            terms,
+            budget=min(COOPERATIVE_SAMPLE_SECONDS, candidate.deadline_at - started_at),
+        )
+        checked_at = now()
+        if (
+            not self._new_exposure_allowed
+            or type(checked_at) is not int
+            or not started_at <= checked_at < candidate.deadline_at
+            or type(sample) is not CooperativeClaimOutpoint
+            or not _cooperative_outpoint_matches(sample, binding, terms, candidate.deadline_height)
+        ):
+            return None
+
+        def effect_clock() -> int:
+            # SQLite/native work must not turn bounded-age height evidence
+            # into stale initiation authority, even while wall time is open.
+            if not self._new_exposure_allowed or time.monotonic() >= sample_deadline:
+                raise LiveSessionStoreError("cooperative proposal evidence expired or revoked")
+            return now()
+
+        cooperation_id = secrets.token_bytes(32)
+        self._store.burn_selected_cooperative_claim(
+            session_id,
+            cooperation_id,
+            plan,
+            now=effect_clock,
+            tip_height=sample.tip_height,
+            deadline_at=candidate.deadline_at,
+            deadline_height=candidate.deadline_height,
+        )
+        if not self._new_exposure_allowed:
+            raise LiveSessionStoreError("cooperative initiation revoked after burn")
+        return self._store.begin_selected_cooperative_proposal(
+            session_id, cooperation_id, now=effect_clock, tip_height=sample.tip_height
+        )
+
     def _fee_limit(self, success_fee_sat: int) -> int:
         """Routing fees may use at most the success fee and the operator cap."""
         return min(self._settings.max_routing_fee_sat, success_fee_sat)
@@ -444,7 +560,9 @@ class SettlementEngine:
             selected.append(candidate)
         return tuple(selected)
 
-    def _validate_prepared_fallback(self, candidate: PreparedFallback) -> None:
+    def _validate_prepared_fallback(
+        self, candidate: PreparedFallback
+    ) -> tuple[ContractTerms, FundingBinding]:
         terms = offered_terms(Envelope.model_validate_json(candidate.terms_offer, strict=True))
         funding = Envelope.model_validate_json(candidate.funding_binding, strict=True)
         binding = parse_model_json(FundingBindingPayload, canonicalize(funding.payload)).binding
@@ -466,6 +584,7 @@ class SettlementEngine:
             or verified.fee_sat != candidate.fee_sat
         ):
             raise LiveSessionStoreError("prepared claim validation mismatch")
+        return terms, binding
 
     def recorded_fallbacks(self) -> tuple[PreparedFallback, ...]:
         """Read durable selected work for the independent submission lane."""
@@ -1141,6 +1260,39 @@ class SettlementEngine:
             item.session_id, plan.signature_hash, self._crypto
         )
         return finalize_unilateral_spend(plan, signature, verifier=self._crypto)
+
+
+def _cooperative_outpoint_matches(
+    sample: CooperativeClaimOutpoint,
+    binding: FundingBinding,
+    terms: ContractTerms,
+    cutoff_height: int,
+) -> bool:
+    """Check the trusted sampler's exact named-tip evidence, not signing authority."""
+    return (
+        type(sample.static_match) is FundingBindingTransactionMatch
+        and sample.network_identity == terms.network_identity
+        and sample.funding_txid == binding.funding_txid == sample.static_match.funding_txid
+        and sample.funding_vout == binding.contract_vout == sample.static_match.contract_vout
+        and sample.static_match.lineage_anchor_txid == binding.lineage_anchor_txid
+        and sample.static_match.lineage_anchor_vout == binding.lineage_anchor_vout
+        and sample.funding_value_sat == int(binding.contract_value_sat)
+        and sample.funding_script_pubkey == bytes.fromhex(binding.contract_script_pubkey)
+        and type(sample.tip_height) is int
+        and type(sample.confirmations) is int
+        and type(sample.inclusion_height) is int
+        and sample.confirmations >= terms.funding_confirmations
+        and 0 < sample.inclusion_height <= sample.tip_height < cutoff_height
+        and sample.tip_height < terms.refund_lock_height
+        and sample.confirmations == sample.tip_height - sample.inclusion_height + 1
+        and isinstance(sample.tip_hash, str)
+        and isinstance(sample.inclusion_block_hash, str)
+        and len(sample.tip_hash) == 64  # noqa: PLR2004 - 32-byte lowercase hash
+        and len(sample.inclusion_block_hash) == 64  # noqa: PLR2004
+        and all(
+            char in "0123456789abcdef" for char in sample.tip_hash + sample.inclusion_block_hash
+        )
+    )
 
 
 def claim_fee_target(  # noqa: PLR0913 - explicit schedule inputs
