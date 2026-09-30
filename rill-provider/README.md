@@ -103,9 +103,13 @@ host. The store cannot verify that attestation. Behavior:
    synchronous economic effects. A timeout around a non-worker await must escape
    the operation context, or its handler must explicitly call `abandon()` before
    continuing. Timeout scopes can restore cancellation counts, so checkpoints
-   cannot infer those caught timeouts. This primitive is not yet wired into
-   reverse advancement or hold-invoice admission; runtime serialization remains
-   a separate unfinished acceptance gate.
+   cannot infer those caught timeouts. Reverse advancement uses this boundary,
+   reloads its row after acquiring it, and retains every Core/LND worker through
+   actual completion before releasing physical exclusion. Queued snapshots
+   cannot authorize a second cancellation after terminal commitment or skip a
+   newly recorded settlement debt. Hold-invoice creation/disposition and future
+   cooperative proposal admission are not yet integrated; full reverse economic
+   serialization remains an unfinished acceptance gate.
 - Absent, partial, foreign, or newer files are refused before any pragma can
   modify them. Malformed provisioning metadata (UUID or attestation) is also
   refused. The inode numbers of the database and the lock file are recorded

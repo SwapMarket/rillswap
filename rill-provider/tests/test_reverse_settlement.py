@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from rill_provider.core_tx_bytes import FundedOutput, SpendObservation, SpendSca
 from rill_provider.live_session_store import SettlementItem
 from rill_provider.lnd_hold_invoice import HeldHtlc, HoldInvoiceStatus
 from rill_provider.lnd_payment_observation import LndProtocolError
+from rill_provider.reverse_operations import ReverseOperations
 
 DOCUMENT = json.loads(
     (Path(__file__).parent / "fixtures/initial-ln-to-btc-no-prepayment-v1.json").read_text()
@@ -55,6 +57,9 @@ def backends(monkeypatch: pytest.MonkeyPatch) -> tuple[reverse.ReverseSettlement
         reverse, "reconstruct_taproot_contract", lambda *_a, **_k: Mock(script_pubkey=SCRIPT)
     )
     store, chain, hold = Mock(), Mock(), Mock()
+    store.owner_is_open = True
+    store.retain_owner.side_effect = nullcontext
+    store.reverse_operations = ReverseOperations(store)
     chain.tip_height.return_value = 1000
     chain.fund_output.return_value = FUNDED
     chain.find_spender.return_value = SpendScan(None, 1000)
@@ -64,6 +69,9 @@ def backends(monkeypatch: pytest.MonkeyPatch) -> tuple[reverse.ReverseSettlement
 
 
 def _run(engine: reverse.ReverseSettlement, item: SettlementItem) -> str:
+    # This fixture supplies the authoritative row under the real execution
+    # gate, rather than treating a queued caller snapshot as current state.
+    engine._store.settlement_work.return_value = (item,)  # type: ignore[attr-defined]  # noqa: SLF001
     return asyncio.run(engine.advance(item, NOW))
 
 
@@ -85,6 +93,20 @@ def test_accepted_waits_for_an_open_hold_until_it_expires(backends: Any) -> None
     )
     hold.cancel.assert_called_once_with(HASH)
     assert _moved(store, "ABORTED")["observation"]["reason"] == "hold invoice expired unpaid"
+
+
+def test_reverse_entry_refuses_misdirected_terms_before_any_hold_or_chain_effect(
+    backends: Any,  # noqa: ANN401
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, store, chain, hold = backends
+    monkeypatch.setattr(reverse, "offered_terms", lambda _envelope: Mock(profile_id="btc-to-ln/v1"))
+    with pytest.raises(reverse.LiveSessionStoreError, match="requires LN to BTC terms"):
+        _run(engine, _item("ACCEPTED"))
+    hold.lookup.assert_not_called()
+    hold.cancel.assert_not_called()
+    chain.tip_height.assert_not_called()
+    store.advance_reverse_swap.assert_not_called()
 
 
 @pytest.mark.parametrize(

@@ -9,12 +9,12 @@ signed transaction is recorded before it is broadcast.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import math
 import secrets
-from typing import TYPE_CHECKING, Protocol
+from functools import partial
+from typing import TYPE_CHECKING, ParamSpec, Protocol, TypeVar
 
 from rill_core.settlement import (
     FundingOutput,
@@ -28,21 +28,26 @@ from rill_core.settlement import (
 from rill_core.wire.hashes import contract_hash
 from rill_core.wire.messages import Envelope, FundingBinding
 
-from rill_provider.live_session_store import LiveSessionStoreError
+from rill_provider.live_session_store import LiveSessionStoreError, StaleSwapError
 from rill_provider.lnd_payment_observation import LndObservationError
 from rill_provider.settlement_policy import offered_terms
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from rill_core.wire.messages import ContractTerms
 
     from rill_provider.core_tx_bytes import FundedOutput, SpendScan
     from rill_provider.live_session_store import LiveSessionStore, SettlementItem
     from rill_provider.lnd_hold_invoice import HoldInvoiceStatus
+    from rill_provider.reverse_operations import ReverseOperation
     from rill_provider.settlement_engine import EngineCrypto
 
 LOG = logging.getLogger(__name__)
 REFUND_ESTIMATE_TARGET = 6
 PREIMAGE_BYTES = 32
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
 
 
 class HoldInvoiceBackend(Protocol):
@@ -83,12 +88,7 @@ class ReverseChainBackend(Protocol):
 
 
 class ReverseSettlement:
-    """Advance one LN to BTC swap by at most one step per serialized owner tick.
-
-    The service serializes these calls. In particular, do not run stale refund
-    cancellation concurrently with a writer admitting settlement obligations.
-    Store transition checks are not an atomic fence around external LND RPCs.
-    """
+    """Advance fresh state inside the acquired owner's reverse execution gate."""
 
     def __init__(
         self,
@@ -105,12 +105,35 @@ class ReverseSettlement:
         self._hold = hold_invoices
         self._crypto = crypto
         self._refund_fee_floor_sat = refund_fee_floor_sat
+        self._operation: ReverseOperation | None = None
 
     async def advance(self, item: SettlementItem, now: int) -> str:
-        """Run the step for ``item.state``; return the (possibly unchanged) state."""
+        """Reload after serialization, never execute a queued stale snapshot."""
+        async with self._store.reverse_operations.operation() as operation:
+            work = self._store.settlement_work(session_id=item.session_id)
+            if len(work) != 1:
+                raise StaleSwapError("reverse swap no longer available for settlement")
+            self._operation = operation
+            try:
+                return await self._step(work[0], now)
+            finally:
+                self._operation = None
+
+    def _check_operation(self) -> ReverseOperation:
+        if self._operation is None:
+            raise LiveSessionStoreError("reverse settlement step not active")
+        self._operation.check()
+        return self._operation
+
+    async def _worker(self, function: Callable[_P, _T], *args: _P.args, **kwargs: _P.kwargs) -> _T:
+        return await self._check_operation().worker(partial(function, *args, **kwargs))
+
+    async def _step(self, item: SettlementItem, now: int) -> str:
         if item.preimage is not None and item.state not in {"FUNDED", "REFUNDING", "SETTLED"}:
             raise LiveSessionStoreError("reverse settlement intent in an unexpected state")
         terms = offered_terms(Envelope.model_validate_json(item.terms_offer, strict=True))
+        if terms.profile_id != "ln-to-btc/v1":
+            raise LiveSessionStoreError("reverse settlement requires LN to BTC terms")
         if item.state == "ACCEPTED":
             return await self._accepted(item, terms, now)
         if item.state == "LN_HELD":
@@ -122,6 +145,7 @@ class ReverseSettlement:
         return item.state
 
     def _move(self, item: SettlementItem, to_state: str, now: int, **fields: object) -> str:
+        self._check_operation()
         self._store.advance_reverse_swap(
             item.session_id,
             from_state=item.state,
@@ -134,7 +158,7 @@ class ReverseSettlement:
 
     async def _abort(self, item: SettlementItem, terms: ContractTerms, now: int, why: str) -> str:
         """Cancel the hold (nothing was funded) and close the swap."""
-        await asyncio.to_thread(self._hold.cancel, terms.invoice_binding.payment_hash)
+        await self._worker(self._hold.cancel, terms.invoice_binding.payment_hash)
         LOG.info("LN to BTC swap aborted before funding: %s", why)
         return self._move(item, "ABORTED", now, observation={"kind": "swap_aborted", "reason": why})
 
@@ -165,7 +189,7 @@ class ReverseSettlement:
 
     async def _accepted(self, item: SettlementItem, terms: ContractTerms, now: int) -> str:
         """Wait for the hold; move to LN_HELD once every accepted part checks out."""
-        status = await asyncio.to_thread(self._hold.lookup, terms.invoice_binding.payment_hash)
+        status = await self._worker(self._hold.lookup, terms.invoice_binding.payment_hash)
         if status.state == "OPEN":
             if now >= terms.invoice_binding.expires_at:
                 return await self._abort(item, terms, now, "hold invoice expired unpaid")
@@ -180,23 +204,23 @@ class ReverseSettlement:
         problem = self._held_as_agreed(terms, status)
         if problem is not None:
             return await self._abort(item, terms, now, problem)
-        tip = await asyncio.to_thread(self._chain.tip_height)
+        tip = await self._worker(self._chain.tip_height)
         if not self._funding_window_open(terms, tip):
             return await self._abort(item, terms, now, "funding window closed")
         return self._move(item, "LN_HELD", now, observation={"kind": "hold_accepted"})
 
     async def _held(self, item: SettlementItem, terms: ContractTerms, now: int) -> str:
         """Fund the contract: re-check the hold and the window, sign, record, broadcast."""
-        status = await asyncio.to_thread(self._hold.lookup, terms.invoice_binding.payment_hash)
+        status = await self._worker(self._hold.lookup, terms.invoice_binding.payment_hash)
         problem = self._held_as_agreed(terms, status)
         if problem is not None:
             return await self._abort(item, terms, now, problem)
-        tip = await asyncio.to_thread(self._chain.tip_height)
+        tip = await self._worker(self._chain.tip_height)
         if not self._funding_window_open(terms, tip):
             return await self._abort(item, terms, now, "funding window closed")
         script = reconstruct_taproot_contract(terms, keys=self._crypto).script_pubkey
         value = int(terms.economics.model_dump()["contract_amount_sat"])
-        funded = await asyncio.to_thread(
+        funded = await self._worker(
             self._chain.fund_output,
             script,
             value,
@@ -219,17 +243,17 @@ class ReverseSettlement:
         # The grant (and the signed funding_binding for the client) is durable
         # before any broadcast; FUNDING_SENT rebroadcasts.
         state = self._move(item, "FUNDING_SENT", now, funding=(binding, funded.raw))
-        await asyncio.to_thread(self._chain.broadcast, funded.raw, funded.txid)
+        await self._worker(self._chain.broadcast, funded.raw, funded.txid)
         return state
 
     async def _funding_sent(self, item: SettlementItem, terms: ContractTerms, now: int) -> str:
         """Keep the funding broadcast; move to FUNDED at the signed depth."""
         txid, raw = _funding(item)
-        await asyncio.to_thread(self._chain.broadcast, raw, txid)
-        depth = await asyncio.to_thread(self._chain.confirmations, txid)
+        await self._worker(self._chain.broadcast, raw, txid)
+        depth = await self._worker(self._chain.confirmations, txid)
         if depth < terms.funding_confirmations:
             return item.state
-        tip = await asyncio.to_thread(self._chain.tip_height)
+        tip = await self._worker(self._chain.tip_height)
         state = self._move(item, "FUNDED", now)
         # Scan for a claim from the inclusion block on.
         self._store.record_spend_scan(item.session_id, max(1, tip - depth))
@@ -243,9 +267,9 @@ class ReverseSettlement:
             return await self._settle_claim(item, terms, now, item.preimage)
         txid, _raw = _funding(item)
         vout = int(item.funding_vout or 0)
-        tip = await asyncio.to_thread(self._chain.tip_height)
+        tip = await self._worker(self._chain.tip_height)
         start = (item.spend_scan_height or max(1, tip - 1)) + 1
-        scan = await asyncio.to_thread(
+        scan = await self._worker(
             self._chain.find_spender, txid, vout, from_height=start, to_height=tip
         )
         payment_hash = terms.invoice_binding.payment_hash
@@ -271,18 +295,18 @@ class ReverseSettlement:
             refund=(spend.txid, spend.raw_transaction),
             observation={"kind": "refund_broadcast", "refund_txid": spend.txid},
         )
-        await asyncio.to_thread(self._chain.broadcast, spend.raw_transaction, spend.txid)
+        await self._worker(self._chain.broadcast, spend.raw_transaction, spend.txid)
         return state
 
     async def _refunding(self, item: SettlementItem, terms: ContractTerms, now: int) -> str:
         """Keep the refund broadcast; cancel the hold only at the signed depth."""
         if item.refund_txid is None or item.refund_tx is None:
             raise RuntimeError("REFUNDING swap without its refund")
-        await asyncio.to_thread(self._chain.broadcast, item.refund_tx, item.refund_txid)
-        depth = await asyncio.to_thread(self._chain.confirmations, item.refund_txid)
+        await self._worker(self._chain.broadcast, item.refund_tx, item.refund_txid)
+        depth = await self._worker(self._chain.confirmations, item.refund_txid)
         if depth < terms.refund_resolution_confirmations:
             return item.state
-        await asyncio.to_thread(self._hold.cancel, terms.invoice_binding.payment_hash)
+        await self._worker(self._hold.cancel, terms.invoice_binding.payment_hash)
         return self._move(
             item,
             "REFUNDED",
@@ -294,6 +318,7 @@ class ReverseSettlement:
     async def _settle_claim(
         self, item: SettlementItem, terms: ContractTerms, now: int, preimage: str
     ) -> str:
+        self._check_operation()
         self._store.record_reverse_settlement_preimage(
             item.session_id, from_state=item.state, preimage=preimage, now=now
         )
@@ -305,13 +330,14 @@ class ReverseSettlement:
     async def _settle(self, preimage: str, payment_hash: str) -> None:
         """Settle the hold; tolerate an earlier settlement of the same invoice."""
         try:
-            await asyncio.to_thread(self._hold.settle, preimage)
+            await self._worker(self._hold.settle, preimage)
         except LndObservationError:
-            status = await asyncio.to_thread(self._hold.lookup, payment_hash)
+            status = await self._worker(self._hold.lookup, payment_hash)
             if status.state != "SETTLED":
                 raise
 
     async def _refund(self, item: SettlementItem, terms: ContractTerms) -> ValidatedUnilateralSpend:
+        self._check_operation()
         txid, _raw = _funding(item)
         funding = FundingOutput(
             txid=bytes.fromhex(txid),
@@ -326,7 +352,7 @@ class ReverseSettlement:
         floor = min(self._refund_fee_floor_sat, ceiling)
         spend = self._sign_refund(item, authorization, floor)
         try:
-            rate = await asyncio.to_thread(self._chain.fee_rate_sat_vb, REFUND_ESTIMATE_TARGET)
+            rate = await self._worker(self._chain.fee_rate_sat_vb, REFUND_ESTIMATE_TARGET)
         except Exception:  # noqa: BLE001 - advice only; never defer a timelocked spend for it
             LOG.warning("fee estimate unavailable; signing at the floor fee")
             rate = None
@@ -338,6 +364,7 @@ class ReverseSettlement:
     def _sign_refund(
         self, item: SettlementItem, authorization: UnilateralAuthorization, fee: int
     ) -> ValidatedUnilateralSpend:
+        self._check_operation()
         plan = build_unilateral_spend(authorization, fee_sat=fee)
         signature = self._store.sign_with_contract_key(
             item.session_id, plan.signature_hash, self._crypto
