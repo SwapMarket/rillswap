@@ -18,6 +18,7 @@ with the same fee escalation.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import math
 import secrets
@@ -26,6 +27,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol, TypeVar
 
+from rill_core.recovery import REVERSE_FALLBACK_EXTENSION, inspect_recovery_successor
 from rill_core.settlement import (
     FundingOutput,
     UnilateralAuthorization,
@@ -35,8 +37,9 @@ from rill_core.settlement import (
     max_spendable_fee,
     reconstruct_taproot_contract,
 )
-from rill_core.wire.canonical import canonicalize, parse_model_json
+from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_model_json
 from rill_core.wire.hashes import (
+    COOPERATIVE_CLAIM_FEATURE,
     client_acceptance_hash,
     contract_hash,
     funding_binding_hash,
@@ -66,7 +69,7 @@ from rill_cli.refund_watcher import ChainView
 if TYPE_CHECKING:
     from collections.abc import Callable
     from types import TracebackType
-    from typing import Self
+    from typing import Any, Self
 
     from rill_core.wire.messages import ContractTerms, Envelope, FundingBinding, InvoiceBinding
     from rill_core.wire.types import NetworkIdentity
@@ -99,7 +102,9 @@ class _ReverseLifetime:
         self._duration = duration
         self._deadline: float | None = None
         self._stopped = threading.Event()
-        self._workers: set[asyncio.Task[object]] = set()
+        self._workers: set[asyncio.Future[Any]] = (
+            set()
+        )  # Heterogeneous results, consumed only for drainage.
 
     async def __aenter__(self) -> Self:
         return self
@@ -112,11 +117,9 @@ class _ReverseLifetime:
     ) -> None:
         self._stopped.set()
 
-        async def drain() -> None:
-            await asyncio.gather(*self._workers, return_exceptions=True)
-            self._workers.clear()
-
-        draining = asyncio.create_task(drain())
+        # Neither executor bridges nor this gather are Tasks. Loop-wide Task
+        # cancellation must not mark an actual running thread as completed.
+        draining = asyncio.gather(*self._workers, return_exceptions=True)
         canceled = isinstance(error, asyncio.CancelledError)
         while not draining.done():
             try:
@@ -124,6 +127,7 @@ class _ReverseLifetime:
             except asyncio.CancelledError:
                 canceled = True
         draining.result()
+        self._workers.clear()
         if canceled:
             raise asyncio.CancelledError
 
@@ -165,7 +169,8 @@ class _ReverseLifetime:
             self._check_work()  # Executor queueing cannot reserve authority.
             return function()
 
-        task = asyncio.create_task(asyncio.to_thread(execute))
+        context = contextvars.copy_context()
+        task = asyncio.get_running_loop().run_in_executor(None, context.run, execute)
         self._workers.add(task)
         try:
             if self._deadline is None:
@@ -482,6 +487,58 @@ def _submit(wallet: ClaimWallet, raw: bytes, txid: str, lifetime: _ReverseLifeti
     return result == txid
 
 
+async def _publish_reverse_fallback(  # noqa: PLR0913 - exact retained predecessor and private claim
+    lifetime: _ReverseLifetime,
+    *,
+    funded_document: bytes,
+    binding: FundingBinding,
+    transaction: bytes,
+    session: _Session,
+    write_recovery: Callable[[bytes, bytes | None], bytes | None],
+) -> bytes:
+    """Require the trusted writer's exact acknowledgment, never infer disclosure authority.
+
+    The CLI returns bytes only after durable encrypted publication and readback.
+    Matching bytes detect accidental no-ops, not a lying storage adapter. A late
+    or uncertain write may leave a valid sibling, but cannot reopen cooperation.
+    """
+    lifetime.check()
+
+    def prepare() -> bytes:
+        lifetime.check()
+        record = parse_json_strict(funded_document)
+        if not isinstance(record, dict):
+            raise SwapError("reverse fallback predecessor unavailable")
+        extensions = record.get("extensions")
+        if not isinstance(extensions, dict):
+            raise SwapError("reverse fallback predecessor unavailable")
+        if REVERSE_FALLBACK_EXTENSION in extensions:
+            raise SwapError("reverse fallback already prepared; restart cannot resume cooperation")
+        extensions[REVERSE_FALLBACK_EXTENSION] = {
+            "version": 1,
+            "funding_binding_hash": funding_binding_hash(binding).hex(),
+            "transaction": transaction.hex(),
+        }
+        candidate = canonicalize(record)
+        inspect_recovery_successor(
+            funded_document, candidate, session.network, crypto=session.crypto
+        )
+        lifetime.check()
+        return candidate
+
+    try:
+        candidate = await lifetime.worker(prepare)
+        acknowledged = await lifetime.worker(lambda: write_recovery(candidate, funded_document))
+    except (TimeoutError, asyncio.CancelledError):
+        raise
+    except Exception:  # noqa: BLE001 - publication errors may contain encrypted/plaintext secrets
+        raise SwapError("reverse fallback publication uncertain; " + _UNRESOLVED) from None
+    lifetime.check()
+    if type(acknowledged) is not bytes or acknowledged != candidate:
+        raise SwapError("reverse fallback publication not acknowledged; " + _UNRESOLVED)
+    return candidate
+
+
 async def run_reverse_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
     connection: RelayConnection,
     *,
@@ -491,7 +548,7 @@ async def run_reverse_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
     decode_invoice: Callable[[str], InvoiceBinding],
     payer: HoldPayer,
     wallet: ClaimWallet,
-    write_recovery: Callable[[bytes, bytes | None], None],
+    write_recovery: Callable[[bytes, bytes | None], bytes | None],
     limits: ReverseSwapLimits,
     crypto: Context,
     timeout: float = 60.0,  # noqa: ASYNC109
@@ -668,10 +725,28 @@ async def run_reverse_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
                 check_authority=lifetime.check,
             )
             probe_vsize = (await lifetime.worker(lambda: sign(min(ceiling, 1), 0)))[3]
+            initial_fee = max(
+                1, min(ceiling, math.ceil(limits.claim_fee_rate_sat_vb * probe_vsize))
+            )
+            if COOPERATIVE_CLAIM_FEATURE in terms.required_features:
+                prepared_claim = await lifetime.worker(lambda: sign(initial_fee, 0))
+                await _publish_reverse_fallback(
+                    lifetime,
+                    funded_document=successor,
+                    binding=binding,
+                    transaction=prepared_claim[0],
+                    session=session,
+                    write_recovery=write_recovery,
+                )
+                report("private signed fallback snapshot acknowledged; cooperation remains gated")
+                # Do not turn a negotiated privacy commitment into an implicit
+                # script-path claim while the cooperative consumer is unfinished.
+                raise SwapError(
+                    "reverse cooperative settlement is not yet available; " + _UNRESOLVED
+                )
+
             watcher = ClaimWatcher(
-                initial_fee_sat=max(
-                    1, min(ceiling, math.ceil(limits.claim_fee_rate_sat_vb * probe_vsize))
-                ),
+                initial_fee_sat=initial_fee,
                 max_fee_sat=max(1, ceiling),
                 deadline_height=terms.refund_lock_height
                 - terms.timing_policy.claim_confirmation_blocks,

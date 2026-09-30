@@ -156,6 +156,8 @@ repeated cancellation cannot release the SDK's crypto context before workers
 finish. Cleanup lies outside the settlement budget and can remain unbounded
 if a started callback hangs. An in-flight LND send can outlive the payer, but its
 permission predicate uses only local lifetime state, not the crypto context.
+Executor work and drainage are held as shielded Futures, not child Tasks;
+loop-wide Task cancellation cannot falsely mark a running thread as completed.
 
 The own-Core wallet broadcaster accepts the same optional lifetime inputs.
 Guarded calls keep one absolute deadline through network/genesis attestation,
@@ -169,6 +171,21 @@ Phase timeouts are not a total duration bound. Late successful results remain
 knowledge; timeout, transport error, cancellation, or missing chain observation
 does not prove privacy or authorize retry. The reverse dispatcher supplies this
 guard to every claim submission; activation and release gates remain closed.
+
+For newly negotiated featured reverse terms, the dispatcher privately prepares
+an independently valid signed claim and publishes a create-only `.fallback`
+successor to the exact funded snapshot. The new gate requires the trusted
+storage adapter to return those exact canonical bytes after durable encrypted
+publication and readback. `None`, mismatches, exceptions, timeout, and late
+acknowledgments grant no subsequent authority, even if a valid file was created.
+Matching bytes detect accidental no-ops; they are not independent proof against
+a lying adapter. Older unilateral and forward callback behavior is unchanged.
+
+Reverse cooperative proposal/disclosure handling is still unfinished. Featured
+terms currently stop after acknowledged preparation, preserving all snapshots
+and independent recovery rather than silently replacing the privacy commitment
+with a script-path broadcast. Production negotiation remains disabled until the
+cooperative consumer and provider admission are implemented and accepted.
 
 ```sh
 rill swap ln-to-btc \

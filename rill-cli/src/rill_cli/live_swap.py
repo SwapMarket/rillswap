@@ -768,7 +768,7 @@ class _CooperativeClaimAttempt:
         funded_recovery: bytes,
         contract_secret: bytes,
         wallet: Wallet,
-        write_recovery: Callable[[bytes, bytes | None], None],
+        write_recovery: Callable[[bytes, bytes | None], bytes | None],
         settlement_deadline: float,
         configured_fee_floor_sat: int,
         allow_regtest_fixed_fee: bool = False,
@@ -1406,7 +1406,7 @@ async def run_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
     invoice: str,
     decode_invoice: Callable[[str], InvoiceBinding],
     wallet: Wallet,
-    write_recovery: Callable[[bytes, bytes | None], None],
+    write_recovery: Callable[[bytes, bytes | None], bytes | None],
     limits: SwapLimits,
     crypto: Context,
     timeout: float = 60.0,  # noqa: ASYNC109

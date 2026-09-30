@@ -222,7 +222,12 @@ class NativeSdk:
         self.broadcasts.append(raw)
         return self.claim_txid
 
-    async def run(self, writer: object = None) -> reverse.ReverseSwapOutcome:
+    async def run(
+        self,
+        writer: object = None,
+        *,
+        settle_timeout: float = 20,
+    ) -> reverse.ReverseSwapOutcome:
         return await reverse.run_reverse_swap(
             Mock(),
             identity=self.terms.provider_identity_key,
@@ -234,7 +239,7 @@ class NativeSdk:
             write_recovery=writer or self.write,
             limits=reverse.ReverseSwapLimits(5000, 0, 5000, 1, 1000, 100, 2),
             crypto=self.crypto,
-            settle_timeout=20,
+            settle_timeout=settle_timeout,
             report=self.reports.append,
         )
 

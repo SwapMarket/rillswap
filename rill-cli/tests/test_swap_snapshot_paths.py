@@ -6,7 +6,7 @@ import json
 from typing import TYPE_CHECKING
 
 import pytest
-from rill_core.recovery import COOPERATIVE_RESERVATION_EXTENSION
+from rill_core.recovery import COOPERATIVE_RESERVATION_EXTENSION, REVERSE_FALLBACK_EXTENSION
 
 from rill_cli.publication import RecoveryPublicationError, publish_new_ciphertext
 from rill_cli.swap_command import _snapshot_path
@@ -76,3 +76,16 @@ def test_cooperative_reservation_has_one_distinct_destination(tmp_path: Path) ->
     reserved["funding_history"] = [{"binding": "other"}]
     with pytest.raises(ValueError, match="unsupported recovery snapshot transition"):
         _snapshot_path(tmp_path / "swap.age", json.dumps(reserved).encode(), paid_bytes)
+
+
+def test_reverse_fallback_routes_to_a_distinct_create_only_sibling(tmp_path: Path) -> None:
+    funded = json.loads(_snapshot(funded=True, paid=True))
+    funded.update(profile_id="ln-to-btc/v1", extensions={})
+    prepared = {**funded, "extensions": {REVERSE_FALLBACK_EXTENSION: {"version": 1}}}
+    prior, candidate = json.dumps(funded).encode(), json.dumps(prepared).encode()
+    assert _snapshot_path(tmp_path / "swap.age", candidate, prior) == tmp_path / "swap.age.fallback"
+    with pytest.raises(ValueError, match="unsupported recovery snapshot transition"):
+        _snapshot_path(tmp_path / "swap.age", candidate, candidate)
+    prepared["funding_history"] = [{"binding": "another output"}]
+    with pytest.raises(ValueError, match="unsupported recovery snapshot transition"):
+        _snapshot_path(tmp_path / "swap.age", json.dumps(prepared).encode(), prior)

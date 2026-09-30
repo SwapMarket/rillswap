@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
@@ -280,5 +281,79 @@ def test_wallet_rpc_error_rechecks_actual_authority_before_returning_false(
             else:
                 assert reverse._submit(wallet, b"witness", "aa" * 32, owner) is False  # noqa: SLF001
             wallet.broadcast.assert_called_once()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("phase", ["work", "drain"])
+@pytest.mark.parametrize("failure", [False, True])
+def test_global_task_cancellation_cannot_complete_a_running_executor_worker(
+    phase: str,
+    *,
+    failure: bool,
+) -> None:
+    async def exercise() -> None:
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        context_open = True
+        context_violations: list[str] = []
+        owner = reverse._ReverseLifetime(0.02 if phase == "drain" else 10)  # noqa: SLF001
+
+        def work() -> None:
+            entered.set()
+            try:
+                assert release.wait(2)
+                if not context_open:
+                    context_violations.append("caller closed context before worker completion")
+                if failure:
+                    raise RuntimeError("late worker failure must be consumed during drain")
+            finally:
+                finished.set()
+
+        async def lifetime() -> None:
+            nonlocal context_open
+            try:
+                async with owner:
+                    owner.start()
+                    await owner.worker(work)
+            finally:
+                context_open = False  # Model actual SDK caller cleanup, not controller timing.
+
+        running = asyncio.create_task(lifetime())
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            if phase == "drain":
+                await asyncio.sleep(0.04)
+            controller = asyncio.current_task()
+            # Equivalent to runner-wide cancellation, not just canceling the
+            # public SDK Task. Old to_thread and drain Tasks were also canceled.
+            for task in asyncio.all_tasks():
+                if task is not controller:
+                    task.cancel()
+            await asyncio.sleep(0.02)
+            assert not running.done()
+            assert not finished.is_set()
+            assert not owner.allowed()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await running
+            assert finished.is_set()
+            assert not context_violations
+            assert not context_open
+        finally:
+            release.set()
+            await asyncio.gather(running, return_exceptions=True)
+
+    asyncio.run(exercise())
+
+
+def test_executor_future_preserves_caller_context_variables() -> None:
+    marker = contextvars.ContextVar("reverse-test-context", default="unset")
+
+    async def exercise() -> None:
+        marker.set("caller value")
+        async with reverse._ReverseLifetime(10) as owner:  # noqa: SLF001
+            assert await owner.worker(marker.get) == "caller value"
+            owner.start()
+            assert await owner.worker(marker.get) == "caller value"
 
     asyncio.run(exercise())

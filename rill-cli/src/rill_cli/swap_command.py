@@ -7,7 +7,11 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from rill_core.recovery import COOPERATIVE_RESERVATION_EXTENSION, inspect_recovery_successor
+from rill_core.recovery import (
+    COOPERATIVE_RESERVATION_EXTENSION,
+    REVERSE_FALLBACK_EXTENSION,
+    inspect_recovery_successor,
+)
 from rill_core.wire.canonical import parse_json_strict
 from rill_crypto import Context
 from rill_provider.lnd_invoice_decode import LndInvoiceDecoder
@@ -100,7 +104,8 @@ def _common_arguments(command: argparse.ArgumentParser) -> None:
     command.add_argument(
         "--recovery-output",
         required=True,
-        help="create-only recovery file (later '.funded', '.paid', '.cooperating' snapshots)",
+        help="create-only recovery file "
+        "(later '.funded', '.paid', '.fallback', '.cooperating' snapshots)",
     )
     command.add_argument("--timeout", type=float, default=60.0, help="per-answer seconds")
     command.add_argument("--settle-timeout", type=float, default=3600.0)
@@ -166,6 +171,15 @@ def _snapshot_path(path: Path, document: bytes, previous: bytes | None) -> Path:
     prior_extensions = prior.get("extensions")
     current_extensions = current.get("extensions")
     if (
+        prior.get("profile_id") == "ln-to-btc/v1"
+        and prior_knowledge == current_knowledge
+        and isinstance(prior_extensions, dict)
+        and isinstance(current_extensions, dict)
+        and REVERSE_FALLBACK_EXTENSION not in prior_extensions
+        and REVERSE_FALLBACK_EXTENSION in current_extensions
+    ):
+        return path.with_name(path.name + ".fallback")
+    if (
         prior_knowledge.get("preimage_known") is True
         and prior_knowledge == current_knowledge
         and isinstance(prior_extensions, dict)
@@ -226,10 +240,11 @@ def run(args: argparse.Namespace, network: NetworkIdentity, identity: str) -> st
     RelayConnection(args.relay, proxy=proxy)
     with Context(library_path=args.crypto_library) as crypto:
 
-        def write_recovery(document: bytes, previous: bytes | None) -> None:
+        def write_recovery(document: bytes, previous: bytes | None) -> bytes:
             _write_recovery_snapshot(
                 output, document, previous, network, credentials=credentials, crypto=crypto
             )
+            return document  # Only after verified publication, readback, and directory fsync.
 
         decoder = LndInvoiceDecoder(
             host="127.0.0.1",
@@ -273,7 +288,7 @@ async def _reverse(  # noqa: PLR0913, PLR0917 - explicit already-built handles
     crypto: Context,
     decoder: LndInvoiceDecoder,
     wallet: WalletRpc,
-    write_recovery: Callable[[bytes, bytes | None], None],
+    write_recovery: Callable[[bytes, bytes | None], bytes | None],
 ) -> str:
     payer = LndHoldPayer(
         port=args.lnd_port,
