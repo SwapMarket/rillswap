@@ -17,10 +17,17 @@ import httpx
 from rill_core.errors import ValidationError
 from rill_core.networks import backend_names, require_funding_release
 from rill_core.settlement import FundingPrevout, PlannedFundingOutput
+from rill_provider.core_tx_bytes import (
+    CooperativeClaimOutpoint,
+    CooperativeFeePolicy,
+    CoreTransactionReader,
+)
 
 from rill_cli.recovery_core_observation import _cookie, _matches_signet_challenge
 
 if TYPE_CHECKING:
+    from rill_core.settlement import TaprootKeyOperations
+    from rill_core.wire.messages import ContractTerms, FundingBinding
     from rill_core.wire.types import NetworkIdentity
 
 SATS_PER_BTC = Decimal(100_000_000)
@@ -79,6 +86,14 @@ class ConfirmedOutput:
     confirmations: int
 
 
+@dataclass(frozen=True, slots=True)
+class CooperativeClaimEvidence:
+    """Matching named-tip own-node observations, not nonce or signing authority."""
+
+    outpoint: CooperativeClaimOutpoint
+    fee_policy: CooperativeFeePolicy
+
+
 def _sats(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, (int, Decimal)):
         raise WalletRpcError("Core amount is not a number")
@@ -109,6 +124,45 @@ class WalletRpc:
         self._cookie_path = Path(cookie_path)
         self._wallet = wallet
         self._network = network
+        self._transactions = CoreTransactionReader(
+            port=port, cookie_path=cookie_path, network=network
+        )
+
+    def observe_cooperative_claim_evidence(
+        self,
+        binding: FundingBinding,
+        terms: ContractTerms,
+        *,
+        keys: TaprootKeyOperations,
+        allow_regtest_fixed_fee: bool = False,
+    ) -> CooperativeClaimEvidence:
+        """Join strict outpoint and fee samples, with no wallet RPC or effects.
+
+        The original-session handler must bound the entire acquisition and
+        native-effect age, check confirmations/deadlines and the exact plan's
+        fee, and recheck after durable reservation publication. The two reads
+        are non-atomic; a matching tip does not freeze mempool or chain policy.
+        """
+        try:
+            outpoint = self._transactions.observe_cooperative_claim_outpoint(
+                binding, terms, keys=keys
+            )
+            policy = self._transactions.observe_cooperative_fee_policy(
+                terms.timing_policy.claim_confirmation_blocks,
+                allow_regtest_fixed_fee=allow_regtest_fixed_fee,
+            )
+            if (
+                type(outpoint) is not CooperativeClaimOutpoint
+                or type(policy) is not CooperativeFeePolicy
+                or outpoint.network_identity != self._network
+                or policy.network_identity != self._network
+                or policy.confirmation_blocks != terms.timing_policy.claim_confirmation_blocks
+                or (outpoint.tip_hash, outpoint.tip_height) != (policy.tip_hash, policy.tip_height)
+            ):
+                raise WalletRpcError("cooperative Core view changed")  # noqa: TRY301
+        except Exception:  # noqa: BLE001 - failed acquisition grants no signing evidence
+            raise WalletRpcError("cooperative Core evidence unavailable") from None
+        return CooperativeClaimEvidence(outpoint, policy)
 
     def _call(self, method: str, *params: object, wallet: bool = True) -> Any:  # noqa: ANN401
         if method not in METHODS:

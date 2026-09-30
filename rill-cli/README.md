@@ -157,6 +157,15 @@ responses. Selecting a regtest network file does not authorize a different
 wallet backend. The check is not cached across calls. Existing installations
 need no state migration; a mismatched endpoint now fails before wallet effects.
 
+The dormant cooperative preflight joins the shared Core reader's mempool-aware
+outpoint and strict fee-policy samples only when both name the same configured
+network and tip. It never uses a wallet RPC route. It does not authorize signing
+or bound acquisition time on its own. The future original-session handler must
+enforce the original deadlines, one-second evidence lifetime, exact transaction
+policy, and durable create-only `.cooperating` reservation before nonce
+allocation. Recovery inspection never resumes cooperation. Live readiness
+echoes and client cooperative signing remain disabled pending that handler.
+
 Funding uses one confirmed, safe P2WPKH or P2TR coin. Core receives that exact
 input with `add_inputs=false`, and its proposed input set is checked before
 signing. If no single coin covers the amount and a conservative 165-vbyte fee
