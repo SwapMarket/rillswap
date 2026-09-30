@@ -113,6 +113,36 @@ same dedicated-output spend already authorized by the retained valid preimage.
 An existing `true` value MUST remain `true`. This classification does not apply
 to other signing flows or waive their authorization and disclosure checks.
 
+### 3.2 Private reverse claim fallback
+
+The extension `rillswap/reverse-claim-fallback` is a closed object containing:
+
+* `version`: the exact integer `1` (not a boolean).
+* `funding_binding_hash`: the lowercase 32-byte RS-001 hash of exactly one
+  authenticated retained funding binding.
+* `transaction`: bounded, nonempty, even-length lowercase hex containing the
+  fully signed unilateral reverse client claim, including its preimage witness.
+
+Static inspection requires the LN-to-BTC profile and independently verifies
+the transaction against the binding and terms: outpoint, claim ownership,
+destination, fee, preimage, script, control block, digest, and native signature.
+Insertion selects the latest binding and preserves funding history, monotonic
+knowledge, secrets, and unrelated extensions. Private preparation preserves
+`dangerous_signature_issued` exactly, including an existing `true`; it is not
+signature issuance or preimage disclosure. Once inserted, the artifact is
+immutable. Valid funding history may still grow, and an older fallback remains
+inspectable without authorizing a replacement output.
+
+The artifact proves only prepared signed bytes. It proves neither payment,
+current chain validity, timely or durable encrypted publication, nor permission
+to disclose. Independent key-based rebuilding remains available; this fixed-fee
+transaction is never the sole recovery path. Missing, partial, older, or restored
+records authorize no automatic work, migration, payment retry, or cooperation.
+Restart abandons cooperation. The future live flow must separately verify durable
+publication and fresh original-session payment/funding authority, then durably
+reserve possible preimage disclosure before transmission. This artifact is not
+that disclosure reservation and does not enable reverse readiness or cooperation.
+
 ## 4. Import and use
 
 The top-level format identifier and specification version are immutable exact

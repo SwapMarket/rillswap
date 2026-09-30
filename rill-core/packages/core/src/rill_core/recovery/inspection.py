@@ -28,6 +28,7 @@ from rill_core.settlement.unilateral import (
     UnilateralAuthorization,
     build_unilateral_spend,
     finalize_unilateral_spend,
+    validate_unilateral_spend,
     verify_cooperative_claim_proposal,
 )
 from rill_core.wire.canonical import JsonValue, canonicalize, parse_json_strict
@@ -41,6 +42,7 @@ from rill_core.wire.hashes import (
     EPOCH_SESSION_FEATURE,
     client_acceptance_hash,
     contract_hash,
+    funding_binding_hash,
     handshake_accept_hash,
     handshake_hash,
     provider_terms_hash,
@@ -69,6 +71,7 @@ from rill_core.wire.types import (
 
 MAX_RECOVERY_BYTES = 128 * 1024
 COOPERATIVE_RESERVATION_EXTENSION = "rillswap/cooperative-claim-reservation"
+REVERSE_FALLBACK_EXTENSION = "rillswap/reverse-claim-fallback"
 FUNDING_ATTEMPT_HEX_LENGTH = 64
 SCHNORR_AUXILIARY_BYTES = 32
 PURPOSE_KEY_COUNT = 6
@@ -182,6 +185,19 @@ class _CooperativeReservation(StrictModel):
     version: Annotated[int, Field(strict=True, ge=1, le=1)]
     proposal: Envelope
     signature_hash: Hex32
+
+
+class _ReverseClaimFallback(StrictModel):
+    """Private prepared claim bytes, never payment or disclosure authority."""
+
+    version: Annotated[int, Field(strict=True, ge=1, le=1)]
+    funding_binding_hash: Hex32
+    transaction: Annotated[
+        str,
+        Field(
+            strict=True, min_length=2, max_length=MAX_RECOVERY_BYTES, pattern=r"^(?:[0-9a-f]{2})+$"
+        ),
+    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -539,17 +555,19 @@ def _require_successor(
         not earlier.dangerous_signature_issued or later.dangerous_signature_issued,
         "issued signature knowledge regressed",
     )
-    _require_reservation_successor(previous, candidate, crypto)
+    _require_extension_successor(previous, candidate, crypto)
 
 
-def _require_reservation_successor(
+def _require_extension_successor(
     previous: _RecoveryPlaintext, candidate: _RecoveryPlaintext, crypto: RecoveryCrypto
 ) -> None:
-    """Permit only the append-once reservation, preserving every other extension."""
+    """Permit the two direction-specific append-once records, preserving all others."""
     earlier = dict(previous.extensions)
     later = dict(candidate.extensions)
     prior_marker = earlier.pop(COOPERATIVE_RESERVATION_EXTENSION, None)
     marker = later.pop(COOPERATIVE_RESERVATION_EXTENSION, None)
+    prior_fallback = earlier.pop(REVERSE_FALLBACK_EXTENSION, None)
+    fallback = later.pop(REVERSE_FALLBACK_EXTENSION, None)
     _require(canonicalize(earlier) == canonicalize(later), "recovery extensions changed")
     if COOPERATIVE_RESERVATION_EXTENSION in previous.extensions:
         _require(canonicalize(prior_marker) == canonicalize(marker), "reservation changed")
@@ -572,6 +590,22 @@ def _require_reservation_successor(
         # insertion it must select the latest, not a superseded historic output.
         latest = candidate.funding_history[-1].binding
         _reservation_plan(candidate.contract_terms, latest, payload, crypto)
+    if REVERSE_FALLBACK_EXTENSION in previous.extensions:
+        _require(canonicalize(prior_fallback) == canonicalize(fallback), "reverse fallback changed")
+    elif REVERSE_FALLBACK_EXTENSION in candidate.extensions:
+        _require(previous.funding_history == candidate.funding_history, "fallback changed funding")
+        _require(
+            previous.monotonic_knowledge == candidate.monotonic_knowledge,
+            "fallback changed knowledge",
+        )
+        prepared = _ReverseClaimFallback.model_validate_json(canonicalize(fallback), strict=True)
+        # Complete candidate inspection already validated the signed claim and
+        # its unique retained binding. Only insertion requires the latest one.
+        _require(
+            prepared.funding_binding_hash
+            == funding_binding_hash(candidate.funding_history[-1].binding).hex(),
+            "fallback does not select latest funding",
+        )
 
 
 def _require(condition: bool, message: str) -> None:  # noqa: FBT001 - internal predicate
@@ -694,6 +728,7 @@ def _inspect(
     ):
         _require(stored == reconstructed_value, "Taproot artifact")
     _check_static_history(record, crypto)
+    _inspect_reverse_fallback(record, crypto)
     _inspect_cooperative_reservation(record, crypto)
     return OfflineRecoveryInspection(
         network_name=record.network_identity.name,
@@ -724,6 +759,33 @@ def _check_static_history(record: _RecoveryPlaintext, crypto: RecoveryCrypto) ->
         session_key,
         crypto=crypto,
     )
+
+
+def _inspect_reverse_fallback(record: _RecoveryPlaintext, crypto: RecoveryCrypto) -> None:
+    """Validate private historical claim bytes without any live authority inference."""
+    if REVERSE_FALLBACK_EXTENSION not in record.extensions:
+        return
+    fallback = _ReverseClaimFallback.model_validate_json(
+        canonicalize(record.extensions[REVERSE_FALLBACK_EXTENSION]), strict=True
+    )
+    _require(record.profile_id == "ln-to-btc/v1", "fallback requires reverse client claim")
+    bindings = [
+        entry.binding
+        for entry in record.funding_history
+        if funding_binding_hash(entry.binding).hex() == fallback.funding_binding_hash
+    ]
+    _require(len(bindings) == 1, "fallback binding unavailable or ambiguous")
+    binding = bindings[0]
+    funding = FundingOutput(
+        txid=bytes.fromhex(binding.funding_txid),
+        output_index=binding.contract_vout,
+        value_sat=int(binding.contract_value_sat),
+        script_pubkey=bytes.fromhex(binding.contract_script_pubkey),
+    )
+    authorization = UnilateralAuthorization.from_terms(
+        record.contract_terms, funding, "claim", keys=crypto
+    )
+    validate_unilateral_spend(bytes.fromhex(fallback.transaction), authorization, verifier=crypto)
 
 
 def _inspect_cooperative_reservation(record: _RecoveryPlaintext, crypto: RecoveryCrypto) -> None:
