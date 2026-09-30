@@ -13,7 +13,8 @@ import os
 import re
 import stat
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Context as DecimalContext
+from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -117,6 +118,36 @@ class CooperativeClaimOutpoint:
     inclusion_block_hash: str
 
 
+@dataclass(frozen=True, slots=True)
+class CooperativeFeePolicy:
+    """Named-tip fee advice and admission floors, not signing authority.
+
+    The runtime must separately bound acquisition/effect age, verify the exact
+    outpoint and transaction, and enforce deadlines, cap, and dust policy.
+    """
+
+    network_identity: NetworkIdentity
+    tip_hash: str
+    tip_height: int
+    confirmation_blocks: int
+    min_relay_sat_kvb: int
+    mempool_min_sat_kvb: int
+    estimate_sat_kvb: int | None
+    estimate_blocks: int
+
+    def fee_floor_sat(self, *, vsize: int, configured_floor_sat: int) -> int:
+        """Integer ceiling for a caller's independently verified final vsize."""
+        if (
+            type(vsize) is not int
+            or not 0 < vsize <= MAX_TRANSACTION_HEX_BYTES
+            or type(configured_floor_sat) is not int
+            or not 0 < configured_floor_sat <= MAX_SATS
+        ):
+            raise ValueError("cooperative fee inputs invalid")
+        rate = max(self.min_relay_sat_kvb, self.mempool_min_sat_kvb, self.estimate_sat_kvb or 0)
+        return max(configured_floor_sat, (rate * vsize + 999) // 1000)
+
+
 class CoreReadError(Exception):
     """No usable requested evidence was established; never absence proof."""
 
@@ -180,6 +211,22 @@ def _exact_sats(value: object, expected: int) -> bool:
     # Decimal comparison is exact; arithmetic would use the ambient precision
     # and can round away a fractional satoshi or overflow on a huge exponent.
     return value == Decimal(f"{whole}.{fractional:08d}")
+
+
+def _fee_rate_sat_kvb(value: object) -> int:
+    """Core rates are whole satoshis per kvB, never ambient-rounded floats."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, Decimal))
+        or not Decimal(value).is_finite()
+        or not 0 <= value < 1
+    ):
+        raise CoreProtocolError("Core cooperative fee rate invalid")
+    with localcontext(DecimalContext(prec=28)):
+        rate = int(value * SATS_PER_BTC)
+    if not _exact_sats(value, rate):
+        raise CoreProtocolError("Core cooperative fee rate is not whole satoshis per kvB")
+    return rate
 
 
 def _cookie(path: Path) -> tuple[str, str]:
@@ -602,6 +649,76 @@ class CoreTransactionReader:
             raise CoreProtocolError("Core outpoint status is inconsistent")
         return True
 
+    def observe_cooperative_fee_policy(
+        self, target_blocks: int, *, allow_regtest_fixed_fee: bool = False
+    ) -> CooperativeFeePolicy:
+        """Sample strict fee evidence without changing fallback fee advice.
+
+        Public networks require an affirmative conservative estimate whose
+        returned horizon fits the signed confirmation budget. Only explicit
+        regtest configuration permits an explicitly unavailable estimate.
+        Missing/malformed evidence never selects that exemption.
+        """
+        if type(target_blocks) is not int or not 1 <= target_blocks <= MAX_ESTIMATE_TARGET:
+            raise ValueError("estimate target out of range")
+        if type(allow_regtest_fixed_fee) is not bool or (
+            allow_regtest_fixed_fee and self._network.name != "regtest"
+        ):
+            raise ValueError("fixed cooperative fee policy requires explicit regtest configuration")
+        try:
+            with self._client() as client:
+                tip_hash, tip_height = _chain_tip(
+                    self._rpc(client, "getblockchaininfo", [], 1), self._network
+                )
+                if self._rpc(client, "getblockhash", [0], 2) != self._network.genesis_hash:
+                    raise CoreProtocolError("Core genesis differs from configuration")
+                mempool = self._rpc(client, "getmempoolinfo", [], 3)
+                if not isinstance(mempool, dict):
+                    raise CoreProtocolError("Core cooperative mempool policy unavailable")
+                relay = _fee_rate_sat_kvb(mempool.get("minrelaytxfee"))
+                minimum = _fee_rate_sat_kvb(mempool.get("mempoolminfee"))
+                estimate = self._rpc(client, "estimatesmartfee", [target_blocks, "CONSERVATIVE"], 4)
+                if not isinstance(estimate, dict) or (
+                    type(estimate.get("blocks")) is not int
+                    or not 0 <= estimate["blocks"] <= MAX_ESTIMATE_TARGET
+                ):
+                    raise CoreProtocolError("Core cooperative estimate malformed")
+                errors = estimate.get("errors")
+                if "errors" in estimate:
+                    if (
+                        not isinstance(errors, list)
+                        or not errors
+                        or any(type(error) is not str or not error for error in errors)
+                        or "feerate" in estimate
+                    ):
+                        raise CoreProtocolError("Core cooperative estimate malformed")
+                    if not allow_regtest_fixed_fee:
+                        raise CoreUnavailableError("Core cooperative estimate unavailable")
+                    rate = None
+                else:
+                    rate = _fee_rate_sat_kvb(estimate.get("feerate"))
+                    if rate <= 0 or not 1 <= estimate["blocks"] <= target_blocks:
+                        raise CoreProtocolError(
+                            "Core cooperative estimate exceeds confirmation budget"
+                        )
+                end_hash, end_height = _chain_tip(
+                    self._rpc(client, "getblockchaininfo", [], 5), self._network
+                )
+        except httpx.HTTPError:
+            raise CoreUnavailableError("Core RPC transport unavailable") from None
+        if (tip_hash, tip_height) != (end_hash, end_height):
+            raise CoreUnavailableError("Core chain view changed; no current fee evidence")
+        return CooperativeFeePolicy(
+            self._network,
+            tip_hash,
+            tip_height,
+            target_blocks,
+            relay,
+            minimum,
+            rate,
+            estimate["blocks"],
+        )
+
     def fee_rate_sat_vb(self, target_blocks: int) -> float | None:
         """Return Core's conservative feerate estimate in sat/vB, or ``None``.
 
@@ -684,6 +801,7 @@ class CoreTransactionReader:
         if method not in (
             "getblockchaininfo",
             "estimatesmartfee",
+            "getmempoolinfo",
             "getblockhash",
             "getindexinfo",
             "getrawtransaction",

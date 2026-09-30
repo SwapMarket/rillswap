@@ -909,6 +909,19 @@ spends or establish action authority. It uses only
 four read-only RPC methods (`getblockchaininfo`, `getblockhash`,
 `getrawtransaction`, `gettxout`),
 with no wallet route, redirects, environment proxy, automatic retry, or writes.
+
+`observe_cooperative_fee_policy` is separate strict, read-only signing
+preflight evidence, not the optional floating-point fallback fee estimate.
+It samples `getmempoolinfo` relay/mempool floors and a conservative
+`estimatesmartfee` answer between matching, network-checked tips. Public networks
+require a positive whole-satoshi-per-kvB estimate whose returned block target
+fits the requested signed confirmation budget. Only an explicitly requested
+regtest fixed-fee mode permits an explicitly unavailable estimate. Missing or
+malformed fields and transport failures never enable that exception. Fee floors
+use integer ceiling arithmetic and never override signed caps or dust policy.
+Runtime still must bound acquisition and evidence age, independently verify
+the selected outpoint, and recheck before native effects. This reader alone
+does not authorize a partial signature; no completion caller uses it yet.
 The deployment namespace and consensus profile are operator assertions, not
 facts Core attests. Arbitrary old confirmed transactions need Core `-txindex=1`
 already configured; this probe never enables indexing or initiates a reindex.
