@@ -8,6 +8,8 @@ broadcasting it. Only the fixed methods below are callable.
 from __future__ import annotations
 
 import json
+import math
+import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -26,6 +28,8 @@ from rill_provider.core_tx_bytes import (
 from rill_cli.recovery_core_observation import _cookie, _matches_signet_challenge
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from rill_core.settlement import TaprootKeyOperations
     from rill_core.wire.messages import ContractTerms, FundingBinding
     from rill_core.wire.types import NetworkIdentity
@@ -164,22 +168,57 @@ class WalletRpc:
             raise WalletRpcError("cooperative Core evidence unavailable") from None
         return CooperativeClaimEvidence(outpoint, policy)
 
-    def _call(self, method: str, *params: object, wallet: bool = True) -> Any:  # noqa: ANN401
+    def _call(
+        self,
+        method: str,
+        *params: object,
+        wallet: bool = True,
+        deadline: float | None = None,
+        effect_allowed: Callable[[], bool] | None = None,
+    ) -> Any:  # noqa: ANN401 - exact Core JSON response
         if method not in METHODS:
             raise WalletRpcError("unsupported Core wallet method")
+        guarded = deadline is not None or effect_allowed is not None
+        if guarded:
+            _request_budget(deadline, effect_allowed)
         if method in WALLET_EFFECTS:
-            self._verify_network()
+            if guarded:
+                self._verify_network(deadline=deadline, effect_allowed=effect_allowed)
+            else:
+                self._verify_network()
         username, password = _cookie(self._cookie_path)
         path = f"/wallet/{self._wallet}" if wallet else "/"
+        body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": list(params)}
         try:
-            response = httpx.post(
-                self._url + path,
-                json={"jsonrpc": "2.0", "id": 1, "method": method, "params": list(params)},
-                auth=(username, password),
-                timeout=httpx.Timeout(30.0, connect=2.0),
-                follow_redirects=False,
-                trust_env=False,
-            )
+            if guarded:
+
+                def authorize(request: httpx.Request) -> None:
+                    # Auth and request construction precede this hook. Handoff
+                    # is potentially irreversible, not a socket-write cutoff.
+                    remaining = _request_budget(deadline, effect_allowed)
+                    request.extensions["timeout"] = httpx.Timeout(
+                        remaining,
+                        connect=min(2.0, remaining),
+                    ).as_dict()
+
+                remaining = _request_budget(deadline, effect_allowed)
+                with httpx.Client(
+                    auth=(username, password),
+                    timeout=httpx.Timeout(remaining, connect=min(2.0, remaining)),
+                    follow_redirects=False,
+                    trust_env=False,
+                    event_hooks={"request": [authorize]},
+                ) as client:
+                    response = client.post(self._url + path, json=body)
+            else:
+                response = httpx.post(
+                    self._url + path,
+                    json=body,
+                    auth=(username, password),
+                    timeout=httpx.Timeout(30.0, connect=2.0),
+                    follow_redirects=False,
+                    trust_env=False,
+                )
         except httpx.HTTPError:
             raise WalletRpcError("Core RPC unavailable") from None
         if response.status_code != HTTP_OK or len(response.content) > MAX_RESPONSE_BYTES:
@@ -196,8 +235,15 @@ class WalletRpc:
         """Return the best height only after checking the actual wallet backend."""
         return self._verify_network()
 
-    def _verify_network(self) -> int:
-        info = self._call("getblockchaininfo", wallet=False)
+    def _verify_network(
+        self,
+        *,
+        deadline: float | None = None,
+        effect_allowed: Callable[[], bool] | None = None,
+    ) -> int:
+        info = self._call(
+            "getblockchaininfo", wallet=False, deadline=deadline, effect_allowed=effect_allowed
+        )
         if (
             not isinstance(info, dict)
             or info.get("chain") != self._chain
@@ -207,7 +253,12 @@ class WalletRpc:
             or not _matches_signet_challenge(info, self._network)
         ):
             raise WalletRpcError("Core wallet chain is unavailable or differs from configuration")
-        if self._call("getblockhash", 0, wallet=False) != self._network.genesis_hash:
+        if (
+            self._call(
+                "getblockhash", 0, wallet=False, deadline=deadline, effect_allowed=effect_allowed
+            )
+            != self._network.genesis_hash
+        ):
             raise WalletRpcError("Core wallet genesis differs from configuration")
         return int(info["blocks"])
 
@@ -351,9 +402,47 @@ class WalletRpc:
         depth = result.get("confirmations") if isinstance(result, dict) else None
         return depth if type(depth) is int and result.get("txid") == txid else None
 
-    def broadcast(self, raw: bytes) -> str:
-        """Submit exact bytes; return Core's txid."""
-        txid = self._call("sendrawtransaction", raw.hex(), wallet=False)
+    def broadcast(
+        self,
+        raw: bytes,
+        *,
+        deadline: float | None = None,
+        effect_allowed: Callable[[], bool] | None = None,
+    ) -> str:
+        """Submit exact bytes; optionally authorize transport handoff, not transmission.
+
+        The original deadline covers attestation and final request setup.
+        Once handed off, witness transmission or Core completion may occur
+        after expiry. Errors and timeouts never establish preimage privacy.
+        """
+        txid = self._call(
+            "sendrawtransaction",
+            raw.hex(),
+            wallet=False,
+            deadline=deadline,
+            effect_allowed=effect_allowed,
+        )
         if not isinstance(txid, str):
             raise WalletRpcError("Core broadcast result unusable")
         return txid
+
+
+def _request_budget(deadline: float | None, effect_allowed: Callable[[], bool] | None) -> float:
+    """Sample the final time after the trusted local permission observation."""
+    if deadline is not None and (
+        type(deadline) not in (int, float)
+        or not math.isfinite(deadline)
+        or time.monotonic() >= deadline
+    ):
+        raise WalletRpcError("Core request authority expired or invalid")
+    if effect_allowed is not None:
+        try:
+            allowed = effect_allowed() is True
+        except Exception:  # noqa: BLE001 - caller details may contain secrets
+            allowed = False
+        if not allowed:
+            raise WalletRpcError("Core request authority unavailable")
+    remaining = 30.0 if deadline is None else min(30.0, deadline - time.monotonic())
+    if remaining <= 0:
+        raise WalletRpcError("Core request authority expired")
+    return remaining

@@ -151,6 +151,19 @@ Operational reporting can follow an expired submission to preserve evidence.
 The reverse dispatcher still needs to supply this authority and drain actual
 crypto-using workers before returning or closing the context.
 
+The own-Core wallet broadcaster accepts the same optional lifetime inputs.
+Guarded calls keep one absolute deadline through network/genesis attestation,
+cookie access, authentication, and request setup. A final HTTPX request hook
+checks permission and refreshes phase timeouts before transport handoff. The
+destination, root broadcast route, authentication, disabled redirects/proxies,
+and exact transaction bytes remain unchanged; the default path is unchanged.
+Handoff is potentially irreversible disclosure. Connection establishment still
+follows the hook, so the first witness transmission can begin after expiry.
+Phase timeouts are not a total duration bound. Late successful results remain
+knowledge; timeout, transport error, cancellation, or missing chain observation
+does not prove privacy or authorize retry. This producer guard is not yet wired
+into the reverse dispatcher and does not open activation or release gates.
+
 ```sh
 rill swap ln-to-btc \
   --network trusted-regtest-network.json \
