@@ -701,8 +701,10 @@ normal 60-second submission budget, require an affirmative `True`, and fence
 both sides of the predicate, after node attestation and after RPC setup before
 `SendToRouteV2`. Predicate failures are redacted. Expiry or revocation prevents
 new submission; it cannot undo an RPC already started. A late successful result
-still reports payment knowledge and never renews signing authority. Reverse
-client propagation is not connected yet, and no stored dispatch is retried.
+still reports payment knowledge and never renews signing authority. The reverse
+client propagates its original lifetime through the hold payer to this boundary.
+No stored dispatch is retried. Physical RPC completion and cleanup can outlive
+the authorization budget; feature activation and release remain gated.
 
 Absent, legacy (unversioned or relative-send), partial, malformed, other-hash,
 or other-network records bind no payer. For them normal settlement still defers
