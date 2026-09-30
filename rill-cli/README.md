@@ -137,6 +137,20 @@ tracking remains payment knowledge; unknown outcomes require inspection and
 never authorize retry. `run_reverse_swap` does not propagate these inputs yet,
 so this does not establish an overall reverse lifetime.
 
+The claim watcher likewise accepts an original absolute monotonic deadline
+and nonconsuming, thread-safe effect predicate. A relative timeout can shorten,
+never renew, that deadline. Checks surround chain and confirmation observations,
+signing, and submission, and sleeps cannot extend the budget. Revoked or expired
+authority prevents new effects; an already-running callback can still finish.
+Signed attempts remain prepared evidence even if a late callback times out or
+submission reports failure. Neither outcome proves that the preimage stayed
+private. The existing block-height signing and rebroadcast rules are unchanged.
+Clock and permission collaborators must be trusted, prompt local observations;
+arbitrary callbacks cannot provide atomic time-and-revocation guarantees.
+Operational reporting can follow an expired submission to preserve evidence.
+The reverse dispatcher still needs to supply this authority and drain actual
+crypto-using workers before returning or closing the context.
+
 ```sh
 rill swap ln-to-btc \
   --network trusted-regtest-network.json \
