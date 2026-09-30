@@ -10,7 +10,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from rill_core.settlement import FundingBindingTransactionMatch, validate_cooperative_claim
@@ -23,11 +23,13 @@ from test_cooperation_burn import _featured_paid_swap
 from test_live_session_store import Harness
 
 from rill_provider import live_session_store as live
+from rill_provider._nip59_send import _wrap_envelope
 from rill_provider.core_tx_bytes import (
     CooperativeClaimOutpoint,
     CooperativeFeePolicy,
     CoreTransactionUnknownError,
 )
+from rill_provider.handshake_service import HandshakeService, ServicePolicy
 from rill_provider.live_session_store import LiveSessionStoreError, SettlementItem
 from rill_provider.settlement_engine import EngineSettings, SettlementEngine
 from rill_provider.settlement_policy import offered_terms
@@ -82,6 +84,8 @@ if TYPE_CHECKING:
         "candidate_blocked",
         "candidate_malformed_json",
         "runtime_completion",
+        "runtime_service_completion",
+        "runtime_service_commit_uncertain",
         "runtime_distinct_fee",
         "runtime_tip_mismatch",
         "runtime_fee_high",
@@ -468,12 +472,13 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0911, P
             return
         if winner.startswith("candidate_"):
             assert store.cooperative_completion_candidate(session, cooperation_id) is None
-        assert (
-            store._admit_cooperative_result(  # noqa: SLF001
-                canonicalize(signed.model_dump(mode="json")), now=1002
-            ).status
-            == "signed"
-        )
+        if winner not in {"runtime_service_completion", "runtime_service_commit_uncertain"}:
+            assert (
+                store._admit_cooperative_result(  # noqa: SLF001
+                    canonicalize(signed.model_dump(mode="json")), now=1002
+                ).status
+                == "signed"
+            )
         if winner.startswith("candidate_"):
             if winner == "candidate_no_handle":
                 store._cooperation_handles.pop(cooperation_id).close()  # noqa: SLF001 - custody lost, never reconstructed
@@ -562,6 +567,67 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0911, P
             engine = SettlementEngine(
                 store, chain, Mock(), crypto, EngineSettings(claim_fee_sat=300)
             )
+            if winner in {"runtime_service_completion", "runtime_service_commit_uncertain"}:
+                service_policy = ServicePolicy(
+                    network=harness.network,
+                    profiles=("btc-to-ln/v1",),
+                    amount_bands=((1000, 2000),),
+                    base_fee_sat=1,
+                    proportional_millionths=1,
+                    slot="s",
+                    relay_urls=("ws://r/",),
+                )
+                service = HandshakeService(
+                    store, Mock(), crypto, service_policy, clock=lambda: 1002, settlement=engine
+                )
+                completion = AsyncMock(wraps=engine.complete_cooperative_claim)
+                monkeypatch.setattr(engine, "complete_cooperative_claim", completion)
+                if winner == "runtime_service_commit_uncertain":
+                    actual_commit = store.commit_selected_cooperative_claim
+
+                    def committed_then_failed(*args: object, **kwargs: object) -> str:
+                        actual_commit(*args, **kwargs)
+                        raise LiveSessionStoreError("completion publication outcome unknown")
+
+                    monkeypatch.setattr(
+                        store, "commit_selected_cooperative_claim", committed_then_failed
+                    )
+                event = _wrap_envelope(
+                    canonicalize(signed.model_dump(mode="json")),
+                    sender_session_secret=(2).to_bytes(32, "big"),
+                    recipient_xonly_key=proposal.sender_session_key,
+                    crypto=crypto,
+                )
+                assert asyncio.run(service.handle(event, [])) == "result-admitted"
+                assert store.selected_cooperative_claim(session) is not None
+                assert cooperation_id not in store._cooperation_handles  # noqa: SLF001 - actual ingress consumed native custody
+                replay = _wrap_envelope(
+                    canonicalize(signed.model_dump(mode="json")),
+                    sender_session_secret=(2).to_bytes(32, "big"),
+                    recipient_xonly_key=proposal.sender_session_key,
+                    crypto=crypto,
+                )
+                assert asyncio.run(service.handle(replay, [])) == "result-replay"
+                completion.assert_awaited_once()
+                chain.broadcast.assert_not_called()
+                owed = [
+                    entry
+                    for entry in store.pending_outbox()
+                    if Envelope.model_validate_json(entry.canonical_bytes).payload.get("action")
+                    == "cooperative_claim_complete"
+                ]
+                assert len(owed) == 1
+                assert not store.pending_requires_live_cooperation(owed[0].message_id)
+                assert store.pending_sendable(owed[0].message_id, now=1025)
+                service._readiness_closed = True  # noqa: SLF001 - retained owed completion is not new signing authority
+                service._deadline_healthy = False  # noqa: SLF001
+                service._clock = lambda: 1025  # noqa: SLF001 - actual owed delivery after the original deadline
+                service._chain_tip = Mock(side_effect=OSError("Core unavailable"))  # noqa: SLF001
+                relay = Mock(publish=AsyncMock(return_value=True))
+                asyncio.run(service._send_pending(owed[0].message_id, [relay]))  # noqa: SLF001 - real checked owed outbox
+                relay.publish.assert_awaited_once()
+                service._chain_tip.assert_not_called()  # noqa: SLF001
+                return
             if winner in {"runtime_clock_delay", "runtime_clock_revokes"}:
                 monotonic_value = 0.0
                 armed = False

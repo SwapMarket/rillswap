@@ -195,6 +195,15 @@ class HandshakeService:
         )
         return self._deadline_high_water
 
+    def _live_cooperative_now(self) -> int:
+        """Fence new signing exposure, not observations or owed completions."""
+        if self._readiness_closed or not self._deadline_healthy:
+            raise LiveSessionStoreError("original cooperative service unavailable")
+        current = self._deadline_now()
+        if self._readiness_closed or not self._deadline_healthy:
+            raise LiveSessionStoreError("original cooperative service unavailable")
+        return current
+
     async def start_cooperative_readiness(
         self,
         session_id: str,
@@ -342,9 +351,7 @@ class HandshakeService:
         self._store.retire_cooperative_readiness(challenge)
 
         def proposal_now() -> int:
-            if self._readiness_closed or not self._deadline_healthy:
-                raise LiveSessionStoreError("original cooperative service unavailable")
-            current = self._deadline_now()
+            current = self._live_cooperative_now()
             if current >= token.deadline_at:
                 raise LiveSessionStoreError("original cooperative deadline elapsed")
             return current
@@ -700,6 +707,26 @@ class HandshakeService:
                     ):
                         return await self._admit_ready_result(document, envelope.get("session_id"))
                     result = store._admit_cooperative_result(document, now=now)  # noqa: SLF001 - store-owned admission; no signer or reply
+                    if (
+                        self._settlement is not None
+                        and result.status == "signed"
+                        and not result.replay
+                    ):
+                        try:
+                            self._live_cooperative_now()
+                            # Admission authenticated and context-checked this
+                            # exact document. IDs are lookup keys, not authority.
+                            await self._settlement.complete_cooperative_claim(
+                                result.session_id,
+                                bytes.fromhex(payload["cooperation_id"]),
+                                now=self._live_cooperative_now,
+                            )
+                        except StaleOwnerError:
+                            raise
+                        except Exception:  # noqa: BLE001 - durable admission survives uncertain completion; never retry
+                            LOG.warning(
+                                "cooperative completion stopped for %s", result.session_id[:16]
+                            )
                     return "result-replay" if result.replay else "result-admitted"
                 return await self._answer(document, relays, now)
             init = store.open_epoch_frame(event, now=now, transport=self._transport)

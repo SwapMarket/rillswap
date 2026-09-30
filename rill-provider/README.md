@@ -921,7 +921,7 @@ malformed fields and transport failures never enable that exception. Fee floors
 use integer ceiling arithmetic and never override signed caps or dust policy.
 Runtime still must bound acquisition and evidence age, independently verify
 the selected outpoint, and recheck before native effects. This reader alone
-does not authorize a partial signature; only dormant completion preflight uses it.
+does not authorize a partial signature; independent completion preflight uses it.
 
 `cooperative_completion_candidate` is a nonauthorizing read snapshot containing
 the current prepared fallback and canonical burned binding. It exposes no
@@ -932,9 +932,9 @@ fee from its fallback, so preflight must validate its exact transaction and
 sighash rather than infer them from the fallback. Begin the monotonic evidence
 budget before acquiring this snapshot. Atomic completion still independently
 checks custody, deadlines, and winner selection. The getter adds no migration,
-sampling, signing, or restart cooperation, and has no production caller yet.
+sampling, signing, or restart cooperation.
 
-The dormant `complete_cooperative_claim` coordinator validates that snapshot
+The `complete_cooperative_claim` coordinator validates that snapshot
 and the exact burned plan, then joins fresh own-node outpoint and fee samples
 at the same named tip. Its one-second monotonic budget begins before snapshot
 lock acquisition and native validation, includes worker queueing, and fences
@@ -946,7 +946,13 @@ the signed cap. Only precommit refusal returns `None`. Once atomic completion
 begins, errors propagate because custody or durable selection may have changed.
 There is no automatic retry. Selected completions use the normal checked
 outbox, and broadcast never depends on a client receipt. Fresh signed-result
-dispatch is not connected yet; release and feature gates remain closed.
+dispatch now invokes this operation exactly once after fresh authenticated
+`signed` admission, never for replay, decline, or completion receipt. Ordinary
+completion failures preserve the durable admission disposition because a
+winner may already be selected; stale ownership and cancellation propagate.
+New signing requires healthy original-service clocks, but owed completion
+delivery remains independent of those flags and Core availability. Quote
+feature activation, client readiness echoes, and release gates remain closed.
 The deployment namespace and consensus profile are operator assertions, not
 facts Core attests. Arbitrary old confirmed transactions need Core `-txindex=1`
 already configured; this probe never enables indexing or initiates a reindex.
