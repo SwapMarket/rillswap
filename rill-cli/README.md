@@ -163,8 +163,28 @@ network and tip. It never uses a wallet RPC route. It does not authorize signing
 or bound acquisition time on its own. The future original-session handler must
 enforce the original deadlines, one-second evidence lifetime, exact transaction
 policy, and durable create-only `.cooperating` reservation before nonce
-allocation. Recovery inspection never resumes cooperation. Live readiness
-echoes and client cooperative signing remain disabled pending that handler.
+allocation. Recovery inspection never resumes cooperation.
+
+The dormant `_CooperativeClaimAttempt` owns the original FIFO through readiness,
+proposal, one-shot partial signing, and verified completion. It preserves valid
+preimage knowledge even when readiness is unusable, publishes `.paid` before
+echoing, and requires confirmed `.cooperating` publication plus new own-node
+evidence before allocating a client nonce. Its nonrenewing budget intersects
+the original funding lifetime and advertised deadline. Completion at or after
+the cutoff is not processed, even if queued. Abandonment does not cancel a
+provider's already-selected key-path winner or permit payment/signing retry.
+Transport may retransmit the identical wrapped event without signing again.
+
+Cancellation or timeout does not stop an RPC or recovery writer thread. The
+eventual caller MUST retain the owner and crypto context and await
+`wait_for_workers()` before closing that context. Late publication may leave a
+valid recovery file; the retained pending successor is unconfirmed, not a
+durability promise. Late worker success never reactivates the attempt.
+Live readiness echoes and client cooperative signing remain disabled until
+this owner is integrated with authenticated feature negotiation, provider
+completion supervision, and adversarial Core/LND acceptance tests. Synchronous
+native work and filesystem synchronization can overrun their last clock check;
+strict end-to-end deadline guarantees are not established by these unit tests.
 
 Funding uses one confirmed, safe P2WPKH or P2TR coin. Core receives that exact
 input with `add_inputs=false`, and its proposed input set is checked before

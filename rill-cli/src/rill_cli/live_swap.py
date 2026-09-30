@@ -21,20 +21,35 @@ import json
 import math
 import secrets
 import time
-from dataclasses import dataclass
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from rill_core.domain.chain import MAX_EXACT_JSON_INTEGER
+from rill_core.recovery import (
+    COOPERATIVE_RESERVATION_EXTENSION,
+    inspect_recovery_plaintext,
+    inspect_recovery_successor,
+)
 from rill_core.settlement import (
     FundingPlan,
     authorize_funding_transaction,
     reconstruct_taproot_contract,
 )
+from rill_core.settlement.unilateral import (
+    FundingOutput,
+    UnilateralAuthorization,
+    finalize_cooperative_claim,
+    verify_cooperative_claim_proposal,
+)
 from rill_core.wire.canonical import canonicalize, parse_model_json
 from rill_core.wire.cooperative_messages import (
+    CooperativeClaimComplete,
+    CooperativeClaimPropose,
     CooperativeClaimReadyRequest,
     check_cooperative_action_context,
 )
+from rill_core.wire.envelope_authentication import verify_static_signed_envelope
 from rill_core.wire.hashes import (
     COOPERATIVE_CLAIM_FEATURE,
     EPOCH_SESSION_EXTENSION,
@@ -68,17 +83,21 @@ from rill_core.wire.settlement_messages import PaymentSettled, parse_observation
 from rill_provider import _nip01_event as nip01
 from rill_provider._nip59_receive import _decode_gift_wrap_candidate
 from rill_provider._nip59_send import _wrap_envelope
+from rill_provider.core_tx_bytes import CooperativeClaimOutpoint, CooperativeFeePolicy
 from rill_provider.provider_identity import ADVERTISEMENT_TAG, ANNOUNCEMENT_KIND
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
+from rill_cli.wallet_rpc import CooperativeClaimEvidence
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable
+
+    from rill_core.settlement.unilateral import CooperativeClaimPlan, ValidatedCooperativeClaim
     from rill_core.wire.messages import ContractTerms, InvoiceBinding
     from rill_core.wire.types import NetworkIdentity
     from rill_crypto import Context
     from rill_provider.relay_client import RelayConnection
 
-    from rill_cli.wallet_rpc import WalletFunding
+    from rill_cli.wallet_rpc import WalletFunding, WalletRpc
 
 PROFILE: Literal["btc-to-ln/v1"] = "btc-to-ln/v1"
 type ProfileId = Literal["btc-to-ln/v1", "ln-to-btc/v1"]
@@ -280,6 +299,19 @@ class _Session:
         self._provider_by_sequence: dict[int, tuple[str, bytes]] = {}
         self._provider_pending: dict[int, tuple[Envelope, int]] = {}
         self._provider_pending_bytes = 0
+        self._settlement_active = False
+        self._cooperative_attempt_started = False
+
+    @asynccontextmanager
+    async def settlement_stream(self) -> AsyncIterator[None]:
+        """One settlement consumer owns the FIFO even while awaiting effects."""
+        if self._settlement_active:
+            raise SwapError("original settlement stream already owned")
+        self._settlement_active = True
+        try:
+            yield
+        finally:
+            self._settlement_active = False
 
     def envelope(  # noqa: PLR0913 - explicit per-envelope negotiated features
         self,
@@ -547,37 +579,40 @@ async def _wait_for_payment(
     loop = asyncio.get_running_loop()
     expected_contract = contract_hash(terms).hex()
     timeout_error = "provider settlement not observed in time; " + refund_hint
-    while True:
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            raise SwapError(timeout_error)
-        try:
-            message = await session.receive_next(timeout=remaining)
-        except TimeoutError:
-            raise SwapError(timeout_error) from None
-        except SwapError as error:
-            raise SwapError(f"provider session stopped: {error}; " + refund_hint) from None
-        if loop.time() >= deadline:
-            raise SwapError(timeout_error)
-        if message.contract_hash != expected_contract or message.in_reply_to is not None:
-            raise SwapError("unexpected provider settlement context; " + refund_hint)
-        if message.message_type == "action_request":
-            raise SwapError("cooperation unavailable; payment status unresolved; " + refund_hint)
-        if message.message_type != "observation":
-            raise SwapError("unexpected provider settlement message; " + refund_hint)
-        try:
-            seen = parse_observation(canonicalize(message.payload))
-        except ValueError:
-            raise SwapError("invalid provider settlement observation; " + refund_hint) from None
-        if isinstance(seen, PaymentSettled):
-            preimage = seen.payment_preimage
-            if hashlib.sha256(bytes.fromhex(preimage)).hexdigest() != (
-                terms.invoice_binding.payment_hash
-            ):
-                raise SwapError("provider sent a wrong preimage; " + refund_hint)
-            return preimage
-        if seen.kind == "payment_failed":
-            raise SwapError("provider reports the payment failed; " + refund_hint)
+    async with session.settlement_stream():
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise SwapError(timeout_error)
+            try:
+                message = await session.receive_next(timeout=remaining)
+            except TimeoutError:
+                raise SwapError(timeout_error) from None
+            except SwapError as error:
+                raise SwapError(f"provider session stopped: {error}; " + refund_hint) from None
+            if loop.time() >= deadline:
+                raise SwapError(timeout_error)
+            if message.contract_hash != expected_contract or message.in_reply_to is not None:
+                raise SwapError("unexpected provider settlement context; " + refund_hint)
+            if message.message_type == "action_request":
+                raise SwapError(
+                    "cooperation unavailable; payment status unresolved; " + refund_hint
+                )
+            if message.message_type != "observation":
+                raise SwapError("unexpected provider settlement message; " + refund_hint)
+            try:
+                seen = parse_observation(canonicalize(message.payload))
+            except ValueError:
+                raise SwapError("invalid provider settlement observation; " + refund_hint) from None
+            if isinstance(seen, PaymentSettled):
+                preimage = seen.payment_preimage
+                if hashlib.sha256(bytes.fromhex(preimage)).hexdigest() != (
+                    terms.invoice_binding.payment_hash
+                ):
+                    raise SwapError("provider sent a wrong preimage; " + refund_hint)
+                return preimage
+            if seen.kind == "payment_failed":
+                raise SwapError("provider reports the payment failed; " + refund_hint)
 
 
 def _validate_cooperative_readiness(  # noqa: PLR0913 - all independent bindings are explicit
@@ -673,6 +708,482 @@ async def _answer_cooperative_readiness(  # noqa: PLR0913 - explicit independent
     )
     await session.send(reply, provider_key)
     return payload.payment_preimage
+
+
+@dataclass(frozen=True, repr=False)
+class _CooperativeClaimOutcome:
+    """Paid knowledge survives abandonment; it does not cancel a provider winner."""
+
+    preimage: str = field(repr=False)
+    recovery: bytes = field(repr=False)
+    claim: ValidatedCooperativeClaim | None
+    pending_recovery: bytes | None = field(default=None, repr=False)
+
+
+class _CooperativeClaimAttempt:
+    """Dormant original-session BTC-to-LN owner, never constructed by recovery.
+
+    One consumer, one budget, one reservation and one partial. The caller must
+    retain the crypto context until wait_for_workers finishes, even after
+    cancellation. A canceled to_thread await does not stop a writer or RPC.
+    Production dispatch intentionally does not instantiate this owner yet.
+    """
+
+    def __init__(  # noqa: PLR0913 - independently retained live bindings
+        self,
+        session: _Session,
+        *,
+        terms: ContractTerms,
+        init: HandshakeInit,
+        accept: HandshakeAccept,
+        funded_recovery: bytes,
+        contract_secret: bytes,
+        wallet: WalletRpc,
+        write_recovery: Callable[[bytes, bytes | None], None],
+        settlement_deadline: float,
+        configured_fee_floor_sat: int,
+        allow_regtest_fixed_fee: bool = False,
+        wall_clock: Callable[[], int] = lambda: int(time.time()),
+        monotonic_clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if session._cooperative_attempt_started:  # noqa: SLF001 - colocated ephemeral custody
+            raise SwapError("original session cooperation already reserved")
+        inspect_recovery_plaintext(funded_recovery, session.network, crypto=session.crypto)
+        record: dict[str, Any] = json.loads(funded_recovery)
+        if not isinstance(record, dict):
+            raise SwapError("invalid original funded recovery")
+        context = record["verification_context"]
+        if (
+            not isinstance(context, dict)
+            or terms.profile_id != PROFILE
+            or session.profile != PROFILE
+            or terms.network_identity != session.network
+            or init.session_id != session.session_id
+            or init.client_session_xonly_key != session.key
+            or accept.provider_session_xonly_key != session.provider_key
+            or session.crypto.public_key(session.secret)[1:].hex() != session.key
+            or record["contract_terms"] != terms.model_dump(mode="json")
+            or context["handshake_init"] != init.model_dump(mode="json")
+            or context["handshake_accept"] != accept.model_dump(mode="json")
+            or record["user_secret"]
+            != {"kind": "raw-secp256k1-v1", "contract_secret_key": contract_secret.hex()}
+            or not record["funding_history"]
+            or record["monotonic_knowledge"]
+            != {
+                "preimage_known": False,
+                "preimage": None,
+                "dangerous_signature_issued": record["monotonic_knowledge"][
+                    "dangerous_signature_issued"
+                ],
+            }
+            or COOPERATIVE_RESERVATION_EXTENSION in record["extensions"]
+            or COOPERATIVE_CLAIM_FEATURE not in terms.required_features
+            or not math.isfinite(settlement_deadline)
+            or type(configured_fee_floor_sat) is not int
+            or configured_fee_floor_sat <= 0
+            or type(allow_regtest_fixed_fee) is not bool
+            or (allow_regtest_fixed_fee and session.network.name != "regtest")
+        ):
+            raise SwapError("cooperation requires the original live funded session")
+        self.session, self.terms, self.init, self.accept = session, terms, init, accept
+        self.wallet, self.write_recovery = wallet, write_recovery
+        self.recovery, self.contract_secret = funded_recovery, contract_secret
+        self.pending_recovery: bytes | None = None
+        self.binding = FundingBinding.model_validate_json(
+            canonicalize(record["funding_history"][-1]["binding"]), strict=True
+        )
+        self.deadline = settlement_deadline
+        self.wall_deadline: int | None = None
+        self.height_deadline = (
+            terms.refund_lock_height - terms.timing_policy.claim_confirmation_blocks
+        )
+        self.fee_floor, self.fixed_fee = configured_fee_floor_sat, allow_regtest_fixed_fee
+        self.wall_clock, self.monotonic_clock = wall_clock, monotonic_clock
+        self.last_wall, self.last_mono = 0, 0.0
+        self.preimage: str | None = None
+        self.stage = "fresh"
+        self.workers: set[asyncio.Task[Any]] = set()
+        self.proposal: Envelope | None = None
+        self.plan: CooperativeClaimPlan | None = None
+        self.partial_result: Envelope | None = None
+        self.public_transcript: dict[str, Any] | None = None
+        self.client_partial: bytes | None = None
+        self._clock()
+        session._cooperative_attempt_started = True  # noqa: SLF001 - never reset this session's attempt
+
+    def _clock(self) -> tuple[int, float]:
+        wall, mono = self.wall_clock(), self.monotonic_clock()
+        if (
+            type(wall) is not int
+            or wall < 0
+            or type(mono) not in (int, float)
+            or not math.isfinite(mono)
+            or mono < 0
+        ):
+            raise SwapError("cooperative clock unavailable")
+        self.last_wall, self.last_mono = max(self.last_wall, wall), max(self.last_mono, mono)
+        if self.last_mono >= self.deadline or (
+            self.wall_deadline is not None and self.last_wall >= self.wall_deadline
+        ):
+            raise SwapError("cooperative attempt expired")
+        return self.last_wall, self.last_mono
+
+    def _remaining(self) -> float:
+        wall, mono = self._clock()
+        return min(
+            self.deadline - mono,
+            float(self.wall_deadline - wall) if self.wall_deadline is not None else math.inf,
+        )
+
+    async def wait_for_workers(self) -> None:
+        """Lifecycle cleanup only; late success can never reactivate signing."""
+        if self.workers:
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in tuple(self.workers)), return_exceptions=True
+            )
+
+    def _worker_done(self, task: asyncio.Task[Any]) -> None:
+        self.workers.discard(task)
+        if not task.cancelled():
+            task.exception()  # consume late errors, never use a late result
+
+    async def _effect(self, operation: Callable[[], Any], *, sample: bool = False) -> Any:  # noqa: ANN401
+        if self.workers:
+            raise SwapError("cooperative worker still owned")
+        budget = min(self._remaining(), 1.0 if sample else math.inf)
+        task = asyncio.create_task(asyncio.to_thread(operation))
+        self.workers.add(task)
+        task.add_done_callback(self._worker_done)
+        result = await asyncio.wait_for(asyncio.shield(task), timeout=budget)
+        self._clock()
+        return result
+
+    async def _publish(self, candidate: bytes) -> None:
+        previous = self.recovery
+        inspect_recovery_successor(
+            previous, candidate, self.session.network, crypto=self.session.crypto
+        )
+        self.pending_recovery = candidate
+        await self._effect(lambda: self.write_recovery(candidate, previous))
+        self.recovery = candidate
+        self.pending_recovery = None
+
+    async def _learn_payment(
+        self, preimage: str, *, readiness: CooperativeClaimReadyRequest | None = None
+    ) -> bool:
+        if (
+            hashlib.sha256(bytes.fromhex(preimage)).hexdigest()
+            != self.terms.invoice_binding.payment_hash
+        ):
+            raise SwapError("cooperative preimage refused")
+        newly_known = self.preimage is None
+        if not newly_known and preimage != self.preimage:
+            raise SwapError("cooperative preimage conflict")
+        self.preimage = preimage  # knowledge survives even an expiring clock guard
+        wall, mono = self._clock()
+        if newly_known:
+            self.wall_deadline = wall + 30
+            self.deadline = min(self.deadline, mono + 30)
+        eligible = True
+        if readiness is not None:
+            eligible = (
+                wall < readiness.deadline_at <= wall + 30
+                and 0 < readiness.deadline_height <= self.height_deadline
+            )
+            if eligible:
+                self.wall_deadline = min(
+                    self.wall_deadline or readiness.deadline_at, readiness.deadline_at
+                )
+                self.deadline = min(self.deadline, mono + readiness.deadline_at - wall)
+                self.height_deadline = readiness.deadline_height
+        if newly_known:
+            # Unusable readiness still discloses valuable invoice knowledge.
+            # Preserve it within the local budget without granting eligibility
+            # or applying an expired advertised deadline to recovery storage.
+            record = json.loads(self.recovery)
+            record["updated_at"] = max(record["updated_at"], wall)
+            record["monotonic_knowledge"].update(preimage_known=True, preimage=preimage)
+            await self._publish(canonicalize(record))
+        return eligible
+
+    async def _sample(self) -> tuple[CooperativeClaimEvidence, float]:
+        _, started = self._clock()
+        sample = await self._effect(
+            lambda: self.wallet.observe_cooperative_claim_evidence(
+                self.binding,
+                self.terms,
+                keys=self.session.crypto,
+                allow_regtest_fixed_fee=self.fixed_fee,
+            ),
+            sample=True,
+        )
+        self._check_sample(sample, started)
+        return sample, started
+
+    def _check_sample(self, sample: CooperativeClaimEvidence, started: float) -> None:
+        _, now = self._clock()
+        if type(sample) is not CooperativeClaimEvidence:
+            raise SwapError("cooperative evidence refused")
+        output, policy = sample.outpoint, sample.fee_policy
+        if type(output) is not CooperativeClaimOutpoint or type(policy) is not CooperativeFeePolicy:
+            raise SwapError("cooperative evidence refused")
+        if (
+            now - started >= 1
+            or output.network_identity != self.session.network
+            or policy.network_identity != self.session.network
+            or (output.tip_hash, output.tip_height) != (policy.tip_hash, policy.tip_height)
+            or output.funding_txid != self.binding.funding_txid
+            or output.funding_vout != self.binding.contract_vout
+            or output.funding_value_sat != int(self.binding.contract_value_sat)
+            or output.funding_script_pubkey != bytes.fromhex(self.binding.contract_script_pubkey)
+            or output.confirmations < self.terms.funding_confirmations
+            or type(output.confirmations) is not int
+            or type(output.tip_height) is not int
+            or output.tip_height < 0
+            or output.tip_height >= self.height_deadline
+            or policy.confirmation_blocks != self.terms.timing_policy.claim_confirmation_blocks
+            or (policy.estimate_sat_kvb is None and not self.fixed_fee)
+            or any(
+                type(rate) is not int or rate < 0
+                for rate in (
+                    policy.min_relay_sat_kvb,
+                    policy.mempool_min_sat_kvb,
+                )
+            )
+            or (
+                policy.estimate_sat_kvb is not None
+                and (
+                    type(policy.estimate_sat_kvb) is not int
+                    or policy.estimate_sat_kvb <= 0
+                    or type(policy.estimate_blocks) is not int
+                    or not 1
+                    <= policy.estimate_blocks
+                    <= self.terms.timing_policy.claim_confirmation_blocks
+                )
+            )
+        ):
+            raise SwapError("cooperative evidence refused")
+        if self.plan is not None:
+            vsize = (4 * len(self.plan.base_transaction) + 68 + 3) // 4
+            if self.plan.fee_sat < policy.fee_floor_sat(
+                vsize=vsize, configured_floor_sat=self.fee_floor
+            ):
+                raise SwapError("cooperative fee refused")
+
+    async def _send(self, reply: Envelope) -> None:
+        await asyncio.wait_for(
+            self.session.send(reply, self.accept.provider_session_xonly_key),
+            timeout=self._remaining(),
+        )
+        self._clock()
+
+    def _authenticate(self, message: Envelope) -> None:
+        verify_static_signed_envelope(
+            canonicalize(message.model_dump(mode="json")),
+            expected_session_id=self.session.session_id,
+            expected_profile=PROFILE,
+            expected_network=self.session.network,
+            expected_sender_key=self.accept.provider_session_xonly_key,
+            supported_features={EPOCH_SESSION_FEATURE, COOPERATIVE_CLAIM_FEATURE},
+            crypto=self.session.crypto,
+        )
+        if (
+            message.contract_hash != contract_hash(self.terms).hex()
+            or message.in_reply_to is not None
+        ):
+            raise SwapError("cooperative provider context refused")
+
+    async def _ready(self, message: Envelope, payload: CooperativeClaimReadyRequest) -> None:
+        if self.stage != "fresh":
+            raise SwapError("cooperative readiness already consumed")
+        self.stage = "preparing"
+        if not await self._learn_payment(payload.payment_preimage, readiness=payload):
+            raise SwapError("cooperative readiness deadline refused")
+        sample, started = await self._sample()
+        self._check_sample(sample, started)
+        reply = self.session.envelope(
+            "action_result",
+            {
+                "action": "cooperative_claim_ready",
+                "challenge": payload.challenge,
+                "status": "ready",
+            },
+            in_reply_to=message.message_id,
+            contract=contract_hash(self.terms).hex(),
+            required_features=(COOPERATIVE_CLAIM_FEATURE,),
+        )
+        self._check_sample(sample, started)
+        await self._send(reply)
+        self.ready = payload
+        self.stage = "echoed"
+
+    async def _propose(self, message: Envelope, payload: CooperativeClaimPropose) -> None:
+        if self.stage != "echoed":
+            raise SwapError("cooperative proposal unavailable")
+        self.stage = "reserved"  # consumed before validation/publication/nonce effects
+        if (
+            payload.payment_preimage != self.preimage
+            or payload.deadline_at != self.ready.deadline_at
+            or payload.deadline_height != self.ready.deadline_height
+        ):
+            raise SwapError("cooperative proposal context refused")
+        funding = FundingOutput(
+            txid=bytes.fromhex(self.binding.funding_txid),
+            output_index=self.binding.contract_vout,
+            value_sat=int(self.binding.contract_value_sat),
+            script_pubkey=bytes.fromhex(self.binding.contract_script_pubkey),
+        )
+        self.plan = verify_cooperative_claim_proposal(
+            bytes.fromhex(payload.unsigned_transaction),
+            UnilateralAuthorization.from_terms(
+                self.terms, funding, "claim", keys=self.session.crypto
+            ),
+        )
+        self.session.crypto.musig_public_nonce_validate(bytes.fromhex(payload.public_nonce))
+        await self._sample()
+        record = json.loads(self.recovery)
+        wall, _ = self._clock()
+        record["updated_at"] = max(record["updated_at"], wall)
+        record["extensions"][COOPERATIVE_RESERVATION_EXTENSION] = {
+            "version": 1,
+            "proposal": message.model_dump(mode="json"),
+            "signature_hash": self.plan.signature_hash.hex(),
+        }
+        await self._publish(canonicalize(record))
+        sample, started = await self._sample()  # never reuse pre-publication evidence
+        artifacts = reconstruct_taproot_contract(self.terms, keys=self.session.crypto)
+        self._check_sample(sample, started)
+        attempt, nonce = self.session.crypto.musig_begin(
+            secret_key=self.contract_secret,
+            user_public_key=bytes.fromhex(self.terms.client_contract_compressed_key),
+            provider_public_key=bytes.fromhex(self.terms.provider_contract_compressed_key),
+            tap_tweak=artifacts.tap_tweak,
+            message=self.plan.signature_hash,
+            cooperation_id=bytes.fromhex(payload.cooperation_id),
+        )
+        try:
+            self._check_sample(sample, started)
+            self.client_partial = attempt.partial_sign_once(bytes.fromhex(payload.public_nonce))
+            self._check_sample(sample, started)
+        finally:
+            attempt.close()
+        self.public_transcript = {
+            "user_public_key": bytes.fromhex(self.terms.client_contract_compressed_key),
+            "provider_public_key": bytes.fromhex(self.terms.provider_contract_compressed_key),
+            "tap_tweak": artifacts.tap_tweak,
+            "message": self.plan.signature_hash,
+            "user_public_nonce": nonce,
+            "provider_public_nonce": bytes.fromhex(payload.public_nonce),
+        }
+        self.session.crypto.musig_partial_verify(
+            **self.public_transcript, signer_index=0, partial_signature=self.client_partial
+        )
+        self._check_sample(sample, started)
+        self.partial_result = self.session.envelope(
+            "action_result",
+            {
+                "action": "cooperative_claim_propose",
+                "cooperation_id": payload.cooperation_id,
+                "status": "signed",
+                "public_nonce": nonce.hex(),
+                "partial_signature": self.client_partial.hex(),
+            },
+            in_reply_to=message.message_id,
+            contract=contract_hash(self.terms).hex(),
+            required_features=(COOPERATIVE_CLAIM_FEATURE,),
+        )
+        self._check_sample(sample, started)
+        self.proposal = message
+        self.stage = "partial issued"
+        await self._send(self.partial_result)
+
+    async def _complete(
+        self, message: Envelope, payload: CooperativeClaimComplete
+    ) -> ValidatedCooperativeClaim:
+        if (
+            self.stage != "partial issued"
+            or self.proposal is None
+            or self.plan is None
+            or self.public_transcript is None
+            or self.client_partial is None
+        ):
+            raise SwapError("cooperative completion unavailable")
+        self.stage = "verifying"
+        check_cooperative_action_context(
+            message, self.terms, self.init, self.accept, prior_request=self.proposal
+        )
+        height = await self._effect(self.wallet.tip_height, sample=True)
+        if type(height) is not int or not 0 <= height < self.height_deadline:
+            raise SwapError("cooperative completion cutoff reached")
+        self._clock()
+        partial = bytes.fromhex(payload.partial_signature)
+        self.session.crypto.musig_partial_verify(
+            **self.public_transcript, signer_index=1, partial_signature=partial
+        )
+        signature = self.session.crypto.musig_aggregate(
+            **self.public_transcript,
+            user_partial_signature=self.client_partial,
+            provider_partial_signature=partial,
+        )
+        claim = finalize_cooperative_claim(self.plan, signature, verifier=self.session.crypto)
+        self._clock()
+        receipt = self.session.envelope(
+            "action_result",
+            {
+                "action": "cooperative_claim_complete",
+                "cooperation_id": payload.cooperation_id,
+                "status": "verified",
+            },
+            in_reply_to=message.message_id,
+            contract=contract_hash(self.terms).hex(),
+            required_features=(COOPERATIVE_CLAIM_FEATURE,),
+        )
+        await self._send(receipt)
+        self.stage = "completed"
+        return claim
+
+    async def run(self) -> _CooperativeClaimOutcome:
+        if self.stage != "fresh":
+            raise SwapError("cooperative attempt cannot resume")
+        async with self.session.settlement_stream():
+            try:
+                while True:
+                    message = await self.session.receive_next(timeout=self._remaining())
+                    self._clock()  # queued arrival never reserves deadline authority
+                    self._authenticate(message)
+                    if message.message_type == "observation":
+                        seen = parse_observation(canonicalize(message.payload))
+                        if isinstance(seen, PaymentSettled):
+                            await self._learn_payment(seen.payment_preimage)
+                        elif seen.kind == "payment_failed":
+                            raise SwapError("provider reports payment failure")  # noqa: TRY301 - terminal lifecycle
+                        continue
+                    payload = check_cooperative_action_context(
+                        message, self.terms, self.init, self.accept, prior_request=self.proposal
+                    )
+                    if isinstance(payload, CooperativeClaimReadyRequest):
+                        await self._ready(message, payload)
+                    elif isinstance(payload, CooperativeClaimPropose):
+                        await self._propose(message, payload)
+                    elif isinstance(payload, CooperativeClaimComplete):
+                        claim = await self._complete(message, payload)
+                        return _CooperativeClaimOutcome(self.preimage or "", self.recovery, claim)
+                    else:
+                        raise SwapError("unexpected cooperative provider action")  # noqa: TRY301 - terminal lifecycle
+            except asyncio.CancelledError:
+                self.stage = "abandoned"
+                raise
+            except Exception:  # noqa: BLE001 - no failure reopens nonce or payment authority
+                self.stage = "abandoned"
+                if self.preimage is None:
+                    raise SwapError(
+                        "cooperation stopped; payment status unresolved; preserve funded recovery"
+                    ) from None
+                # This is known payment with bounded fallback, NOT cancellation
+                # of a provider's already selected key-path winner.
+                return _CooperativeClaimOutcome(
+                    self.preimage, self.recovery, None, self.pending_recovery
+                )
 
 
 def _recovery_document(  # noqa: PLR0913 - one record's explicit parts
