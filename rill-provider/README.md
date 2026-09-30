@@ -887,7 +887,7 @@ handshake accept until separately durable signed-result and outbox ownership
 exist.
 
 The separate `core_tx_bytes.CoreTransactionReader` is an explicit,
-read-only **regtest-only** Bitcoin Core v30 RPC probe. It takes a numeric
+read-only Bitcoin Core v30 RPC probe for the supported complete networks. It takes a numeric
 loopback address, port, owner-private Core cookie file, and a complete trusted
 network identity. Construction and opening either existing ledger make no RPC
 call. An explicit probe compares the configured identity to supplied contract
@@ -897,7 +897,13 @@ bytes by txid for the core static funding-binding byte check. A second explicit
 derives the reported inclusion height, fetches that height's block hash and
 re-reads identical transaction bytes qualified by that block hash before the
 final matching tip reading. It returns a **candidate** with sampled inclusion
-fields at a named tip, not a serialized best-chain lineage entry. The RPC
+fields at a named tip, not a serialized best-chain lineage entry. Named-tip
+outpoint probes and informational `tip_height` additionally require the exact
+configured signet challenge from `getblockchaininfo`; outpoint probes check it
+at both tip readings. Missing or mismatched challenge evidence fails closed,
+even when the chain label and shared genesis match. Custom signet execution
+remains unsupported. No missing attestation triggers migration or recovery work.
+The RPC
 sequence is non-atomic, can miss an ABA reorg, and does not check mempool
 spends or establish action authority. It uses only
 four read-only RPC methods (`getblockchaininfo`, `getblockhash`,

@@ -2,8 +2,8 @@
 
 No wallet, ledger, mempool, funding, or payment action. Named-tip UTXO
 samples cannot establish persistent confirmation or live action authority.
-The operator supplies the full network identity; Core attests only chain label
-and genesis, NOT the deployment namespace or consensus policy identifier.
+The operator supplies the full network identity; Core attests chain label,
+genesis, and signet challenge, NOT deployment namespace or consensus profile.
 """
 
 from __future__ import annotations
@@ -150,7 +150,8 @@ def _hash(value: object) -> bool:
     )
 
 
-def _chain_tip(value: object, chain: str) -> tuple[str, int]:
+def _chain_tip(value: object, network: NetworkIdentity) -> tuple[str, int]:
+    chain = backend_names(network).core_chain
     if (
         not isinstance(value, dict)
         or value.get("chain") != chain
@@ -158,6 +159,13 @@ def _chain_tip(value: object, chain: str) -> tuple[str, int]:
         or type(value.get("blocks")) is not int
         or value["blocks"] < 0
         or value.get("initialblockdownload") is not False
+        or (
+            network.name == "signet"
+            and (
+                type(value.get("signet_challenge")) is not str
+                or value["signet_challenge"] != network.signet_challenge
+            )
+        )
     ):
         raise CoreProtocolError("Core has no usable current tip on the configured chain")
     return value["bestblockhash"], value["blocks"]
@@ -230,7 +238,7 @@ class CoreTransactionReader:
         self._wallet_path = "/" if wallet is None else f"/wallet/{wallet}"
 
     def tip_height(self) -> int:
-        """Return the current tip height after checking chain and genesis.
+        """Return the current height after checking chain, genesis, and signet challenge.
 
         Informational only (e.g. an indicative quote's reference height); a
         height read here authorizes nothing.
@@ -244,7 +252,7 @@ class CoreTransactionReader:
                 follow_redirects=False,
                 timeout=httpx.Timeout(READ_SECONDS, connect=CONNECT_SECONDS),
             ) as client:
-                _, height = _chain_tip(self._rpc(client, "getblockchaininfo", [], 1), self._chain)
+                _, height = _chain_tip(self._rpc(client, "getblockchaininfo", [], 1), self._network)
                 if self._rpc(client, "getblockhash", [0], 2) != self._network.genesis_hash:
                     raise CoreProtocolError("Core genesis differs from configuration")
         except httpx.HTTPError:
@@ -379,7 +387,7 @@ class CoreTransactionReader:
                 timeout=httpx.Timeout(READ_SECONDS, connect=CONNECT_SECONDS),
             ) as client:
                 tip_hash, tip_height = _chain_tip(
-                    self._rpc(client, "getblockchaininfo", [], 1), self._chain
+                    self._rpc(client, "getblockchaininfo", [], 1), self._network
                 )
                 if self._rpc(client, "getblockhash", [0], 2) != self._network.genesis_hash:
                     raise CoreProtocolError("Core genesis differs from configuration")
@@ -410,7 +418,7 @@ class CoreTransactionReader:
                 if block_raw != raw:
                     raise CoreProtocolError("Core block-qualified transaction bytes differ")
                 end_hash, end_height = _chain_tip(
-                    self._rpc(client, "getblockchaininfo", [], 7), self._chain
+                    self._rpc(client, "getblockchaininfo", [], 7), self._network
                 )
         except httpx.HTTPError:
             raise CoreUnavailableError("Core RPC transport unavailable") from None

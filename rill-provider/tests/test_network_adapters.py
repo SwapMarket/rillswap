@@ -53,12 +53,42 @@ def test_every_supported_network_configures_every_adapter(tmp_path: Path, name: 
 @pytest.mark.parametrize("name", LABELS)
 def test_core_tip_requires_this_networks_chain_label(name: str) -> None:
     chain = LABELS[name][0]
+    network = _network(name)
     tip = {"chain": chain, "bestblockhash": "ab" * 32, "blocks": 7, "initialblockdownload": False}
-    assert core_tx_bytes._chain_tip(tip, chain) == ("ab" * 32, 7)  # noqa: SLF001
+    if name == "signet":
+        tip["signet_challenge"] = network.signet_challenge
+    assert core_tx_bytes._chain_tip(tip, network) == ("ab" * 32, 7)  # noqa: SLF001
     for other, _lnd in LABELS.values():
         if other != chain:
             with pytest.raises(core_tx_bytes.CoreProtocolError):
-                core_tx_bytes._chain_tip(tip | {"chain": other}, chain)  # noqa: SLF001
+                core_tx_bytes._chain_tip(tip | {"chain": other}, network)  # noqa: SLF001
+
+
+@pytest.mark.parametrize("challenge", ["missing", None, True, 1, "51", "uppercase", "whitespace"])
+def test_signet_tip_requires_exact_affirmative_challenge(challenge: object) -> None:
+    network = _network("signet")
+    tip = {
+        "chain": "signet",
+        "bestblockhash": "ab" * 32,
+        "blocks": 7,
+        "initialblockdownload": False,
+    }
+    if challenge != "missing":
+        tip["signet_challenge"] = (
+            network.signet_challenge.upper()
+            if challenge == "uppercase"
+            else network.signet_challenge + " "
+            if challenge == "whitespace"
+            else challenge
+        )
+    with pytest.raises(core_tx_bytes.CoreProtocolError):
+        core_tx_bytes._chain_tip(tip, network)  # noqa: SLF001
+
+
+def test_custom_signet_does_not_gain_execution_support(tmp_path: Path) -> None:
+    network = _network("signet").model_copy(update={"signet_challenge": "51"})
+    with pytest.raises(ValueError, match="supported complete network"):
+        core_tx_bytes.CoreTransactionReader(port=18443, cookie_path=tmp_path, network=network)
 
 
 class _Calls:
