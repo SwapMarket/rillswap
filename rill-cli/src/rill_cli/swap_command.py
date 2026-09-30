@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from rill_core.recovery import inspect_recovery_successor
+from rill_core.recovery import COOPERATIVE_RESERVATION_EXTENSION, inspect_recovery_successor
 from rill_core.wire.canonical import parse_json_strict
 from rill_crypto import Context
 from rill_provider.lnd_invoice_decode import LndInvoiceDecoder
@@ -94,7 +94,7 @@ def _common_arguments(command: argparse.ArgumentParser) -> None:
     command.add_argument(
         "--recovery-output",
         required=True,
-        help="create-only recovery file; later snapshots add '.funded' and '.paid'",
+        help="create-only recovery file (later '.funded', '.paid', '.cooperating' snapshots)",
     )
     command.add_argument("--timeout", type=float, default=60.0, help="per-answer seconds")
     command.add_argument("--settle-timeout", type=float, default=3600.0)
@@ -130,11 +130,25 @@ def _snapshot_path(path: Path, document: bytes, previous: bytes | None) -> Path:
         or current.get("funding_history") != prior.get("funding_history")
         or not isinstance(prior_knowledge, dict)
         or not isinstance(current_knowledge, dict)
-        or prior_knowledge.get("preimage_known") is not False
-        or current_knowledge.get("preimage_known") is not True
     ):
         raise ValueError("unsupported recovery snapshot transition")
-    return path.with_name(path.name + ".paid")
+    if (
+        prior_knowledge.get("preimage_known") is False
+        and current_knowledge.get("preimage_known") is True
+    ):
+        return path.with_name(path.name + ".paid")
+    prior_extensions = prior.get("extensions")
+    current_extensions = current.get("extensions")
+    if (
+        prior_knowledge.get("preimage_known") is True
+        and prior_knowledge == current_knowledge
+        and isinstance(prior_extensions, dict)
+        and isinstance(current_extensions, dict)
+        and COOPERATIVE_RESERVATION_EXTENSION not in prior_extensions
+        and COOPERATIVE_RESERVATION_EXTENSION in current_extensions
+    ):
+        return path.with_name(path.name + ".cooperating")
+    raise ValueError("unsupported recovery snapshot transition")
 
 
 def _write_recovery_snapshot(  # noqa: PLR0913 - explicit local publication dependencies

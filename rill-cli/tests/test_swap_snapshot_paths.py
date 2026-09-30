@@ -6,6 +6,7 @@ import json
 from typing import TYPE_CHECKING
 
 import pytest
+from rill_core.recovery import COOPERATIVE_RESERVATION_EXTENSION
 
 from rill_cli.publication import RecoveryPublicationError, publish_new_ciphertext
 from rill_cli.swap_command import _snapshot_path
@@ -60,3 +61,18 @@ def test_changed_funding_cannot_route_to_paid(tmp_path: Path) -> None:
     paid["funding_history"] = [{"binding": "another output"}]
     with pytest.raises(ValueError, match="unsupported recovery snapshot transition"):
         _snapshot_path(tmp_path / "swap.age", json.dumps(paid).encode(), funded)
+
+
+def test_cooperative_reservation_has_one_distinct_destination(tmp_path: Path) -> None:
+    paid = json.loads(_snapshot(funded=True, paid=True))
+    paid["extensions"] = {}
+    reserved = {**paid, "extensions": {COOPERATIVE_RESERVATION_EXTENSION: {"version": 1}}}
+    paid_bytes, reserved_bytes = json.dumps(paid).encode(), json.dumps(reserved).encode()
+    assert _snapshot_path(tmp_path / "swap.age", reserved_bytes, paid_bytes) == (
+        tmp_path / "swap.age.cooperating"
+    )
+    with pytest.raises(ValueError, match="unsupported recovery snapshot transition"):
+        _snapshot_path(tmp_path / "swap.age", reserved_bytes, reserved_bytes)
+    reserved["funding_history"] = [{"binding": "other"}]
+    with pytest.raises(ValueError, match="unsupported recovery snapshot transition"):
+        _snapshot_path(tmp_path / "swap.age", json.dumps(reserved).encode(), paid_bytes)
