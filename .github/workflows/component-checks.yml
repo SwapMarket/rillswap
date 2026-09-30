@@ -166,6 +166,16 @@ jobs:
         run: |
           RILL_CRYPTO_LIBRARY="$PWD/tmp/native/librill_crypto.so" \
             tmp/ci-venv/bin/python -m pytest -q -m native_crypto --basetemp=tmp/pytest-ci
+      - name: Check shared Core native recovery and settlement contracts
+        working-directory: rill-core
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONPATH: packages/core/src:../rill-crypto/python/src
+          RILLSWAP_RUN_NATIVE_CRYPTO: '1'
+        run: |
+          RILL_CRYPTO_LIBRARY="$PWD/../rill-provider/tmp/native/librill_crypto.so" \
+            ../rill-provider/tmp/ci-venv/bin/python -m pytest -q -m native_crypto \
+            --basetemp=tmp/pytest-ci-native
 
   cli:
     runs-on: ubuntu-24.04
