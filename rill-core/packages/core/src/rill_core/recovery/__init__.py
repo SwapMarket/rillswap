@@ -1,6 +1,7 @@
 """Offline-only inspection of static recovery package commitments."""
 
 from rill_core.recovery.inspection import (
+    COOPERATIVE_RESERVATION_EXTENSION,
     OfflineRecoveryInspection,
     SelectedRecoveryFundingContext,
     construct_selected_recovery_claim,
@@ -12,6 +13,7 @@ from rill_core.recovery.inspection import (
 )
 
 __all__ = [
+    "COOPERATIVE_RESERVATION_EXTENSION",
     "OfflineRecoveryInspection",
     "SelectedRecoveryFundingContext",
     "construct_selected_recovery_claim",

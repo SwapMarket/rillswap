@@ -129,6 +129,11 @@ Secret nonces exist only in one-shot opaque native handles. A durable burned
 attempt record is written before handle allocation. A crash abandons the
 attempt. Public nonces and a resulting public partial signature may be stored.
 A changed transaction or fee requires a new identifier and new nonces.
+The BTC-to-LN client's burn is the append-once encrypted reservation described
+in RS-007 section 3.1. Its already-paid, exact provider claim does not change
+`dangerous_signature_issued`; the reservation never proves signature issuance
+or permits signing from recovery. The one-attempt-per-swap limit below still
+applies to fee changes in the first release.
 
 The cooperative claim uses transaction version 2, locktime zero, input sequence
 `0xfffffffd`, and the same one-contract-input, one-role-destination output, fee,

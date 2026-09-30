@@ -101,10 +101,40 @@
       "$ref": "#/$defs/monotonicKnowledge"
     },
     "extensions": {
-      "$ref": "../wire/common-v1.schema.json#/$defs/extensions"
+      "allOf": [
+        { "$ref": "../wire/common-v1.schema.json#/$defs/extensions" },
+        {
+          "properties": {
+            "rillswap/cooperative-claim-reservation": {
+              "$ref": "#/$defs/cooperativeReservation"
+            }
+          }
+        }
+      ]
     }
   },
   "$defs": {
+    "cooperativeReservation": {
+      "description": "Historical reservation only; authentication, transaction, funding, and successor rules require RS-007 semantic verification.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "proposal", "signature_hash"],
+      "properties": {
+        "version": { "type": "integer", "const": 1 },
+        "proposal": {
+          "allOf": [
+            { "$ref": "../wire/envelope-v1.schema.json" },
+            {
+              "properties": {
+                "message_type": { "const": "action_request" },
+                "signature": { "$ref": "../wire/common-v1.schema.json#/$defs/signature64" }
+              }
+            }
+          ]
+        },
+        "signature_hash": { "$ref": "../wire/common-v1.schema.json#/$defs/hex32" }
+      }
+    },
     "verificationContext": {
       "type": "object",
       "additionalProperties": false,

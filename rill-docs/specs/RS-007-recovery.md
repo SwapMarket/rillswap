@@ -73,6 +73,46 @@ A pre-signed fixed-fee transaction alone is insufficient. Recovery retains the
 key and construction data needed to rebuild and sign the correct unilateral
 transaction for the actual outpoint and fee environment.
 
+### 3.1 Cooperative claim reservation
+
+Before allocating a BTC-to-LN cosigner nonce, the original live client MUST
+publish and verify a create-only encrypted `.cooperating` successor to its
+already-funded, already-paid snapshot. Publication failure or uncertainty
+abandons cooperation, even if the attempted file exists. Previous recovery
+files remain unchanged. The successor adds only the extension
+`rillswap/cooperative-claim-reservation`, a closed object containing:
+
+* `version`: the exact integer `1` (not a boolean).
+* `proposal`: the complete signed provider RS-001 `cooperative_claim_propose`
+  envelope, including all signed fields.
+* `signature_hash`: the lowercase 32-byte BIP341 signing digest recomputed from
+  the exact authorized claim transaction and selected prevout.
+
+Static inspection authenticates the provider session signature, cooperative
+feature/role/context, retained preimage, exact transaction and fee policy, and
+exactly one retained funding binding. The wall deadline is positive and the
+height deadline is positive and no later than the signed refund height minus
+`claim_confirmation_blocks`. Insertion requires the latest recorded binding,
+unchanged funding history and monotonic knowledge, prior known preimage, and an
+update timestamp strictly before the proposal wall deadline. Every unrelated
+extension is immutable. After insertion the reservation is immutable, including
+its envelope signature, but valid funding history may still grow. Inspection
+then matches the historical binding and succeeds even after expiry or reorg.
+
+The record proves reservation only, not actual nonce allocation or signature
+issuance, timely publication, chain validity, or signing authority. The live
+handler MUST retain the original readiness deadline and cutoff, consume its
+attempt eligibility once, and recheck time and independent funding evidence
+after publication. Neither this record nor an absent, older, or restored record
+allows signing to resume. Restart abandons cooperation and uses independent
+unilateral recovery. No automatic migration or retry is performed.
+
+For the narrowly verified, already-paid BTC-to-LN provider claim,
+`dangerous_signature_issued` remains unchanged: its partial enables only the
+same dedicated-output spend already authorized by the retained valid preimage.
+An existing `true` value MUST remain `true`. This classification does not apply
+to other signing flows or waive their authorization and disclosure checks.
+
 ## 4. Import and use
 
 The top-level format identifier and specification version are immutable exact

@@ -23,12 +23,19 @@ from rill_core.settlement.funding_authentication import (
 )
 from rill_core.settlement.taproot import TaprootKeyOperations, reconstruct_taproot_contract
 from rill_core.settlement.unilateral import (
+    CooperativeClaimPlan,
     FundingOutput,
     UnilateralAuthorization,
     build_unilateral_spend,
     finalize_unilateral_spend,
+    verify_cooperative_claim_proposal,
 )
 from rill_core.wire.canonical import JsonValue, canonicalize, parse_json_strict
+from rill_core.wire.cooperative_messages import (
+    CooperativeClaimPropose,
+    check_cooperative_action_context,
+)
+from rill_core.wire.envelope_authentication import verify_static_signed_envelope
 from rill_core.wire.hashes import (
     COOPERATIVE_CLAIM_FEATURE,
     EPOCH_SESSION_FEATURE,
@@ -41,6 +48,7 @@ from rill_core.wire.hashes import (
 from rill_core.wire.messages import (
     ClientAcceptance,
     ContractTerms,
+    Envelope,
     FundingBinding,
     HandshakeAccept,
     HandshakeInit,
@@ -60,6 +68,7 @@ from rill_core.wire.types import (
 )
 
 MAX_RECOVERY_BYTES = 128 * 1024
+COOPERATIVE_RESERVATION_EXTENSION = "rillswap/cooperative-claim-reservation"
 FUNDING_ATTEMPT_HEX_LENGTH = 64
 SCHNORR_AUXILIARY_BYTES = 32
 PURPOSE_KEY_COUNT = 6
@@ -167,6 +176,14 @@ class _RecoveryPlaintext(StrictModel):
     extensions: dict[str, JsonValue]
 
 
+class _CooperativeReservation(StrictModel):
+    """Historical attempt reservation, never permission to allocate or sign."""
+
+    version: Annotated[int, Field(strict=True, ge=1, le=1)]
+    proposal: Envelope
+    signature_hash: Hex32
+
+
 @dataclass(frozen=True, slots=True)
 class OfflineRecoveryInspection:
     """Redacted static checks only, never evidence for any financial action."""
@@ -229,7 +246,7 @@ def inspect_recovery_successor(
     try:
         prior_record, _ = _validated_record(previous, expected_network, crypto)
         next_record, result = _validated_record(candidate, expected_network, crypto)
-        _require_successor(prior_record, next_record)
+        _require_successor(prior_record, next_record, crypto)
     except (CanonicalizationError, PydanticValidationError, ValueError, RuntimeError):
         # The private models contain keys and preimages. Do not preserve a
         # secret-bearing exception chain or echo any compared field value.
@@ -488,8 +505,16 @@ def _validated_record(
     return record, _inspect(record, expected_network, crypto)
 
 
-def _require_successor(previous: _RecoveryPlaintext, candidate: _RecoveryPlaintext) -> None:
-    mutable = {"updated_at", "funding_history", "chain_scan_birthday_height", "monotonic_knowledge"}
+def _require_successor(
+    previous: _RecoveryPlaintext, candidate: _RecoveryPlaintext, crypto: RecoveryCrypto
+) -> None:
+    mutable = {
+        "updated_at",
+        "funding_history",
+        "chain_scan_birthday_height",
+        "monotonic_knowledge",
+        "extensions",
+    }
     _require(
         canonicalize(previous.model_dump(mode="json", exclude=mutable))
         == canonicalize(candidate.model_dump(mode="json", exclude=mutable)),
@@ -514,6 +539,39 @@ def _require_successor(previous: _RecoveryPlaintext, candidate: _RecoveryPlainte
         not earlier.dangerous_signature_issued or later.dangerous_signature_issued,
         "issued signature knowledge regressed",
     )
+    _require_reservation_successor(previous, candidate, crypto)
+
+
+def _require_reservation_successor(
+    previous: _RecoveryPlaintext, candidate: _RecoveryPlaintext, crypto: RecoveryCrypto
+) -> None:
+    """Permit only the append-once reservation, preserving every other extension."""
+    earlier = dict(previous.extensions)
+    later = dict(candidate.extensions)
+    prior_marker = earlier.pop(COOPERATIVE_RESERVATION_EXTENSION, None)
+    marker = later.pop(COOPERATIVE_RESERVATION_EXTENSION, None)
+    _require(canonicalize(earlier) == canonicalize(later), "recovery extensions changed")
+    if COOPERATIVE_RESERVATION_EXTENSION in previous.extensions:
+        _require(canonicalize(prior_marker) == canonicalize(marker), "reservation changed")
+    elif COOPERATIVE_RESERVATION_EXTENSION in candidate.extensions:
+        _require(previous.monotonic_knowledge.preimage_known, "reservation before payment")
+        _require(
+            previous.funding_history == candidate.funding_history, "reservation changed funding"
+        )
+        _require(
+            previous.monotonic_knowledge == candidate.monotonic_knowledge,
+            "reservation changed knowledge",
+        )
+        reservation = _CooperativeReservation.model_validate_json(canonicalize(marker), strict=True)
+        payload = CooperativeClaimPropose.model_validate_json(
+            canonicalize(reservation.proposal.payload), strict=True
+        )
+        _require(candidate.updated_at < payload.deadline_at, "reservation recorded after deadline")
+        # The complete candidate inspection already authenticated and verified
+        # this exact transaction against exactly one retained binding. At burn
+        # insertion it must select the latest, not a superseded historic output.
+        latest = candidate.funding_history[-1].binding
+        _reservation_plan(candidate.contract_terms, latest, payload, crypto)
 
 
 def _require(condition: bool, message: str) -> None:  # noqa: FBT001 - internal predicate
@@ -636,6 +694,7 @@ def _inspect(
     ):
         _require(stored == reconstructed_value, "Taproot artifact")
     _check_static_history(record, crypto)
+    _inspect_cooperative_reservation(record, crypto)
     return OfflineRecoveryInspection(
         network_name=record.network_identity.name,
         profile_id=record.profile_id,
@@ -664,4 +723,74 @@ def _check_static_history(record: _RecoveryPlaintext, crypto: RecoveryCrypto) ->
         record.taproot_contract.script_pubkey,
         session_key,
         crypto=crypto,
+    )
+
+
+def _inspect_cooperative_reservation(record: _RecoveryPlaintext, crypto: RecoveryCrypto) -> None:
+    """Check historical bytes only, even after expiry or a later binding append.
+
+    This authenticates neither receipt order nor current payment/funding/chain
+    evidence. Restarts and restored predecessors never recover signing authority.
+    """
+    if COOPERATIVE_RESERVATION_EXTENSION not in record.extensions:
+        return
+    reservation = _CooperativeReservation.model_validate_json(
+        canonicalize(record.extensions[COOPERATIVE_RESERVATION_EXTENSION]), strict=True
+    )
+    terms, context = record.contract_terms, record.verification_context
+    _require(
+        terms.profile_id == "btc-to-ln/v1"
+        and bool(record.funding_history)
+        and record.monotonic_knowledge.preimage_known,
+        "reservation requires paid provider claim",
+    )
+    proposal = reservation.proposal
+    verify_static_signed_envelope(
+        canonicalize(proposal.model_dump(mode="json")),
+        expected_session_id=context.handshake_init.session_id,
+        expected_profile=record.profile_id,
+        expected_network=record.network_identity,
+        expected_sender_key=context.provider_session_xonly_key,
+        supported_features={EPOCH_SESSION_FEATURE, COOPERATIVE_CLAIM_FEATURE},
+        crypto=crypto,
+    )
+    payload = check_cooperative_action_context(
+        proposal, terms, context.handshake_init, context.handshake_accept
+    )
+    if not isinstance(payload, CooperativeClaimPropose):
+        raise ValidationError("reservation is not a proposal")
+    _require(
+        payload.payment_preimage == record.monotonic_knowledge.preimage
+        and payload.deadline_at > 0
+        and 0
+        < payload.deadline_height
+        <= terms.refund_lock_height - terms.timing_policy.claim_confirmation_blocks,
+        "reservation payment or cutoff changed",
+    )
+    matches = 0
+    for entry in record.funding_history:
+        try:
+            plan = _reservation_plan(terms, entry.binding, payload, crypto)
+        except ValidationError:
+            continue
+        _require(plan.signature_hash.hex() == reservation.signature_hash, "reservation sighash")
+        matches += 1
+    _require(matches == 1, "reservation funding transaction unavailable")
+
+
+def _reservation_plan(
+    terms: ContractTerms,
+    binding: FundingBinding,
+    payload: CooperativeClaimPropose,
+    crypto: RecoveryCrypto,
+) -> CooperativeClaimPlan:
+    funding = FundingOutput(
+        txid=bytes.fromhex(binding.funding_txid),
+        output_index=binding.contract_vout,
+        value_sat=int(binding.contract_value_sat),
+        script_pubkey=bytes.fromhex(binding.contract_script_pubkey),
+    )
+    authorization = UnilateralAuthorization.from_terms(terms, funding, "claim", keys=crypto)
+    return verify_cooperative_claim_proposal(
+        bytes.fromhex(payload.unsigned_transaction), authorization
     )
