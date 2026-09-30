@@ -507,10 +507,11 @@ class CooperativeResultAdmission:
 class CooperativeClaimObservation:
     """Trusted runtime's fresh, mempool-aware claim sample, not a wire model.
 
-    The store cannot independently acquire chain or LND facts. A future
-    runtime must obtain these from its configured Core and payment backends,
-    bound to one named tip, immediately before invoking the signer. No caller
-    exists yet, and this type must not be deserialized from a peer message.
+    The store cannot independently acquire chain or LND facts. Trusted runtime
+    must obtain these from its configured Core and payment backends, bound to
+    one named tip immediately before invoking the signer. The dormant engine
+    coordinator constructs this, but production admission does not invoke it
+    yet. This type must never be deserialized from a peer message.
     """
 
     network: NetworkIdentity

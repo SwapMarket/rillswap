@@ -921,7 +921,7 @@ malformed fields and transport failures never enable that exception. Fee floors
 use integer ceiling arithmetic and never override signed caps or dust policy.
 Runtime still must bound acquisition and evidence age, independently verify
 the selected outpoint, and recheck before native effects. This reader alone
-does not authorize a partial signature; no completion caller uses it yet.
+does not authorize a partial signature; only dormant completion preflight uses it.
 
 `cooperative_completion_candidate` is a nonauthorizing read snapshot containing
 the current prepared fallback and canonical burned binding. It exposes no
@@ -932,7 +932,21 @@ fee from its fallback, so preflight must validate its exact transaction and
 sighash rather than infer them from the fallback. Begin the monotonic evidence
 budget before acquiring this snapshot. Atomic completion still independently
 checks custody, deadlines, and winner selection. The getter adds no migration,
-sampling, signing, or restart cooperation, and has no runtime caller yet.
+sampling, signing, or restart cooperation, and has no production caller yet.
+
+The dormant `complete_cooperative_claim` coordinator validates that snapshot
+and the exact burned plan, then joins fresh own-node outpoint and fee samples
+at the same named tip. Its one-second monotonic budget begins before snapshot
+lock acquisition and native validation, includes worker queueing, and fences
+every atomic completion clock callback before and after the caller's clock
+returns. Proposal and completion sampling share one retained worker slot;
+timeout or cancellation never permits a second worker or reuse of late evidence.
+The computed floor must fit the frozen transaction; fees are never clamped to
+the signed cap. Only precommit refusal returns `None`. Once atomic completion
+begins, errors propagate because custody or durable selection may have changed.
+There is no automatic retry. Selected completions use the normal checked
+outbox, and broadcast never depends on a client receipt. Fresh signed-result
+dispatch is not connected yet; release and feature gates remain closed.
 The deployment namespace and consensus profile are operator assertions, not
 facts Core attests. Arbitrary old confirmed transactions need Core `-txindex=1`
 already configured; this probe never enables indexing or initiates a reindex.

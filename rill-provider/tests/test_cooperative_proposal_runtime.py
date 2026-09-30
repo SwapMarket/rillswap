@@ -157,6 +157,38 @@ def test_proposal_is_durable_before_its_message_id_is_returned(runtime: tuple) -
     assert store.pending_sendable(proposal_id, now=1001, tip_height=sample.tip_height)
 
 
+@pytest.mark.parametrize("change", ["clock delay", "revocation"])
+def test_proposal_clock_return_is_fenced_before_burn(
+    runtime: tuple,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    engine, store, _ = runtime
+    monotonic_value = 0.0
+    armed = False
+    burn = store.burn_selected_cooperative_claim
+
+    def armed_burn(*args: object, **kwargs: object) -> None:
+        nonlocal armed
+        armed = True
+        burn(*args, **kwargs)
+
+    def now() -> int:
+        nonlocal monotonic_value
+        if armed:
+            if change == "clock delay":
+                monotonic_value = 1.0
+            else:
+                engine.disable_new_exposure()
+        return 1001
+
+    monkeypatch.setattr(engine_module, "time", Mock(monotonic=lambda: monotonic_value))
+    monkeypatch.setattr(store, "burn_selected_cooperative_claim", armed_burn)
+    with pytest.raises(LiveSessionStoreError, match="clock unavailable"):
+        asyncio.run(engine.initiate_cooperative_proposal(_session(store), now=now))
+    _assert_no_attempt(store)
+
+
 @pytest.mark.parametrize(
     "case",
     [

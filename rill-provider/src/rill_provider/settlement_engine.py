@@ -34,6 +34,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
 from rill_core.settlement.funding import FundingBindingTransactionMatch
+from rill_core.settlement.taproot import reconstruct_taproot_contract
 from rill_core.settlement.unilateral import (
     FundingOutput,
     UnilateralAuthorization,
@@ -45,15 +46,21 @@ from rill_core.settlement.unilateral import (
     max_spendable_fee,
     validate_cooperative_claim,
     validate_unilateral_spend,
+    verify_cooperative_claim_proposal,
 )
-from rill_core.wire.canonical import canonicalize, parse_model_json
+from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_model_json
 from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE, contract_hash
 from rill_core.wire.messages import Envelope
 from rill_core.wire.settlement_messages import FundingBindingPayload
 
-from rill_provider.core_tx_bytes import CooperativeClaimOutpoint, CoreTransactionUnknownError
+from rill_provider.core_tx_bytes import (
+    CooperativeClaimOutpoint,
+    CooperativeFeePolicy,
+    CoreTransactionUnknownError,
+)
 from rill_provider.live_session_store import (
     MAX_CLAIM_ATTEMPTS,
+    CooperativeClaimObservation,
     CooperativeWinner,
     LiveSessionStoreError,
     PreparedFallback,
@@ -98,6 +105,12 @@ class ChainBackend(Protocol):
         self, binding: FundingBinding, terms: ContractTerms, *, keys: TaprootKeyOperations
     ) -> CooperativeClaimOutpoint:
         """Sample the exact confirmed outpoint with mempool spends considered."""
+        ...
+
+    def observe_cooperative_fee_policy(
+        self, target_blocks: int, *, allow_regtest_fixed_fee: bool = False
+    ) -> CooperativeFeePolicy:
+        """Return strict own-node fee evidence, never optional fallback advice."""
         ...
 
     def broadcast(self, raw: bytes, txid: str) -> str:
@@ -230,7 +243,7 @@ class SettlementEngine:
         self._new_exposure_allowed = True
         self._new_featured_sessions: dict[str, tuple[str, int]] = {}
         self._claim_probes: dict[str, ClaimProbeWindow] = {}
-        self._cooperative_sample_task: asyncio.Task[CooperativeClaimOutpoint] | None = None
+        self._cooperative_sample_task: asyncio.Task[object] | None = None
 
     def register_new_featured_session(self, session_id: str, contract: str) -> bool:
         """Remember one current-process original session, not a stored ADMITTED row.
@@ -414,22 +427,29 @@ class SettlementEngine:
     async def _sample_cooperative_outpoint(
         self, binding: FundingBinding, terms: ContractTerms, *, budget: float
     ) -> CooperativeClaimOutpoint | None:
+        sample = await self._sample_cooperative(
+            lambda: self._chain.observe_cooperative_claim_outpoint(
+                binding, terms, keys=self._crypto
+            ),
+            budget=budget,
+        )
+        return sample if type(sample) is CooperativeClaimOutpoint else None
+
+    async def _sample_cooperative(
+        self, operation: Callable[[], object], *, budget: float
+    ) -> object | None:
         """Retain one sampler slot until its worker actually finishes.
 
         Cancellation or timeout of the waiter does not stop a Core worker.
         Never accumulate another sample behind it or reuse a late result.
         """
-        if self._cooperative_sample_task is not None:
+        if self._cooperative_sample_task is not None or budget <= 0:
             return None
         started = time.monotonic()
-        task = asyncio.create_task(
-            asyncio.to_thread(
-                self._chain.observe_cooperative_claim_outpoint, binding, terms, keys=self._crypto
-            )
-        )
+        task = asyncio.create_task(asyncio.to_thread(operation))
         self._cooperative_sample_task = task
 
-        def finished(completed: asyncio.Task[CooperativeClaimOutpoint]) -> None:
+        def finished(completed: asyncio.Task[object]) -> None:
             if not completed.cancelled():
                 completed.exception()  # consume late failures, never reuse results
             if self._cooperative_sample_task is completed:
@@ -441,6 +461,156 @@ class SettlementEngine:
         except Exception:  # noqa: BLE001 - failed evidence grants no nonce effect
             return None
         return sample if time.monotonic() - started < budget else None
+
+    async def complete_cooperative_claim(  # noqa: PLR0911 - preconsumption refusals, then one commit boundary
+        self,
+        session_id: str,
+        cooperation_id: bytes,
+        *,
+        now: Callable[[], int],
+        allow_regtest_fixed_fee: bool = False,
+    ) -> str | None:
+        """Dormant independent completion preflight after fresh signed admission.
+
+        None is only a precommit refusal: this invocation consumed no custody. Once
+        commit begins, errors propagate: consumption or durable completion may
+        have occurred. Never automatically retry or reconstruct eligibility.
+        This does not broadcast or send; the checked outbox owns disclosure.
+        """
+        deadline = time.monotonic() + COOPERATIVE_SAMPLE_SECONDS
+        if not self._new_exposure_allowed or not callable(now):
+            return None
+        if type(allow_regtest_fixed_fee) is not bool or (
+            allow_regtest_fixed_fee and self._store.network_identity.name != "regtest"
+        ):
+            return None
+        started_at = now()
+        if type(started_at) is not int or started_at < 0:
+            return None
+        candidate = self._store.cooperative_completion_candidate(session_id, cooperation_id)
+        if candidate is None:
+            return None
+        fallback = candidate.fallback
+        latest_at = started_at
+
+        def effect_clock() -> int:
+            nonlocal latest_at
+            if not self._new_exposure_allowed or time.monotonic() >= deadline:
+                raise LiveSessionStoreError("cooperative completion evidence expired or revoked")
+            current = now()
+            # Caller clocks can block or revoke availability. Fence their
+            # return before allowing the store's immediately following effect.
+            if not self._new_exposure_allowed or time.monotonic() >= deadline:
+                raise LiveSessionStoreError("cooperative completion evidence expired or revoked")
+            if type(current) is not int or current < 0:
+                raise LiveSessionStoreError("cooperative completion clock unavailable")
+            latest_at = max(latest_at, current)
+            if latest_at >= fallback.deadline_at:
+                raise LiveSessionStoreError("cooperative completion deadline elapsed")
+            return latest_at
+
+        try:
+            effect_clock()  # candidate acquisition and validation share the one-second budget
+            terms, binding = self._validate_prepared_fallback(fallback)
+            burned = parse_json_strict(candidate.burned_binding)
+            if not isinstance(burned, dict):
+                return None
+            unsigned_transaction = burned["unsigned_transaction"]
+            if not isinstance(unsigned_transaction, str):
+                return None
+            plan = verify_cooperative_claim_proposal(
+                bytes.fromhex(unsigned_transaction), self._authorization(terms, binding)
+            )
+            if (
+                terms.network_identity != self._store.network_identity
+                or COOPERATIVE_CLAIM_FEATURE not in terms.required_features
+                or type(burned["fee_sat"]) is not int
+                or plan.fee_sat != burned["fee_sat"]
+                or plan.signature_hash.hex() != burned["signature_hash"]
+                or burned["cooperation_id"] != cooperation_id.hex()
+                or burned["session_id"] != session_id
+                or burned["network_identity"] != terms.network_identity.model_dump(mode="json")
+                or burned["user_key"] != terms.client_contract_compressed_key
+                or burned["provider_key"] != terms.provider_contract_compressed_key
+                or burned["claimant"] != "provider"
+                or burned["tap_tweak"]
+                != reconstruct_taproot_contract(terms, keys=self._crypto).tap_tweak.hex()
+            ):
+                return None
+
+            def sample() -> tuple[CooperativeClaimOutpoint, CooperativeFeePolicy]:
+                output = self._chain.observe_cooperative_claim_outpoint(
+                    binding, terms, keys=self._crypto
+                )
+                policy = self._chain.observe_cooperative_fee_policy(
+                    terms.timing_policy.claim_confirmation_blocks,
+                    allow_regtest_fixed_fee=allow_regtest_fixed_fee,
+                )
+                return output, policy
+
+            effect_clock()
+            sampled = await self._sample_cooperative(sample, budget=deadline - time.monotonic())
+            effect_clock()
+            if not isinstance(sampled, tuple) or len(sampled) != 2:  # noqa: PLR2004 - own two-part sample
+                return None
+            output, policy = sampled
+            if (
+                type(output) is not CooperativeClaimOutpoint
+                or type(policy) is not CooperativeFeePolicy
+                or not _cooperative_outpoint_matches(
+                    output, binding, terms, fallback.deadline_height
+                )
+                or policy.network_identity != terms.network_identity
+                or (policy.tip_hash, policy.tip_height) != (output.tip_hash, output.tip_height)
+                or policy.confirmation_blocks != terms.timing_policy.claim_confirmation_blocks
+                or (policy.estimate_sat_kvb is None and not allow_regtest_fixed_fee)
+                or any(
+                    type(rate) is not int or rate < 0
+                    for rate in (
+                        policy.min_relay_sat_kvb,
+                        policy.mempool_min_sat_kvb,
+                    )
+                )
+                or (
+                    policy.estimate_sat_kvb is not None
+                    and (
+                        type(policy.estimate_sat_kvb) is not int
+                        or policy.estimate_sat_kvb <= 0
+                        or type(policy.estimate_blocks) is not int
+                        or not 1
+                        <= policy.estimate_blocks
+                        <= terms.timing_policy.claim_confirmation_blocks
+                    )
+                )
+            ):
+                return None
+            vsize = (4 * len(plan.base_transaction) + 68 + 3) // 4
+            fee_floor = policy.fee_floor_sat(
+                vsize=vsize, configured_floor_sat=self._settings.claim_fee_sat
+            )
+            if plan.fee_sat < fee_floor:
+                return None
+            observation = CooperativeClaimObservation(
+                network=output.network_identity,
+                funding_txid=output.funding_txid,
+                funding_vout=output.funding_vout,
+                funding_value_sat=output.funding_value_sat,
+                funding_script_pubkey=output.funding_script_pubkey,
+                tip_height=output.tip_height,
+                tip_hash=output.tip_hash,
+                confirmations=output.confirmations,
+                sampled_at=started_at,
+                mempool_unspent=True,
+                fee_floor_sat=fee_floor,
+            )
+        except StaleOwnerError:
+            raise
+        except Exception:  # noqa: BLE001 - a failed preflight does not consume the native handle
+            return None
+        # No catch or automatic retry beyond this private-consumption boundary.
+        return self._store.commit_selected_cooperative_claim(
+            session_id, cooperation_id, observation, now=effect_clock
+        )
 
     async def initiate_cooperative_proposal(
         self, session_id: str, *, now: Callable[[], int]
@@ -498,7 +668,10 @@ class SettlementEngine:
             # into stale initiation authority, even while wall time is open.
             if not self._new_exposure_allowed or time.monotonic() >= sample_deadline:
                 raise LiveSessionStoreError("cooperative proposal evidence expired or revoked")
-            return now()
+            current = now()
+            if not self._new_exposure_allowed or time.monotonic() >= sample_deadline:
+                raise LiveSessionStoreError("cooperative proposal evidence expired or revoked")
+            return current
 
         cooperation_id = secrets.token_bytes(32)
         self._store.burn_selected_cooperative_claim(

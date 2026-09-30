@@ -5,13 +5,15 @@ from __future__ import annotations
 import asyncio
 import os
 import sqlite3
+import threading
+import time
 from contextlib import contextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
 
 import pytest
-from rill_core.settlement import validate_cooperative_claim
+from rill_core.settlement import FundingBindingTransactionMatch, validate_cooperative_claim
 from rill_core.settlement.unilateral import build_cooperative_claim
 from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_model_json
 from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE
@@ -21,9 +23,13 @@ from test_cooperation_burn import _featured_paid_swap
 from test_live_session_store import Harness
 
 from rill_provider import live_session_store as live
-from rill_provider.core_tx_bytes import CoreTransactionUnknownError
+from rill_provider.core_tx_bytes import (
+    CooperativeClaimOutpoint,
+    CooperativeFeePolicy,
+    CoreTransactionUnknownError,
+)
 from rill_provider.live_session_store import LiveSessionStoreError, SettlementItem
-from rill_provider.settlement_engine import SettlementEngine
+from rill_provider.settlement_engine import EngineSettings, SettlementEngine
 from rill_provider.settlement_policy import offered_terms
 
 if TYPE_CHECKING:
@@ -75,6 +81,21 @@ if TYPE_CHECKING:
         "candidate_unilateral_winner",
         "candidate_blocked",
         "candidate_malformed_json",
+        "runtime_completion",
+        "runtime_distinct_fee",
+        "runtime_tip_mismatch",
+        "runtime_fee_high",
+        "runtime_target_expanded",
+        "runtime_revoked",
+        "runtime_hung_outpoint",
+        "runtime_hung_fee",
+        "runtime_acquisition_expired",
+        "runtime_shutdown_after_sample",
+        "runtime_canceled_sampling",
+        "runtime_clock_delay",
+        "runtime_clock_revokes",
+        "runtime_fallback_wins",
+        "runtime_commit_uncertain",
     ],
 )
 def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0911, PLR0912, PLR0915 - native custody lifecycle
@@ -90,7 +111,7 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0911, P
         harness.acquire() as store,
     ):
         session, plan, funding = _featured_paid_swap(harness, store)
-        if winner == "candidate_distinct_fee":
+        if winner in {"candidate_distinct_fee", "runtime_distinct_fee"}:
             plan = build_cooperative_claim(plan.authorization, fee_sat=350)
         store._public_keys = crypto  # noqa: SLF001 - actual native custody fixture
         store._crypto = crypto  # noqa: SLF001
@@ -497,6 +518,209 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0911, P
             else:
                 assert candidate is None
             assert store.cooperative_completion_candidate(session, b"\x99" * 32) is None
+            return
+        if winner.startswith("runtime_"):
+            chain = Mock()
+            output = CooperativeClaimOutpoint(
+                harness.network,
+                FundingBindingTransactionMatch(
+                    binding.funding_txid,
+                    binding.contract_vout,
+                    binding.lineage_anchor_txid,
+                    binding.lineage_anchor_vout,
+                ),
+                binding.funding_txid,
+                binding.contract_vout,
+                int(binding.contract_value_sat),
+                bytes.fromhex(binding.contract_script_pubkey),
+                "19" * 32,
+                1090,
+                terms.funding_confirmations,
+                1091 - terms.funding_confirmations,
+                "18" * 32,
+            )
+            policy = CooperativeFeePolicy(
+                harness.network,
+                "19" * 32,
+                1090,
+                terms.timing_policy.claim_confirmation_blocks,
+                100,
+                1000,
+                1000,
+                terms.timing_policy.claim_confirmation_blocks,
+            )
+            if winner == "runtime_tip_mismatch":
+                policy = replace(policy, tip_hash="20" * 32)
+            elif winner == "runtime_fee_high":
+                policy = replace(policy, estimate_sat_kvb=100000)
+            elif winner == "runtime_target_expanded":
+                policy = replace(
+                    policy, estimate_blocks=terms.timing_policy.claim_confirmation_blocks + 1
+                )
+            chain.observe_cooperative_claim_outpoint.return_value = output
+            chain.observe_cooperative_fee_policy.return_value = policy
+            engine = SettlementEngine(
+                store, chain, Mock(), crypto, EngineSettings(claim_fee_sat=300)
+            )
+            if winner in {"runtime_clock_delay", "runtime_clock_revokes"}:
+                monotonic_value = 0.0
+                armed = False
+                verify = crypto.musig_partial_verify
+
+                def arm_clock(**kwargs: object) -> None:
+                    nonlocal armed
+                    verify(**kwargs)
+                    if kwargs["signer_index"] == 0:
+                        armed = True
+
+                def delayed_clock() -> int:
+                    nonlocal monotonic_value
+                    if armed:
+                        if winner == "runtime_clock_delay":
+                            monotonic_value = 1.0
+                        else:
+                            engine.disable_new_exposure()
+                    return 1003
+
+                monkeypatch.setattr(
+                    "rill_provider.settlement_engine.time", Mock(monotonic=lambda: monotonic_value)
+                )
+                monkeypatch.setattr(crypto, "musig_partial_verify", arm_clock)
+                with pytest.raises(LiveSessionStoreError, match="cooperative clock unavailable"):
+                    asyncio.run(
+                        engine.complete_cooperative_claim(
+                            session, cooperation_id, now=delayed_clock
+                        )
+                    )
+                assert cooperation_id in store._cooperation_handles  # noqa: SLF001 - callback fenced before native consumption
+                assert store._connection.execute(  # noqa: SLF001
+                    "SELECT state FROM cooperation_attempts WHERE session_id=?", (session,)
+                ).fetchone() == ("SIGNING",)
+                return
+            if winner == "runtime_fallback_wins":
+                original_sample = engine._sample_cooperative  # noqa: SLF001 - deterministic concurrent arbitration
+
+                async def sampled_after_fallback(operation: object, *, budget: float) -> object:
+                    observed = await original_sample(operation, budget=budget)
+                    assert len(engine.select_due_fallbacks(1003, height=1094)) == 1
+                    return observed
+
+                monkeypatch.setattr(engine, "_sample_cooperative", sampled_after_fallback)
+                with pytest.raises(LiveSessionStoreError, match="arbitration unavailable"):
+                    asyncio.run(
+                        engine.complete_cooperative_claim(session, cooperation_id, now=lambda: 1003)
+                    )
+                assert store.selected_cooperative_claim(session) is None
+                assert store.cooperative_completion_candidate(session, cooperation_id) is None
+                return
+            if winner == "runtime_commit_uncertain":
+                commit = store.commit_selected_cooperative_claim
+
+                def uncertain_commit(*args: object, **kwargs: object) -> str:
+                    commit(*args, **kwargs)
+                    raise LiveSessionStoreError("completion outcome unknown")
+
+                monkeypatch.setattr(store, "commit_selected_cooperative_claim", uncertain_commit)
+                with pytest.raises(LiveSessionStoreError, match="outcome unknown"):
+                    asyncio.run(
+                        engine.complete_cooperative_claim(session, cooperation_id, now=lambda: 1003)
+                    )
+                assert store.selected_cooperative_claim(session) is not None
+                assert cooperation_id not in store._cooperation_handles  # noqa: SLF001 - durable consumption cannot be retried
+                return
+            if winner == "runtime_revoked":
+                engine.disable_new_exposure()
+            elif winner == "runtime_shutdown_after_sample":
+
+                def revoked_policy(*_args: object, **_kwargs: object) -> CooperativeFeePolicy:
+                    engine.disable_new_exposure()
+                    return policy
+
+                chain.observe_cooperative_fee_policy.side_effect = revoked_policy
+            elif winner == "runtime_acquisition_expired":
+                getter = store.cooperative_completion_candidate
+
+                def slow_getter(*args: object) -> live.CooperativeCompletionCandidate | None:
+                    result = getter(*args)
+                    time.sleep(0.02)
+                    return result
+
+                monkeypatch.setattr(
+                    "rill_provider.settlement_engine.COOPERATIVE_SAMPLE_SECONDS", 0.01
+                )
+                monkeypatch.setattr(store, "cooperative_completion_candidate", slow_getter)
+            elif winner in {
+                "runtime_hung_outpoint",
+                "runtime_hung_fee",
+                "runtime_canceled_sampling",
+            }:
+                entered, release = threading.Event(), threading.Event()
+
+                def hung(*_args: object, **_kwargs: object) -> object:
+                    entered.set()
+                    assert release.wait(timeout=3)
+                    return output if winner == "runtime_hung_outpoint" else policy
+
+                if winner == "runtime_hung_outpoint":
+                    chain.observe_cooperative_claim_outpoint.side_effect = hung
+                else:
+                    chain.observe_cooperative_fee_policy.side_effect = hung
+
+                async def exercise_busy_sampler() -> None:
+                    running = asyncio.create_task(
+                        engine.complete_cooperative_claim(session, cooperation_id, now=lambda: 1003)
+                    )
+                    try:
+                        assert await asyncio.to_thread(entered.wait, 1)
+                        # Proposal and completion cannot start two Core workers.
+                        assert (
+                            await engine.initiate_cooperative_proposal(session, now=lambda: 1003)
+                            is None
+                        )
+                        if winner == "runtime_canceled_sampling":
+                            running.cancel()
+                            with pytest.raises(asyncio.CancelledError):
+                                await running
+                        else:
+                            assert (
+                                await asyncio.wait_for(asyncio.shield(running), timeout=1.5) is None
+                            )
+                        assert engine._cooperative_sample_task is not None  # noqa: SLF001 - canceled waiter retains worker slot
+                        chain.observe_cooperative_claim_outpoint.assert_called_once()
+                        release.set()
+                        await asyncio.shield(engine._cooperative_sample_task)  # noqa: SLF001 - drain actual worker before crypto close
+                        assert engine._cooperative_sample_task is None  # noqa: SLF001
+                        assert store.selected_cooperative_claim(session) is None
+                    finally:
+                        release.set()
+                        await asyncio.gather(running, return_exceptions=True)
+                        if engine._cooperative_sample_task is not None:  # noqa: SLF001
+                            await asyncio.shield(engine._cooperative_sample_task)  # noqa: SLF001
+
+                asyncio.run(exercise_busy_sampler())
+                return
+            result = asyncio.run(
+                engine.complete_cooperative_claim(session, cooperation_id, now=lambda: 1003)
+            )
+            if winner in {"runtime_completion", "runtime_distinct_fee"}:
+                assert result is not None
+                (selected,) = store.cooperative_winners()
+                assert (
+                    validate_cooperative_claim(
+                        selected.raw, plan.authorization, verifier=crypto
+                    ).fee_sat
+                    == plan.fee_sat
+                )
+                assert store.cooperative_completion_candidate(session, cooperation_id) is None
+            else:
+                assert result is None
+                assert store._connection.execute(  # noqa: SLF001 - preconsumption refusal retains custody
+                    "SELECT state FROM cooperation_attempts WHERE session_id=?", (session,)
+                ).fetchone() == ("SIGNING",)
+                assert cooperation_id in store._cooperation_handles  # noqa: SLF001
+                if winner == "runtime_acquisition_expired":
+                    chain.observe_cooperative_claim_outpoint.assert_not_called()
+                    chain.observe_cooperative_fee_policy.assert_not_called()
             return
         observation = live.CooperativeClaimObservation(
             network=harness.network,
