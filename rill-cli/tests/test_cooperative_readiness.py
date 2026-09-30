@@ -20,7 +20,12 @@ from rill_core.wire.hashes import (
 )
 from rill_core.wire.messages import ContractTerms, Envelope, HandshakeAccept, HandshakeInit
 
-from rill_cli.live_swap import SwapError, _answer_cooperative_readiness, _Session
+from rill_cli.live_swap import (
+    SwapError,
+    _answer_cooperative_readiness,
+    _Session,
+    _validate_cooperative_readiness,
+)
 
 FIXTURE = (
     Path(__file__).parents[2] / "rill-core/tests/fixtures/recovery-v1/initial-btc-to-ln-v1.json"
@@ -334,5 +339,75 @@ def test_readiness_echo_has_exact_request_and_feature_without_recovery_changes()
                 tip_height=1090,
             )
         assert session.send.await_count == 1
+
+    asyncio.run(scenario())
+
+
+def test_readiness_validation_learns_preimage_without_any_protocol_effect() -> None:
+    terms, init, accept = _context()
+    crypto = Mock(public_key=lambda _secret: bytes.fromhex("02" + "11" * 32))
+    session = _Session(Mock(), crypto, terms.network_identity, timeout=1)
+    session.session_id = init.session_id
+    session.key = init.client_session_xonly_key
+    session.provider_key = accept.provider_session_xonly_key
+    session.sequence = 3
+    session.send = AsyncMock()
+    request = _request(terms, init, accept)
+    validated = _validate_cooperative_readiness(
+        session,
+        request,
+        terms=terms,
+        init=init,
+        accept=accept,
+        provider_key=accept.provider_session_xonly_key,
+        observed_preimage=None,
+        now=1000,
+        tip_height=1090,
+    )
+    assert validated.payment_preimage == PREIMAGE
+    assert validated.challenge == "cc" * 32
+    assert session.sequence == 3
+    session.send.assert_not_called()
+    crypto.schnorr_sign.assert_not_called()
+
+
+@pytest.mark.parametrize("expiry", ["wall", "height"])
+def test_readiness_echo_rechecks_deadlines_after_validation(expiry: str) -> None:
+    async def scenario() -> None:
+        terms, init, accept = _context()
+        crypto = Mock(public_key=lambda _secret: bytes.fromhex("02" + "11" * 32))
+        session = _Session(Mock(), crypto, terms.network_identity, timeout=1)
+        session.session_id = init.session_id
+        session.key = init.client_session_xonly_key
+        session.provider_key = accept.provider_session_xonly_key
+        session.sequence = 3
+        session.send = AsyncMock()
+        request = _request(terms, init, accept)
+        validated = _validate_cooperative_readiness(
+            session,
+            request,
+            terms=terms,
+            init=init,
+            accept=accept,
+            provider_key=accept.provider_session_xonly_key,
+            observed_preimage=None,
+            now=1000,
+            tip_height=1090,
+        )
+        with pytest.raises(SwapError, match="readiness refused"):
+            await _answer_cooperative_readiness(
+                session,
+                request,
+                terms=terms,
+                init=init,
+                accept=accept,
+                provider_key=accept.provider_session_xonly_key,
+                observed_preimage=validated.payment_preimage,
+                now=1020 if expiry == "wall" else 1001,
+                tip_height=1094 if expiry == "height" else 1090,
+            )
+        assert session.sequence == 3
+        session.send.assert_not_called()
+        crypto.schnorr_sign.assert_not_called()
 
     asyncio.run(scenario())

@@ -580,7 +580,7 @@ async def _wait_for_payment(
             raise SwapError("provider reports the payment failed; " + refund_hint)
 
 
-async def _answer_cooperative_readiness(  # noqa: PLR0913 - all independent bindings are explicit
+def _validate_cooperative_readiness(  # noqa: PLR0913 - all independent bindings are explicit
     session: _Session,
     request: Envelope,
     *,
@@ -591,12 +591,12 @@ async def _answer_cooperative_readiness(  # noqa: PLR0913 - all independent bind
     observed_preimage: str | None,
     now: int,
     tip_height: int,
-) -> str:
-    """Answer one authenticated original-session readiness request, no nonce.
+) -> CooperativeClaimReadyRequest:
+    """Verify a readiness request and learn its preimage without replying.
 
-    This helper does not establish receive ordering or consent to a proposal.
-    Its caller must admit the request from the original relay session exactly
-    once, not from a recovery file, and retain the swap's bounded lifetime.
+    The complete handler must durably retain the learned preimage before any
+    readiness echo. Validation grants no signing authority and changes neither
+    session sequence nor recovery state. It does not establish FIFO admission.
     """
     if (
         request.sender_session_key != provider_key
@@ -628,6 +628,38 @@ async def _answer_cooperative_readiness(  # noqa: PLR0913 - all independent bind
         or (observed_preimage is not None and payload.payment_preimage != observed_preimage)
     ):
         raise SwapError("cooperative readiness refused")
+    return payload
+
+
+async def _answer_cooperative_readiness(  # noqa: PLR0913 - explicit independent bindings
+    session: _Session,
+    request: Envelope,
+    *,
+    terms: ContractTerms,
+    init: HandshakeInit,
+    accept: HandshakeAccept,
+    provider_key: str,
+    observed_preimage: str | None,
+    now: int,
+    tip_height: int,
+) -> str:
+    """Revalidate then echo one readiness request, still dormant in production.
+
+    A complete original-session signing/completion handler must first use the
+    validation-only helper and publish its learned-preimage recovery successor.
+    Do not wire this echo into dispatch until that entire handler is available.
+    """
+    payload = _validate_cooperative_readiness(
+        session,
+        request,
+        terms=terms,
+        init=init,
+        accept=accept,
+        provider_key=provider_key,
+        observed_preimage=observed_preimage,
+        now=now,
+        tip_height=tip_height,
+    )
     reply = session.envelope(
         "action_result",
         {
