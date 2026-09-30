@@ -124,18 +124,19 @@ observations never renew the wait, and buffered funding at expiry is not
 processed. Timeout means funding was not observed, not proof that the provider
 never funded. Check `lncli listpayments` and do not retry payment automatically.
 Nonfinite or nonpositive settlement timeout values are refused before discovery
-or payment. Funding, depth, and claim watching still use separate budgets;
-this increment does not establish one overall reverse lifetime or activate
-reverse cooperative signing.
+or payment. One absolute settlement deadline starts immediately before queuing
+the exact hold payment. Queueing, preparation, uncertain submission, funding,
+depth, and claim watching consume that same budget; no stage renews it. This
+does not activate reverse cooperative signing.
 
 The hold payer accepts optional absolute monotonic submission authority for
-the upcoming shared reverse lifetime. It caps existing planning/submission
+the shared reverse lifetime. It caps existing planning/submission
 budgets, checks after planning and inside queued submission work, and passes
 the fixed deadline and permission predicate through to the actual LND RPC
 boundary. An already-started send may continue after return. Late positive
 tracking remains payment knowledge; unknown outcomes require inspection and
-never authorize retry. `run_reverse_swap` does not propagate these inputs yet,
-so this does not establish an overall reverse lifetime.
+never authorize retry. `run_reverse_swap` supplies the original deadline and
+thread-safe submission predicate, including to queued payer work.
 
 The claim watcher likewise accepts an original absolute monotonic deadline
 and nonconsuming, thread-safe effect predicate. A relative timeout can shorten,
@@ -148,8 +149,13 @@ private. The existing block-height signing and rebroadcast rules are unchanged.
 Clock and permission collaborators must be trusted, prompt local observations;
 arbitrary callbacks cannot provide atomic time-and-revocation guarantees.
 Operational reporting can follow an expired submission to preserve evidence.
-The reverse dispatcher still needs to supply this authority and drain actual
-crypto-using workers before returning or closing the context.
+The reverse dispatcher supplies this authority to sizing signatures, claim
+signing, and watching. Startup recovery publication and settlement workers are
+shielded and owned until their actual completion. Cancellation stops new work;
+repeated cancellation cannot release the SDK's crypto context before workers
+finish. Cleanup lies outside the settlement budget and can remain unbounded
+if a started callback hangs. An in-flight LND send can outlive the payer, but its
+permission predicate uses only local lifetime state, not the crypto context.
 
 The own-Core wallet broadcaster accepts the same optional lifetime inputs.
 Guarded calls keep one absolute deadline through network/genesis attestation,
@@ -161,8 +167,8 @@ Handoff is potentially irreversible disclosure. Connection establishment still
 follows the hook, so the first witness transmission can begin after expiry.
 Phase timeouts are not a total duration bound. Late successful results remain
 knowledge; timeout, transport error, cancellation, or missing chain observation
-does not prove privacy or authorize retry. This producer guard is not yet wired
-into the reverse dispatcher and does not open activation or release gates.
+does not prove privacy or authorize retry. The reverse dispatcher supplies this
+guard to every claim submission; activation and release gates remain closed.
 
 ```sh
 rill swap ln-to-btc \
@@ -176,13 +182,15 @@ rill swap ln-to-btc \
   --recovery-output swap-recovery.age
 ```
 
-Nothing is at risk until the hold is paid; an abort before funding, or an
-unusable route, stops with exit code `5` and the held payment fails back when
-the provider cancels the hold. If the command stops after funding, claim from
+Payment errors and unknown status do not prove that nothing was submitted.
+Preserve recovery files, inspect `lncli listpayments`, and do not retry payment.
+A provider abort or expired observation budget does not prove nonfunding or
+preimage privacy. If the command stops after funding, claim from
 the `.funded` snapshot with `rill recover watch-claim` (same schedule, from
 `--initial-fee-sat` to `--max-fee-sat`, capped by the signed terms) before
-the refund lock height. After that the provider refunds and cancels the hold,
-which returns your Lightning funds. Core needs `txindex=1` to report the
+the refund lock height. Do not assume a late claim was broadcast or confirmed;
+check Core and LND. Refund or hold cancellation must be observed, not inferred
+from a timeout. Core needs `txindex=1` to report the
 funding depth.
 
 ```sh

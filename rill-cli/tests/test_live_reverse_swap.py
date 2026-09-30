@@ -189,9 +189,23 @@ class FakeChain:
     def wallet_confirmations(self, txid: str) -> int | None:
         return 1 if txid in self.claim_txids else None  # mined in the next block
 
-    def broadcast_claim(self, raw: bytes) -> str:
-        self.claims.append(raw)
+    def broadcast_claim(
+        self,
+        raw: bytes,
+        *,
+        deadline: float | None = None,
+        effect_allowed: Any = None,  # noqa: ANN401 - test honors the guarded wallet protocol
+    ) -> str:
+        if effect_allowed is not None:
+            assert effect_allowed() is True
+        if deadline is not None:
+            assert time.monotonic() < deadline
         txid, _ = _segwit_claim(raw)
+        if effect_allowed is not None:
+            assert effect_allowed() is True
+        if deadline is not None:
+            assert time.monotonic() < deadline
+        self.claims.append(raw)
         self.claim_txids.append(txid)
         return txid
 
