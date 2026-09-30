@@ -87,8 +87,14 @@ host. The store cannot verify that attestation. Behavior:
   generation counter, and every write checks that generation. A closed or
   superseded handle raises `StaleOwnerError`, and so does a handle inherited
   across `fork` (reacquire in the child instead). If a `COMMIT` fails, the
-  outcome is uncertain, so the handle releases ownership and the new owner
-  re-reads the stored state.
+   outcome is uncertain, so the handle immediately loses usable ownership.
+   Normally the physical lock is released immediately and a new owner re-reads
+   the stored state. An explicit `retain_owner()` block can defer physical lock
+   release until outstanding external RPC execution finishes, including caller
+   cancellation drainage. SQLite and native handles still close immediately.
+   This owning-thread primitive is not a concurrency gate or new financial
+   authority; callers must never use it to keep native/store workers alive.
+   Missing recovery or settlement metadata triggers no work on upgrade.
 - Absent, partial, foreign, or newer files are refused before any pragma can
   modify them. Malformed provisioning metadata (UUID or attestation) is also
   refused. The inode numbers of the database and the lock file are recorded

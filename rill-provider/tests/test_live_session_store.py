@@ -581,6 +581,150 @@ def test_uncertain_commit_releases_ownership(harness: Harness) -> None:
         assert fresh.reserve(harness.init).revision == 0
 
 
+def test_nested_owner_pins_fence_immediately_but_release_only_after_final_exit(
+    harness: Harness,
+) -> None:
+    harness.provision()
+    store = harness.acquire()
+    generation = store.generation
+    with store.retain_owner():
+        with store.retain_owner():
+            store.close()
+            store.close()
+            with pytest.raises(StaleOwnerError, match="closed"):
+                store.reserve(harness.init)
+            with pytest.raises(StaleOwnerError, match="closed"):
+                store.pending_outbox()
+            with pytest.raises(StaleOwnerError, match="closed"), store.retain_owner():
+                pass
+            with pytest.raises(LiveSessionStoreError, match="owned by another"):
+                harness.acquire()
+        with pytest.raises(LiveSessionStoreError, match="owned by another"):
+            harness.acquire()
+    with harness.acquire() as fresh:
+        assert fresh.generation == generation + 1
+        assert fresh.reserve(harness.init).revision == 0
+
+
+def test_pin_exit_does_not_close_a_live_owner_or_suppress_exceptions(harness: Harness) -> None:
+    harness.provision()
+    with harness.acquire() as store:
+        with pytest.raises(RuntimeError, match="body failure"), store.retain_owner():
+            raise RuntimeError("body failure")
+        with pytest.raises(LiveSessionStoreError, match="owned by another"):
+            harness.acquire()
+        assert store.reserve(harness.init).revision == 0
+    with harness.acquire() as fresh:
+        assert fresh.generation == store.generation + 1
+
+
+def test_pin_survives_native_cleanup_reentrancy_and_failure(harness: Harness) -> None:
+    harness.provision()
+    store = harness.acquire()
+    calls: list[str] = []
+
+    class Attempt:
+        def close(self) -> None:
+            calls.append("destroyed")
+            store.close()  # Reentrant cleanup must not release the retained descriptor.
+            with pytest.raises(LiveSessionStoreError, match="owned by another"):
+                harness.acquire()
+            raise RuntimeError("native cleanup failed")
+
+    store._cooperation_handles[b"fixture"] = Attempt()  # type: ignore[assignment]  # noqa: SLF001
+    with store.retain_owner():
+        with pytest.raises(RuntimeError, match="native cleanup failed"):
+            store.close()
+        store.close()
+        with pytest.raises(StaleOwnerError, match="closed"):
+            store.reserve(harness.init)
+        with pytest.raises(LiveSessionStoreError, match="owned by another"):
+            harness.acquire()
+    assert calls == ["destroyed"]
+    with harness.acquire() as fresh:
+        assert fresh.generation == store.generation + 1
+
+
+@pytest.mark.parametrize("failure", ["commit", "rollback"])
+def test_transaction_failure_fences_immediately_without_releasing_a_pinned_owner(
+    harness: Harness,
+    failure: str,
+) -> None:
+    class FailTransaction(_FailingCommit):
+        def execute(self, sql: str, *args: Any) -> sqlite3.Cursor:  # noqa: ANN401
+            if sql == "ROLLBACK" and failure == "rollback":
+                raise sqlite3.OperationalError("rollback failed")
+            if failure == "commit":
+                return super().execute(sql, *args)
+            return self._connection.execute(sql, *args)
+
+    harness.provision()
+    store = harness.acquire()
+    store._connection = FailTransaction(store._connection)  # type: ignore[assignment]  # noqa: SLF001
+    with store.retain_owner():
+        if failure == "commit":
+            with pytest.raises(StaleOwnerError, match="uncertain"):
+                store.reserve(harness.init)
+        else:
+            with pytest.raises(RuntimeError, match="original transaction failure"), store._write():  # noqa: SLF001
+                raise RuntimeError("original transaction failure")
+        with pytest.raises(StaleOwnerError, match="closed"):
+            store.pending_outbox()
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            store._connection.execute("SELECT 1")  # noqa: SLF001 - SQLite cleanup is immediate, not pinned
+        with pytest.raises(LiveSessionStoreError, match="owned by another"):
+            harness.acquire()
+    with harness.acquire() as fresh:
+        assert fresh.reserve(harness.init).revision == 0
+
+
+def _forked_pinned_child(store: LiveSessionStore, pin: Any, queue: Any) -> None:  # noqa: ANN401
+    try:
+        with store.retain_owner():
+            queue.put("incorrectly retained inherited owner")
+    except StaleOwnerError as error:
+        queue.put(str(error))
+    store.close()
+    try:
+        suppressed = pin.__exit__(RuntimeError, RuntimeError("child exception"), None)
+    except RuntimeError as error:
+        queue.put(str(error))
+    else:
+        queue.put("suppressed" if suppressed else "exception propagated")
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_forked_pin_exit_cannot_release_parent_or_suppress_child_exception(
+    harness: Harness,
+    *,
+    closed: bool,
+) -> None:
+    harness.provision()
+    store = harness.acquire()
+    pin = store.retain_owner()
+    pin.__enter__()
+    try:
+        if closed:
+            store.close()
+        context = multiprocessing.get_context("fork")
+        queue = context.Queue()
+        child = context.Process(target=_forked_pinned_child, args=(store, pin, queue))
+        child.start()
+        child.join(30)
+        assert child.exitcode == 0
+        assert queue.get(timeout=5) == "store handle inherited across fork; reacquire"
+        assert queue.get(timeout=5) == "exception propagated"
+        with pytest.raises(LiveSessionStoreError, match="owned by another"):
+            harness.acquire()
+        if not closed:
+            assert store.reserve(harness.init).revision == 0
+    finally:
+        store.close()
+        pin.__exit__(None, None, None)
+    with harness.acquire() as fresh:
+        assert fresh.generation == store.generation + 1
+
+
 @pytest.mark.parametrize(
     ("column", "value"),
     [

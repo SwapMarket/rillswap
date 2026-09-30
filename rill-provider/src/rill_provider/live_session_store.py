@@ -787,6 +787,8 @@ class LiveSessionStore:
         """Use provision() or acquire(); never construct directly."""
         self.path = path
         self._lock_fd: int | None = lock_fd
+        self._owner_pins = 0
+        self._retained_lock_fd: int | None = None
         self._connection = connection
         self._generation = generation
         self._network = network
@@ -1065,20 +1067,53 @@ class LiveSessionStore:
         return owned
 
     def close(self) -> None:
-        """Release ownership; the handle can never write again."""
+        """Fence the handle immediately; pinned physical exclusion ends later."""
         lock_fd, self._lock_fd = self._lock_fd, None
         if os.getpid() != self._pid:
             # Inherited across fork: never touch the parent's SQLite connection.
             # Closing our descriptor copy does not release the parent's flock.
-            if lock_fd is not None:
-                os.close(lock_fd)
+            retained, self._retained_lock_fd = self._retained_lock_fd, None
+            self._owner_pins = 0
+            for inherited in (lock_fd, retained):
+                if inherited is not None:
+                    os.close(inherited)
             return
+        if lock_fd is not None and self._owner_pins:
+            # Transfer before native/SQLite cleanup, which may raise or reenter.
+            self._retained_lock_fd, lock_fd = lock_fd, None
+        handles, self._cooperation_handles = self._cooperation_handles, {}
         try:
-            for attempt in self._cooperation_handles.values():
+            for attempt in handles.values():
                 attempt.close()
         finally:
-            self._cooperation_handles.clear()
             _discard(self._connection, -1 if lock_fd is None else lock_fd)
+
+    @contextmanager
+    def retain_owner(self) -> Iterator[None]:
+        """Pin physical exclusion, not usable authority, on the owning thread.
+
+        External economic RPC workers must not access SQLite or native handles,
+        which close() still destroys immediately. Their caller must retain this
+        pin until actual execution finishes, including cancellation drainage.
+        No new pin or effect is permitted after logical closure. This in-memory
+        mechanism neither resumes cooperation nor protects against process death.
+        """
+        if os.getpid() != self._pid:
+            raise StaleOwnerError("store handle inherited across fork; reacquire")
+        if self._lock_fd is None:
+            raise StaleOwnerError("store handle closed")
+        self._owner_pins += 1
+        try:
+            yield
+        finally:
+            # Do not return in a forked child: that suppresses an exception
+            # thrown through this generator's context-manager exit.
+            if os.getpid() == self._pid:
+                self._owner_pins -= 1
+                if self._owner_pins == 0:
+                    retained, self._retained_lock_fd = self._retained_lock_fd, None
+                    if retained is not None:
+                        os.close(retained)
 
     def __enter__(self) -> Self:
         """Own the store for the block."""
