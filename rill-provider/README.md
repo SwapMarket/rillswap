@@ -95,6 +95,17 @@ host. The store cannot verify that attestation. Behavior:
    This owning-thread primitive is not a concurrency gate or new financial
    authority; callers must never use it to keep native/store workers alive.
    Missing recovery or settlement metadata triggers no work on upgrade.
+   `reverse_operations.operation()` provides one shared execution gate and a
+   fresh task-bound token. Its external workers and cancellation drainage retain
+   physical exclusion until actual completion; token cancellation does not
+   permanently disable subsequent fresh unilateral recovery. Authoritative
+   state must be reloaded after acquiring the gate, and `check()` must precede
+   synchronous economic effects. A timeout around a non-worker await must escape
+   the operation context, or its handler must explicitly call `abandon()` before
+   continuing. Timeout scopes can restore cancellation counts, so checkpoints
+   cannot infer those caught timeouts. This primitive is not yet wired into
+   reverse advancement or hold-invoice admission; runtime serialization remains
+   a separate unfinished acceptance gate.
 - Absent, partial, foreign, or newer files are refused before any pragma can
   modify them. Malformed provisioning metadata (UUID or attestation) is also
   refused. The inode numbers of the database and the lock file are recorded

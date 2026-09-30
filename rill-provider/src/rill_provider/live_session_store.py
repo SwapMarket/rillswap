@@ -103,6 +103,7 @@ if TYPE_CHECKING:
 
     from rill_provider.handshake_custody_offline import CustodyPublicKeys
     from rill_provider.provider_identity import ProviderIdentity
+    from rill_provider.reverse_operations import ReverseOperations
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
 SCHEMA_VERSION = 13  # v8-v12 upgrade on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
@@ -789,6 +790,7 @@ class LiveSessionStore:
         self._lock_fd: int | None = lock_fd
         self._owner_pins = 0
         self._retained_lock_fd: int | None = None
+        self._reverse_operations: ReverseOperations | None = None
         self._connection = connection
         self._generation = generation
         self._network = network
@@ -1127,6 +1129,26 @@ class LiveSessionStore:
     def generation(self) -> int:
         """Owner generation; increases on every acquire."""
         return self._generation
+
+    @property
+    def owner_is_open(self) -> bool:
+        """Local lifecycle fence only, not generation or financial authority.
+
+        External RPC queue guards may read this without using SQLite or crypto.
+        Physical retention handles an effect already starting when close races
+        the guard. Authoritative state still requires the normal store checks.
+        """
+        return os.getpid() == self._pid and self._lock_fd is not None
+
+    @property
+    def reverse_operations(self) -> ReverseOperations:
+        """One reverse execution boundary shared by every caller of this owner."""
+        if self._reverse_operations is None:
+            # Lifecycle-local import avoids a store/token runtime import cycle.
+            from rill_provider.reverse_operations import ReverseOperations  # noqa: PLC0415
+
+            self._reverse_operations = ReverseOperations(self)
+        return self._reverse_operations
 
     @property
     def network_identity(self) -> NetworkIdentity:
