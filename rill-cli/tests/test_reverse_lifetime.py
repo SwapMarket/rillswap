@@ -357,3 +357,51 @@ def test_executor_future_preserves_caller_context_variables() -> None:
             assert await owner.worker(marker.get) == "caller value"
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("reason", ["caller", "global", "timeout"])
+def test_late_reverse_worker_exceptions_are_consumed_without_loop_logging(reason: str) -> None:
+    async def exercise() -> None:
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        loop_errors: list[dict] = []
+        asyncio.get_running_loop().set_exception_handler(
+            lambda _loop, context: loop_errors.append(context)
+        )
+
+        def fail() -> None:
+            entered.set()
+            try:
+                assert release.wait(2)
+                raise RuntimeError("private adapter details must not reach loop logging")
+            finally:
+                finished.set()
+
+        async def lifetime() -> None:
+            async with reverse._ReverseLifetime(0.02 if reason == "timeout" else 10) as owner:  # noqa: SLF001
+                owner.start()
+                await owner.worker(fail)
+
+        running = asyncio.create_task(lifetime())
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            if reason == "timeout":
+                await asyncio.sleep(0.04)
+            elif reason == "caller":
+                running.cancel()
+            else:
+                controller = asyncio.current_task()
+                for task in asyncio.all_tasks():
+                    if task is not controller:
+                        task.cancel()
+            await asyncio.sleep(0.01)
+            assert not running.done()
+            release.set()
+            with pytest.raises(TimeoutError if reason == "timeout" else asyncio.CancelledError):
+                await running
+            assert finished.is_set()
+            assert not loop_errors
+        finally:
+            release.set()
+            await asyncio.gather(running, return_exceptions=True)
+
+    asyncio.run(exercise())

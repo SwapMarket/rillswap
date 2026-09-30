@@ -174,10 +174,11 @@ class _ReverseLifetime:
         self._workers.add(task)
         try:
             if self._deadline is None:
-                result = await asyncio.shield(task)
+                await asyncio.wait((task,))
             else:
                 async with asyncio.timeout(max(0, self._deadline - time.monotonic())):
-                    result = await asyncio.shield(task)
+                    await asyncio.wait((task,))
+            result = task.result()
             self._check_work()
             return result  # noqa: TRY300 - a late-result refusal must stop future work
         except (TimeoutError, asyncio.CancelledError):

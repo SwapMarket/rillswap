@@ -156,8 +156,10 @@ repeated cancellation cannot release the SDK's crypto context before workers
 finish. Cleanup lies outside the settlement budget and can remain unbounded
 if a started callback hangs. An in-flight LND send can outlive the payer, but its
 permission predicate uses only local lifetime state, not the crypto context.
-Executor work and drainage are held as shielded Futures, not child Tasks;
-loop-wide Task cancellation cannot falsely mark a running thread as completed.
+Executor work is held as private Futures with cancellation-isolated waits;
+drainage uses a shielded gather Future, not a child Task. Loop-wide Task
+cancellation cannot falsely mark a running thread as completed. Late worker
+exceptions are consumed without canceled-shield exception logging.
 
 The own-Core wallet broadcaster accepts the same optional lifetime inputs.
 Guarded calls keep one absolute deadline through network/genesis attestation,
@@ -264,7 +266,7 @@ a floor above `--max-claim-fee-sat`, fail before relay or native setup. No
 implicit regtest estimate exemption is enabled.
 
 Cancellation or timeout does not stop an RPC or recovery writer thread.
-Forward settlement cleanup retains one shielded worker-drain task even under
+Forward settlement cleanup retains one shielded worker-drain Future even under
 repeated cancellation, then propagates cancellation before the CLI closes its
 crypto context. Late publication may leave a
 valid recovery file; the retained pending successor is unconfirmed, not a

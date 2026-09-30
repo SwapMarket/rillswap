@@ -16,6 +16,7 @@ never pays, the user refunds after ``refund_lock_height`` with
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 import math
@@ -831,7 +832,7 @@ class _CooperativeClaimAttempt:
         self.last_wall, self.last_mono = 0, 0.0
         self.preimage: str | None = None
         self.stage = "fresh"
-        self.workers: set[asyncio.Task[Any]] = set()
+        self.workers: set[asyncio.Future[Any]] = set()
         self.proposal: Envelope | None = None
         self.plan: CooperativeClaimPlan | None = None
         self.partial_result: Envelope | None = None
@@ -864,14 +865,11 @@ class _CooperativeClaimAttempt:
             float(self.wall_deadline - wall) if self.wall_deadline is not None else math.inf,
         )
 
-    async def wait_for_workers(self) -> None:
-        """Lifecycle cleanup only; late success can never reactivate signing."""
-        if self.workers:
-            await asyncio.gather(
-                *(asyncio.shield(task) for task in tuple(self.workers)), return_exceptions=True
-            )
+    def wait_for_workers(self) -> asyncio.Future[list[Any]]:
+        """Return actual completion, not a globally cancelable cleanup Task."""
+        return asyncio.gather(*tuple(self.workers), return_exceptions=True)
 
-    def _worker_done(self, task: asyncio.Task[Any]) -> None:
+    def _worker_done(self, task: asyncio.Future[Any]) -> None:
         self.workers.discard(task)
         if not task.cancelled():
             task.exception()  # consume late errors, never use a late result
@@ -880,10 +878,16 @@ class _CooperativeClaimAttempt:
         if self.workers:
             raise SwapError("cooperative worker still owned")
         budget = min(self._remaining(), 1.0 if sample else math.inf)
-        task = asyncio.create_task(asyncio.to_thread(operation))
+        context = contextvars.copy_context()
+        task = asyncio.get_running_loop().run_in_executor(None, context.run, operation)
         self.workers.add(task)
         task.add_done_callback(self._worker_done)
-        result = await asyncio.wait_for(asyncio.shield(task), timeout=budget)
+        # Cancellation of wait's private waiter never cancels actual executor
+        # work. Unlike a canceled shield in Python 3.14, it does not log late
+        # exceptions (which may contain sensitive adapter details).
+        async with asyncio.timeout(budget):
+            await asyncio.wait((task,))
+        result = task.result()
         self._clock()
         return result
 
@@ -1384,9 +1388,9 @@ async def _drain_cooperative_workers(owner: _CooperativeClaimAttempt) -> None:
 
     Cleanup is not new signing authority and is deliberately outside the
     settlement budget. Do not silently turn cancellation during return into
-    success. One shielded task owns cleanup, never another writer or sample.
+    success. Shielded gather Futures own cleanup, never another writer or sample.
     """
-    draining = asyncio.create_task(owner.wait_for_workers())
+    draining = asyncio.gather(owner.wait_for_workers())
     canceled = False
     while not draining.done():
         try:
