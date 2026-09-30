@@ -12,7 +12,8 @@ from unittest.mock import Mock
 
 import pytest
 from rill_core.settlement import validate_cooperative_claim
-from rill_core.wire.canonical import canonicalize, parse_model_json
+from rill_core.settlement.unilateral import build_cooperative_claim
+from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_model_json
 from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE
 from rill_core.wire.messages import Envelope
 from rill_core.wire.settlement_messages import FundingBindingPayload
@@ -67,6 +68,13 @@ if TYPE_CHECKING:
         "completion_clock_failure",
         "completion_noncallable_clock",
         "completion_age_exactly_five",
+        "candidate_snapshot",
+        "candidate_distinct_fee",
+        "candidate_no_handle",
+        "candidate_other_owner",
+        "candidate_unilateral_winner",
+        "candidate_blocked",
+        "candidate_malformed_json",
     ],
 )
 def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0911, PLR0912, PLR0915 - native custody lifecycle
@@ -82,6 +90,8 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0911, P
         harness.acquire() as store,
     ):
         session, plan, funding = _featured_paid_swap(harness, store)
+        if winner == "candidate_distinct_fee":
+            plan = build_cooperative_claim(plan.authorization, fee_sat=350)
         store._public_keys = crypto  # noqa: SLF001 - actual native custody fixture
         store._crypto = crypto  # noqa: SLF001
         store._connection.execute(  # noqa: SLF001 - synthetic confirmed client sequence
@@ -435,12 +445,59 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0911, P
                 "SELECT count(*) FROM inbox WHERE session_id=?", (session,)
             ).fetchone() == (0,)
             return
+        if winner.startswith("candidate_"):
+            assert store.cooperative_completion_candidate(session, cooperation_id) is None
         assert (
             store._admit_cooperative_result(  # noqa: SLF001
                 canonicalize(signed.model_dump(mode="json")), now=1002
             ).status
             == "signed"
         )
+        if winner.startswith("candidate_"):
+            if winner == "candidate_no_handle":
+                store._cooperation_handles.pop(cooperation_id).close()  # noqa: SLF001 - custody lost, never reconstructed
+            elif winner == "candidate_other_owner":
+                store._connection.execute(  # noqa: SLF001 - another generation is not live authority
+                    "UPDATE cooperation_attempts SET owner_generation=owner_generation+1"
+                )
+            elif winner == "candidate_blocked":
+                store._connection.execute("UPDATE sessions SET blocked=1")  # noqa: SLF001
+            elif winner == "candidate_unilateral_winner":
+                (fallback_candidate,) = store.prepared_fallbacks()
+                store.select_prepared_fallback(
+                    fallback_candidate, signer=crypto, now=1003, height=1094
+                )
+            elif winner == "candidate_malformed_json":
+                store._connection.execute(  # noqa: SLF001 - corrupt storage is an error, not absence
+                    "UPDATE cooperation_attempts SET binding=?", (b"{",)
+                )
+            before = store._connection.execute("SELECT * FROM cooperation_attempts").fetchall()  # noqa: SLF001
+            handles = dict(store._cooperation_handles)  # noqa: SLF001
+            if winner == "candidate_malformed_json":
+                with pytest.raises(LiveSessionStoreError, match="candidate unavailable"):
+                    store.cooperative_completion_candidate(session, cooperation_id)
+                candidate = None
+            else:
+                candidate = store.cooperative_completion_candidate(session, cooperation_id)
+            assert (
+                store._connection.execute("SELECT * FROM cooperation_attempts").fetchall() == before  # noqa: SLF001 - getter never consumes custody
+            )
+            assert store._cooperation_handles == handles  # noqa: SLF001
+            if winner in {"candidate_snapshot", "candidate_distinct_fee"}:
+                assert candidate is not None
+                assert candidate.fallback.raw == fallback.raw_transaction
+                assert candidate.fallback.fee_sat == 300
+                burned = parse_json_strict(candidate.burned_binding)
+                assert burned["fee_sat"] == (350 if winner == "candidate_distinct_fee" else 300)
+                assert burned["unsigned_transaction"] == plan.base_transaction.hex()
+                assert burned["signature_hash"] == plan.signature_hash.hex()
+                assert "peer_nonce" not in burned
+                assert "local_nonce" not in burned
+                assert preimage not in repr(candidate)
+            else:
+                assert candidate is None
+            assert store.cooperative_completion_candidate(session, b"\x99" * 32) is None
+            return
         observation = live.CooperativeClaimObservation(
             network=harness.network,
             funding_txid=funding.txid.hex(),

@@ -633,6 +633,19 @@ class PreparedFallback:
     preimage: str
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class CooperativeCompletionCandidate:
+    """Non-authorizing read snapshot for independent completion preflight.
+
+    No native handle, nonce, or peer partial is exposed. The runtime must
+    validate the fallback and exact burned plan within its original evidence
+    budget; the atomic completion entry point rechecks all live authority.
+    """
+
+    fallback: PreparedFallback
+    burned_binding: bytes
+
+
 @dataclass(frozen=True, slots=True)
 class ReadinessChallenge:
     """A newly issued request, not an admission or restartable authority."""
@@ -3401,6 +3414,69 @@ class LiveSessionStore:
             select_winner=True,
             clock=now,
         )
+
+    def cooperative_completion_candidate(
+        self, session_id: str, cooperation_id: bytes
+    ) -> CooperativeCompletionCandidate | None:
+        """Read only a current, affirmatively prepared SIGNING candidate.
+
+        This is not a clock, chain, fee, native-plan, or signing verifier. A
+        missing/older/nonqualifying record or absent process-local custody
+        selects no candidate. Malformed storage raises a sanitized error.
+        Restart never recreates custody from these bytes. Start
+        the runtime's monotonic budget before acquiring this snapshot.
+        """
+        if type(cooperation_id) is not bytes or len(cooperation_id) != 32:  # noqa: PLR2004 - exact burned ID
+            raise LiveSessionStoreError("cooperative completion identifier invalid")
+        try:
+            with self._write() as connection:
+                if cooperation_id not in self._cooperation_handles:
+                    return None
+                row = connection.execute(
+                    "SELECT a.session_id,a.contract_hash,a.state,a.owner_generation,"
+                    "a.deadline_at,a.deadline_height,a.fallback_raw,a.fallback_txid,"
+                    "a.fallback_fee_sat,w.terms_offer,w.funding_binding,w.preimage,c.binding "
+                    "FROM cooperation_attempts c "
+                    "JOIN claim_arbitration a ON a.session_id=c.session_id "
+                    "JOIN swaps w ON w.session_id=c.session_id "
+                    "JOIN sessions s ON s.session_id=c.session_id "
+                    "WHERE c.session_id=? AND c.cooperation_id=? AND c.state='SIGNING' "
+                    "AND c.owner_generation=? AND a.state='WAITING' AND a.version=1 "
+                    "AND a.owner_generation=c.owner_generation AND a.deadline_at=c.deadline_at "
+                    "AND a.cooperative_raw IS NULL AND a.cooperative_txid IS NULL "
+                    "AND a.fallback_raw IS NOT NULL AND a.fallback_txid IS NOT NULL "
+                    "AND a.fallback_fee_sat IS NOT NULL AND w.state='PAID' "
+                    "AND w.contract_hash=a.contract_hash AND w.preimage IS NOT NULL "
+                    "AND w.terms_offer IS NOT NULL AND w.funding_binding IS NOT NULL "
+                    "AND w.claim_tx IS NULL AND w.claim_txid IS NULL "
+                    "AND s.phase='ACCEPTED' AND s.blocked=0 "
+                    "AND NOT EXISTS (SELECT 1 FROM claim_attempts t "
+                    "WHERE t.session_id=w.session_id)",
+                    (session_id, cooperation_id, self._generation),
+                ).fetchone()
+                if row is None:
+                    return None
+                fallback, burned_bytes = PreparedFallback(*row[:-1]), row[-1]
+                binding = parse_json_strict(burned_bytes)
+                if (
+                    not isinstance(binding, dict)
+                    or canonicalize(binding) != burned_bytes
+                    or type(binding.get("version")) is not int
+                    or binding["version"] != 1
+                    or binding.get("session_id") != session_id
+                    or binding.get("cooperation_id") != cooperation_id.hex()
+                    or binding.get("contract_hash") != fallback.contract_hash
+                    or type(binding.get("deadline_at")) is not int
+                    or type(binding.get("deadline_height")) is not int
+                    or binding.get("deadline_at") != fallback.deadline_at
+                    or binding.get("deadline_height") != fallback.deadline_height
+                ):
+                    return None
+                return CooperativeCompletionCandidate(fallback, burned_bytes)
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - no stored failure grants sampling or signer authority
+            raise LiveSessionStoreError("cooperative completion candidate unavailable") from None
 
     def _commit_cooperative_claim_partial(
         self,

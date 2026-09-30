@@ -922,6 +922,17 @@ use integer ceiling arithmetic and never override signed caps or dust policy.
 Runtime still must bound acquisition and evidence age, independently verify
 the selected outpoint, and recheck before native effects. This reader alone
 does not authorize a partial signature; no completion caller uses it yet.
+
+`cooperative_completion_candidate` is a nonauthorizing read snapshot containing
+the current prepared fallback and canonical burned binding. It exposes no
+handle, nonce, or admitted partial. Missing custody, another generation,
+blocked sessions, or nonqualifying arbitration return no candidate; malformed
+storage raises a sanitized error. The burned transaction may have a different
+fee from its fallback, so preflight must validate its exact transaction and
+sighash rather than infer them from the fallback. Begin the monotonic evidence
+budget before acquiring this snapshot. Atomic completion still independently
+checks custody, deadlines, and winner selection. The getter adds no migration,
+sampling, signing, or restart cooperation, and has no runtime caller yet.
 The deployment namespace and consensus profile are operator assertions, not
 facts Core attests. Arbitrary old confirmed transactions need Core `-txindex=1`
 already configured; this probe never enables indexing or initiates a reindex.
