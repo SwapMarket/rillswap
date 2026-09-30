@@ -128,6 +128,15 @@ or payment. Funding, depth, and claim watching still use separate budgets;
 this increment does not establish one overall reverse lifetime or activate
 reverse cooperative signing.
 
+The hold payer accepts optional absolute monotonic submission authority for
+the upcoming shared reverse lifetime. It caps existing planning/submission
+budgets, checks after planning and inside queued submission work, and passes
+the fixed deadline and permission predicate through to the actual LND RPC
+boundary. An already-started send may continue after return. Late positive
+tracking remains payment knowledge; unknown outcomes require inspection and
+never authorize retry. `run_reverse_swap` does not propagate these inputs yet,
+so this does not establish an overall reverse lifetime.
+
 ```sh
 rill swap ln-to-btc \
   --network trusted-regtest-network.json \

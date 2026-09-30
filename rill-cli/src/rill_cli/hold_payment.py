@@ -8,18 +8,24 @@ the client checks the planned final expiry itself before submitting.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from typing import TYPE_CHECKING, Literal
 
 from rill_provider._lnd_proto.routerrpc import router_pb2
-from rill_provider.lnd_payment_observation import LndNotSyncedError, LndObservationError
+from rill_provider.lnd_payment_observation import (
+    LndNotSyncedError,
+    LndObservationError,
+    LndUnavailableError,
+)
 from rill_provider.lnd_payment_send import LndPaymentSender
 
 from rill_cli.live_swap import SwapError
 
 if TYPE_CHECKING:
     import os
+    from collections.abc import Callable
 
     from rill_core.wire.messages import InvoiceBinding
     from rill_core.wire.types import NetworkIdentity
@@ -40,12 +46,13 @@ POLL_SECONDS = 0.5
 _AMBIGUOUS = (
     "hold invoice payment outcome unknown; keep the recovery file. If the payment "
     "is held, the provider funds and you claim with rill recover, or it is "
-    "canceled and fails back after the provider's funding window"
+    "canceled and fails back after the provider's funding window; "
+    "check `lncli listpayments` and do not retry payment"
 )
 
 
 class HoldPaymentError(SwapError):
-    """The hold could not be paid as the terms require; nothing was sent."""
+    """The hold stopped; unresolved submissions require payment inspection."""
 
 
 class LndHoldPayer:
@@ -68,7 +75,7 @@ class LndHoldPayer:
             network=network,
         )
 
-    def pay(
+    def pay(  # noqa: PLR0913 - signed route bounds and independent submission authority
         self,
         bolt11: str,
         *,
@@ -76,14 +83,28 @@ class LndHoldPayer:
         min_final_expiry_height: int,
         max_expiry_height: int,
         fee_limit_sat: int,
+        deadline: float | None = None,
+        submission_allowed: Callable[[], bool] | None = None,
     ) -> HoldStatus:
         """Submit one payment whose final hop expires at or after the minimum.
 
         Returns LND's status: ``IN_FLIGHT`` is the expected answer for an
         accepted hold; the client then waits for the provider's funding.
+        Optional original-lifetime authority caps planning and submission,
+        including queued daemon work and the sender's actual RPC boundary.
+        The predicate must be thread-safe, nonconsuming, and independent of
+        crypto-context lifetime. Already-started RPCs may outlive this method;
+        late tracked statuses are knowledge, not renewed signing authority.
         """
-        deadline = time.monotonic() + SYNC_BUDGET_SECONDS
+        if deadline is not None and (
+            type(deadline) not in (int, float) or not math.isfinite(deadline)
+        ):
+            raise HoldPaymentError("hold payment submission deadline invalid")
+        planning_deadline = time.monotonic() + SYNC_BUDGET_SECONDS
+        if deadline is not None:
+            planning_deadline = min(planning_deadline, deadline)
         while True:
+            _require_submission(planning_deadline, submission_allowed)
             try:
                 payment = self._sender.prepare(
                     bolt11,
@@ -93,18 +114,29 @@ class LndHoldPayer:
                 )
                 break
             except LndNotSyncedError:  # planning only; nothing was sent
-                if time.monotonic() >= deadline:
+                if time.monotonic() >= planning_deadline:
                     raise
-                time.sleep(POLL_SECONDS)
+                time.sleep(min(POLL_SECONDS, max(0, planning_deadline - time.monotonic())))
+        _require_submission(planning_deadline, submission_allowed)
         request = router_pb2.SendToRouteRequest.FromString(payment.request)
         if not request.route.hops or request.route.hops[-1].expiry < min_final_expiry_height:
             raise HoldPaymentError("planned route expires before the provider's minimum")
-        return self._submit(payment)
+        _require_submission(planning_deadline, submission_allowed)
+        return self._submit(payment, deadline=deadline, submission_allowed=submission_allowed)
 
-    def _submit(self, payment: PreparedPayment) -> HoldStatus:
+    def _submit(
+        self,
+        payment: PreparedPayment,
+        *,
+        deadline: float | None = None,
+        submission_allowed: Callable[[], bool] | None = None,
+    ) -> HoldStatus:
         """Send aside; return when LND tracks it, or when the send itself ends."""
-        deadline = time.monotonic() + SUBMIT_BUDGET_SECONDS
+        submission_deadline = time.monotonic() + SUBMIT_BUDGET_SECONDS
+        if deadline is not None:
+            submission_deadline = min(submission_deadline, deadline)
         while True:
+            _require_submission(submission_deadline, submission_allowed)
             box: list[HoldStatus | LndObservationError] = []
             done = threading.Event()
 
@@ -112,24 +144,33 @@ class LndHoldPayer:
                 box: list[HoldStatus | LndObservationError] = box, done: threading.Event = done
             ) -> None:
                 try:
-                    box.append(self._sender.send(payment).status)
+                    _require_submission(submission_deadline, submission_allowed)
+                    if deadline is None and submission_allowed is None:
+                        outcome = self._sender.send(payment)
+                    else:
+                        outcome = self._sender.send(
+                            payment,
+                            deadline=submission_deadline,
+                            submission_allowed=submission_allowed,
+                        )
+                    box.append(outcome.status)
                 except LndObservationError as error:
                     box.append(error)
                 finally:
                     done.set()
 
             threading.Thread(target=send, name="hold-payment", daemon=True).start()
-            while not done.wait(POLL_SECONDS):
+            while not done.wait(min(POLL_SECONDS, max(0, submission_deadline - time.monotonic()))):
                 if self._polled(payment.payment_hash) in ("IN_FLIGHT", "SUCCEEDED"):
                     return "IN_FLIGHT"
-                if time.monotonic() >= deadline:
+                if time.monotonic() >= submission_deadline:
                     raise HoldPaymentError(_AMBIGUOUS)
             (outcome,) = box
             if not isinstance(outcome, LndObservationError):
                 return outcome
             # Unsynced is raised by the attestation before anything is sent.
-            if isinstance(outcome, LndNotSyncedError) and time.monotonic() < deadline:
-                time.sleep(POLL_SECONDS)
+            if isinstance(outcome, LndNotSyncedError) and time.monotonic() < submission_deadline:
+                time.sleep(min(POLL_SECONDS, max(0, submission_deadline - time.monotonic())))
                 continue
             try:
                 status = self.status(payment.payment_hash)
@@ -148,3 +189,18 @@ class LndHoldPayer:
     def status(self, payment_hash: str) -> HoldStatus:
         """Return the tracked status of the payment (``UNKNOWN`` when LND has none)."""
         return self._sender.track(payment_hash).status
+
+
+def _require_submission(deadline: float, submission_allowed: Callable[[], bool] | None) -> None:
+    """Fence both sides of nonconsuming permission checks before new work."""
+    allowed = time.monotonic() < deadline
+    if allowed and submission_allowed is not None:
+        try:
+            allowed = submission_allowed() is True
+        except Exception:  # noqa: BLE001 - callback details may contain secrets
+            allowed = False
+    if not allowed or time.monotonic() >= deadline:
+        raise LndUnavailableError(
+            "hold payment submission authority expired or unavailable; keep the recovery file, "
+            "check `lncli listpayments`, and do not retry payment"
+        )
