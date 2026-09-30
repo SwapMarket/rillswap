@@ -28,6 +28,7 @@ from rill_core.settlement import (
 from rill_core.wire.hashes import contract_hash
 from rill_core.wire.messages import Envelope, FundingBinding
 
+from rill_provider.live_session_store import LiveSessionStoreError
 from rill_provider.lnd_payment_observation import LndObservationError
 from rill_provider.settlement_policy import offered_terms
 
@@ -82,7 +83,12 @@ class ReverseChainBackend(Protocol):
 
 
 class ReverseSettlement:
-    """Advance one LN to BTC swap by at most one step per call."""
+    """Advance one LN to BTC swap by at most one step per serialized owner tick.
+
+    The service serializes these calls. In particular, do not run stale refund
+    cancellation concurrently with a writer admitting settlement obligations.
+    Store transition checks are not an atomic fence around external LND RPCs.
+    """
 
     def __init__(
         self,
@@ -102,6 +108,8 @@ class ReverseSettlement:
 
     async def advance(self, item: SettlementItem, now: int) -> str:
         """Run the step for ``item.state``; return the (possibly unchanged) state."""
+        if item.preimage is not None and item.state not in {"FUNDED", "REFUNDING", "SETTLED"}:
+            raise LiveSessionStoreError("reverse settlement intent in an unexpected state")
         terms = offered_terms(Envelope.model_validate_json(item.terms_offer, strict=True))
         if item.state == "ACCEPTED":
             return await self._accepted(item, terms, now)
@@ -229,6 +237,10 @@ class ReverseSettlement:
 
     async def _funded(self, item: SettlementItem, terms: ContractTerms, now: int) -> str:
         """Settle on a claim revealing the preimage; otherwise refund after the lock."""
+        if item.preimage is not None:
+            # Affirmatively recorded intent survives vanished witnesses and
+            # Core outages. No chain scan or refund may supersede this debt.
+            return await self._settle_claim(item, terms, now, item.preimage)
         txid, _raw = _funding(item)
         vout = int(item.funding_vout or 0)
         tip = await asyncio.to_thread(self._chain.tip_height)
@@ -240,10 +252,7 @@ class ReverseSettlement:
         if scan.spender is not None:
             preimage = _preimage_in(scan.spender.witness, payment_hash)
             if preimage is not None:
-                await self._settle(preimage, payment_hash)
-                return self._move(
-                    item, "SETTLED", now, preimage=preimage, observation={"kind": "hold_settled"}
-                )
+                return await self._settle_claim(item, terms, now, preimage)
             # Our own refund, or an unknown spend: only our refund is expected here.
             if scan.spender.txid != item.refund_txid:
                 LOG.warning("contract spent by an unexpected transaction; not settling")
@@ -280,6 +289,17 @@ class ReverseSettlement:
             now,
             refund_confirmations=depth,
             observation={"kind": "refund_confirmed", "refund_txid": item.refund_txid},
+        )
+
+    async def _settle_claim(
+        self, item: SettlementItem, terms: ContractTerms, now: int, preimage: str
+    ) -> str:
+        self._store.record_reverse_settlement_preimage(
+            item.session_id, from_state=item.state, preimage=preimage, now=now
+        )
+        await self._settle(preimage, terms.invoice_binding.payment_hash)
+        return self._move(
+            item, "SETTLED", now, preimage=preimage, observation={"kind": "hold_settled"}
         )
 
     async def _settle(self, preimage: str, payment_hash: str) -> None:

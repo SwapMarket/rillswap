@@ -509,15 +509,34 @@ advances each swap one step per tick:
 - `FUNDED` at `funding_confirmations`. The engine looks for a spend of the
   contract output (`gettxspendingprevout` for the mempool, then at most 12
   blocks per tick with `getblock` verbosity 2 from a durable scan cursor). A
-  spend whose witness holds the preimage of the payment hash settles the
-  hold and the swap is `SETTLED`. Any other spender is logged and never
-  settled on.
+  spend whose witness holds the preimage of the payment hash first records a
+  durable settlement obligation, then settles the hold. Only successful LND
+  settlement or an own-LND `SETTLED` lookup permits terminal `SETTLED` and
+  reservation release. Any other spender is logged and never settled on.
 - Past `refund_lock_height` with no claim, the refund leaf is signed with the
   contract key, recorded (`REFUNDING`), and broadcast. The engine keeps
   looking for a late claim (which still settles). The hold is canceled
   only once the refund has `refund_resolution_confirmations` (`REFUNDED`).
 
 Cooperative MuSig2 claims are not negotiated yet.
+
+A retained matching preimage in `FUNDED` or `REFUNDING` means settlement is
+owed, not that LND settlement succeeded. Restart retries that obligation
+without needing Core or rediscovering a disappeared witness. Under serialized
+owner ticks, refund progression and invoice cancellation cannot supersede it.
+The store fences refund transitions, not concurrent external LND cancellation;
+future concurrent intent admission must preserve that execution boundary.
+The checked writer preserves
+the original preimage and does not release capacity, publish a success
+observation, or start cooperation. It relies on the existing authorized funding
+and trusted own-Core witness observation, not peer-deserialized evidence.
+
+This uses the existing preimage column without a schema migration. An upgrading
+installation with no nonterminal preimage retains existing processing; absence
+does not prove an unpaid invoice or create a recovery action. Older terminal
+`SETTLED` rows remain terminal. Malformed or inconsistent intent fails closed.
+A preimage already lost by a previous-release crash cannot be reconstructed by
+this fix and remains an unresolved recovery case.
 
 ### Operator entrypoint (private regtest only)
 

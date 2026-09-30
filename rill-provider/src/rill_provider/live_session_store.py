@@ -4048,6 +4048,58 @@ class LiveSessionStore:
             raise LiveSessionStoreError("settlement work unavailable") from None
         return items
 
+    def record_reverse_settlement_preimage(
+        self, session_id: str, *, from_state: str, preimage: str, now: int
+    ) -> None:
+        """Durably owe hold settlement before its RPC, without releasing funds.
+
+        Trusted runtime calls this only after observing the matching claim
+        witness through its own Core. Presence proves intent via this controlled
+        writer, not prior LND settlement or independent transaction validation.
+        Reverse nonterminal preimages had no other repository writer. Missing
+        knowledge never manufactures an obligation or starts recovery work.
+        """
+        if from_state not in {"FUNDED", "REFUNDING"} or type(now) is not int or now < 0:
+            raise LiveSessionStoreError("reverse settlement intent context invalid")
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT terms_offer,preimage,funding_txid,funding_vout,funding_tx "
+                    "FROM swaps WHERE session_id=? AND state=?",
+                    (session_id, from_state),
+                ).fetchone()
+                if row is None:
+                    raise StaleSwapError("swap state changed")  # noqa: TRY301 - atomic obligation
+                offer_bytes, retained, txid, vout, raw = row
+                terms = _offer_terms(offer_bytes)
+                if (
+                    terms.profile_id != "ln-to-btc/v1"
+                    or terms.network_identity != self._network
+                    or type(txid) is not str
+                    or len(txid) != 64  # noqa: PLR2004 - canonical txid
+                    or any(character not in "0123456789abcdef" for character in txid)
+                    or type(vout) is not int
+                    or vout < 0
+                    or type(raw) is not bytes
+                    or not raw
+                    or type(preimage) is not str
+                    or len(preimage) != 64  # noqa: PLR2004 - canonical preimage
+                    or any(character not in "0123456789abcdef" for character in preimage)
+                    or hashlib.sha256(bytes.fromhex(preimage)).hexdigest()
+                    != terms.invoice_binding.payment_hash
+                    or (retained is not None and retained != preimage)
+                ):
+                    raise LiveSessionStoreError("reverse settlement intent evidence invalid")  # noqa: TRY301
+                connection.execute(
+                    "UPDATE swaps SET preimage=?,updated_at=MAX(updated_at,?) "
+                    "WHERE session_id=? AND state=?",
+                    (preimage, now, session_id, from_state),
+                )
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - no secret or storage details escape
+            raise LiveSessionStoreError("reverse settlement intent refused") from None
+
     def advance_reverse_swap(  # noqa: PLR0912, PLR0913 - one atomic transition's explicit parts
         self,
         session_id: str,
@@ -4085,16 +4137,28 @@ class LiveSessionStore:
         )
         try:
             with self._write() as connection:
-                (offer_bytes,) = connection.execute(
-                    "SELECT terms_offer FROM swaps WHERE session_id=? AND state=?",
+                offer_bytes, retained_preimage = connection.execute(
+                    "SELECT terms_offer,preimage FROM swaps WHERE session_id=? AND state=?",
                     (session_id, from_state),
-                ).fetchone() or (None,)
+                ).fetchone() or (None, None)
                 if offer_bytes is None:
                     raise StaleSwapError("swap state changed")  # noqa: TRY301
                 terms = _offer_terms(offer_bytes)
                 payment_hash = terms.invoice_binding.payment_hash
                 if terms.profile_id != "ln-to-btc/v1":
                     raise LiveSessionStoreError("not an LN to BTC swap")  # noqa: TRY301
+                if retained_preimage is not None and to_state in {"REFUNDING", "REFUNDED"}:
+                    raise LiveSessionStoreError(  # noqa: TRY301 - durable debt fences refund transitions
+                        "reverse settlement obligation forbids refund progression"
+                    )
+                if (
+                    retained_preimage is not None
+                    and to_state == "SETTLED"
+                    and preimage != retained_preimage
+                ):
+                    raise LiveSessionStoreError(  # noqa: TRY301 - retained knowledge is immutable
+                        "reverse settlement intent conflicts with completion"
+                    )
                 if preimage is not None and (
                     type(preimage) is not str
                     or len(preimage) != 64  # noqa: PLR2004 - hex preimage
