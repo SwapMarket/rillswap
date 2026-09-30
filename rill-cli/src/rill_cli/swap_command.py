@@ -20,7 +20,7 @@ from rill_cli.age_container import (
 )
 from rill_cli.hold_payment import LndHoldPayer
 from rill_cli.live_reverse_swap import ReverseSwapLimits, run_reverse_swap
-from rill_cli.live_swap import SwapLimits, run_swap
+from rill_cli.live_swap import SwapError, SwapLimits, SwapOutcome, run_swap
 from rill_cli.publication import publish_new_ciphertext
 from rill_cli.wallet_rpc import WalletRpc
 
@@ -43,6 +43,12 @@ def add_parser(categories: argparse._SubParsersAction[argparse.ArgumentParser]) 
     forward.add_argument("--max-refund-fee-sat", type=int, default=5_000)
     forward.add_argument("--max-refund-delay-blocks", type=int, default=288)
     forward.add_argument("--fee-rate", type=int, default=2, help="funding sat/vB")
+    forward.add_argument(
+        "--claim-fee-floor-sat",
+        type=int,
+        default=1,
+        help="minimum absolute cooperative claim fee in satoshis (own-node floor may be higher)",
+    )
     forward.add_argument("--wallet", required=True, help="Core wallet that funds the swap")
     forward.add_argument("--lnd-macaroon", required=True, help="invoice-decoding macaroon")
     reverse = kinds.add_parser("ln-to-btc", help="receive on-chain BTC by paying over Lightning")
@@ -102,6 +108,26 @@ def _common_arguments(command: argparse.ArgumentParser) -> None:
 
 def _report(line: str) -> None:
     sys.stderr.write(line + "\n")
+
+
+def _forward_report(outcome: SwapOutcome) -> str:
+    """Distinguish verified payment from claim completion and confirmation."""
+    result = (
+        f"Paid. preimage {outcome.payment_preimage} "
+        f"(funding {outcome.funding_txid}, contract {outcome.contract_hash})"
+    )
+    if outcome.cooperation == "verified":
+        return result + (
+            f" Cooperative completion verified ({outcome.cooperative_claim_txid}); "
+            "not a chain confirmation."
+        )
+    if outcome.cooperation == "abandoned":
+        return result + (
+            " Cooperation abandoned locally, not canceled at the provider. "
+            "Preserve all recovery files, including any .cooperating snapshot; "
+            "do not retry payment or signing."
+        )
+    return result
 
 
 def _funded_path(path: Path) -> Path:
@@ -182,6 +208,18 @@ def _write_recovery_snapshot(  # noqa: PLR0913 - explicit local publication depe
 def run(args: argparse.Namespace, network: NetworkIdentity, identity: str) -> str:
     """Run the swap; return the final report line."""
     output = Path(args.recovery_output)
+    limits: SwapLimits | None = None
+    if args.command == "btc-to-ln":
+        limits = SwapLimits(
+            max_success_fee_sat=args.max_success_fee_sat,
+            max_funding_fee_sat=args.max_funding_fee_sat,
+            max_claim_fee_sat=args.max_claim_fee_sat,
+            max_refund_fee_sat=args.max_refund_fee_sat,
+            max_refund_delay_blocks=args.max_refund_delay_blocks,
+            funding_fee_rate_sat_vb=args.fee_rate,
+            claim_fee_floor_sat=args.claim_fee_floor_sat,
+        )
+        limits.validate_cooperative_fee_floor()
     credentials = X25519Credentials(args.recipient, identity)
     # Refuse an unsafe relay route before the native library, files, or wallet.
     proxy = require_relay_route(network, args.relay_proxy, allow_direct=args.allow_direct_relay)
@@ -205,14 +243,8 @@ def run(args: argparse.Namespace, network: NetworkIdentity, identity: str) -> st
         )
         if args.command == "ln-to-btc":
             return asyncio.run(_reverse(args, network, crypto, decoder, wallet, write_recovery))
-        limits = SwapLimits(
-            max_success_fee_sat=args.max_success_fee_sat,
-            max_funding_fee_sat=args.max_funding_fee_sat,
-            max_claim_fee_sat=args.max_claim_fee_sat,
-            max_refund_fee_sat=args.max_refund_fee_sat,
-            max_refund_delay_blocks=args.max_refund_delay_blocks,
-            funding_fee_rate_sat_vb=args.fee_rate,
-        )
+        if limits is None:
+            raise SwapError("unsupported swap direction")
 
         async def swap() -> str:
             async with RelayConnection(args.relay, proxy=proxy) as connection:
@@ -230,10 +262,7 @@ def run(args: argparse.Namespace, network: NetworkIdentity, identity: str) -> st
                     settle_timeout=args.settle_timeout,
                     report=_report,
                 )
-            return (
-                f"Paid. preimage {outcome.payment_preimage} "
-                f"(funding {outcome.funding_txid}, contract {outcome.contract_hash})"
-            )
+            return _forward_report(outcome)
 
         return asyncio.run(swap())
 

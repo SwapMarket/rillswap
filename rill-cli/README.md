@@ -157,15 +157,15 @@ responses. Selecting a regtest network file does not authorize a different
 wallet backend. The check is not cached across calls. Existing installations
 need no state migration; a mismatched endpoint now fails before wallet effects.
 
-The dormant cooperative preflight joins the shared Core reader's mempool-aware
+Cooperative preflight joins the shared Core reader's mempool-aware
 outpoint and strict fee-policy samples only when both name the same configured
 network and tip. It never uses a wallet RPC route. It does not authorize signing
-or bound acquisition time on its own. The future original-session handler must
-enforce the original deadlines, one-second evidence lifetime, exact transaction
+or bound acquisition time on its own. The original-session handler enforces
+the original deadlines, one-second evidence lifetime, exact transaction
 policy, and durable create-only `.cooperating` reservation before nonce
 allocation. Recovery inspection never resumes cooperation.
 
-The dormant `_CooperativeClaimAttempt` owns the original FIFO through readiness,
+The `_CooperativeClaimAttempt` owns the original FIFO through readiness,
 proposal, one-shot partial signing, and verified completion. It preserves valid
 preimage knowledge even when readiness is unusable, publishes `.paid` before
 echoing, and requires confirmed `.cooperating` publication plus new own-node
@@ -175,14 +175,35 @@ the cutoff is not processed, even if queued. Abandonment does not cancel a
 provider's already-selected key-path winner or permit payment/signing retry.
 Transport may retransmit the identical wrapped event without signing again.
 
-Cancellation or timeout does not stop an RPC or recovery writer thread. The
-eventual caller MUST retain the owner and crypto context and await
-`wait_for_workers()` before closing that context. Late publication may leave a
+Forward `run_swap` constructs this owner only for authenticated cooperative
+terms, using the exact original funded bytes and fixed funding lifetime. It
+never reconstructs or republishes paid recovery afterward. `SwapOutcome`
+distinguishes `verified` completion from `abandoned` cooperation, neither of
+which implies chain confirmation or cancellation of a provider winner.
+Unconfirmed paid publication retains the existing known-payment error and
+do-not-retry guidance. Acknowledged paid storage remains usable even if a later
+reservation publication is uncertain; preserve all recovery files.
+
+`--claim-fee-floor-sat` sets the forward user's positive absolute cooperative
+claim fee floor (default 1 sat), not the funding sat/vB rate or a signed ceiling.
+Fresh own-node market policy may require a higher fee. Invalid floors, including
+a floor above `--max-claim-fee-sat`, fail before relay or native setup. No
+implicit regtest estimate exemption is enabled.
+
+Cancellation or timeout does not stop an RPC or recovery writer thread.
+Forward settlement cleanup retains one shielded worker-drain task even under
+repeated cancellation, then propagates cancellation before the CLI closes its
+crypto context. Late publication may leave a
 valid recovery file; the retained pending successor is unconfirmed, not a
 durability promise. Late worker success never reactivates the attempt.
+This cleanup is outside the settlement budget and can remain blocked by a
+worker that does not terminate; physical worker termination is still a gate.
 Live readiness echoes and client cooperative signing remain disabled until
-this owner is integrated with authenticated feature negotiation, provider
-completion supervision, and adversarial Core/LND acceptance tests. Synchronous
+authenticated feature negotiation, both-direction cooperation, and adversarial
+Core/LND acceptance tests are complete. The conditional forward branch is
+tested with real funding, encrypted publication, and native MuSig2, but its
+discovery/handshake fixtures are stubbed, not negotiated interoperability.
+Synchronous
 native work and filesystem synchronization can overrun their last clock check;
 strict end-to-end deadline guarantees are not established by these unit tests.
 

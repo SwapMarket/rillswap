@@ -91,13 +91,14 @@ from rill_cli.wallet_rpc import CooperativeClaimEvidence
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
+    from rill_core.settlement.taproot import TaprootKeyOperations
     from rill_core.settlement.unilateral import CooperativeClaimPlan, ValidatedCooperativeClaim
     from rill_core.wire.messages import ContractTerms, InvoiceBinding
     from rill_core.wire.types import NetworkIdentity
     from rill_crypto import Context
     from rill_provider.relay_client import RelayConnection
 
-    from rill_cli.wallet_rpc import WalletFunding, WalletRpc
+    from rill_cli.wallet_rpc import WalletFunding
 
 PROFILE: Literal["btc-to-ln/v1"] = "btc-to-ln/v1"
 type ProfileId = Literal["btc-to-ln/v1", "ln-to-btc/v1"]
@@ -136,6 +137,17 @@ class Wallet(Protocol):
         """Submit exact bytes."""
         ...
 
+    def observe_cooperative_claim_evidence(
+        self,
+        binding: FundingBinding,
+        terms: ContractTerms,
+        *,
+        keys: TaprootKeyOperations,
+        allow_regtest_fixed_fee: bool = False,
+    ) -> CooperativeClaimEvidence:
+        """Read independent own-node outpoint and fee policy at one named tip."""
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class SwapLimits:
@@ -147,6 +159,20 @@ class SwapLimits:
     max_refund_fee_sat: int = 5_000
     max_refund_delay_blocks: int = 288
     funding_fee_rate_sat_vb: int = 2
+    claim_fee_floor_sat: int = 1
+
+    def validate_cooperative_fee_floor(self) -> None:
+        """Refuse unusable local policy before discovery, wallet work, or funding."""
+        if (
+            type(self.claim_fee_floor_sat) is not int
+            or self.claim_fee_floor_sat <= 0
+            or type(self.max_claim_fee_sat) is not int
+            or self.claim_fee_floor_sat > self.max_claim_fee_sat
+        ):
+            raise SwapError(
+                "cooperative claim fee floor must be a positive integer "
+                "within the claim fee ceiling"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +184,8 @@ class SwapOutcome:
     funding_txid: str
     payment_preimage: str
     refund_lock_height: int
+    cooperation: Literal["not_negotiated", "verified", "abandoned"] = "not_negotiated"
+    cooperative_claim_txid: str | None = None
 
 
 def _scalar(crypto: Context) -> tuple[bytes, bytes]:
@@ -726,7 +754,8 @@ class _CooperativeClaimAttempt:
     One consumer, one budget, one reservation and one partial. The caller must
     retain the crypto context until wait_for_workers finishes, even after
     cancellation. A canceled to_thread await does not stop a writer or RPC.
-    Production dispatch intentionally does not instantiate this owner yet.
+    Forward dispatch constructs this only for authenticated featured terms;
+    production feature negotiation remains disabled until release acceptance.
     """
 
     def __init__(  # noqa: PLR0913 - independently retained live bindings
@@ -738,7 +767,7 @@ class _CooperativeClaimAttempt:
         accept: HandshakeAccept,
         funded_recovery: bytes,
         contract_secret: bytes,
-        wallet: WalletRpc,
+        wallet: Wallet,
         write_recovery: Callable[[bytes, bytes | None], None],
         settlement_deadline: float,
         configured_fee_floor_sat: int,
@@ -1350,6 +1379,25 @@ def _check_offer(  # noqa: PLR0913 - every binding checked explicitly
     return terms
 
 
+async def _drain_cooperative_workers(owner: _CooperativeClaimAttempt) -> None:
+    """Keep crypto alive until real workers finish, even under repeated cancellation.
+
+    Cleanup is not new signing authority and is deliberately outside the
+    settlement budget. Do not silently turn cancellation during return into
+    success. One shielded task owns cleanup, never another writer or sample.
+    """
+    draining = asyncio.create_task(owner.wait_for_workers())
+    canceled = False
+    while not draining.done():
+        try:
+            await asyncio.shield(draining)
+        except asyncio.CancelledError:
+            canceled = True
+    draining.result()
+    if canceled:
+        raise asyncio.CancelledError
+
+
 async def run_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
     connection: RelayConnection,
     *,
@@ -1366,6 +1414,7 @@ async def run_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
     report: Callable[[str], None] = lambda _line: None,
 ) -> SwapOutcome:
     """Run one BTC to LN swap; see the module docstring for the order."""
+    limits.validate_cooperative_fee_floor()
     if not math.isfinite(settle_timeout) or settle_timeout <= 0:
         raise SwapError("settlement timeout must be finite and positive")
     now = int(time.time())
@@ -1522,6 +1571,50 @@ async def run_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
         f"`rill recover watch-refund --funding-attempt-id {attempt_id} --binding-revision 0` "
         "on the funded recovery file"
     )
+    if COOPERATIVE_CLAIM_FEATURE in terms.required_features:
+        owner = _CooperativeClaimAttempt(
+            session,
+            terms=terms,
+            init=init,
+            accept=accept,
+            funded_recovery=successor,
+            contract_secret=contract_secret,
+            wallet=wallet,
+            write_recovery=write_recovery,
+            settlement_deadline=settlement_deadline,
+            configured_fee_floor_sat=limits.claim_fee_floor_sat,
+            monotonic_clock=asyncio.get_running_loop().time,
+        )
+        try:
+            result = await owner.run()
+        finally:
+            await _drain_cooperative_workers(owner)
+        knowledge = json.loads(result.recovery)["monotonic_knowledge"]
+        if not knowledge["preimage_known"] or knowledge["preimage"] != result.preimage:
+            raise SwapError(
+                "payment verified but paid recovery snapshot publication could not be confirmed; "
+                "preserve all recovery files and inspect any .paid snapshot; do not retry payment"
+            )
+        if result.claim is None:
+            report(
+                "payment verified; cooperation abandoned locally, not canceled at the provider; "
+                "preserve all recovery files, including any .cooperating snapshot; "
+                "do not retry payment or signing"
+            )
+        else:
+            report(
+                f"cooperative completion verified (claim {result.claim.txid}); "
+                "not a chain confirmation"
+            )
+        return SwapOutcome(
+            session.session_id,
+            offer.terms.contract_hash,
+            txid,
+            result.preimage,
+            terms.refund_lock_height,
+            cooperation="verified" if result.claim is not None else "abandoned",
+            cooperative_claim_txid=result.claim.txid if result.claim is not None else None,
+        )
     preimage = await _wait_for_payment(
         session,
         terms,
