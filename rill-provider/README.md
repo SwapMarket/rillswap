@@ -695,6 +695,15 @@ as an immediate send failure. This is not rollback-safe evidence (a restored
 LND database with the same identity is indistinguishable) and grants no resend
 or economic-capacity release.
 
+The shared sender also accepts an optional absolute monotonic deadline and
+nonconsuming submission predicate for original client lifetimes. These cap the
+normal 60-second submission budget, require an affirmative `True`, and fence
+both sides of the predicate, after node attestation and after RPC setup before
+`SendToRouteV2`. Predicate failures are redacted. Expiry or revocation prevents
+new submission; it cannot undo an RPC already started. A late successful result
+still reports payment knowledge and never renews signing authority. Reverse
+client propagation is not connected yet, and no stored dispatch is retried.
+
 Absent, legacy (unversioned or relative-send), partial, malformed, other-hash,
 or other-network records bind no payer. For them normal settlement still defers
 a tracked `FAILED` result without changing the swap or its grant, and a later

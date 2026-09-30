@@ -9,6 +9,7 @@ prepared route once, with an absolute first-hop expiry bounded by the contract.
 from __future__ import annotations
 
 import hashlib
+import math
 import time
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
@@ -38,7 +39,7 @@ from rill_provider.payment_dispatch_record import PaymentAuthority, encode_dispa
 
 if TYPE_CHECKING:
     import os
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from rill_core.wire.messages import InvoiceBinding
     from rill_core.wire.types import NetworkIdentity
@@ -303,18 +304,37 @@ class LndPaymentSender:
             payer,
         )
 
-    def send(self, payment: PreparedPayment) -> PaymentOutcome:
+    def send(
+        self,
+        payment: PreparedPayment,
+        *,
+        deadline: float | None = None,
+        submission_allowed: Callable[[], bool] | None = None,
+    ) -> PaymentOutcome:
         """Submit the in-memory plan from prepare() once, after its store commit.
 
         This is not a restored-request API. Immutable prepared bytes preserve
         the amount/fee/destination checks; only time-dependent bounds are
         refreshed here. Ambiguous outcomes require tracking, never replay.
+
+        An optional absolute monotonic deadline caps the normal call budget.
+        The nonconsuming predicate must return exactly True at every check.
+        These fence submission authorization, not physical completion of an
+        RPC already started. Late results do not renew caller authority.
         """
+        if deadline is not None and (
+            type(deadline) not in (int, float) or not math.isfinite(deadline)
+        ):
+            raise LndUnavailableError("LND payment submission authority invalid")
+        deadline = (
+            min(time.monotonic() + 60, deadline) if deadline is not None else time.monotonic() + 60
+        )
+        _check_submission_authority(deadline, submission_allowed)
         request = router_pb2.SendToRouteRequest.FromString(payment.request)
-        deadline = time.monotonic() + 60
         # Attest the bound payer on the channel that carries the submission.
         with self._connect() as calls:
             tip, _ = self._attest(calls, deadline, expected=payment.payer)
+            _check_submission_authority(deadline, submission_allowed)
             if not (
                 request.payment_hash.hex() == payment.payment_hash
                 and not request.skip_temp_err
@@ -332,6 +352,7 @@ class LndPaymentSender:
                 lightning_pb2.HTLCAttempt,
                 deadline,
                 expires_at=payment.expires_at,
+                submission_allowed=submission_allowed,
             )
         if attempt.status == lightning_pb2.HTLCAttempt.SUCCEEDED:
             if (
@@ -432,6 +453,23 @@ class LndPaymentSender:
         return replace(outcome, payer=payer.node_pubkey)
 
 
+def _check_submission_authority(
+    deadline: float, submission_allowed: Callable[[], bool] | None
+) -> None:
+    """Fence both sides of a caller predicate, including a delayed callback."""
+    if time.monotonic() >= deadline:
+        raise LndUnavailableError("LND payment submission deadline elapsed")
+    if submission_allowed is not None:
+        try:
+            allowed = submission_allowed() is True
+        except Exception:  # noqa: BLE001 - caller details may contain secrets
+            allowed = False
+        if not allowed:
+            raise LndUnavailableError("LND payment submission authority unavailable")
+    if time.monotonic() >= deadline:
+        raise LndUnavailableError("LND payment submission deadline elapsed")
+
+
 class _Calls:
     """Calls over one channel and credential snapshot, with redacted errors."""
 
@@ -439,7 +477,7 @@ class _Calls:
         self._channel = channel
         self._metadata = (("macaroon", macaroon.hex()),)
 
-    def unary(
+    def unary(  # noqa: PLR0913 - explicit RPC bounds and optional submission guard
         self,
         method: str,
         request: Any,  # noqa: ANN401 - pinned protobuf request
@@ -447,6 +485,7 @@ class _Calls:
         deadline: float,
         *,
         expires_at: int | None = None,
+        submission_allowed: Callable[[], bool] | None = None,
     ) -> Any:  # noqa: ANN401 - pinned protobuf response class
         failure: LndObservationError | None = None
         try:
@@ -455,6 +494,8 @@ class _Calls:
                 request_serializer=type(request).SerializeToString,
                 response_deserializer=response_type.FromString,
             )
+            if submission_allowed is not None:
+                _check_submission_authority(deadline, submission_allowed)
             remaining = deadline - time.monotonic()
             if expires_at is not None:
                 remaining = min(remaining, expires_at - time.time())
