@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 from typing import TYPE_CHECKING, Any
 
+import httpx
 import pytest
 from pyrage import x25519
 from rill_core.errors import ValidationError
@@ -40,9 +42,10 @@ from rill_core.wire.messages import (
 )
 from rill_core.wire.types import NetworkIdentity
 from rill_crypto import Context
+from rill_crypto.binding import MusigAttempt
 from test_recovery_cli import _fixture, _signed_binding
 
-from rill_cli import publication, swap_command
+from rill_cli import main, publication, swap_command
 from rill_cli.age_container import X25519Credentials, verify_export_ciphertext
 from rill_cli.publication import RecoveryPublicationError, RecoveryPublicationUncertainError
 from rill_cli.swap_command import _write_recovery_snapshot
@@ -282,3 +285,57 @@ def test_native_signature_tampering_cannot_create_reservation_file(tmp_path: Pat
             )
         assert list(tmp_path.iterdir()) == []
         assert inspect_recovery_plaintext(canonicalize(paid), network, crypto=crypto)
+
+
+def test_stored_reservation_inspection_never_networks_or_resumes_signing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    credentials = _credentials()
+    with Context(library_path=LIBRARY) as crypto:
+        _, _, paid, reserved = _snapshots(crypto)
+        network = NetworkIdentity.model_validate_json(canonicalize(paid["network_identity"]))
+        output = tmp_path / "swap.age"
+        _write_recovery_snapshot(
+            output,
+            canonicalize(reserved),
+            canonicalize(paid),
+            network,
+            credentials=credentials,
+            crypto=crypto,
+        )
+    trusted = tmp_path / "network.json"
+    trusted.write_text(json.dumps(reserved["network_identity"]))
+    identity = tmp_path / "identity"
+    identity.write_text(credentials.identity + "\n")
+    identity.chmod(0o600)
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("recovery inspection must not network or sign")
+
+    monkeypatch.setattr(httpx, "Client", forbidden)
+    monkeypatch.setattr(swap_command, "RelayConnection", forbidden)
+    monkeypatch.setattr(Context, "musig_begin", forbidden)
+    monkeypatch.setattr(Context, "schnorr_sign", forbidden)
+    monkeypatch.setattr(MusigAttempt, "partial_sign_once", forbidden)
+    assert (
+        main.main(
+            [
+                "recover",
+                "inspect",
+                "--network",
+                str(trusted),
+                "--crypto-library",
+                str(LIBRARY),
+                "--identity",
+                str(identity),
+                str(tmp_path / "swap.age.cooperating"),
+            ]
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert reserved["user_secret"]["contract_secret_key"] not in captured.out
+    assert reserved["monotonic_knowledge"]["preimage"] not in captured.out
