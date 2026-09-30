@@ -4,24 +4,29 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
-from rill_core.wire.canonical import canonicalize
+from rill_core.settlement.funding import FundingBindingTransactionMatch
+from rill_core.wire.canonical import canonicalize, parse_model_json
 from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE, unsigned_envelope_hash
 from rill_core.wire.messages import Envelope
+from rill_core.wire.settlement_messages import FundingBindingPayload
 from test_cooperation_burn import _featured_paid_swap
 from test_cooperative_probe_gate import _insert_first_request
 from test_live_session_store import Harness
 
 from rill_provider import live_session_store as live
+from rill_provider import settlement_engine as engine_module
 from rill_provider._nip59_send import _wrap_envelope
+from rill_provider.core_tx_bytes import CooperativeClaimOutpoint, CoreTransactionUnknownError
 from rill_provider.handshake_service import HandshakeService
 from rill_provider.live_session_store import LiveSessionStoreError, ReadinessChallenge
 from rill_provider.lnd_payment_send import PaymentOutcome
-from rill_provider.settlement_engine import SettlementEngine
+from rill_provider.settlement_engine import EngineSettings, SettlementEngine
 from rill_provider.settlement_policy import offered_terms
 
 if TYPE_CHECKING:
@@ -36,7 +41,22 @@ CLIENT_SECRET = (2).to_bytes(32, "big")  # Fixture session key, not production c
     os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
     reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
 )
-@pytest.mark.parametrize("outcome", ["waiting", "selected_during_tip"])
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "waiting",
+        "selected_during_tip",
+        "proposal_refused",
+        "proposal_failure",
+        "proposal_hung",
+        "shutdown_during_sample",
+        "unhealthy_during_sample",
+        "publication_shutdown",
+        "publication_unhealthy",
+        "publication_shutdown_during_tip",
+        "publication_unhealthy_during_tip",
+    ],
+)
 def test_signed_echo_enters_waiting_only_via_original_live_service(  # noqa: PLR0915 - one integrated signed lifecycle
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str
 ) -> None:
@@ -72,13 +92,41 @@ def test_signed_echo_enters_waiting_only_via_original_live_service(  # noqa: PLR
             )
         chain = Mock()
         lightning = Mock(track=Mock(return_value=PaymentOutcome("SUCCEEDED", "42" * 32)))
-        engine = SettlementEngine(store, chain, lightning, crypto)
+        engine = SettlementEngine(
+            store, chain, lightning, crypto, EngineSettings(claim_fee_sat=300)
+        )
         assert engine.register_new_featured_session(session, digest)
         assert asyncio.run(engine._advance(store.settlement_work(session_id=session)[0], 1002)) == (  # noqa: SLF001
             "PAID"
         )
         window = engine.probe_window(session)
         assert window is not None
+        (item,) = store.settlement_work(session_id=session)
+        terms = offered_terms(Envelope.model_validate_json(item.terms_offer, strict=True))
+        binding = parse_model_json(
+            FundingBindingPayload,
+            canonicalize(Envelope.model_validate_json(item.funding_binding, strict=True).payload),
+        ).binding
+        chain.observe_cooperative_claim_outpoint.return_value = CooperativeClaimOutpoint(
+            terms.network_identity,
+            FundingBindingTransactionMatch(
+                binding.funding_txid,
+                binding.contract_vout,
+                binding.lineage_anchor_txid,
+                binding.lineage_anchor_vout,
+            ),
+            binding.funding_txid,
+            binding.contract_vout,
+            int(binding.contract_value_sat),
+            bytes.fromhex(binding.contract_script_pubkey),
+            "aa" * 32,
+            1090,
+            terms.funding_confirmations,
+            1091 - terms.funding_confirmations,
+            "bb" * 32,
+        )
+        initiate = AsyncMock(wraps=engine.initiate_cooperative_proposal)
+        monkeypatch.setattr(engine, "initiate_cooperative_proposal", initiate)
         service = HandshakeService(
             store,
             Mock(),
@@ -90,6 +138,8 @@ def test_signed_echo_enters_waiting_only_via_original_live_service(  # noqa: PLR
         )
         request_id = asyncio.run(service.start_cooperative_readiness(session, window=window))
         assert request_id is not None
+        assert store.pending_requires_live_cooperation(request_id) is True
+        assert store.pending_requires_live_cooperation("ff" * 32) is None
         request = next(
             Envelope.model_validate_json(row.canonical_bytes, strict=True)
             for row in store.pending_outbox()
@@ -126,6 +176,16 @@ def test_signed_echo_enters_waiting_only_via_original_live_service(  # noqa: PLR
             recipient_xonly_key=request.sender_session_key,
             crypto=crypto,
         )
+        if outcome == "proposal_refused":
+            chain.observe_cooperative_claim_outpoint.side_effect = CoreTransactionUnknownError(
+                "spent"
+            )
+        if outcome == "proposal_failure":
+            monkeypatch.setattr(
+                store,
+                "begin_selected_cooperative_proposal",
+                Mock(side_effect=LiveSessionStoreError("burn may be durable")),
+            )
         if outcome == "selected_during_tip":
 
             async def race_selection() -> str:
@@ -154,6 +214,62 @@ def test_signed_echo_enters_waiting_only_via_original_live_service(  # noqa: PLR
             assert store._connection.execute(  # noqa: SLF001 - selected winner cannot be overwritten
                 "SELECT state FROM claim_arbitration WHERE session_id=?", (session,)
             ).fetchone() == ("ADMITTED",)
+            initiate.assert_not_called()
+        elif outcome in {"proposal_hung", "shutdown_during_sample", "unhealthy_during_sample"}:
+
+            async def blocked_proposal() -> str:
+                started, release = asyncio.Event(), threading.Event()
+                loop = asyncio.get_running_loop()
+                sample = chain.observe_cooperative_claim_outpoint.return_value
+                monkeypatch.setattr(
+                    engine_module,
+                    "COOPERATIVE_SAMPLE_SECONDS",
+                    0.02 if outcome == "proposal_hung" else 0.5,
+                )
+
+                def paused_sample(*_args: object, **_kwargs: object) -> CooperativeClaimOutpoint:
+                    loop.call_soon_threadsafe(started.set)
+                    if not release.wait(timeout=2):
+                        raise AssertionError("test sampler was not released")
+                    return sample
+
+                chain.observe_cooperative_claim_outpoint.side_effect = paused_sample
+                echo = asyncio.create_task(service.handle(event, []))
+                try:
+                    async with asyncio.timeout(1):
+                        await started.wait()
+                    if outcome == "proposal_hung":
+                        assert len(engine.select_due_fallbacks(window.deadline_at)) == 1
+                        assert len(store.recorded_fallbacks()) == 1
+                    elif outcome == "shutdown_during_sample":
+                        service._readiness_closed = True  # noqa: SLF001
+                        release.set()
+                    else:
+                        service._deadline_healthy = False  # noqa: SLF001
+                        release.set()
+                    return await asyncio.wait_for(echo, timeout=1)
+                finally:
+                    release.set()
+                    await asyncio.gather(echo, return_exceptions=True)
+                    sampler = engine._cooperative_sample_task  # noqa: SLF001
+                    if sampler is not None:
+                        await asyncio.gather(sampler, return_exceptions=True)
+                    await asyncio.sleep(0)
+
+            assert asyncio.run(blocked_proposal()) == "readiness-prepared"
+            initiate.assert_awaited_once()
+            assert store._connection.execute(  # noqa: SLF001
+                "SELECT count(*) FROM cooperation_attempts WHERE session_id=?", (session,)
+            ).fetchone() == (0,)
+            assert store._cooperation_handles == {}  # noqa: SLF001
+            assert not any(
+                Envelope.model_validate_json(row.canonical_bytes).payload.get("action")
+                == "cooperative_claim_propose"
+                for row in store.pending_outbox()
+            )
+            # Availability restoration cannot recreate the consumed echo.
+            service._readiness_closed = False  # noqa: SLF001
+            service._deadline_healthy = True  # noqa: SLF001
         else:
             assert asyncio.run(service.handle(event, [])) == "readiness-prepared"
             (fallback,) = store.prepared_fallbacks()
@@ -161,9 +277,90 @@ def test_signed_echo_enters_waiting_only_via_original_live_service(  # noqa: PLR
             assert fallback.deadline_at == window.deadline_at
             assert fallback.deadline_height == 1094
             assert store.claim_attempts(session) == ()
+            initiate.assert_awaited_once()
+            if outcome == "waiting" or outcome.startswith("publication_"):
+                proposal = next(
+                    Envelope.model_validate_json(row.canonical_bytes, strict=True)
+                    for row in store.pending_outbox()
+                    if Envelope.model_validate_json(row.canonical_bytes).payload.get("action")
+                    == "cooperative_claim_propose"
+                )
+                assert proposal.payload["deadline_at"] == window.deadline_at
+                assert proposal.payload["deadline_height"] == 1094
+                assert store._connection.execute(  # noqa: SLF001
+                    "SELECT state FROM cooperation_attempts WHERE session_id=?", (session,)
+                ).fetchone() == ("NONCE_READY",)
+                publish = AsyncMock(return_value=True)
+                monkeypatch.setattr(service, "_publish", publish)
+                if outcome.startswith("publication_"):
+
+                    def revoke_publication() -> None:
+                        if "shutdown" in outcome:
+                            service._readiness_closed = True  # noqa: SLF001
+                        else:
+                            service._deadline_healthy = False  # noqa: SLF001
+
+                    async def gated_publication() -> None:
+                        if outcome.endswith("during_tip"):
+                            started, release = asyncio.Event(), asyncio.Event()
+
+                            async def paused_tip() -> int:
+                                started.set()
+                                await release.wait()
+                                return 1090
+
+                            monkeypatch.setattr(service, "_sample_tip", paused_tip)
+                            sender = asyncio.create_task(
+                                service._send_pending(proposal.message_id, [])  # noqa: SLF001
+                            )
+                            async with asyncio.timeout(1):
+                                await started.wait()
+                                revoke_publication()
+                                release.set()
+                                await sender
+                        else:
+                            revoke_publication()
+                            await service._send_pending(proposal.message_id, [])  # noqa: SLF001
+                        publish.assert_not_called()
+                        observation = next(
+                            Envelope.model_validate_json(row.canonical_bytes, strict=True)
+                            for row in store.pending_outbox()
+                            if Envelope.model_validate_json(row.canonical_bytes).payload.get("kind")
+                            == "payment_settled"
+                        )
+                        assert (
+                            store.pending_requires_live_cooperation(observation.message_id) is False
+                        )
+                        await service._send_pending(observation.message_id, [])  # noqa: SLF001
+                        publish.assert_awaited_once()
+
+                    asyncio.run(gated_publication())
+                    assert store._connection.execute(  # noqa: SLF001
+                        "SELECT state FROM cooperation_attempts WHERE session_id=?",
+                        (session,),
+                    ).fetchone() == ("NONCE_READY",)
+                    service._readiness_closed = False  # noqa: SLF001
+                    service._deadline_healthy = True  # noqa: SLF001
+                else:
+                    monkeypatch.setattr(service, "_sample_tip", AsyncMock(return_value=1094))
+                    asyncio.run(service._send_pending(proposal.message_id, []))  # noqa: SLF001
+                    publish.assert_not_called()
+                    monkeypatch.setattr(service, "_sample_tip", AsyncMock(return_value=1090))
+                    asyncio.run(service._send_pending(proposal.message_id, []))  # noqa: SLF001
+                    publish.assert_awaited_once()
+                    service._deadline_high_water = window.deadline_at  # noqa: SLF001
+                    asyncio.run(service._send_pending(proposal.message_id, []))  # noqa: SLF001
+                    publish.assert_awaited_once()
+            else:
+                assert store._cooperation_handles == {}  # noqa: SLF001
+                assert store._connection.execute(  # noqa: SLF001
+                    "SELECT state FROM cooperation_attempts WHERE session_id=?", (session,)
+                ).fetchall() == ([] if outcome == "proposal_refused" else [("BURNED",)])
         assert engine.probe_window(session) is None
         assert service.take_cooperative_readiness(session) is None
         assert asyncio.run(service.handle(event, [])) == "duplicate"
+        if outcome != "selected_during_tip":
+            initiate.assert_awaited_once()
         chain.tip_height.assert_not_called()
         chain.fee_rate_sat_vb.assert_not_called()
         chain.broadcast.assert_not_called()

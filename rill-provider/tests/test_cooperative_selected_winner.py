@@ -472,6 +472,7 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0911, P
             ).fetchone() == (completion_id,)
             assert any(entry.message_id == completion_id for entry in store.pending_outbox())
             assert store.pending_sendable(completion_id, now=1025)  # selected winner is still owed
+            assert store.pending_requires_live_cooperation(completion_id) is False
             assert store.recorded_fallbacks() == ()
             assert store.selected_cooperative_claim(session).raw == raw
             with pytest.raises(LiveSessionStoreError, match="replacement refused"):

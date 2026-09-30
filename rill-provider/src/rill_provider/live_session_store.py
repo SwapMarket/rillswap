@@ -1987,6 +1987,34 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - never echo secret material or library errors
             raise LiveSessionStoreError("outbox wrap refused") from None
 
+    def pending_requires_live_cooperation(self, message_id: str) -> bool | None:
+        """Classify a retained request, not its window or delivery authority.
+
+        Only new readiness/proposal requests need live service availability.
+        Ordinary settlement and already-owed completion remain deliverable.
+        None means no pending record, never permission to recreate one.
+        """
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT canonical_bytes FROM outbox "
+                    "WHERE message_id=? AND delivery_state='PENDING'",
+                    (message_id,),
+                ).fetchone()
+                if row is None:
+                    return None
+                envelope = _canonical_envelope(row[0])
+                return envelope.message_type == "action_request" and envelope.payload.get(
+                    "action"
+                ) in (
+                    "cooperative_claim_ready",
+                    "cooperative_claim_propose",
+                )
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - malformed retained state grants no disclosure
+            raise LiveSessionStoreError("pending request classification unavailable") from None
+
     def pending_sendable(  # noqa: PLR0911 - one fail-closed proposal authorization
         self,
         message_id: str,

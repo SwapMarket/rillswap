@@ -340,6 +340,24 @@ class HandshakeService:
             )
             return "readiness-abandoned"
         self._store.retire_cooperative_readiness(challenge)
+
+        def proposal_now() -> int:
+            if self._readiness_closed or not self._deadline_healthy:
+                raise LiveSessionStoreError("original cooperative service unavailable")
+            current = self._deadline_now()
+            if current >= token.deadline_at:
+                raise LiveSessionStoreError("original cooperative deadline elapsed")
+            return current
+
+        try:
+            proposal_now()  # refuse entry if preparation consumed eligibility
+            await settlement.initiate_cooperative_proposal(token.session_id, now=proposal_now)
+        except StaleOwnerError:
+            raise
+        except Exception:  # noqa: BLE001 - burn may be durable; never retry or renew authority
+            LOG.warning("cooperative proposal initiation stopped for %s", challenge.session_id[:16])
+        # The normal tick outbox uses time/height-checked _send_pending. Do not
+        # disclose a proposal here or restore the consumed echo after failure.
         return "readiness-prepared"
 
     async def _admit_ready_result(self, document: bytes, session_id: object) -> str:
@@ -591,14 +609,19 @@ class HandshakeService:
 
     async def _send_pending(self, message_id: str, relays: Sequence[Relay]) -> None:
         self._state.attempts[message_id] = self._now()
+        requires_live = self._store.pending_requires_live_cooperation(message_id)
+
+        def service_available() -> bool:
+            return not requires_live or (not self._readiness_closed and self._deadline_healthy)
+
+        if requires_live is None or not service_available():
+            return
         now = self._deadline_now()
         tip: int | None = None
         readiness = next(
             (probe for probe in self._readiness_probes.values() if probe.request_id == message_id),
             None,
         )
-        if readiness is not None and self._readiness_closed:
-            return
         if not self._store.pending_sendable(message_id, now=now):
             tip = await self._sample_tip()
             if tip is None:
@@ -607,10 +630,12 @@ class HandshakeService:
                 return
             if not self._pending_sendable(message_id, tip=tip, readiness=readiness):
                 return
+        if not service_available():
+            return
         wrap = self._store.wrap_pending(message_id, transport=self._transport)
         if not self._pending_sendable(message_id, tip=tip, readiness=readiness):
             return  # arbitration may have closed before wrapping finished
-        if readiness is not None and self._readiness_closed:
+        if not service_available():
             return
         if not await self._publish(wrap, relays):
             LOG.warning("outbox wrap not accepted by any relay; will retry")

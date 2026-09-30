@@ -277,11 +277,24 @@ def test_only_newly_registered_paid_transition_starts_a_live_probe(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("outcome", ["prepared", "failure"])
-def test_live_echo_is_consumed_before_fallback_preparation(
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "prepared",
+        "failure",
+        "proposal_refused",
+        "proposal_failure",
+        "shutdown",
+        "unhealthy",
+        "shutdown_after_sample",
+        "unhealthy_after_sample",
+        "deadline_after_sample",
+    ],
+)
+def test_live_echo_is_consumed_before_fallback_preparation(  # noqa: PLR0915 - one-shot authorization lifecycle
     outcome: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def scenario() -> None:
+    async def scenario() -> None:  # noqa: PLR0915 - original token consumption and effect ordering
         session, contract = "aa" * 32, "dd" * 32
         challenge = ReadinessChallenge(session, "bb" * 32, "cc" * 32, contract, 1, 1000, 1030, 1094)
         window = ClaimProbeWindow(session, contract, 1, 1000, 1030, time.monotonic())
@@ -290,7 +303,9 @@ def test_live_echo_is_consumed_before_fallback_preparation(
             session, "ee" * 32, "ready", replay=False
         )
         settlement = Mock(probe_window=Mock(return_value=window))
-        service = _service(store, [1001])
+        trace: list[str] = []
+        clock = [1001]
+        service = _service(store, clock)
         service._settlement = settlement  # noqa: SLF001 - newly paid original session
         service._readiness_probes[session] = challenge  # noqa: SLF001 - freshly issued token
         monkeypatch.setattr(service, "_fresh_probe_tip", AsyncMock(return_value=1090))
@@ -300,10 +315,38 @@ def test_live_echo_is_consumed_before_fallback_preparation(
             assert callable(sample_tip)
             assert callable(now)
             assert service.take_cooperative_readiness(session) is None
+            trace.append("prepared")
             if outcome == "failure":
                 raise LiveSessionStoreError("fallback not durable")
+            if outcome == "shutdown":
+                service._readiness_closed = True  # noqa: SLF001
+            if outcome == "unhealthy":
+                service._deadline_healthy = False  # noqa: SLF001
+
+        store.retire_cooperative_readiness.side_effect = lambda _token: trace.append("retired")
+
+        async def initiate(session_id: str, *, now: object) -> str | None:
+            assert session_id == session
+            assert callable(now)
+            assert now() == 1001
+            assert trace == ["prepared", "retired"]
+            trace.append("initiated")
+            if outcome == "proposal_failure":
+                raise LiveSessionStoreError("burn may be durable")
+            if outcome.endswith("after_sample"):
+                await asyncio.sleep(0)
+                if outcome == "shutdown_after_sample":
+                    service._readiness_closed = True  # noqa: SLF001
+                elif outcome == "unhealthy_after_sample":
+                    service._deadline_healthy = False  # noqa: SLF001
+                else:
+                    clock[0] = 1030
+                now()  # late eligibility must be refused by the supplied clock
+                raise AssertionError("late service authority must never survive sampling")
+            return None if outcome == "proposal_refused" else "ff" * 32
 
         settlement.prepare_cooperative_window = AsyncMock(side_effect=prepare)
+        settlement.initiate_cooperative_proposal = AsyncMock(side_effect=initiate)
         store.open_mailbox_frame.return_value = json.dumps(
             {
                 "message_type": "action_result",
@@ -319,11 +362,17 @@ def test_live_echo_is_consumed_before_fallback_preparation(
         settlement.prepare_cooperative_window.assert_awaited_once()
         store.retire_cooperative_readiness.assert_called_once_with(challenge)
         assert service.take_cooperative_readiness(session) is None
-        assert await service.handle(json.dumps({"id": "02" * 32}).encode(), []) == "refused"
+        assert await service.handle(json.dumps({"id": "02" * 32}).encode(), []) == (
+            "unavailable" if outcome.startswith(("shutdown", "unhealthy")) else "refused"
+        )
         settlement.prepare_cooperative_window.assert_awaited_once()
         if outcome == "failure":
             settlement.abandon_probe.assert_called_once_with(session)
         else:
             settlement.abandon_probe.assert_not_called()
+        if outcome in ("failure", "shutdown", "unhealthy"):
+            settlement.initiate_cooperative_proposal.assert_not_called()
+        else:
+            settlement.initiate_cooperative_proposal.assert_awaited_once()
 
     asyncio.run(scenario())
