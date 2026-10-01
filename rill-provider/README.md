@@ -119,6 +119,17 @@ host. The store cannot verify that attestation. Behavior:
    LND may retain historical invoice records. No absent metadata triggers cleanup
    on upgrade. Future cooperative proposal admission is not yet integrated;
    complete cooperative reverse settlement remains an unfinished acceptance gate.
+   A preparatory private provenance record binds a freshly committed cooperative
+   reverse handshake accept and terms acceptance to this acquired owner. It is
+   populated only after successful commits, never from replay or retained rows,
+   and is cleared on logical close even while physical exclusion remains pinned.
+   Ownership, blocked state, and exact retained context are checked when consumed.
+   This is not deadline, payment, nonce, chain, or signing authority. Handshakes
+   contain no signed session expiry; mutable activity timestamps are not one.
+   Restored or previous-release sessions receive no provenance backfill and keep
+   independent unilateral recovery and settlement-debt repayment. The existing
+   production rejection of featured reverse acceptance remains unchanged until
+   independently verified reverse admission and signing safeguards are complete.
 - Absent, partial, foreign, or newer files are refused before any pragma can
   modify them. Malformed provisioning metadata (UUID or attestation) is also
   refused. The inode numbers of the database and the lock file are recorded

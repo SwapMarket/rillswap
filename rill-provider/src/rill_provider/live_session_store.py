@@ -474,6 +474,16 @@ class AcceptCommit:
 
 
 @dataclass(frozen=True, slots=True)
+class _ReverseNegotiationOrigin:
+    """Acquired-owner-local provenance, never payment or signing permission."""
+
+    accept_document: bytes
+    handshake_hash: str
+    contract_hash: str | None = None
+    acceptance_document: bytes | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ConfirmAdmission:
     """Client confirmation admitted; grants no economic authority."""
 
@@ -791,6 +801,7 @@ class LiveSessionStore:
         self._owner_pins = 0
         self._retained_lock_fd: int | None = None
         self._reverse_operations: ReverseOperations | None = None
+        self._reverse_negotiations: dict[str, _ReverseNegotiationOrigin] = {}
         self._connection = connection
         self._generation = generation
         self._network = network
@@ -1071,6 +1082,7 @@ class LiveSessionStore:
     def close(self) -> None:
         """Fence the handle immediately; pinned physical exclusion ends later."""
         lock_fd, self._lock_fd = self._lock_fd, None
+        self._reverse_negotiations.clear()
         if os.getpid() != self._pid:
             # Inherited across fork: never touch the parent's SQLite connection.
             # Closing our descriptor copy does not release the parent's flock.
@@ -2441,6 +2453,16 @@ class LiveSessionStore:
             raise
         except Exception:  # noqa: BLE001 - never echo caller documents or crypto details
             raise LiveSessionStoreError("accept commit refused") from None
+        if (
+            self._policy.profile == "ln-to-btc/v1"
+            and COOPERATIVE_CLAIM_FEATURE in accepted.accept.required_features
+        ):
+            # Only this fresh path reaches here, after successful COMMIT. An
+            # inherited reservation may finish a new handshake, but an already
+            # committed accept or restored accepted session supplies no origin.
+            self._reverse_negotiations[outer.session_id] = _ReverseNegotiationOrigin(
+                accept_document, transcript
+            )
         return AcceptCommit(
             outer.session_id, outer.message_id, accept_document, transcript, committed
         )
@@ -2705,6 +2727,8 @@ class LiveSessionStore:
             raise
         except Exception:  # noqa: BLE001 - never echo storage details
             raise LiveSessionStoreError("session expiry refused") from None
+        for (session_id,) in idle:
+            self._reverse_negotiations.pop(session_id, None)
         return len(idle)
 
     def receiving_epochs(self, *, now: int) -> tuple[str, ...]:
@@ -2765,6 +2789,7 @@ class LiveSessionStore:
         """
         now = int(time.time()) if now is None else now
         conflict = False
+        reverse_origin: _ReverseNegotiationOrigin | None = None
         try:
             outer = _canonical_envelope(request_document)
             with self._write() as connection:
@@ -2859,6 +2884,43 @@ class LiveSessionStore:
                         _apply_effect(connection, outer, reply.effect, replied, now)
                         if isinstance(reply.effect, AcceptSwap):
                             self._admit_claim_arbitration(connection, outer, reply, replied, now)
+                            origin = self._reverse_negotiations.get(outer.session_id)
+                            if (
+                                origin is not None
+                                and origin.contract_hash is None
+                                and replied is not None
+                                and outer.message_type == "terms_accept"
+                                and reply.message_type == "ack"
+                                and origin.handshake_hash == transcript
+                            ):
+                                terms = _offer_terms(replied[0])
+                                if (
+                                    terms.profile_id == "ln-to-btc/v1"
+                                    and COOPERATIVE_CLAIM_FEATURE in terms.required_features
+                                    and contract_hash(terms).hex() == reply.effect.contract_hash
+                                ):
+                                    initiation_bytes = connection.execute(
+                                        "SELECT init_bytes FROM sessions WHERE session_id=?",
+                                        (outer.session_id,),
+                                    ).fetchone()[0]
+                                    initiation = parse_model_json(
+                                        HandshakeInit,
+                                        canonicalize(_canonical_envelope(initiation_bytes).payload),
+                                    )
+                                    accepted = parse_model_json(
+                                        HandshakeAcceptPayload,
+                                        canonicalize(
+                                            _canonical_envelope(origin.accept_document).payload
+                                        ),
+                                    )
+                                    require_supported_contract_features(
+                                        terms, initiation, accepted.accept
+                                    )
+                                    reverse_origin = replace(
+                                        origin,
+                                        contract_hash=reply.effect.contract_hash,
+                                        acceptance_document=request_document,
+                                    )
                     if reply.payment_hash is not None:
                         connection.execute(
                             "INSERT INTO payment_hashes VALUES (?, ?, ?)",
@@ -2907,7 +2969,47 @@ class LiveSessionStore:
             raise LiveSessionStoreError("request refused") from None
         if conflict:
             raise SessionBlockedError("conflicting signed request is durable")
+        if reverse_origin is not None:
+            # Native allocation, deadlines, LND settlement, chain evidence, and
+            # proposal admission remain separate requirements. Do not publish a
+            # provenance transition inside the potentially uncertain transaction.
+            self._reverse_negotiations[outer.session_id] = reverse_origin
         return RequestAnswer(outer.session_id, outer.message_id, response.message_id, replay=False)
+
+    def _has_original_reverse_negotiation(self, session_id: str, digest: str) -> bool:
+        """Check only this owner's uninterrupted negotiation provenance.
+
+        No signed session expiry exists. This supplies no deadline, payment,
+        nonce, chain, or signing authority. Missing process memory (including
+        after upgrade/restart) denies provenance without initiating any work.
+        The future admission must independently enforce original cooperation
+        deadlines and every other financial prerequisite under the shared gate.
+        """
+        origin = self._reverse_negotiations.get(session_id)
+        if (
+            not self.owner_is_open
+            or origin is None
+            or origin.contract_hash != digest
+            or origin.acceptance_document is None
+        ):
+            return False
+        with self._write() as connection:
+            row = connection.execute(
+                "SELECT s.accept_bytes, s.transcript_digest, s.blocked, w.contract_hash, "
+                "w.terms_accept FROM sessions s JOIN swaps w ON w.session_id=s.session_id "
+                "WHERE s.session_id=?",
+                (session_id,),
+            ).fetchone()
+            return bool(
+                row
+                == (
+                    origin.accept_document,
+                    origin.handshake_hash,
+                    0,
+                    digest,
+                    origin.acceptance_document,
+                )
+            )
 
     def _admit_claim_arbitration(
         self,
