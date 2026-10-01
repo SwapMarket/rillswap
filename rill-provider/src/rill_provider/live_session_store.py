@@ -48,7 +48,9 @@ from rill_core.settlement import (
     build_cooperative_claim,
     finalize_cooperative_claim,
     reconstruct_taproot_contract,
+    verify_cooperative_claim_proposal,
 )
+from rill_core.settlement.funding import check_funding_binding_transaction
 from rill_core.settlement.unilateral import validate_unilateral_spend
 from rill_core.wire import verify_static_handshake_accept, verify_static_handshake_transcript
 from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_model_json
@@ -90,6 +92,7 @@ from rill_provider._nip59_send import _wrap_envelope
 from rill_provider.handshake_store import HandshakePolicy, _expected, _features, _require_policy
 from rill_provider.issuance_reservation import _policy_bytes
 from rill_provider.payment_dispatch_record import PaymentAuthority, bound_payer
+from rill_provider.reverse_cooperation import ReverseCooperationWindow
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -103,7 +106,7 @@ if TYPE_CHECKING:
 
     from rill_provider.handshake_custody_offline import CustodyPublicKeys
     from rill_provider.provider_identity import ProviderIdentity
-    from rill_provider.reverse_operations import ReverseOperations
+    from rill_provider.reverse_operations import ReverseOperation, ReverseOperations
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
 SCHEMA_VERSION = 13  # v8-v12 upgrade on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
@@ -484,6 +487,24 @@ class _ReverseNegotiationOrigin:
 
 
 @dataclass(frozen=True, slots=True)
+class _ReverseProposalAttempt:
+    message_id: str
+    unsigned_digest: str
+    cooperation_id: str
+    window: ReverseCooperationWindow | None
+
+
+@dataclass(frozen=True, slots=True)
+class ReverseProposalAdmission:
+    """Reservation receipt only, never settlement, nonce, or signing authority."""
+
+    session_id: str
+    message_id: str
+    cooperation_id: str
+    replay: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ConfirmAdmission:
     """Client confirmation admitted; grants no economic authority."""
 
@@ -802,6 +823,7 @@ class LiveSessionStore:
         self._retained_lock_fd: int | None = None
         self._reverse_operations: ReverseOperations | None = None
         self._reverse_negotiations: dict[str, _ReverseNegotiationOrigin] = {}
+        self._reverse_proposals: dict[str, _ReverseProposalAttempt] = {}
         self._connection = connection
         self._generation = generation
         self._network = network
@@ -1083,6 +1105,10 @@ class LiveSessionStore:
         """Fence the handle immediately; pinned physical exclusion ends later."""
         lock_fd, self._lock_fd = self._lock_fd, None
         self._reverse_negotiations.clear()
+        for proposal in self._reverse_proposals.values():
+            if proposal.window is not None:
+                proposal.window.abandon()
+        self._reverse_proposals.clear()
         if os.getpid() != self._pid:
             # Inherited across fork: never touch the parent's SQLite connection.
             # Closing our descriptor copy does not release the parent's flock.
@@ -2729,6 +2755,9 @@ class LiveSessionStore:
             raise LiveSessionStoreError("session expiry refused") from None
         for (session_id,) in idle:
             self._reverse_negotiations.pop(session_id, None)
+            attempt = self._reverse_proposals.pop(session_id, None)
+            if attempt is not None and attempt.window is not None:
+                attempt.window.abandon()
         return len(idle)
 
     def receiving_epochs(self, *, now: int) -> tuple[str, ...]:
@@ -3000,16 +3029,26 @@ class LiveSessionStore:
                 "WHERE s.session_id=?",
                 (session_id,),
             ).fetchone()
-            return bool(
-                row
-                == (
-                    origin.accept_document,
-                    origin.handshake_hash,
-                    0,
-                    digest,
-                    origin.acceptance_document,
-                )
+            return self._matches_reverse_negotiation(session_id, digest, row)
+
+    def _matches_reverse_negotiation(
+        self, session_id: str, digest: str, retained: tuple[bytes, str, int, str, bytes] | None
+    ) -> bool:
+        origin = self._reverse_negotiations.get(session_id)
+        return bool(
+            self.owner_is_open
+            and origin is not None
+            and origin.contract_hash == digest
+            and origin.acceptance_document is not None
+            and retained
+            == (
+                origin.accept_document,
+                origin.handshake_hash,
+                0,
+                digest,
+                origin.acceptance_document,
             )
+        )
 
     def _admit_claim_arbitration(
         self,
@@ -3117,6 +3156,351 @@ class LiveSessionStore:
             )
         except Exception:  # noqa: BLE001 - no signed acceptance or local policy oracle
             raise LiveSessionStoreError("cooperative admission refused") from None
+
+    def _admit_reverse_cooperative_proposal(  # noqa: PLR0912, PLR0915 - one authenticated reservation
+        self,
+        document: bytes,
+        *,
+        operation: ReverseOperation,
+        wall_clock: Callable[[], float] = time.time,
+        monotonic_clock: Callable[[], float] = time.monotonic,
+    ) -> ReverseProposalAdmission:
+        """Reserve exact reverse proposal evidence without replying or settling.
+
+        INTERNAL ONLY. No debt, preimage knowledge, nonce allocation, signing,
+        network effects, or financial permission are created. Retained funding
+        bytes prove neither publication nor current unspent confirmation. Later
+        economic admission must independently prove those facts and recheck this
+        ORIGINAL window, not instantiate another. Replay returns a receipt only,
+        including after restart. Production featured acceptance stays gated.
+        """
+        self.reverse_operations.check(operation)
+        attempt: _ReverseProposalAttempt | None = None
+        conflict = False
+        abandoned: tuple[bytes, ...] = ()
+        refusal: LiveSessionStoreError | None = None
+        receipt: ReverseProposalAdmission | None = None
+        try:
+            outer = _canonical_envelope(document)
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT s.client_key,s.provider_session_key,s.phase,s.blocked,s.revision,"
+                    "s.next_client_seq,s.init_bytes,s.accept_bytes,s.transcript_digest,"
+                    "w.contract_hash,w.terms_offer,w.terms_accept,w.state,"
+                    "w.funding_txid,w.funding_vout,w.funding_tx FROM sessions s "
+                    "JOIN swaps w ON w.session_id=s.session_id WHERE s.session_id=?",
+                    (outer.session_id,),
+                ).fetchone()
+                if row is None or row[2] != "ACCEPTED" or self._policy.profile != "ln-to-btc/v1":
+                    raise LiveSessionStoreError("no accepted reverse session")  # noqa: TRY301
+                (
+                    client,
+                    provider,
+                    _,
+                    blocked,
+                    revision,
+                    client_seq,
+                    init_bytes,
+                    accept_bytes,
+                    transcript,
+                    digest,
+                    offer_bytes,
+                    accepted_bytes,
+                    state,
+                    txid,
+                    vout,
+                    raw,
+                ) = row
+                unsigned_digest = verify_static_signed_envelope(
+                    document,
+                    expected_session_id=outer.session_id,
+                    expected_profile=self._policy.profile,
+                    expected_network=self._network,
+                    expected_sender_key=client,
+                    supported_features=self._policy.features,
+                    crypto=self._crypto,
+                ).hex()
+                if outer.message_type != "action_request":
+                    raise LiveSessionStoreError("reverse proposal type unsupported")  # noqa: TRY301
+                payload = parse_cooperative_payload("action_request", canonicalize(outer.payload))
+                if not isinstance(payload, CooperativeClaimPropose):
+                    raise LiveSessionStoreError("reverse proposal type unsupported")  # noqa: TRY301
+                seen = connection.execute(
+                    "SELECT message_id,seq,unsigned_digest FROM inbox WHERE session_id=? "
+                    "AND sender_key=? AND (message_id=? OR seq=?)",
+                    (outer.session_id, client, outer.message_id, outer.sequence),
+                ).fetchall()
+                if seen:
+                    if seen == [(outer.message_id, outer.sequence, unsigned_digest)]:
+                        return ReverseProposalAdmission(
+                            outer.session_id,
+                            outer.message_id,
+                            payload.cooperation_id,
+                            replay=True,
+                        )
+                    _record_conflict(connection, outer.session_id, "request", document)
+                    abandoned = tuple(
+                        item[0]
+                        for item in connection.execute(
+                            "SELECT cooperation_id FROM cooperation_attempts WHERE session_id=?",
+                            (outer.session_id,),
+                        )
+                    )
+                    connection.execute(
+                        "UPDATE cooperation_attempts SET state='ABANDONED' "
+                        "WHERE session_id=? AND state IN ('BURNED','NONCE_READY','SIGNING')",
+                        (outer.session_id,),
+                    )
+                    conflict = True
+                else:
+                    if (
+                        blocked
+                        or outer.sequence != client_seq
+                        or client_seq - FIRST_REQUEST_SEQUENCE >= MAX_REQUESTS_PER_SESSION
+                        or payload.cooperation_id == "00" * 32
+                        or outer.session_id in self._reverse_proposals
+                        or connection.execute(
+                            "SELECT 1 FROM cooperation_attempts WHERE session_id=? LIMIT 1",
+                            (outer.session_id,),
+                        ).fetchone()
+                        is not None
+                        or not self._matches_reverse_negotiation(
+                            outer.session_id,
+                            digest,
+                            (accept_bytes, transcript, blocked, digest, accepted_bytes),
+                        )
+                    ):
+                        raise LiveSessionStoreError("reverse proposal unavailable")  # noqa: TRY301
+                    initiation = parse_model_json(
+                        HandshakeInit, canonicalize(_canonical_envelope(init_bytes).payload)
+                    )
+                    acceptance = parse_model_json(
+                        HandshakeAcceptPayload,
+                        canonicalize(_canonical_envelope(accept_bytes).payload),
+                    ).accept
+                    offer = _canonical_envelope(offer_bytes)
+                    offered = parse_model_json(TermsOfferPayload, canonicalize(offer.payload))
+                    terms = offered.terms.contract_terms
+                    accepted = _canonical_envelope(accepted_bytes)
+                    signed_acceptance = parse_model_json(
+                        TermsAcceptPayload, canonicalize(accepted.payload)
+                    )
+                    acceptance.validate_against(
+                        initiation, supported_features=self._policy.features
+                    )
+                    checked = check_cooperative_action_context(outer, terms, initiation, acceptance)
+                    signed = signed_acceptance.acceptance
+                    if (
+                        not isinstance(checked, CooperativeClaimPropose)
+                        or terms.profile_id != "ln-to-btc/v1"
+                        or client != initiation.client_session_xonly_key
+                        or provider != acceptance.provider_session_xonly_key
+                        or handshake_hash(initiation, acceptance).hex() != transcript
+                        or offered.terms.handshake_hash != transcript
+                        or contract_hash(terms).hex() != digest
+                        or offered.terms.contract_hash != digest
+                        or offer.contract_hash != digest
+                        or accepted.message_type != "terms_accept"
+                        or accepted.in_reply_to != offer.message_id
+                        or accepted.contract_hash != digest
+                        or signed.contract_hash != digest
+                        or signed.handshake_hash != transcript
+                        or signed.session_id != outer.session_id
+                        or signed.client_session_xonly_key != client
+                        or signed.provider_session_xonly_key != provider
+                        or hashlib.sha256(bytes.fromhex(payload.payment_preimage)).hexdigest()
+                        != terms.invoice_binding.payment_hash
+                    ):
+                        raise LiveSessionStoreError("reverse proposal context differs")  # noqa: TRY301
+                    for retained, sender in ((offer_bytes, provider), (accepted_bytes, client)):
+                        verify_static_signed_envelope(
+                            retained,
+                            expected_session_id=outer.session_id,
+                            expected_profile=self._policy.profile,
+                            expected_network=self._network,
+                            expected_sender_key=sender,
+                            supported_features=self._policy.features,
+                            crypto=self._crypto,
+                        )
+                    self._crypto.schnorr_verify(
+                        bytes.fromhex(acceptance.provider_identity_xonly_key),
+                        provider_terms_hash(offered.terms),
+                        bytes.fromhex(offered.provider_terms_signature),
+                    )
+                    self._crypto.schnorr_verify(
+                        bytes.fromhex(client),
+                        client_acceptance_hash(signed),
+                        bytes.fromhex(signed_acceptance.client_acceptance_signature),
+                    )
+                    # Keep this first anchor even when the transaction later
+                    # rolls back. Corrected/new-ID retries cannot renew it.
+                    attempt = _ReverseProposalAttempt(
+                        outer.message_id,
+                        unsigned_digest,
+                        payload.cooperation_id,
+                        None,
+                    )
+                    self._reverse_proposals[outer.session_id] = attempt
+                    window = ReverseCooperationWindow(
+                        signed_deadline_at=payload.deadline_at,
+                        signed_deadline_height=payload.deadline_height,
+                        claim_height_cutoff=terms.refund_lock_height
+                        - terms.timing_policy.claim_confirmation_blocks,
+                        wall_clock=wall_clock,
+                        monotonic_clock=monotonic_clock,
+                    )
+                    attempt = replace(attempt, window=window)
+                    self._reverse_proposals[outer.session_id] = attempt
+                    if state not in ("FUNDING_SENT", "FUNDED") or raw is None:
+                        raise LiveSessionStoreError("reverse funding unavailable")  # noqa: TRY301
+                    funding_messages = [
+                        _canonical_envelope(item[0])
+                        for item in connection.execute(
+                            "SELECT canonical_bytes FROM outbox WHERE session_id=?",
+                            (outer.session_id,),
+                        )
+                    ]
+                    funding_messages = [
+                        item for item in funding_messages if item.message_type == "funding_binding"
+                    ]
+                    if len(funding_messages) != 1:
+                        raise LiveSessionStoreError("reverse funding association ambiguous")  # noqa: TRY301
+                    funding_message = funding_messages[0]
+                    funding_bytes = canonicalize(funding_message.model_dump(mode="json"))
+                    funding_digest = verify_static_signed_envelope(
+                        funding_bytes,
+                        expected_session_id=outer.session_id,
+                        expected_profile=self._policy.profile,
+                        expected_network=self._network,
+                        expected_sender_key=provider,
+                        supported_features=self._policy.features,
+                        crypto=self._crypto,
+                    ).hex()
+                    funding_payload = parse_model_json(
+                        FundingBindingPayload, canonicalize(funding_message.payload)
+                    )
+                    binding = funding_payload.binding
+                    if (
+                        funding_message.contract_hash != digest
+                        or binding.contract_hash != digest
+                        or binding.binding_revision != 0
+                        or binding.replaces_txid is not None
+                        or binding.funder_role != "provider"
+                        or binding.funding_txid != txid
+                        or binding.contract_vout != vout
+                        or bytes.fromhex(funding_payload.funding_transaction) != raw
+                    ):
+                        raise LiveSessionStoreError("reverse funding association differs")  # noqa: TRY301
+                    self._crypto.schnorr_verify(
+                        bytes.fromhex(provider),
+                        funding_binding_hash(binding),
+                        bytes.fromhex(funding_payload.funding_binding_signature),
+                    )
+                    keys = cast("TaprootKeyOperations", self._public_keys)
+                    check_funding_binding_transaction(raw, binding, terms, keys=keys)
+                    funding = FundingOutput(
+                        bytes.fromhex(txid),
+                        vout,
+                        int(binding.contract_value_sat),
+                        bytes.fromhex(binding.contract_script_pubkey),
+                    )
+                    authorization = UnilateralAuthorization.from_terms(
+                        terms, funding, "claim", keys=keys
+                    )
+                    plan = verify_cooperative_claim_proposal(
+                        bytes.fromhex(payload.unsigned_transaction), authorization
+                    )
+                    taproot = reconstruct_taproot_contract(terms, keys=keys)
+                    immutable = canonicalize(
+                        {
+                            "version": 2,
+                            "kind": "reverse-proposal-reservation",
+                            "session_id": outer.session_id,
+                            "cooperation_id": payload.cooperation_id,
+                            "contract_hash": digest,
+                            "proposal_message_id": outer.message_id,
+                            "proposal_unsigned_digest": unsigned_digest,
+                            "funding_message_id": funding_message.message_id,
+                            "funding_unsigned_digest": funding_digest,
+                            "funding_binding_hash": funding_binding_hash(binding).hex(),
+                            "network_identity": terms.network_identity.model_dump(mode="json"),
+                            "claimant": terms.claimant,
+                            "user_key": terms.client_contract_compressed_key,
+                            "provider_key": terms.provider_contract_compressed_key,
+                            "tap_tweak": taproot.tap_tweak.hex(),
+                            "funding_txid": txid,
+                            "funding_vout": vout,
+                            "funding_value_sat": funding.value_sat,
+                            "funding_script_pubkey": funding.script_pubkey.hex(),
+                            "unsigned_transaction": plan.base_transaction.hex(),
+                            "signature_hash": plan.signature_hash.hex(),
+                            "fee_sat": plan.fee_sat,
+                            "deadline_at": payload.deadline_at,
+                            "deadline_height": payload.deadline_height,
+                        }
+                    )
+                    self.reverse_operations.check(operation)
+                    now = int(wall_clock())
+                    if not window.time_allowed():
+                        raise LiveSessionStoreError("reverse proposal deadline elapsed")  # noqa: TRY301
+                    connection.execute(
+                        "INSERT INTO cooperation_attempts "
+                        "(cooperation_id,session_id,owner_generation,binding,"
+                        "created_at,deadline_at,state) "
+                        "VALUES (?,?,?,?,?,?,'BURNED')",
+                        (
+                            bytes.fromhex(payload.cooperation_id),
+                            outer.session_id,
+                            self._generation,
+                            immutable,
+                            now,
+                            payload.deadline_at,
+                        ),
+                    )
+                    connection.execute(
+                        "INSERT INTO inbox VALUES (?,?,?,?,?,?,?)",
+                        (
+                            outer.session_id,
+                            client,
+                            outer.message_id,
+                            outer.sequence,
+                            unsigned_digest,
+                            document,
+                            revision + 1,
+                        ),
+                    )
+                    connection.execute(
+                        "UPDATE sessions SET next_client_seq=?,revision=?,active_at=? "
+                        "WHERE session_id=?",
+                        (client_seq + 1, revision + 1, now, outer.session_id),
+                    )
+                    receipt = ReverseProposalAdmission(
+                        outer.session_id, outer.message_id, payload.cooperation_id, replay=False
+                    )
+        except LiveSessionStoreError as error:
+            if attempt is not None and attempt.window is not None:
+                attempt.window.abandon()
+            refusal = type(error)(str(error))
+        except Exception:  # noqa: BLE001 - no preimage, nonce, binding, or signature oracle
+            if attempt is not None and attempt.window is not None:
+                attempt.window.abandon()
+            refusal = LiveSessionStoreError("reverse proposal refused")
+        if refusal is not None:
+            # Exit the handler before raising: parser errors can retain private
+            # proposal bytes in __context__ even with ``raise ... from None``.
+            raise refusal
+        if conflict:
+            previous = self._reverse_proposals.get(outer.session_id)
+            if previous is not None and previous.window is not None:
+                previous.window.abandon()
+            for cooperation_id in abandoned:
+                handle = self._cooperation_handles.pop(cooperation_id, None)
+                if handle is not None:
+                    handle.close()
+            raise SessionBlockedError("conflicting signed reverse proposal is durable")
+        if receipt is None:
+            raise LiveSessionStoreError("reverse proposal receipt unavailable")
+        return receipt
 
     def _admit_cooperative_result(  # noqa: PLR0912, PLR0915 - one signed admission transaction
         self,

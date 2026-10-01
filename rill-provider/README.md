@@ -135,9 +135,20 @@ host. The store cannot verify that attestation. Behavior:
    exclusive, height equality at the signed refund margin is allowed, and any
    observed expiry, abandonment, or monotonic-clock regression is terminal.
    Wall-clock rollback cannot extend its frozen monotonic bound. The window
-   provides timing checks only: authenticated admission, permanent one-shot
-   reservation, financial evidence, and actual RPC transport fencing still need
-   integration before reverse cooperation can be enabled.
+   provides timing checks only. Internal reverse proposal reservation now
+   authenticates the exact client proposal and retained negotiation signatures,
+   associates the provider-signed funding message with the exact transaction,
+   and freezes a one-shot attempt under the active owner gate. The atomic
+   transaction records inbox evidence and a distinct version-2 BURNED binding,
+   without a reply, provider sequence advance, preimage debt, or native nonce.
+   Existing version-1 signing consumers reject this reservation variant.
+   Post-anchor failures remain terminal in owner memory even after rollback;
+   another message or cooperation ID cannot renew the window. Exact authenticated
+   replay returns only a receipt, including after restart, without restoring
+   authority. Funding signatures and bytes do not prove publication or current
+   chain confirmation. Financial evidence, settlement-before-signing, actual RPC
+   transport fencing, and runtime routing still need integration before reverse
+   cooperation can be enabled. No missing record triggers upgrade work or retry.
 - Absent, partial, foreign, or newer files are refused before any pragma can
   modify them. Malformed provisioning metadata (UUID or attestation) is also
   refused. The inode numbers of the database and the lock file are recorded

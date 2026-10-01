@@ -108,6 +108,13 @@ class ReverseOperations:
         self._store = store
         self._lock = asyncio.Lock()
         self._active_task: asyncio.Task[Any] | None = None
+        self._active_operation: ReverseOperation | None = None
+
+    def check(self, operation: ReverseOperation) -> None:
+        """Require this exact active gate token, not merely another live owner."""
+        if operation is not self._active_operation or operation is None:
+            raise LiveSessionStoreError("reverse operation is not active in this gate")
+        operation.check()
 
     @asynccontextmanager
     async def operation(self) -> AsyncIterator[ReverseOperation]:
@@ -123,6 +130,7 @@ class ReverseOperations:
             with self._store.retain_owner():
                 operation = ReverseOperation(self._store)
                 self._active_task = asyncio.current_task()
+                self._active_operation = operation
                 try:
                     yield operation
                 finally:
@@ -130,3 +138,4 @@ class ReverseOperations:
                         await operation._drain()  # noqa: SLF001 - token lifetime belongs to this gate
                     finally:
                         self._active_task = None
+                        self._active_operation = None
