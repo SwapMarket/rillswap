@@ -184,3 +184,33 @@ invalid data, restart, or timeout. For LN to BTC the client first durably
 saves a signed unilateral claim; proposal preimage disclosure can settle the
 hold, so the provider does not return a partial until it positively reconciles
 that settlement. No runtime currently enables these payloads for new swaps.
+
+For reverse cooperation, the client anchors its single local 30-second window
+immediately before the first native proposal preparation or nonce allocation,
+after exact durable acknowledgment of its private unilateral fallback. This
+window intersects the original payment lifetime; preparation, publication of
+the possible-disclosure reservation, and transmission all consume it. Neither
+publication nor a peer response renews either deadline.
+
+The provider anchors its independent single local window after acquiring the
+reverse execution gate and authenticating the first context-valid proposal,
+before queuing any RPC or native preparation. At monotonic time `m` and
+conservative wall time `w`, it freezes the deadline as
+`min(m + 30, m + (proposal.deadline_at - w))`, rejecting nonpositive remaining
+time. Later checks require both monotonic time strictly before that frozen
+deadline and conservative wall time strictly before the signed deadline.
+Clock rollback cannot extend permission, forward movement can shorten it, and
+expiry or abandonment is terminal. Queueing, settlement reconciliation, and
+signing share this window. Recheck before native signing and before granting
+new disclosure authority. Late settlement does not reopen cooperation; exact
+already-committed response delivery does not authorize another signature.
+
+Live height authorization permits
+`current_height <= proposal.deadline_height <= refund_lock_height - claim_confirmation_blocks`.
+Equality at the cutoff is allowed; time expiry is exclusive. Height retreat
+does not revive an expired attempt. Replay, changed cooperation IDs, refusal,
+restart, or worker completion cannot start another window. Each party has its
+own local clock; the provider cannot infer the client's private payment start
+time. Offer/payment expiry is not a substitute for a nonexistent signed
+handshake lifetime or an additional post-settlement signing deadline. Restored
+state creates no window automatically, and independent recovery is unchanged.

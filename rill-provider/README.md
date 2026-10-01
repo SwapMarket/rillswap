@@ -130,6 +130,14 @@ host. The store cannot verify that attestation. Behavior:
    independent unilateral recovery and settlement-debt repayment. The existing
    production rejection of featured reverse acceptance remains unchanged until
    independently verified reverse admission and signing safeguards are complete.
+   The preparatory `ReverseCooperationWindow` freezes a maximum 30-second
+   monotonic deadline intersecting the signed proposal deadline. Time expiry is
+   exclusive, height equality at the signed refund margin is allowed, and any
+   observed expiry, abandonment, or monotonic-clock regression is terminal.
+   Wall-clock rollback cannot extend its frozen monotonic bound. The window
+   provides timing checks only: authenticated admission, permanent one-shot
+   reservation, financial evidence, and actual RPC transport fencing still need
+   integration before reverse cooperation can be enabled.
 - Absent, partial, foreign, or newer files are refused before any pragma can
   modify them. Malformed provisioning metadata (UUID or attestation) is also
   refused. The inode numbers of the database and the lock file are recorded
