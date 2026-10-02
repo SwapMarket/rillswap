@@ -50,7 +50,10 @@ from rill_core.settlement import (
     reconstruct_taproot_contract,
     verify_cooperative_claim_proposal,
 )
-from rill_core.settlement.funding import check_funding_binding_transaction
+from rill_core.settlement.funding import (
+    FundingBindingTransactionMatch,
+    check_funding_binding_transaction,
+)
 from rill_core.settlement.unilateral import validate_unilateral_spend
 from rill_core.wire import verify_static_handshake_accept, verify_static_handshake_transcript
 from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_model_json
@@ -89,8 +92,10 @@ from rill_core.wire.types import NetworkIdentity
 
 from rill_provider._nip59_receive import _decode_gift_wrap_candidate
 from rill_provider._nip59_send import _wrap_envelope
+from rill_provider.core_tx_bytes import CooperativeClaimOutpoint
 from rill_provider.handshake_store import HandshakePolicy, _expected, _features, _require_policy
 from rill_provider.issuance_reservation import _policy_bytes
+from rill_provider.lnd_hold_invoice import BoundHoldInvoiceObservation, HeldHtlc, HoldInvoiceStatus
 from rill_provider.payment_dispatch_record import PaymentAuthority, bound_payer
 from rill_provider.reverse_cooperation import ReverseCooperationWindow
 
@@ -3345,6 +3350,108 @@ class LiveSessionStore:
             pass
         raise LiveSessionStoreError("reverse preimage evidence unavailable")
 
+    def _reverse_reservation_binding(  # noqa: PLR0913 - one exact signed funding/proposal association
+        self,
+        connection: sqlite3.Connection,
+        outer: Envelope,
+        payload: CooperativeClaimPropose,
+        terms: ContractTerms,
+        *,
+        provider: str,
+        txid: str,
+        vout: int,
+        raw: bytes,
+    ) -> tuple[bytes, FundingBindingTransactionMatch]:
+        """Rebuild immutable reservation bytes inside an authenticated owner write.
+
+        Native static funding/plan verification is not publication, current
+        unspentness, payment, nonce custody, or permission to sign or settle.
+        """
+        digest = contract_hash(terms).hex()
+        funding_messages = [
+            _canonical_envelope(item[0])
+            for item in connection.execute(
+                "SELECT canonical_bytes FROM outbox WHERE session_id=?", (outer.session_id,)
+            )
+        ]
+        funding_messages = [
+            item for item in funding_messages if item.message_type == "funding_binding"
+        ]
+        if len(funding_messages) != 1:
+            raise LiveSessionStoreError("reverse funding association ambiguous")
+        funding_message = funding_messages[0]
+        funding_bytes = canonicalize(funding_message.model_dump(mode="json"))
+        funding_digest = verify_static_signed_envelope(
+            funding_bytes,
+            expected_session_id=outer.session_id,
+            expected_profile=self._policy.profile,
+            expected_network=self._network,
+            expected_sender_key=provider,
+            supported_features=self._policy.features,
+            crypto=self._crypto,
+        ).hex()
+        funding_payload = parse_model_json(
+            FundingBindingPayload, canonicalize(funding_message.payload)
+        )
+        binding = funding_payload.binding
+        if (
+            funding_message.contract_hash != digest
+            or binding.contract_hash != digest
+            or binding.binding_revision != 0
+            or binding.replaces_txid is not None
+            or binding.funder_role != "provider"
+            or binding.funding_txid != txid
+            or binding.contract_vout != vout
+            or bytes.fromhex(funding_payload.funding_transaction) != raw
+        ):
+            raise LiveSessionStoreError("reverse funding association differs")
+        self._crypto.schnorr_verify(
+            bytes.fromhex(provider),
+            funding_binding_hash(binding),
+            bytes.fromhex(funding_payload.funding_binding_signature),
+        )
+        keys = cast("TaprootKeyOperations", self._public_keys)
+        match = check_funding_binding_transaction(raw, binding, terms, keys=keys)
+        funding = FundingOutput(
+            bytes.fromhex(txid),
+            vout,
+            int(binding.contract_value_sat),
+            bytes.fromhex(binding.contract_script_pubkey),
+        )
+        authorization = UnilateralAuthorization.from_terms(terms, funding, "claim", keys=keys)
+        plan = verify_cooperative_claim_proposal(
+            bytes.fromhex(payload.unsigned_transaction), authorization
+        )
+        taproot = reconstruct_taproot_contract(terms, keys=keys)
+        return canonicalize(
+            {
+                "version": 2,
+                "kind": "reverse-proposal-reservation",
+                "session_id": outer.session_id,
+                "cooperation_id": payload.cooperation_id,
+                "contract_hash": digest,
+                "proposal_message_id": outer.message_id,
+                "proposal_unsigned_digest": unsigned_envelope_hash(outer).hex(),
+                "funding_message_id": funding_message.message_id,
+                "funding_unsigned_digest": funding_digest,
+                "funding_binding_hash": funding_binding_hash(binding).hex(),
+                "network_identity": terms.network_identity.model_dump(mode="json"),
+                "claimant": terms.claimant,
+                "user_key": terms.client_contract_compressed_key,
+                "provider_key": terms.provider_contract_compressed_key,
+                "tap_tweak": taproot.tap_tweak.hex(),
+                "funding_txid": txid,
+                "funding_vout": vout,
+                "funding_value_sat": funding.value_sat,
+                "funding_script_pubkey": funding.script_pubkey.hex(),
+                "unsigned_transaction": plan.base_transaction.hex(),
+                "signature_hash": plan.signature_hash.hex(),
+                "fee_sat": plan.fee_sat,
+                "deadline_at": payload.deadline_at,
+                "deadline_height": payload.deadline_height,
+            }
+        ), match
+
     def _admit_reverse_cooperative_proposal(  # noqa: PLR0912, PLR0915 - one authenticated reservation
         self,
         document: bytes,
@@ -3481,91 +3588,15 @@ class LiveSessionStore:
                     self._reverse_proposals[outer.session_id] = attempt
                     if state not in ("FUNDING_SENT", "FUNDED") or raw is None:
                         raise LiveSessionStoreError("reverse funding unavailable")  # noqa: TRY301
-                    funding_messages = [
-                        _canonical_envelope(item[0])
-                        for item in connection.execute(
-                            "SELECT canonical_bytes FROM outbox WHERE session_id=?",
-                            (outer.session_id,),
-                        )
-                    ]
-                    funding_messages = [
-                        item for item in funding_messages if item.message_type == "funding_binding"
-                    ]
-                    if len(funding_messages) != 1:
-                        raise LiveSessionStoreError("reverse funding association ambiguous")  # noqa: TRY301
-                    funding_message = funding_messages[0]
-                    funding_bytes = canonicalize(funding_message.model_dump(mode="json"))
-                    funding_digest = verify_static_signed_envelope(
-                        funding_bytes,
-                        expected_session_id=outer.session_id,
-                        expected_profile=self._policy.profile,
-                        expected_network=self._network,
-                        expected_sender_key=provider,
-                        supported_features=self._policy.features,
-                        crypto=self._crypto,
-                    ).hex()
-                    funding_payload = parse_model_json(
-                        FundingBindingPayload, canonicalize(funding_message.payload)
-                    )
-                    binding = funding_payload.binding
-                    if (
-                        funding_message.contract_hash != digest
-                        or binding.contract_hash != digest
-                        or binding.binding_revision != 0
-                        or binding.replaces_txid is not None
-                        or binding.funder_role != "provider"
-                        or binding.funding_txid != txid
-                        or binding.contract_vout != vout
-                        or bytes.fromhex(funding_payload.funding_transaction) != raw
-                    ):
-                        raise LiveSessionStoreError("reverse funding association differs")  # noqa: TRY301
-                    self._crypto.schnorr_verify(
-                        bytes.fromhex(provider),
-                        funding_binding_hash(binding),
-                        bytes.fromhex(funding_payload.funding_binding_signature),
-                    )
-                    keys = cast("TaprootKeyOperations", self._public_keys)
-                    check_funding_binding_transaction(raw, binding, terms, keys=keys)
-                    funding = FundingOutput(
-                        bytes.fromhex(txid),
-                        vout,
-                        int(binding.contract_value_sat),
-                        bytes.fromhex(binding.contract_script_pubkey),
-                    )
-                    authorization = UnilateralAuthorization.from_terms(
-                        terms, funding, "claim", keys=keys
-                    )
-                    plan = verify_cooperative_claim_proposal(
-                        bytes.fromhex(payload.unsigned_transaction), authorization
-                    )
-                    taproot = reconstruct_taproot_contract(terms, keys=keys)
-                    immutable = canonicalize(
-                        {
-                            "version": 2,
-                            "kind": "reverse-proposal-reservation",
-                            "session_id": outer.session_id,
-                            "cooperation_id": payload.cooperation_id,
-                            "contract_hash": digest,
-                            "proposal_message_id": outer.message_id,
-                            "proposal_unsigned_digest": unsigned_digest,
-                            "funding_message_id": funding_message.message_id,
-                            "funding_unsigned_digest": funding_digest,
-                            "funding_binding_hash": funding_binding_hash(binding).hex(),
-                            "network_identity": terms.network_identity.model_dump(mode="json"),
-                            "claimant": terms.claimant,
-                            "user_key": terms.client_contract_compressed_key,
-                            "provider_key": terms.provider_contract_compressed_key,
-                            "tap_tweak": taproot.tap_tweak.hex(),
-                            "funding_txid": txid,
-                            "funding_vout": vout,
-                            "funding_value_sat": funding.value_sat,
-                            "funding_script_pubkey": funding.script_pubkey.hex(),
-                            "unsigned_transaction": plan.base_transaction.hex(),
-                            "signature_hash": plan.signature_hash.hex(),
-                            "fee_sat": plan.fee_sat,
-                            "deadline_at": payload.deadline_at,
-                            "deadline_height": payload.deadline_height,
-                        }
+                    immutable, _ = self._reverse_reservation_binding(
+                        connection,
+                        outer,
+                        payload,
+                        terms,
+                        provider=provider,
+                        txid=txid,
+                        vout=vout,
+                        raw=raw,
                     )
                     self.reverse_operations.check(operation)
                     now = int(wall_clock())
@@ -4719,6 +4750,202 @@ class LiveSessionStore:
             raise LiveSessionStoreError("settlement work unavailable") from None
         return items
 
+    def _commit_reverse_proposal_debt(  # noqa: PLR0912, PLR0913 - one atomic financial boundary
+        self,
+        document: bytes,
+        *,
+        operation: ReverseOperation,
+        core: CooperativeClaimOutpoint,
+        invoice: BoundHoldInvoiceObservation,
+        observations_started_at: float,
+        observations_completed_at: float,
+        now: int,
+    ) -> None:
+        """Commit new proposal-derived debt, never settle or grant signing authority.
+
+        Trusted runtime must bracket the complete Own-Core/Own-LND acquisition
+        under this same operation using the original window's clock dependency.
+        Typed observations themselves carry no provenance or authority. First
+        release admits only an exact live original-owner reservation in FUNDED,
+        with no potentially issued refund. Historical knowledge cannot bootstrap
+        this path. Existing debt continues through ordinary repayment instead.
+
+        Debt commits before any later settlement dispatch. Expiry or owner loss
+        afterward does not erase it or renew cooperation. No RPC, reply, sequence,
+        native nonce, or reservation release occurs here.
+        """
+        self.reverse_operations.check(operation)
+        if type(now) is not int or now < 0:
+            raise LiveSessionStoreError("reverse proposal debt audit time unsupported")
+        attempt: _ReverseProposalAttempt | None = None
+        try:
+            with self._write() as connection:
+                outer, payload, terms = self._authenticated_reverse_preimage(connection, document)
+                digest = unsigned_envelope_hash(outer).hex()
+                candidate = self._reverse_proposals.get(outer.session_id)
+                if (
+                    candidate is None
+                    or candidate.window is None
+                    or candidate.message_id != outer.message_id
+                    or candidate.unsigned_digest != digest
+                    or candidate.cooperation_id != payload.cooperation_id
+                ):
+                    raise LiveSessionStoreError("reverse proposal debt has no live reservation")  # noqa: TRY301
+                attempt = candidate
+                row = connection.execute(
+                    "SELECT s.accept_bytes,s.transcript_digest,s.blocked,w.contract_hash,"
+                    "w.terms_accept,s.provider_session_key,w.state,w.preimage,"
+                    "w.funding_txid,w.funding_vout,w.funding_tx,w.refund_txid,w.refund_tx "
+                    "FROM sessions s JOIN swaps w ON w.session_id=s.session_id "
+                    "WHERE s.session_id=?",
+                    (outer.session_id,),
+                ).fetchone()
+                if row is None:
+                    raise LiveSessionStoreError("reverse proposal debt lifecycle refused")  # noqa: TRY301
+                (
+                    accept_bytes,
+                    transcript,
+                    blocked,
+                    contract_digest,
+                    accepted_bytes,
+                    provider,
+                    state,
+                    retained,
+                    txid,
+                    vout,
+                    raw,
+                    refund_txid,
+                    refund_raw,
+                ) = row
+                if (
+                    not self._matches_reverse_negotiation(
+                        outer.session_id,
+                        contract_digest,
+                        (accept_bytes, transcript, blocked, contract_digest, accepted_bytes),
+                    )
+                    or state != "FUNDED"
+                    or retained is not None
+                    or refund_txid is not None
+                    or refund_raw is not None
+                    or type(txid) is not str
+                    or type(vout) is not int
+                    or type(raw) is not bytes
+                ):
+                    raise LiveSessionStoreError("reverse proposal debt lifecycle refused")  # noqa: TRY301
+                burned = connection.execute(
+                    "SELECT session_id,owner_generation,binding,state,deadline_at,local_nonce,"
+                    "peer_nonce,partial_signature,nonce_response_id,partial_response_id "
+                    "FROM cooperation_attempts WHERE cooperation_id=?",
+                    (bytes.fromhex(payload.cooperation_id),),
+                ).fetchone()
+                admitted = connection.execute(
+                    "SELECT sender_key,seq,unsigned_digest,canonical_bytes FROM inbox "
+                    "WHERE session_id=? AND message_id=?",
+                    (outer.session_id, outer.message_id),
+                ).fetchone()
+                if (
+                    burned is None
+                    or burned[0] != outer.session_id
+                    or burned[1] != self._generation
+                    or burned[3] != "BURNED"
+                    or burned[4] != payload.deadline_at
+                    or any(value is not None for value in burned[5:])
+                    or admitted is None
+                    or admitted[:3] != (outer.sender_session_key, outer.sequence, digest)
+                    or unsigned_envelope_hash(_canonical_envelope(admitted[3])).hex() != digest
+                ):
+                    raise LiveSessionStoreError("reverse proposal debt reservation differs")  # noqa: TRY301
+                expected, match = self._reverse_reservation_binding(
+                    connection,
+                    outer,
+                    payload,
+                    terms,
+                    provider=provider,
+                    txid=txid,
+                    vout=vout,
+                    raw=raw,
+                )
+                if burned[2] != expected:
+                    raise LiveSessionStoreError("reverse proposal debt binding differs")  # noqa: TRY301
+                binding = parse_json_strict(expected)
+                if not isinstance(binding, dict):
+                    raise LiveSessionStoreError("reverse proposal debt binding unsupported")  # noqa: TRY301
+                if (
+                    type(core) is not CooperativeClaimOutpoint
+                    or core.network_identity != self._network
+                    or type(core.static_match) is not FundingBindingTransactionMatch
+                    or core.static_match != match
+                    or core.funding_txid != txid
+                    or type(core.funding_vout) is not int
+                    or core.funding_vout != vout
+                    or type(core.funding_value_sat) is not int
+                    or core.funding_value_sat != binding["funding_value_sat"]
+                    or type(core.funding_script_pubkey) is not bytes
+                    or core.funding_script_pubkey.hex() != binding["funding_script_pubkey"]
+                    or type(core.tip_height) is not int
+                    or type(core.confirmations) is not int
+                    or type(core.inclusion_height) is not int
+                    or not 0 < core.inclusion_height <= core.tip_height < terms.refund_lock_height
+                    or core.confirmations != core.tip_height - core.inclusion_height + 1
+                    or core.confirmations < terms.funding_confirmations
+                    or not re.fullmatch("[0-9a-f]{64}", core.tip_hash)
+                    or not re.fullmatch("[0-9a-f]{64}", core.inclusion_block_hash)
+                    or (
+                        core.inclusion_height == core.tip_height
+                        and core.inclusion_block_hash != core.tip_hash
+                    )
+                ):
+                    raise LiveSessionStoreError("reverse proposal debt Core evidence refused")  # noqa: TRY301
+                minimum_htlc_expiry = (
+                    terms.refund_lock_height
+                    + 1
+                    + int(terms.timing_policy.model_dump()["refund_and_ln_resolution_blocks"])
+                )
+                if (
+                    type(invoice) is not BoundHoldInvoiceObservation
+                    or invoice.network != self._network
+                    or invoice.payment_hash != terms.invoice_binding.payment_hash
+                    or invoice.bolt11_sha256 != terms.invoice_binding.bolt11_sha256
+                    or invoice.node_pubkey != terms.invoice_binding.payee_compressed_pubkey
+                    or type(invoice.last_lnd_height) is not int
+                    or invoice.last_lnd_height != core.tip_height
+                    or invoice.last_lnd_block_hash != core.tip_hash
+                    or type(invoice.status) is not HoldInvoiceStatus
+                    or invoice.status.state != "ACCEPTED"
+                    or type(invoice.status.htlcs) is not tuple
+                    or not invoice.status.htlcs
+                    or any(
+                        type(part) is not HeldHtlc
+                        or type(part.amount_msat) is not int
+                        or part.amount_msat <= 0
+                        or type(part.expiry_height) is not int
+                        or part.expiry_height <= minimum_htlc_expiry
+                        for part in invoice.status.htlcs
+                    )
+                    or invoice.status.held_msat != int(terms.invoice_binding.amount_msat)
+                ):
+                    raise LiveSessionStoreError("reverse proposal debt LND evidence refused")  # noqa: TRY301
+                candidate.window.check(tip_height=core.tip_height)
+                connection.execute(
+                    "UPDATE swaps SET preimage=?,updated_at=MAX(updated_at,?) "
+                    "WHERE session_id=? AND state='FUNDED' AND preimage IS NULL",
+                    (payload.payment_preimage, now, outer.session_id),
+                )
+                self.reverse_operations.check(operation)
+                candidate.window.check_evidence_interval(
+                    started_at=observations_started_at, completed_at=observations_completed_at
+                )
+        except StaleOwnerError:
+            if attempt is not None and attempt.window is not None:
+                attempt.window.abandon()
+            raise
+        except Exception:  # noqa: BLE001 - no preimage, backend, or crypto oracle
+            if attempt is not None and attempt.window is not None:
+                attempt.window.abandon()
+        else:
+            return
+        raise LiveSessionStoreError("reverse proposal debt refused")
+
     def record_reverse_settlement_preimage(
         self, session_id: str, *, from_state: str, preimage: str, now: int
     ) -> None:
@@ -4727,8 +4954,9 @@ class LiveSessionStore:
         Trusted runtime calls this only after observing the matching claim
         witness through its own Core. Presence proves intent via this controlled
         writer, not prior LND settlement or independent transaction validation.
-        Reverse nonterminal preimages had no other repository writer. Missing
-        knowledge never manufactures an obligation or starts recovery work.
+        Historically this was the only reverse nonterminal preimage writer;
+        fresh proposal debt now has its own separately authenticated boundary.
+        Missing knowledge never manufactures an obligation or starts recovery work.
         """
         if from_state not in {"FUNDED", "REFUNDING"} or type(now) is not int or now < 0:
             raise LiveSessionStoreError("reverse settlement intent context invalid")

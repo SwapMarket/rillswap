@@ -622,6 +622,28 @@ Own-Core chain evidence, economic eligibility, and authority before any effect.
 A late final response can preserve knowledge but never renew authority. No live
 financial or signing consumer uses this API yet.
 
+The internal `_commit_reverse_proposal_debt` boundary is also preparatory. It
+requires fresh original-owner negotiation memory, the exact native-valid
+version-2 BURNED reservation and authenticated inbox proposal, a live original
+window, `FUNDED`, and no potentially issued refund. Independently acquired
+Own-Core and bound Own-LND facts must agree on the named tip, original funding,
+invoice, required depth, and safely held exact amount. The complete acquisition
+interval must remain younger than one second on the original window's clock.
+Those typed facts are not provenance or authorization by themselves: the trusted
+runtime must collect them under the same operation and clock dependency.
+
+Its transaction writes only settlement debt and audit time, before any later
+settlement RPC. Failed pre-COMMIT checks, including after the tentative SQL
+update, roll back debt and abandon cooperation without erasing separately
+committed knowledge. An uncertain COMMIT may retain debt while closing ownership;
+failure to return is not proof that debt was absent. Ordinary repayment resumes
+any valid retained obligation without reconstructing cooperation.
+Historical/restarted, expired, invalid-plan, or refund-issued proposals receive
+no new debt through this path. Existing debt still uses ordinary independent
+repayment; its expiry or restart never renews signing. No runtime caller or
+native allocation uses this new boundary yet. Settlement on a later connection
+still needs its own original-backend association before consumer activation.
+
 A retained matching preimage in `FUNDED` or `REFUNDING` means settlement is
 owed, not that LND settlement succeeded. Restart retries that obligation
 without needing Core or rediscovering a disappeared witness. Under serialized
