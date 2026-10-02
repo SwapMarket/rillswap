@@ -187,7 +187,7 @@ def test_upgrade_is_explicit_and_never_backfills_send_permission(
         assert store._connection.execute("SELECT * FROM payment_dispatch").fetchall() == []  # noqa: SLF001
         assert not store.commit_payment_dispatch(session, _hash(harness), b"request")
     with harness.acquire() as store:
-        assert store._connection.execute("PRAGMA user_version").fetchone() == (13,)  # noqa: SLF001
+        assert store._connection.execute("PRAGMA user_version").fetchone() == (14,)  # noqa: SLF001
         assert not store.commit_payment_dispatch(session, _hash(harness), b"request")
 
 

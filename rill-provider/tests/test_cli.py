@@ -151,7 +151,7 @@ def test_explicit_migration_does_not_start_the_service(
     assert main(["migrate-store", "--config", str(config)]) == 0
     assert main(["migrate-store", "--config", str(config)]) == 0
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (13,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (14,)
         assert connection.execute("SELECT * FROM payment_dispatch").fetchall() == []
         assert connection.execute("SELECT * FROM epoch_admissions").fetchall() == []
         assert connection.execute("SELECT retired_through FROM epoch_retirement").fetchall() == [

@@ -109,7 +109,7 @@ if TYPE_CHECKING:
     from rill_provider.reverse_operations import ReverseOperation, ReverseOperations
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
-SCHEMA_VERSION = 13  # v8-v12 upgrade on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
+SCHEMA_VERSION = 14  # v8-v13 upgrade on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
 CONTRACT_KEY_RECORD_KIND = "rillswap-provider-contract-key"
 OPEN_PHASES = ("CONFIRMED", "ACCEPTED")  # sessions that may still send requests
 SWAP_TRANSITIONS = frozenset(
@@ -381,7 +381,14 @@ CLAIM_ARBITRATION_SCHEMA = (
     "cooperative_raw IS NULL) OR (state='WAITING' AND owner_generation IS NOT NULL "
     "AND cooperative_raw IS NULL) OR state='CLOSED'))"
 )
-SCHEMA = (*SCHEMA_V12, CLAIM_ARBITRATION_SCHEMA)
+SCHEMA_V13 = (*SCHEMA_V12, CLAIM_ARBITRATION_SCHEMA)
+REVERSE_PREIMAGE_EVIDENCE_SCHEMA = (
+    "CREATE TABLE reverse_preimage_evidence (session_id TEXT PRIMARY KEY NOT NULL, "
+    "document BLOB NOT NULL CHECK (typeof(document)='blob' AND "
+    "length(document) BETWEEN 1 AND 65536), received_at INTEGER NOT NULL CHECK "
+    "(typeof(received_at)='integer' AND received_at>=0))"
+)
+SCHEMA = (*SCHEMA_V13, REVERSE_PREIMAGE_EVIDENCE_SCHEMA)
 MAX_CLAIM_ATTEMPTS = 32
 COOPERATION_BUDGET_SECONDS = 30
 COOPERATION_OBSERVATION_MAX_AGE_SECONDS = 5
@@ -501,6 +508,16 @@ class ReverseProposalAdmission:
     session_id: str
     message_id: str
     cooperation_id: str
+    replay: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ReversePreimageEvidenceReceipt:
+    """Knowledge retained privately, not payment, debt, or current authority."""
+
+    session_id: str
+    message_id: str
+    received_at: int
     replay: bool
 
 
@@ -1014,10 +1031,12 @@ class LiveSessionStore:
                 _upgrade_v9(connection)
             if version in (5, 6, 7, 8, 9, 10):
                 _upgrade_v10(connection)
-            if version not in (12, SCHEMA_VERSION):
+            if version in (5, 6, 7, 8, 9, 10, 11):
                 _upgrade_v11(connection)
-            if version != SCHEMA_VERSION:
+            if version in (5, 6, 7, 8, 9, 10, 11, 12):
                 _upgrade_v12(connection)
+            if version in (5, 6, 7, 8, 9, 10, 11, 12, 13):
+                _upgrade_v13(connection)
             if version != SCHEMA_VERSION:
                 connection.execute("UPDATE meta SET schema_version=?", (SCHEMA_VERSION,))
                 connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -3157,6 +3176,175 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - no signed acceptance or local policy oracle
             raise LiveSessionStoreError("cooperative admission refused") from None
 
+    def _authenticated_reverse_preimage(
+        self, connection: sqlite3.Connection, document: bytes
+    ) -> tuple[Envelope, CooperativeClaimPropose, ContractTerms]:
+        """Authenticate historical knowledge, never current economic permission.
+
+        No sequence, blocked state, process-local negotiation, attempt, time,
+        height, funding, or native-plan eligibility is inferred. This validates
+        archived signatures and original roles independently of prior admission.
+        """
+        outer = _canonical_envelope(document)
+        row = connection.execute(
+            "SELECT s.client_key,s.provider_session_key,s.phase,s.init_bytes,"
+            "s.accept_bytes,s.transcript_digest,w.contract_hash,w.terms_offer,"
+            "w.terms_accept FROM sessions s JOIN swaps w ON w.session_id=s.session_id "
+            "WHERE s.session_id=?",
+            (outer.session_id,),
+        ).fetchone()
+        if row is None or row[2] != "ACCEPTED" or self._policy.profile != "ln-to-btc/v1":
+            raise LiveSessionStoreError("no accepted reverse context")
+        (
+            client,
+            provider,
+            _,
+            init_bytes,
+            accept_bytes,
+            transcript,
+            digest,
+            offer_bytes,
+            accepted_bytes,
+        ) = row
+        verify_static_signed_envelope(
+            document,
+            expected_session_id=outer.session_id,
+            expected_profile=self._policy.profile,
+            expected_network=self._network,
+            expected_sender_key=client,
+            supported_features=self._policy.features,
+            crypto=self._crypto,
+        )
+        initiation = parse_model_json(
+            HandshakeInit, canonicalize(_canonical_envelope(init_bytes).payload)
+        )
+        acceptance = parse_model_json(
+            HandshakeAcceptPayload, canonicalize(_canonical_envelope(accept_bytes).payload)
+        ).accept
+        offer = _canonical_envelope(offer_bytes)
+        offered = parse_model_json(TermsOfferPayload, canonicalize(offer.payload))
+        terms = offered.terms.contract_terms
+        accepted = _canonical_envelope(accepted_bytes)
+        signed_acceptance = parse_model_json(TermsAcceptPayload, canonicalize(accepted.payload))
+        acceptance.validate_against(initiation, supported_features=self._policy.features)
+        payload = check_cooperative_action_context(outer, terms, initiation, acceptance)
+        signed = signed_acceptance.acceptance
+        if (
+            not isinstance(payload, CooperativeClaimPropose)
+            or terms.profile_id != "ln-to-btc/v1"
+            or client != initiation.client_session_xonly_key
+            or provider != acceptance.provider_session_xonly_key
+            or handshake_hash(initiation, acceptance).hex() != transcript
+            or offered.terms.handshake_hash != transcript
+            or contract_hash(terms).hex() != digest
+            or offered.terms.contract_hash != digest
+            or offer.contract_hash != digest
+            or accepted.message_type != "terms_accept"
+            or accepted.in_reply_to != offer.message_id
+            or accepted.contract_hash != digest
+            or signed.contract_hash != digest
+            or signed.handshake_hash != transcript
+            or signed.session_id != outer.session_id
+            or signed.client_session_xonly_key != client
+            or signed.provider_session_xonly_key != provider
+            or hashlib.sha256(bytes.fromhex(payload.payment_preimage)).hexdigest()
+            != terms.invoice_binding.payment_hash
+        ):
+            raise LiveSessionStoreError("reverse preimage context differs")
+        for retained, sender in ((offer_bytes, provider), (accepted_bytes, client)):
+            verify_static_signed_envelope(
+                retained,
+                expected_session_id=outer.session_id,
+                expected_profile=self._policy.profile,
+                expected_network=self._network,
+                expected_sender_key=sender,
+                supported_features=self._policy.features,
+                crypto=self._crypto,
+            )
+        self._crypto.schnorr_verify(
+            bytes.fromhex(acceptance.provider_identity_xonly_key),
+            provider_terms_hash(offered.terms),
+            bytes.fromhex(offered.provider_terms_signature),
+        )
+        self._crypto.schnorr_verify(
+            bytes.fromhex(client),
+            client_acceptance_hash(signed),
+            bytes.fromhex(signed_acceptance.client_acceptance_signature),
+        )
+        return outer, payload, terms
+
+    def _retain_reverse_preimage_evidence(
+        self, document: bytes, *, operation: ReverseOperation, now: int
+    ) -> ReversePreimageEvidenceReceipt:
+        """Commit first authenticated knowledge independently of later admission.
+
+        No inbox/outbox, burn, revision, refund blocking, debt, RPC, or signing
+        mutation occurs. Expiry and an invalid native plan do not erase matching
+        preimage knowledge. Audit time is not proof of timely disclosure. Retained
+        evidence is reauthenticated before returning an immutable old receipt.
+        """
+        self.reverse_operations.check(operation)
+        if type(now) is not int or now < 0:
+            raise LiveSessionStoreError("reverse evidence audit time unsupported")
+        try:
+            with self._write() as connection:
+                outer, payload, _ = self._authenticated_reverse_preimage(connection, document)
+                prior = connection.execute(
+                    "SELECT document,received_at FROM reverse_preimage_evidence WHERE session_id=?",
+                    (outer.session_id,),
+                ).fetchone()
+                if prior is None:
+                    self.reverse_operations.check(operation)
+                    connection.execute(
+                        "INSERT INTO reverse_preimage_evidence VALUES (?,?,?)",
+                        (outer.session_id, document, now),
+                    )
+                    receipt = ReversePreimageEvidenceReceipt(
+                        outer.session_id, outer.message_id, now, replay=False
+                    )
+                else:
+                    retained, known, _ = self._authenticated_reverse_preimage(connection, prior[0])
+                    if (
+                        retained.session_id != outer.session_id
+                        or known.payment_preimage != payload.payment_preimage
+                    ):
+                        raise ValueError("retained reverse evidence differs")  # noqa: TRY301
+                    receipt = ReversePreimageEvidenceReceipt(
+                        retained.session_id, retained.message_id, prior[1], replay=True
+                    )
+        except StaleOwnerError:
+            raise
+        except Exception:  # noqa: BLE001, S110 - sanitized refusal, never log private input
+            pass
+        else:
+            return receipt
+        raise LiveSessionStoreError("reverse preimage evidence refused")
+
+    def _reverse_preimage_evidence(self, session_id: str) -> bytes | None:
+        """Read reauthenticated private knowledge, not a financial permission.
+
+        Missing evidence is unknown. Unsupported or malformed evidence is
+        retained for operator review; ordinary recovery and debt do not query it.
+        No scan, lookup, settlement, payment retry, or native work is scheduled.
+        """
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT document FROM reverse_preimage_evidence WHERE session_id=?",
+                    (session_id,),
+                ).fetchone()
+                if row is None:
+                    return None
+                outer, _, _ = self._authenticated_reverse_preimage(connection, row[0])
+                if outer.session_id != session_id:
+                    raise ValueError("retained reverse evidence names another session")  # noqa: TRY301
+                return bytes(row[0])
+        except StaleOwnerError:
+            raise
+        except Exception:  # noqa: BLE001, S110 - sanitized refusal, never log private input
+            pass
+        raise LiveSessionStoreError("reverse preimage evidence unavailable")
+
     def _admit_reverse_cooperative_proposal(  # noqa: PLR0912, PLR0915 - one authenticated reservation
         self,
         document: bytes,
@@ -3200,11 +3388,11 @@ class LiveSessionStore:
                     blocked,
                     revision,
                     client_seq,
-                    init_bytes,
+                    _init_bytes,
                     accept_bytes,
                     transcript,
                     digest,
-                    offer_bytes,
+                    _offer_bytes,
                     accepted_bytes,
                     state,
                     txid,
@@ -3271,67 +3459,7 @@ class LiveSessionStore:
                         )
                     ):
                         raise LiveSessionStoreError("reverse proposal unavailable")  # noqa: TRY301
-                    initiation = parse_model_json(
-                        HandshakeInit, canonicalize(_canonical_envelope(init_bytes).payload)
-                    )
-                    acceptance = parse_model_json(
-                        HandshakeAcceptPayload,
-                        canonicalize(_canonical_envelope(accept_bytes).payload),
-                    ).accept
-                    offer = _canonical_envelope(offer_bytes)
-                    offered = parse_model_json(TermsOfferPayload, canonicalize(offer.payload))
-                    terms = offered.terms.contract_terms
-                    accepted = _canonical_envelope(accepted_bytes)
-                    signed_acceptance = parse_model_json(
-                        TermsAcceptPayload, canonicalize(accepted.payload)
-                    )
-                    acceptance.validate_against(
-                        initiation, supported_features=self._policy.features
-                    )
-                    checked = check_cooperative_action_context(outer, terms, initiation, acceptance)
-                    signed = signed_acceptance.acceptance
-                    if (
-                        not isinstance(checked, CooperativeClaimPropose)
-                        or terms.profile_id != "ln-to-btc/v1"
-                        or client != initiation.client_session_xonly_key
-                        or provider != acceptance.provider_session_xonly_key
-                        or handshake_hash(initiation, acceptance).hex() != transcript
-                        or offered.terms.handshake_hash != transcript
-                        or contract_hash(terms).hex() != digest
-                        or offered.terms.contract_hash != digest
-                        or offer.contract_hash != digest
-                        or accepted.message_type != "terms_accept"
-                        or accepted.in_reply_to != offer.message_id
-                        or accepted.contract_hash != digest
-                        or signed.contract_hash != digest
-                        or signed.handshake_hash != transcript
-                        or signed.session_id != outer.session_id
-                        or signed.client_session_xonly_key != client
-                        or signed.provider_session_xonly_key != provider
-                        or hashlib.sha256(bytes.fromhex(payload.payment_preimage)).hexdigest()
-                        != terms.invoice_binding.payment_hash
-                    ):
-                        raise LiveSessionStoreError("reverse proposal context differs")  # noqa: TRY301
-                    for retained, sender in ((offer_bytes, provider), (accepted_bytes, client)):
-                        verify_static_signed_envelope(
-                            retained,
-                            expected_session_id=outer.session_id,
-                            expected_profile=self._policy.profile,
-                            expected_network=self._network,
-                            expected_sender_key=sender,
-                            supported_features=self._policy.features,
-                            crypto=self._crypto,
-                        )
-                    self._crypto.schnorr_verify(
-                        bytes.fromhex(acceptance.provider_identity_xonly_key),
-                        provider_terms_hash(offered.terms),
-                        bytes.fromhex(offered.provider_terms_signature),
-                    )
-                    self._crypto.schnorr_verify(
-                        bytes.fromhex(client),
-                        client_acceptance_hash(signed),
-                        bytes.fromhex(signed_acceptance.client_acceptance_signature),
-                    )
+                    _, _, terms = self._authenticated_reverse_preimage(connection, document)
                     # Keep this first anchor even when the transaction later
                     # rolls back. Corrected/new-ID retries cannot renew it.
                     attempt = _ReverseProposalAttempt(
@@ -6299,9 +6427,9 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
     if connection.execute("PRAGMA application_id").fetchone() != (
         APPLICATION_ID,
     ) or version not in (
-        (5, 6, 7, 8, 9, 10, 11, 12, SCHEMA_VERSION)
+        (5, 6, 7, 8, 9, 10, 11, 12, 13, SCHEMA_VERSION)
         if allow_v5
-        else (8, 9, 10, 11, 12, SCHEMA_VERSION)
+        else (8, 9, 10, 11, 12, 13, SCHEMA_VERSION)
     ):
         raise LiveSessionStoreError("live session store version unsupported")
     objects = {
@@ -6319,6 +6447,7 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
         10: SCHEMA_V10,
         11: SCHEMA_V11,
         12: SCHEMA_V12,
+        13: SCHEMA_V13,
         SCHEMA_VERSION: SCHEMA,
     }[version]
     indexes = {
@@ -6328,6 +6457,7 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
         10: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
         11: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
         12: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
+        13: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
         SCHEMA_VERSION: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
     }
     expected = {("table", statement.split()[2]): statement for statement in schema}
@@ -6478,6 +6608,16 @@ def _upgrade_v12(connection: sqlite3.Connection) -> None:
     and no transaction is published or signed by the migration.
     """
     connection.execute(CLAIM_ARBITRATION_SCHEMA)
+
+
+def _upgrade_v13(connection: sqlite3.Connection) -> None:
+    """Add empty knowledge storage, never reclassify any existing swap or debt.
+
+    Missing evidence remains unknown. No backfill, scan, RPC, signing, payment,
+    retry, or conversion of retained knowledge to debt follows this migration.
+    Established acquisition reconciliation of nonce ownership is unchanged.
+    """
+    connection.execute(REVERSE_PREIMAGE_EVIDENCE_SCHEMA)
 
 
 def _check_reverse_transition(

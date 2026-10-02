@@ -75,7 +75,7 @@ absent, partial, old, or restored state grants no key allocation or action
 authority.
 
 `live_session_store.LiveSessionStore` is the **authoritative** handshake
-session store (SQLite `RLS1` v8; v5-v7 require explicit migration and unreleased v1-v4 files are refused unchanged), and the only provider store whose rows may
+session store (SQLite `RLS1` v14; v5-v7 require explicit migration and unreleased v1-v4 files are refused unchanged), and the only provider store whose rows may
 permit exposing an accept or admitting a confirm. It must be created
 explicitly with `LiveSessionStore.provision(...)` and an
 `AuthorityDeclaration`, in which the operator attests that the volume is
@@ -148,7 +148,18 @@ host. The store cannot verify that attestation. Behavior:
    authority. Funding signatures and bytes do not prove publication or current
    chain confirmation. Financial evidence, settlement-before-signing, actual RPC
    transport fencing, and runtime routing still need integration before reverse
-   cooperation can be enabled. No missing record triggers upgrade work or retry.
+    cooperation can be enabled. No missing record triggers upgrade work or retry.
+    Private reverse preimage evidence is stored separately from settlement debt.
+    The first canonical signed client proposal is retained immutably, even if its
+    deadline expired or its native claim plan is invalid. The writer authenticates
+    the accepted context, proposal, terms envelopes, identity-signed provider terms,
+    and client acceptance; it does not independently reverify the handshake's
+    identity signature. Its receipt and audit-only timestamp prove neither payment
+    nor timely disclosure, and grant no signing or settlement authority. Retention
+    commits independently of later admission, without advancing sequences,
+    blocking refunds, allocating a nonce, or writing financial debt. Reads
+    reauthenticate retained evidence. Malformed evidence remains for operator
+    review, but existing debt repayment and unilateral recovery never query it.
 - Absent, partial, foreign, or newer files are refused before any pragma can
   modify them. Malformed provisioning metadata (UUID or attestation) is also
   refused. The inode numbers of the database and the lock file are recorded
@@ -616,7 +627,7 @@ rill-provider provision-store --config provider.json
 rill-provider serve --config provider.json           # until SIGINT/SIGTERM
 ```
 
-A v8, v9, v10, v11, or v12 store upgrades to v13 automatically when `serve` (or any
+A v8, v9, v10, v11, v12, or v13 store upgrades to v14 automatically when `serve` (or any
 command) opens it. v9 adds the `claim_attempts` table, and each `CLAIMING` swap's
 retained claim becomes attempt 0 with an unknown fee and height, which the
 engine validates and observes before any bump. v10 rebuilds `swaps` with the
@@ -637,8 +648,16 @@ table; it does not backfill admission, delay a previously accepted swap's
 unilateral claim, sign, broadcast, or infer work from a missing row. Any
 unfinished future arbitration window is closed on reacquisition without
 restarting its deadline; retained fallback and completed bytes are preserved.
-There is no active cooperative scheduler yet. A binary rollback from v13 is
-not supported.
+v14 adds an **empty** reverse-preimage-evidence table after authoritative
+namespace, custody, and ownership validation. An installation upgrading from v13
+preserves its accepted swaps, existing settlement debt, and completed cooperation
+evidence. Established acquisition behavior still abandons unfinished nonce
+attempts and closes unfinished arbitration windows. Missing evidence remains
+unknown: there is no backfill, scan, RPC, payment retry, debt conversion, or new
+signing permission. Partial schemas refuse without repair; interrupted DDL rolls
+back the table and both version markers. A binary rollback from v14 is not
+supported. Production reverse cooperation remains disabled pending integration
+and acceptance.
 
 On the current version, a *new* BTC-to-LN acceptance can record an `ADMITTED`
 arbitration row only when both retained authenticated handshake halves and the

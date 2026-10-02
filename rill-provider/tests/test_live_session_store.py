@@ -198,8 +198,15 @@ def without_v12_cooperation(connection: sqlite3.Connection) -> None:
 
 def without_v13_arbitration(connection: sqlite3.Connection) -> None:
     """Restore exact v12 (or earlier), only if no arbitration history exists."""
+    without_v14_preimage_evidence(connection)
     assert connection.execute("SELECT count(*) FROM claim_arbitration").fetchone() == (0,)
     connection.execute("DROP TABLE claim_arbitration")
+
+
+def without_v14_preimage_evidence(connection: sqlite3.Connection) -> None:
+    """Restore exact v13 (or earlier), without discarding retained knowledge."""
+    assert connection.execute("SELECT count(*) FROM reverse_preimage_evidence").fetchone() == (0,)
+    connection.execute("DROP TABLE reverse_preimage_evidence")
 
 
 class Harness:
