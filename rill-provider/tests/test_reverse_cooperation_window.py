@@ -105,6 +105,138 @@ def test_monotonic_clock_regression_is_terminal_not_extra_elapsed_time() -> None
     assert not attempt.time_allowed()
 
 
+@pytest.mark.parametrize("origin", [100.0, -100.0])
+def test_complete_fresh_evidence_uses_original_clock_without_renewal(origin: float) -> None:
+    clock = Clock(monotonic=origin)
+    attempt = _window(clock)
+    deadline = attempt.monotonic_deadline
+    clock.advance(0.999)
+    attempt.check_evidence_interval(started_at=origin, completed_at=clock.monotonic)
+    assert attempt.monotonic_deadline == deadline
+    assert attempt.time_allowed()
+
+
+@pytest.mark.parametrize(
+    ("started", "completed"),
+    [
+        (99.0, 100.0),
+        (99.001, 100.001),
+        (100.001, 100.001),
+        (100.0, 99.9),
+        (True, 100.0),
+        (100.0, True),
+        (float("nan"), 100.0),
+        (100.0, float("inf")),
+        (10**1000, 100.0),
+        ("100", 100.0),
+    ],
+    ids=[
+        "due",
+        "incomplete",
+        "future",
+        "reversed",
+        "bool-start",
+        "bool-end",
+        "nan",
+        "infinite",
+        "huge",
+        "text",
+    ],
+)
+def test_invalid_evidence_interval_is_terminal_even_after_corrected_samples(
+    started: object, completed: object
+) -> None:
+    clock = Clock()
+    attempt = _window(clock)
+    with pytest.raises(TimeoutError, match="reverse evidence interval closed"):
+        attempt.check_evidence_interval(started_at=started, completed_at=completed)
+    with pytest.raises(TimeoutError):
+        attempt.check_evidence_interval(started_at=100.0, completed_at=100.0)
+    assert not attempt.time_allowed()
+    assert attempt.monotonic_deadline == 130.0
+
+
+@pytest.mark.parametrize("terminal", ["time", "height", "abandon", "regression"])
+def test_fresh_evidence_never_revives_terminal_cooperation(terminal: str) -> None:
+    clock = Clock()
+    attempt = _window(clock)
+    if terminal == "time":
+        clock.advance(30.0)
+    elif terminal == "height":
+        with pytest.raises(TimeoutError):
+            attempt.check(tip_height=111)
+    elif terminal == "abandon":
+        attempt.abandon()
+    else:
+        clock.monotonic = 90.0
+    with pytest.raises(TimeoutError):
+        attempt.check_evidence_interval(started_at=clock.monotonic, completed_at=clock.monotonic)
+    assert not attempt.time_allowed()
+
+
+def test_evidence_check_samples_after_a_delayed_wall_clock() -> None:
+    clock = Clock()
+    delay = False
+
+    def wall() -> float:
+        if delay:
+            clock.monotonic = 101.0
+        return clock.wall
+
+    attempt = ReverseCooperationWindow(
+        signed_deadline_at=1030,
+        signed_deadline_height=110,
+        claim_height_cutoff=110,
+        wall_clock=wall,
+        monotonic_clock=clock.steady,
+    )
+    delay = True
+    with pytest.raises(TimeoutError):
+        attempt.check_evidence_interval(started_at=100.0, completed_at=100.5)
+    assert not attempt.time_allowed()
+
+
+def test_evidence_age_starts_before_acquisition_not_at_completion() -> None:
+    clock = Clock()
+    attempt = _window(clock)
+    clock.advance(1.0)
+    with pytest.raises(TimeoutError):
+        attempt.check_evidence_interval(started_at=100.0, completed_at=100.8)
+    assert not attempt.time_allowed()
+
+
+@pytest.mark.parametrize(
+    "fault", ["wall raises", "monotonic raises", "wall malformed", "monotonic malformed"]
+)
+def test_captured_clock_failure_is_sanitized_and_permanently_terminal(fault: str) -> None:
+    clock = Clock()
+    broken = False
+
+    def sample(name: str) -> float:
+        if broken and fault.startswith(name):
+            if fault.endswith("raises"):
+                raise RuntimeError("private clock details")
+            return "not a clock sample"
+        return clock.wall if name == "wall" else clock.monotonic
+
+    attempt = ReverseCooperationWindow(
+        signed_deadline_at=1030,
+        signed_deadline_height=110,
+        claim_height_cutoff=110,
+        wall_clock=lambda: sample("wall"),
+        monotonic_clock=lambda: sample("monotonic"),
+    )
+    broken = True
+    with pytest.raises(TimeoutError, match="reverse evidence interval closed") as error:
+        attempt.check_evidence_interval(started_at=100.0, completed_at=100.0)
+    assert "private" not in str(error.value)
+    broken = False
+    with pytest.raises(TimeoutError):
+        attempt.check_evidence_interval(started_at=100.0, completed_at=100.0)
+    assert attempt.monotonic_deadline == 130.0
+    assert not attempt.time_allowed()
+
+
 @pytest.mark.parametrize("height", [111, -1, True])
 def test_observed_height_violation_is_terminal_even_after_height_retreat(height: int) -> None:
     clock = Clock()

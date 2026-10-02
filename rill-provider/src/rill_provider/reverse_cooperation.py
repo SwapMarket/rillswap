@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+REVERSE_EVIDENCE_MAX_AGE_SECONDS = 1.0
+
 
 class ReverseCooperationWindow:
     """Bound work after fresh authenticated admission, never authorize admission.
@@ -102,3 +104,32 @@ class ReverseCooperationWindow:
                 self._stopped = True
             if not self._time_allowed():
                 raise TimeoutError("reverse cooperation window closed")
+
+    def check_evidence_interval(self, *, started_at: float, completed_at: float) -> None:
+        """Require a complete acquisition interval still younger than one second.
+
+        Samples must use this window's original monotonic clock domain. The
+        window samples that same clock itself, so a caller cannot substitute the
+        checking clock. Numeric samples cannot prove their clock-domain origin.
+        This validates timing only, not whether observations are authentic,
+        atomic, unspent, paid, or authorized.
+        Invalid, incomplete, stale, or expired intervals abandon the window.
+        Neither an interval nor a later corrected sample renews its deadline.
+        """
+        with self._lock:
+            try:
+                allowed = (
+                    type(started_at) in (int, float)
+                    and type(completed_at) in (int, float)
+                    and math.isfinite(started_at)
+                    and math.isfinite(completed_at)
+                    and self._time_allowed()
+                    and started_at <= completed_at
+                    and completed_at <= self._monotonic_high_water
+                    and self._monotonic_high_water < started_at + REVERSE_EVIDENCE_MAX_AGE_SECONDS
+                )
+            except Exception:  # noqa: BLE001 - invalid timing cannot grant authority
+                allowed = False
+            if not allowed:
+                self._stopped = True
+                raise TimeoutError("reverse evidence interval closed")

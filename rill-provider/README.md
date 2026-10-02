@@ -133,9 +133,12 @@ host. The store cannot verify that attestation. Behavior:
    The preparatory `ReverseCooperationWindow` freezes a maximum 30-second
    monotonic deadline intersecting the signed proposal deadline. Time expiry is
    exclusive, height equality at the signed refund margin is allowed, and any
-   observed expiry, abandonment, or monotonic-clock regression is terminal.
-   Wall-clock rollback cannot extend its frozen monotonic bound. The window
-   provides timing checks only. Internal reverse proposal reservation now
+    observed expiry, abandonment, or monotonic-clock regression is terminal.
+    Wall-clock rollback cannot extend its frozen monotonic bound. The window
+    also checks a complete evidence-acquisition interval against its own original
+    monotonic clock, with an exclusive one-second freshness bound. Invalid,
+    incomplete, stale, or expired intervals abandon it permanently. These are
+    timing checks only, not financial admission. Internal reverse proposal reservation now
    authenticates the exact client proposal and retained negotiation signatures,
    associates the provider-signed funding message with the exact transaction,
    and freezes a one-shot attempt under the active owner gate. The atomic

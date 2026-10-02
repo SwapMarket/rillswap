@@ -205,6 +205,20 @@ signing share this window. Recheck before native signing and before granting
 new disclosure authority. Late settlement does not reopen cooperation; exact
 already-committed response delivery does not authorize another signature.
 
+First-release proposal-derived settlement debt is restricted to a fresh,
+original-owner negotiation with an exact valid burned proposal reservation and
+a still-live original window. The swap must be `FUNDED`, with no potentially
+issued refund, positive confirmed-unspent Own-Core funding evidence, and safely
+accepted exact-amount original Own-LND invoice evidence. The complete evidence
+acquisition interval must remain strictly younger than one second at admission,
+using the window's original monotonic clock domain. A valid interval proves only
+timing, not authentic observations, atomic backend state, or financial authority.
+Invalid, incomplete, stale, or expired intervals abandon cooperation without
+renewal. Historical, restarted, expired, and invalid-plan proposals can retain
+preimage knowledge but do not create new proposal-derived debt under this
+first-release policy. Existing witness-derived debt and independent owed-debt
+repayment remain unchanged.
+
 Live height authorization permits
 `current_height <= proposal.deadline_height <= refund_lock_height - claim_confirmation_blocks`.
 Equality at the cutoff is allowed; time expiry is exclusive. Height retreat
