@@ -30,9 +30,10 @@ class ReverseOperation:
     timeout scopes restore cancellation counts, which check() cannot detect.
     """
 
-    def __init__(self, store: LiveSessionStore) -> None:
+    def __init__(self, store: LiveSessionStore, *, gate: ReverseOperations | None = None) -> None:
         """Create a fresh token inside the acquired owner's operation gate."""
         self._store = store
+        self._gate = gate
         self._task = asyncio.current_task()
         self._initial_cancellations = 0 if self._task is None else self._task.cancelling()
         self._stopped = threading.Event()
@@ -51,6 +52,22 @@ class ReverseOperation:
         if self._task is not None and self._task.cancelling() > self._initial_cancellations:
             self._stopped.set()
         self._check_execution()
+
+    def submission_allowed(self) -> bool:
+        """Worker-safe local transport checkpoint, not financial or signing authority.
+
+        Capture this exact operation before queuing a guarded adapter call.
+        Workers read only stop/owner/membership facts, never SQLite, native
+        handles, or the event loop. A true result cannot atomically prevent
+        cancellation immediately afterward or stop an already started RPC.
+        """
+        return (
+            not self._stopped.is_set()
+            and self._store.owner_is_open
+            and self._gate is not None
+            and self._store._reverse_operations is self._gate  # noqa: SLF001 - local owner gate identity
+            and self._gate._active_operation is self  # noqa: SLF001 - gate owns token membership
+        )
 
     def abandon(self) -> None:
         """Invalidate a caught non-worker timeout; never reactivate this token."""
@@ -128,7 +145,7 @@ class ReverseOperations:
             raise LiveSessionStoreError("reverse operation already active")
         async with self._lock:
             with self._store.retain_owner():
-                operation = ReverseOperation(self._store)
+                operation = ReverseOperation(self._store, gate=self)
                 self._active_task = asyncio.current_task()
                 self._active_operation = operation
                 try:

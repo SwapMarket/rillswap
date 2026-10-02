@@ -100,11 +100,17 @@ host. The store cannot verify that attestation. Behavior:
    physical exclusion until actual completion; token cancellation does not
    permanently disable subsequent fresh unilateral recovery. Authoritative
    state must be reloaded after acquiring the gate, and `check()` must precede
-   synchronous economic effects. A timeout around a non-worker await must escape
+    synchronous economic effects. A timeout around a non-worker await must escape
    the operation context, or its handler must explicitly call `abandon()` before
    continuing. Timeout scopes can restore cancellation counts, so checkpoints
-   cannot infer those caught timeouts. Reverse advancement uses this boundary,
-   reloads its row after acquiring it, and retains every Core/LND worker through
+    cannot infer those caught timeouts.
+    The captured token's `submission_allowed()` provides a worker-safe Boolean
+    transport checkpoint using only local owner openness, stop state, and exact
+    active-gate membership. Observed cancellation or drainage stops it; an old,
+    foreign, or bare token never regains submission permission. It grants no
+    financial or signing authority and cannot atomically revoke a started RPC.
+    Reverse advancement uses this boundary, reloads its row after acquiring it,
+    and retains every Core/LND worker through
    actual completion before releasing physical exclusion. Queued snapshots
    cannot authorize a second cancellation after terminal commitment or skip a
    newly recorded settlement debt. Reverse hold-invoice creation, decoding,

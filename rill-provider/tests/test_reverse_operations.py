@@ -13,6 +13,7 @@ import pytest
 from test_live_session_store import Harness
 
 from rill_provider.live_session_store import LiveSessionStoreError, StaleOwnerError
+from rill_provider.reverse_operations import ReverseOperation, ReverseOperations
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -21,6 +22,48 @@ if TYPE_CHECKING:
 @pytest.fixture
 def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
     return Harness(tmp_path, monkeypatch)
+
+
+def test_transport_predicate_is_worker_safe_and_expires_with_exact_gate_membership(
+    harness: Harness,
+) -> None:
+    harness.provision()
+    with harness.acquire() as store:
+
+        async def exercise() -> None:
+            async with store.reverse_operations.operation() as operation:
+                predicate = operation.submission_allowed
+                assert predicate() is True
+                assert await operation.worker(predicate) is True
+                bare = ReverseOperation(store)
+                assert bare.submission_allowed() is False
+            assert predicate() is False
+            async with store.reverse_operations.operation() as fresh:
+                assert fresh.submission_allowed() is True
+                assert predicate() is False
+
+        asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("stop", ["abandon", "close", "foreign gate"])
+def test_stopped_closed_or_foreign_gate_never_grants_transport_submission(
+    harness: Harness, stop: str
+) -> None:
+    harness.provision()
+    with harness.acquire() as store:
+
+        async def exercise() -> None:
+            gate = ReverseOperations(store) if stop == "foreign gate" else store.reverse_operations
+            async with gate.operation() as operation:
+                if stop == "abandon":
+                    operation.abandon()
+                elif stop == "close":
+                    store.close()
+                assert operation.submission_allowed() is False
+                # A plain executor read needs no event loop, SQL, or native context.
+                assert await asyncio.to_thread(operation.submission_allowed) is False
+
+        asyncio.run(exercise())
 
 
 @pytest.mark.parametrize("cancellation", ["caller", "global"])
@@ -90,7 +133,9 @@ def test_actual_worker_completion_keeps_closed_owner_pinned_through_repeated_can
         asyncio.run(exercise())
 
 
-def test_token_is_task_bound_stopped_after_caught_cancel_and_not_reusable(harness: Harness) -> None:
+def test_token_is_task_bound_stopped_after_caught_cancel_and_not_reusable(  # noqa: PLR0915 - cancellation and physical drainage lifecycle
+    harness: Harness,
+) -> None:
     harness.provision()
     with harness.acquire() as store:
 
@@ -98,6 +143,7 @@ def test_token_is_task_bound_stopped_after_caught_cancel_and_not_reusable(harnes
             calls: list[str] = []
             entered, release = threading.Event(), threading.Event()
             tokens = []
+            cancellation_handled = asyncio.Event()
 
             def rpc() -> None:
                 entered.set()
@@ -118,19 +164,25 @@ def test_token_is_task_bound_stopped_after_caught_cancel_and_not_reusable(harnes
                             operation.check()
                         with pytest.raises(LiveSessionStoreError, match="stopped"):
                             await operation.worker(lambda: calls.append("after canceled worker"))
+                        cancellation_handled.set()
 
             running = asyncio.create_task(call())
             try:
                 assert await asyncio.to_thread(entered.wait, 1)
                 running.cancel()
-                await asyncio.sleep(0)
+                await cancellation_handled.wait()
                 assert not running.done()
+                assert store.owner_is_open
+                assert store.reverse_operations._active_operation is tokens[0]  # noqa: SLF001 - active drainage
+                assert await asyncio.to_thread(tokens[0].submission_allowed) is False
                 release.set()
                 await running  # Caller deliberately caught cancellation; drainage still completed.
                 assert not calls
                 with pytest.raises(LiveSessionStoreError):
                     tokens[0].check()
                 async with store.reverse_operations.operation() as operation:
+                    assert operation.submission_allowed() is True
+                    assert tokens[0].submission_allowed() is False
                     assert store.reserve(harness.init).revision == 0  # Renewed authoritative check.
                     await operation.worker(lambda: calls.append("fresh operation"))
                 assert calls == ["fresh operation"]
