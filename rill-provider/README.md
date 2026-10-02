@@ -580,6 +580,15 @@ advances each swap one step per tick:
 
 Cooperative MuSig2 claims are not negotiated yet.
 
+`LndHoldInvoices.settle` accepts optional transport guards: an absolute
+monotonic `deadline` and a repeatable, nonconsuming `submission_allowed`
+predicate returning exactly `True`. Guarded calls charge setup against a fixed
+ten-second budget capped by that deadline, then check again before RPC dispatch.
+These guards confer no financial or signing authority, do not atomically exclude
+concurrent revocation, and cannot stop an RPC already started. Late RPC results
+retain their meaning without retrying. Existing unguarded debt repayment keeps
+its post-connect budget. No runtime caller uses the new guards yet.
+
 A retained matching preimage in `FUNDED` or `REFUNDING` means settlement is
 owed, not that LND settlement succeeded. Restart retries that obligation
 without needing Core or rediscovering a disappeared witness. Under serialized

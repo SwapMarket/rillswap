@@ -9,6 +9,7 @@ Errors never carry invoice, preimage, or credential material.
 
 from __future__ import annotations
 
+import math
 import time
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -31,11 +32,11 @@ from rill_provider.lnd_payment_observation import (
     LndUnavailableError,
     _read_file,
 )
-from rill_provider.lnd_payment_send import _Calls
+from rill_provider.lnd_payment_send import _Calls, _check_submission_authority
 
 if TYPE_CHECKING:
     import os
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from rill_core.wire.types import NetworkIdentity
 
@@ -168,15 +169,51 @@ class LndHoldInvoices:
             parts.append(HeldHtlc(amount_msat=amount, expiry_height=expiry))
         return HoldInvoiceStatus(state=state, htlcs=tuple(parts))
 
-    def settle(self, preimage: str) -> None:
-        """Settle the hold invoice whose hash is SHA256 of ``preimage``."""
+    def settle(
+        self,
+        preimage: str,
+        *,
+        deadline: float | None = None,
+        submission_allowed: Callable[[], bool] | None = None,
+    ) -> None:
+        """Settle the hold invoice whose hash is SHA256 of ``preimage``.
+
+        Optional guards cap dispatch with an absolute monotonic deadline and
+        a repeatable, nonconsuming predicate that must return exactly True.
+        Guarded calls charge setup against a fixed ten-second budget. They
+        grant no financial authority and cannot terminate an in-flight RPC
+        or atomically exclude concurrent revocation. Late results retain
+        their meaning, without retrying or renewing caller authority.
+        Omitted guards preserve the existing post-connect call budget.
+        """
         request = invoices_pb2.SettleInvoiceMsg(preimage=_hash_bytes(preimage))
+        if deadline is None and submission_allowed is None:
+            with self._connect() as calls:
+                calls.unary(
+                    request=request,
+                    method=SETTLE_METHOD,
+                    response_type=invoices_pb2.SettleInvoiceResp,
+                    deadline=_deadline(),
+                )
+            return
+        if deadline is not None:
+            try:
+                valid = type(deadline) in (int, float) and math.isfinite(deadline)
+            except OverflowError:
+                valid = False
+            if not valid:
+                raise LndUnavailableError("LND settlement submission authority invalid")
+        call_deadline = _deadline()
+        if deadline is not None:
+            call_deadline = min(call_deadline, deadline)
+        _check_submission_authority(call_deadline, submission_allowed)
         with self._connect() as calls:
             calls.unary(
                 request=request,
                 method=SETTLE_METHOD,
                 response_type=invoices_pb2.SettleInvoiceResp,
-                deadline=_deadline(),
+                deadline=call_deadline,
+                submission_allowed=submission_allowed,
             )
 
     def cancel(self, payment_hash: str) -> None:
