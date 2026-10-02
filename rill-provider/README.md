@@ -600,6 +600,25 @@ concurrent revocation, and cannot stop an RPC already started. Late RPC results
 retain their meaning without retrying. Existing unguarded debt repayment keeps
 its post-connect budget. No runtime caller uses the new guards yet.
 
+`LndHoldInvoices.observe_bound_invoice` checks an original, previously
+signature-validated invoice binding supplied from authenticated terms. One
+credential snapshot and channel perform GetInfo, LookupInvoiceV2, then GetInfo
+again within a fixed pre-connect budget. Both node identities and Bitcoin network
+labels must match the original payee and configured network; the returned invoice
+hash, exact ASCII BOLT11 digest, amount, and timing must match the binding.
+The configured invoices credential additionally needs `info:read` for this new
+method, with no fallback or startup change. Ordinary lookup and owed repayment
+remain unchanged.
+
+The immutable result contains non-atomic Own-LND assertions and the last reported
+tip, not current state, an original process identity, exclusive invoice custody,
+genesis, or a signet challenge. Observed tip rollback and same-height
+reorganization refuse the batch; tip advance proves no ancestry. The caller must
+measure the complete observation interval and independently establish freshness,
+Own-Core chain evidence, economic eligibility, and authority before any effect.
+A late final response can preserve knowledge but never renew authority. No live
+financial or signing consumer uses this API yet.
+
 A retained matching preimage in `FUNDED` or `REFUNDING` means settlement is
 owed, not that LND settlement succeeded. Restart retries that obligation
 without needing Core or rediscovering a disappeared witness. Under serialized

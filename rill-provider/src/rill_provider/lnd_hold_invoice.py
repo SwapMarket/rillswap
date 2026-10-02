@@ -9,6 +9,7 @@ Errors never carry invoice, preimage, or credential material.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import time
 from contextlib import contextmanager, suppress
@@ -18,7 +19,8 @@ from typing import TYPE_CHECKING, Literal
 
 import grpc
 from rill_core.errors import ValidationError
-from rill_core.networks import backend_names
+from rill_core.networks import backend_names, invoice_matches_network
+from rill_core.wire.messages import InvoiceBinding
 
 from rill_provider._lnd_proto import lightning_pb2
 from rill_provider._lnd_proto.invoicesrpc import invoices_pb2
@@ -30,9 +32,10 @@ from rill_provider.lnd_payment_observation import (
     LndObservationError,
     LndProtocolError,
     LndUnavailableError,
+    _info_snapshot,
     _read_file,
 )
-from rill_provider.lnd_payment_send import _Calls, _check_submission_authority
+from rill_provider.lnd_payment_send import INFO_METHOD, _Calls, _check_submission_authority
 
 if TYPE_CHECKING:
     import os
@@ -85,6 +88,19 @@ class HoldInvoiceStatus:
         return min((part.expiry_height for part in self.htlcs), default=None)
 
 
+@dataclass(frozen=True, slots=True)
+class BoundHoldInvoiceObservation:
+    """Non-atomic Own-LND assertions, never financial or signing authority."""
+
+    payment_hash: str
+    bolt11_sha256: str
+    node_pubkey: str
+    network: NetworkIdentity
+    status: HoldInvoiceStatus
+    last_lnd_height: int
+    last_lnd_block_hash: str
+
+
 class LndHoldInvoices:
     """Loopback hold invoice management with a dedicated invoices macaroon."""
 
@@ -101,10 +117,12 @@ class LndHoldInvoices:
         if host not in ("127.0.0.1", "::1") or type(port) is not int or not 1 <= port <= MAX_PORT:
             raise ValueError("LND endpoint must be a numeric loopback host and port")
         try:
-            backend_names(network)
+            names = backend_names(network)
         except ValidationError:
             raise ValueError("LND hold invoices require a supported network identity") from None
         self._target = f"[{host}]:{port}" if host == "::1" else f"{host}:{port}"
+        self._network = network
+        self._lnd_network = names.lnd_network
         self._certificate = Path(tls_certificate_path)
         self._macaroon = Path(macaroon_path)
 
@@ -156,18 +174,72 @@ class LndHoldInvoices:
                 response_type=lightning_pb2.Invoice,
                 deadline=_deadline(),
             )
-        state = _STATES.get(int(invoice.state))
-        if state is None:
-            raise LndProtocolError("LND reported an unknown invoice state")
-        parts = []
-        for htlc in invoice.htlcs:
-            if int(htlc.state) != lightning_pb2.ACCEPTED:
-                continue
-            amount, expiry = int(htlc.amt_msat), int(htlc.expiry_height)
-            if amount <= 0 or expiry <= 0:
-                raise LndProtocolError("LND reported an invalid accepted HTLC")
-            parts.append(HeldHtlc(amount_msat=amount, expiry_height=expiry))
-        return HoldInvoiceStatus(state=state, htlcs=tuple(parts))
+        return _invoice_status(invoice)
+
+    def observe_bound_invoice(
+        self,
+        expected: InvoiceBinding,
+        *,
+        deadline: float | None = None,
+        submission_allowed: Callable[[], bool] | None = None,
+    ) -> BoundHoldInvoiceObservation:
+        """Observe an original invoice between two same-channel identity checks.
+
+        The caller supplies a previously signature-validated invoice binding
+        from authenticated original terms, and must measure the full observation
+        interval and independently assess freshness and economic eligibility.
+        A typed binding alone proves no provenance. The configured invoices
+        credential also needs info:read; there is no credential fallback.
+
+        These three separate RPCs attest neither atomic invoice state, exclusive
+        custody, original process identity, nor genesis or signet challenge.
+        The last reported tip is not necessarily current or an ancestor of
+        subsequent tips. Observed rollback or same-height reorganization refuses
+        the batch. Late final responses retain knowledge, not renewed authority.
+        No settlement, retry, nonce, or store mutation occurs.
+        """
+        if not isinstance(expected, InvoiceBinding):
+            raise LndProtocolError("LND original invoice binding unsupported")
+        call_deadline = _bounded_deadline(deadline)
+        _check_submission_authority(call_deadline, submission_allowed)
+        key = bytes.fromhex(expected.payee_compressed_pubkey)
+        with self._connect() as calls:
+            first_info = calls.unary(
+                INFO_METHOD,
+                lightning_pb2.GetInfoRequest(),
+                lightning_pb2.GetInfoResponse,
+                call_deadline,
+                submission_allowed=submission_allowed,
+            )
+            first_height, first_hash = _bound_tip(first_info, key, self._lnd_network)
+            invoice = calls.unary(
+                LOOKUP_METHOD,
+                invoices_pb2.LookupInvoiceMsg(payment_hash=bytes.fromhex(expected.payment_hash)),
+                lightning_pb2.Invoice,
+                call_deadline,
+                submission_allowed=submission_allowed,
+            )
+            _check_bound_invoice(invoice, expected, self._network)
+            status = _invoice_status(invoice)
+            last_info = calls.unary(
+                INFO_METHOD,
+                lightning_pb2.GetInfoRequest(),
+                lightning_pb2.GetInfoResponse,
+                call_deadline,
+                submission_allowed=submission_allowed,
+            )
+            last_height, last_hash = _bound_tip(last_info, key, self._lnd_network)
+        if last_height < first_height or (last_height == first_height and last_hash != first_hash):
+            raise LndProtocolError("LND invoice observation tip changed inconsistently")
+        return BoundHoldInvoiceObservation(
+            expected.payment_hash,
+            expected.bolt11_sha256,
+            expected.payee_compressed_pubkey,
+            self._network,
+            status,
+            last_height,
+            last_hash,
+        )
 
     def settle(
         self,
@@ -196,16 +268,7 @@ class LndHoldInvoices:
                     deadline=_deadline(),
                 )
             return
-        if deadline is not None:
-            try:
-                valid = type(deadline) in (int, float) and math.isfinite(deadline)
-            except OverflowError:
-                valid = False
-            if not valid:
-                raise LndUnavailableError("LND settlement submission authority invalid")
-        call_deadline = _deadline()
-        if deadline is not None:
-            call_deadline = min(call_deadline, deadline)
+        call_deadline = _bounded_deadline(deadline)
         _check_submission_authority(call_deadline, submission_allowed)
         with self._connect() as calls:
             calls.unary(
@@ -252,6 +315,70 @@ class LndHoldInvoices:
                     channel.close()
 
 
+def _invoice_status(invoice: lightning_pb2.Invoice) -> HoldInvoiceStatus:
+    """Preserve the ordinary lookup's state and accepted-part interpretation."""
+    state = _STATES.get(int(invoice.state))
+    if state is None:
+        raise LndProtocolError("LND reported an unknown invoice state")
+    parts = []
+    for htlc in invoice.htlcs:
+        if int(htlc.state) != lightning_pb2.ACCEPTED:
+            continue
+        amount, expiry = int(htlc.amt_msat), int(htlc.expiry_height)
+        if amount <= 0 or expiry <= 0:
+            raise LndProtocolError("LND reported an invalid accepted HTLC")
+        parts.append(HeldHtlc(amount_msat=amount, expiry_height=expiry))
+    return HoldInvoiceStatus(state=state, htlcs=tuple(parts))
+
+
+def _bound_tip(info: lightning_pb2.GetInfoResponse, key: bytes, network: str) -> tuple[int, str]:
+    snapshot = _info_snapshot(info, key, network)
+    if not snapshot.synced_to_chain or snapshot.block_height <= 0:
+        raise LndProtocolError("LND invoice observation requires a synchronized tip")
+    try:
+        valid_hash = _hash_bytes(info.block_hash).hex() == info.block_hash
+    except ValueError:
+        valid_hash = False
+    if not valid_hash:
+        raise LndProtocolError("LND invoice observation block hash unsupported")
+    return snapshot.block_height, info.block_hash
+
+
+def _check_bound_invoice(
+    invoice: lightning_pb2.Invoice, expected: InvoiceBinding, network: NetworkIdentity
+) -> None:
+    if not isinstance(invoice, lightning_pb2.Invoice):
+        raise LndProtocolError("LND invoice observation response unsupported")
+    try:
+        digest = hashlib.sha256(invoice.payment_request.encode("ascii")).hexdigest()
+    except UnicodeEncodeError:
+        raise LndProtocolError("LND invoice observation encoding unsupported") from None
+    if not (
+        invoice.r_hash == bytes.fromhex(expected.payment_hash)
+        and digest == expected.bolt11_sha256
+        and invoice_matches_network(invoice.payment_request, network)
+        and invoice.value_msat == int(expected.amount_msat)
+        and invoice.creation_date == expected.created_at
+        and invoice.expiry > 0
+        and invoice.creation_date + invoice.expiry == expected.expires_at
+        and invoice.cltv_expiry == expected.min_final_cltv_delta
+    ):
+        raise LndProtocolError("LND invoice observation differs from original binding")
+
+
+def _bounded_deadline(deadline: float | None) -> float:
+    """Validate and freeze the shared guarded hold-call budget before setup."""
+    if deadline is not None:
+        try:
+            valid = type(deadline) in (int, float) and math.isfinite(deadline)
+        except OverflowError:
+            valid = False
+        if not valid:
+            raise LndUnavailableError("LND settlement submission authority invalid")
+    local = _deadline()
+    return local if deadline is None else min(local, deadline)
+
+
 def _hash_bytes(value: str) -> bytes:
     if type(value) is not str or len(value) != 2 * HASH_BYTES:
         raise ValueError("expected 32 bytes of hex")
@@ -266,6 +393,7 @@ def _deadline() -> float:
 
 
 __all__ = [
+    "BoundHoldInvoiceObservation",
     "HeldHtlc",
     "HoldInvoiceStatus",
     "LndHoldInvoices",

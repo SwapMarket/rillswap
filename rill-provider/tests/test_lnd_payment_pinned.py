@@ -622,6 +622,8 @@ import grpc
 from rill_core.wire.types import NetworkIdentity
 from rill_provider._lnd_proto import lightning_pb2
 from rill_provider._lnd_proto.invoicesrpc import invoices_pb2
+from rill_provider.lnd_hold_invoice import LndHoldInvoices
+from rill_provider.lnd_invoice_decode import LndInvoiceDecoder
 from rill_provider.lnd_invoice_observation import LndInvoiceObserver
 import walletunlocker_pb2 as unlock
 import stateservice_pb2 as state
@@ -677,6 +679,24 @@ private = Path('/tmp/rill-positive-invoice.macaroon')
 fd = os.open(private, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
 with os.fdopen(fd, 'wb') as output:
     output.write(read)
+combined = bytes.fromhex(bake(lightning_pb2.BakeMacaroonRequest(
+    permissions=[
+        lightning_pb2.MacaroonPermission(entity='invoices', action='read'),
+        lightning_pb2.MacaroonPermission(entity='invoices', action='write'),
+        lightning_pb2.MacaroonPermission(entity='info', action='read')],
+    root_key_id=0, allow_external_permissions=False),
+    metadata=metadata(admin), timeout=3).macaroon)
+decoded = bytes.fromhex(bake(lightning_pb2.BakeMacaroonRequest(
+    permissions=[lightning_pb2.MacaroonPermission(entity='offchain', action='read')],
+    root_key_id=0, allow_external_permissions=False),
+    metadata=metadata(admin), timeout=3).macaroon)
+bound_private = Path('/tmp/rill-bound-invoice.macaroon')
+decode_private = Path('/tmp/rill-bound-decoder.macaroon')
+for destination, credential in ((bound_private, combined), (decode_private, decoded)):
+    assert 0 < len(credential) <= 4096
+    fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'wb') as output:
+        output.write(credential)
 network = NetworkIdentity.model_validate(json.loads(
     Path('/work/provider/tests/fixtures/initial-btc-to-ln-v1.json').read_text()
 )['contract_terms']['network_identity'])
@@ -687,7 +707,8 @@ selected = secrets.token_bytes(32)
 print('PHASE: open_add_once', file=sys.stderr)
 add = unary(channel, '/invoicesrpc.Invoices/AddHoldInvoice',
     invoices_pb2.AddHoldInvoiceRequest, invoices_pb2.AddHoldInvoiceResp)
-result = add(invoices_pb2.AddHoldInvoiceRequest(hash=selected, value_msat=1000),
+result = add(invoices_pb2.AddHoldInvoiceRequest(
+    hash=selected, value_msat=1000, expiry=600, cltv_expiry=40),
     metadata=metadata(admin), timeout=20)
 assert result.payment_request
 cancel = unary(channel, '/invoicesrpc.Invoices/CancelInvoice',
@@ -698,6 +719,24 @@ try:
     assert opened.payment_hash == selected.hex()
     assert opened.state == 'OPEN' and opened.htlcs == ()
     assert opened.value_msat == 1000 and opened.amount_paid_msat == 0
+    decoder = LndInvoiceDecoder(host='127.0.0.1', port=10009,
+        tls_certificate_path='/work/public/tls.cert', macaroon_path=decode_private,
+        network=network)
+    binding = decoder.decode(result.payment_request)
+    assert binding.payment_hash == selected.hex() and binding.amount_msat == '1000'
+    assert binding.payee_compressed_pubkey == reported.identity_pubkey
+    assert binding.expires_at - binding.created_at == 600
+    assert binding.min_final_cltv_delta == 40
+    held = LndHoldInvoices(host='127.0.0.1', port=10009,
+        tls_certificate_path='/work/public/tls.cert', macaroon_path=bound_private,
+        network=network)
+    bound = held.observe_bound_invoice(binding, deadline=time.monotonic() + 5)
+    assert bound.payment_hash == selected.hex()
+    assert bound.bolt11_sha256 == binding.bolt11_sha256
+    assert bound.node_pubkey == reported.identity_pubkey and bound.network == network
+    assert bound.status.state == 'OPEN' and bound.status.htlcs == ()
+    assert bound.status.held_msat == 0
+    assert bound.last_lnd_height == 1 and bound.last_lnd_block_hash == reported.block_hash
 finally:
     print('PHASE: open_cancel', file=sys.stderr)
     cancel(invoices_pb2.CancelInvoiceMsg(payment_hash=selected),
@@ -706,6 +745,8 @@ closed = observer.lookup(selected, deadline_seconds=5)
 assert closed.state == 'CANCELED' and closed.htlcs == ()
 assert closed.payment_hash == selected.hex()
 private.unlink()
+bound_private.unlink()
+decode_private.unlink()
 channel.close()
 print('Pinned LND unfunded invoice OPEN and CANCELED observations passed')
 """
