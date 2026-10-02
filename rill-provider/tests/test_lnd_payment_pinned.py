@@ -1054,6 +1054,7 @@ HELD_HTLC_PAYMENT = (
     + """
 # Test-only SendPaymentV2 creates the incoming evidence; it is not a
 # production pay_with_deadline implementation or funding permission.
+settle_scenario = globals().get('SETTLE_BOUND_SCENARIO', False)
 assert views[0][0].chan_id == views[1][0].chan_id != 0
 channel_id = views[0][0].chan_id
 amount_msat = 1_000_000
@@ -1188,7 +1189,8 @@ with tempfile.TemporaryDirectory(prefix='rill-hold-reads-', dir='/tmp') as crede
         raise AssertionError('raw pinned LND invoice state not observed')
     preimage = secrets.token_bytes(32)
     selected_hash = hashlib.sha256(preimage).digest()
-    del preimage  # no settlement call and no preimage ever sent
+    if not settle_scenario:
+        del preimage  # no settlement call and no preimage ever sent
     print('PHASE: hold_create_once', file=sys.stderr)
     created = unary(b, '/invoicesrpc.Invoices/AddHoldInvoice',
         inv.AddHoldInvoiceRequest, inv.AddHoldInvoiceResp)(
@@ -1197,6 +1199,7 @@ with tempfile.TemporaryDirectory(prefix='rill-hold-reads-', dir='/tmp') as crede
         metadata=metadata(b_secret), timeout=15)
     assert created.payment_request
     cancel_started = False
+    settlement_observed = False
     def cancel_once():
         global cancel_started
         assert not cancel_started
@@ -1264,39 +1267,109 @@ with tempfile.TemporaryDirectory(prefix='rill-hold-reads-', dir='/tmp') as crede
             ln.GetInfoRequest())
         assert info.block_height == 103
         assert part.expiry_height - info.block_height >= 80
-        print('PHASE: hold_cancel_once', file=sys.stderr)
-        cancel_once()
-        print('PHASE: hold_cancel_acknowledged', file=sys.stderr)
-        failed = next_status(iter(sending), selected_hash, ln.Payment.FAILED)
-        print('PHASE: hold_payment_failed', file=sys.stderr)
-        assert failed.htlcs[0].attempt_id == live.htlcs[0].attempt_id
-        one_attempt(failed, ln.HTLCAttempt.FAILED, b_key, channel_id, amount_msat)
-        print('PHASE: hold_attempt_failed', file=sys.stderr)
-        observed = payment_observer.track(selected_hash, deadline_seconds=20)
-        print('PHASE: hold_payment_observed', file=sys.stderr)
-        assert observed.completion == 'terminal'
-        print('PHASE: hold_terminal', file=sys.stderr)
-        assert observed.snapshots[-1].status == 'FAILED'
-        history = observed.snapshots[-1].htlc_attempts
-        assert len(history) <= 1  # pinned LND may prune failed attempts by default
-        if history:
-            assert history[0].status == 'FAILED'
-            assert history[0].lnd_attempt_id == failed.htlcs[0].attempt_id
-        rejected = observe_raw(selected_hash, ln.Invoice.CANCELED)
-        print('PHASE: hold_canceled_observed', file=sys.stderr)
-        assert len(rejected.htlcs) == 1
-        assert rejected.htlcs[0].state == ln.InvoiceHTLCState.CANCELED
-        assert (rejected.htlcs[0].chan_id, rejected.htlcs[0].htlc_index,
-                rejected.htlcs[0].amt_msat, rejected.htlcs[0].expiry_height) == (
-                part.chan_id, part.htlc_index, part.amt_msat, part.expiry_height)
-        print(json.dumps({'funding_txid': txid, 'vout': point.output_index,
-            'capacity_sat': views[0][0].capacity, 'confirmations': output['confirmations'],
-            'backend_hold_observed': True, 'observer_refused_custom': True,
-            'payment_failed': True, 'history_returned': bool(history),
-            'custom_data_matches_records': custom_matches,
-            'custom_record_shape': custom_shape}))
+        if settle_scenario:
+            from rill_provider.lnd_hold_invoice import LndHoldInvoices, SETTLE_METHOD
+            from rill_provider.lnd_invoice_decode import LndInvoiceDecoder
+            combined = call(b, b_secret, 'BakeMacaroon',
+                ln.BakeMacaroonRequest, ln.BakeMacaroonResponse,
+                ln.BakeMacaroonRequest(permissions=[
+                    ln.MacaroonPermission(entity='invoices', action='read'),
+                    ln.MacaroonPermission(entity='invoices', action='write'),
+                    ln.MacaroonPermission(entity='info', action='read')],
+                    root_key_id=0, allow_external_permissions=False)).macaroon
+            bound_file = private_file(credentials, 'bound.macaroon', bytes.fromhex(combined))
+            decode_file = private_file(credentials, 'decode.macaroon',
+                bake_read(b, b_secret, 'offchain'))
+            decoder = LndInvoiceDecoder(host='127.0.0.1', port=10010,
+                tls_certificate_path='/work/public/b.cert', macaroon_path=decode_file,
+                network=network)
+            binding = decoder.decode(created.payment_request)
+            assert binding.payment_hash == selected_hash.hex()
+            assert binding.amount_msat == str(amount_msat)
+            assert binding.payee_compressed_pubkey == b_key
+            assert binding.expires_at - binding.created_at == 3600
+            assert binding.min_final_cltv_delta == 80
+            held = LndHoldInvoices(host='127.0.0.1', port=10010,
+                tls_certificate_path='/work/public/b.cert', macaroon_path=bound_file,
+                network=network)
+            class CountSettlement(grpc.UnaryUnaryClientInterceptor):
+                def __init__(self):
+                    self.calls = 0
+                def intercept_unary_unary(self, continuation, details, request):
+                    if details.method == SETTLE_METHOD:
+                        self.calls += 1
+                        assert request.preimage == preimage
+                    return continuation(details, request)
+            counter = CountSettlement()
+            original_channel = grpc.secure_channel
+            def counted_channel(*args, **kwargs):
+                return grpc.intercept_channel(original_channel(*args, **kwargs), counter)
+            grpc.secure_channel = counted_channel
+            try:
+                bound = held.observe_bound_invoice(binding, deadline=time.monotonic() + 5)
+                assert bound.status.state == 'ACCEPTED' and bound.status.held_msat == amount_msat
+                assert bound.payment_hash == selected_hash.hex()
+                assert bound.bolt11_sha256 == binding.bolt11_sha256
+                assert bound.node_pubkey == b_key and bound.network == network
+                assert bound.last_lnd_height == 103 and bound.last_lnd_block_hash == info.block_hash
+                held.settle_bound_invoice(binding, preimage.hex(), deadline=time.monotonic() + 5,
+                    submission_allowed=lambda: True)
+                assert counter.calls == 1
+                paid = observe_raw(selected_hash, ln.Invoice.SETTLED)
+                assert paid.payment_request == created.payment_request
+                assert paid.value_msat == paid.amt_paid_msat == amount_msat
+                assert len(paid.htlcs) == 1 and paid.htlcs[0].state == ln.InvoiceHTLCState.SETTLED
+                settlement_observed = True
+                confirmed = held.observe_bound_invoice(binding, deadline=time.monotonic() + 5)
+                assert confirmed.status.state == 'SETTLED'
+                assert confirmed.payment_hash == binding.payment_hash
+                assert confirmed.node_pubkey == b_key and confirmed.network == network
+                held.settle_bound_invoice(binding, preimage.hex(), deadline=time.monotonic() + 5,
+                    submission_allowed=lambda: True)
+                assert counter.calls == 1
+            finally:
+                grpc.secure_channel = original_channel
+            succeeded = next_status(iter(sending), selected_hash, ln.Payment.SUCCEEDED)
+            assert succeeded.htlcs[0].attempt_id == live.htlcs[0].attempt_id
+            one_attempt(succeeded, ln.HTLCAttempt.SUCCEEDED, b_key, channel_id, amount_msat)
+            print(json.dumps({'funding_txid': txid, 'vout': point.output_index,
+                'capacity_sat': views[0][0].capacity, 'confirmations': output['confirmations'],
+                'bound_settled': True, 'settle_dispatches': counter.calls,
+                'repeat_no_dispatch': True}))
+        else:
+            print('PHASE: hold_cancel_once', file=sys.stderr)
+            cancel_once()
+            print('PHASE: hold_cancel_acknowledged', file=sys.stderr)
+            failed = next_status(iter(sending), selected_hash, ln.Payment.FAILED)
+            print('PHASE: hold_payment_failed', file=sys.stderr)
+            assert failed.htlcs[0].attempt_id == live.htlcs[0].attempt_id
+            one_attempt(failed, ln.HTLCAttempt.FAILED, b_key, channel_id, amount_msat)
+            print('PHASE: hold_attempt_failed', file=sys.stderr)
+            observed = payment_observer.track(selected_hash, deadline_seconds=20)
+            print('PHASE: hold_payment_observed', file=sys.stderr)
+            assert observed.completion == 'terminal'
+            print('PHASE: hold_terminal', file=sys.stderr)
+            assert observed.snapshots[-1].status == 'FAILED'
+            history = observed.snapshots[-1].htlc_attempts
+            assert len(history) <= 1  # pinned LND may prune failed attempts by default
+            if history:
+                assert history[0].status == 'FAILED'
+                assert history[0].lnd_attempt_id == failed.htlcs[0].attempt_id
+            rejected = observe_raw(selected_hash, ln.Invoice.CANCELED)
+            print('PHASE: hold_canceled_observed', file=sys.stderr)
+            assert len(rejected.htlcs) == 1
+            assert rejected.htlcs[0].state == ln.InvoiceHTLCState.CANCELED
+            assert (rejected.htlcs[0].chan_id, rejected.htlcs[0].htlc_index,
+                    rejected.htlcs[0].amt_msat, rejected.htlcs[0].expiry_height) == (
+                    part.chan_id, part.htlc_index, part.amt_msat, part.expiry_height)
+            print(json.dumps({'funding_txid': txid, 'vout': point.output_index,
+                'capacity_sat': views[0][0].capacity, 'confirmations': output['confirmations'],
+                'backend_hold_observed': True, 'observer_refused_custom': True,
+                'payment_failed': True, 'history_returned': bool(history),
+                'custom_data_matches_records': custom_matches,
+                'custom_record_shape': custom_shape}))
     finally:
-        if not cancel_started:
+        if not cancel_started and not settlement_observed:
             try:
                 cancel_once()
             except grpc.RpcError:
@@ -1501,3 +1574,21 @@ def test_pinned_single_part_hold_accepted_then_canceled(tmp_path: Path) -> None:
     shape = evidence["custom_record_shape"]
     assert shape
     assert all(key >= 65536 and length <= 1024 for key, length in shape)
+
+
+@pytest.mark.lnd
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_LND") != "1",
+    reason="set RILLSWAP_RUN_LND=1 for pinned disposable LND",
+)
+def test_pinned_single_part_hold_bound_settled(tmp_path: Path) -> None:
+    """Settle one isolated held payment, not a swap or public-network payment."""
+    evidence = _run_two_node_sidecar(
+        tmp_path,
+        "SETTLE_BOUND_SCENARIO = True\n" + HELD_HTLC_PAYMENT,
+        prefix="hold-settle",
+        deadline=270,
+    )
+    assert evidence["bound_settled"] is True
+    assert evidence["settle_dispatches"] == 1
+    assert evidence["repeat_no_dispatch"] is True

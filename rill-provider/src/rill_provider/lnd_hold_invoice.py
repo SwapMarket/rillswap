@@ -202,36 +202,49 @@ class LndHoldInvoices:
             raise LndProtocolError("LND original invoice binding unsupported")
         call_deadline = _bounded_deadline(deadline)
         _check_submission_authority(call_deadline, submission_allowed)
-        key = bytes.fromhex(expected.payee_compressed_pubkey)
         with self._connect() as calls:
-            first_info = calls.unary(
-                INFO_METHOD,
-                lightning_pb2.GetInfoRequest(),
-                lightning_pb2.GetInfoResponse,
-                call_deadline,
-                submission_allowed=submission_allowed,
+            observation, _ = self._observe_bound_invoice_on_calls(
+                calls, expected, call_deadline, submission_allowed
             )
-            first_height, first_hash = _bound_tip(first_info, key, self._lnd_network)
-            invoice = calls.unary(
-                LOOKUP_METHOD,
-                invoices_pb2.LookupInvoiceMsg(payment_hash=bytes.fromhex(expected.payment_hash)),
-                lightning_pb2.Invoice,
-                call_deadline,
-                submission_allowed=submission_allowed,
-            )
-            _check_bound_invoice(invoice, expected, self._network)
-            status = _invoice_status(invoice)
-            last_info = calls.unary(
-                INFO_METHOD,
-                lightning_pb2.GetInfoRequest(),
-                lightning_pb2.GetInfoResponse,
-                call_deadline,
-                submission_allowed=submission_allowed,
-            )
-            last_height, last_hash = _bound_tip(last_info, key, self._lnd_network)
+        return observation
+
+    def _observe_bound_invoice_on_calls(
+        self,
+        calls: _Calls,
+        expected: InvoiceBinding,
+        deadline: float,
+        submission_allowed: Callable[[], bool] | None,
+    ) -> tuple[BoundHoldInvoiceObservation, lightning_pb2.Invoice]:
+        """Keep original correspondence checks on the caller's credential/channel snapshot."""
+        key = bytes.fromhex(expected.payee_compressed_pubkey)
+        first_info = calls.unary(
+            INFO_METHOD,
+            lightning_pb2.GetInfoRequest(),
+            lightning_pb2.GetInfoResponse,
+            deadline,
+            submission_allowed=submission_allowed,
+        )
+        first_height, first_hash = _bound_tip(first_info, key, self._lnd_network)
+        invoice = calls.unary(
+            LOOKUP_METHOD,
+            invoices_pb2.LookupInvoiceMsg(payment_hash=bytes.fromhex(expected.payment_hash)),
+            lightning_pb2.Invoice,
+            deadline,
+            submission_allowed=submission_allowed,
+        )
+        _check_bound_invoice(invoice, expected, self._network)
+        status = _invoice_status(invoice)
+        last_info = calls.unary(
+            INFO_METHOD,
+            lightning_pb2.GetInfoRequest(),
+            lightning_pb2.GetInfoResponse,
+            deadline,
+            submission_allowed=submission_allowed,
+        )
+        last_height, last_hash = _bound_tip(last_info, key, self._lnd_network)
         if last_height < first_height or (last_height == first_height and last_hash != first_hash):
             raise LndProtocolError("LND invoice observation tip changed inconsistently")
-        return BoundHoldInvoiceObservation(
+        observation = BoundHoldInvoiceObservation(
             expected.payment_hash,
             expected.bolt11_sha256,
             expected.payee_compressed_pubkey,
@@ -240,6 +253,62 @@ class LndHoldInvoices:
             last_height,
             last_hash,
         )
+        return observation, invoice
+
+    def settle_bound_invoice(
+        self,
+        expected: InvoiceBinding,
+        preimage: str,
+        *,
+        deadline: float | None = None,
+        submission_allowed: Callable[[], bool] | None = None,
+    ) -> None:
+        """Dispatch once after checking the original invoice on this channel.
+
+        The trusted caller must already have authenticated the original binding
+        and durably admitted settlement debt. These checks grant no financial
+        or signing authority. The configured credential also needs info:read.
+        A channel can reconnect; this is trusted-service correspondence, not
+        proof of one physical connection, original process, or exclusive custody.
+
+        None means the RPC succeeded or a sufficiently paid original invoice
+        was observed. It is not current signing eligibility or post-RPC payment
+        reconciliation. Late success retains its meaning; any failure after
+        dispatch may be ambiguous and never authorizes a retry or fallback.
+        """
+        if not isinstance(expected, InvoiceBinding):
+            raise LndProtocolError("LND original invoice binding unsupported")
+        try:
+            secret = _hash_bytes(preimage)
+            matches = (
+                len(secret) == HASH_BYTES
+                and secret.hex() == preimage
+                and hashlib.sha256(secret).hexdigest() == expected.payment_hash
+            )
+        except ValueError:
+            matches = False
+        if not matches:
+            raise LndProtocolError("LND bound settlement preimage unsupported")
+        call_deadline = _bounded_deadline(deadline)
+        _check_submission_authority(call_deadline, submission_allowed)
+        with self._connect() as calls:
+            observation, invoice = self._observe_bound_invoice_on_calls(
+                calls, expected, call_deadline, submission_allowed
+            )
+            amount = int(expected.amount_msat)
+            if observation.status.state == "SETTLED":
+                if invoice.amt_paid_msat < amount:
+                    raise LndProtocolError("LND settled invoice paid amount inconsistent")
+                return
+            if observation.status.state != "ACCEPTED" or observation.status.held_msat != amount:
+                raise LndProtocolError("LND bound settlement hold is not accepted as agreed")
+            calls.unary(
+                SETTLE_METHOD,
+                invoices_pb2.SettleInvoiceMsg(preimage=secret),
+                invoices_pb2.SettleInvoiceResp,
+                call_deadline,
+                submission_allowed=submission_allowed,
+            )
 
     def settle(
         self,

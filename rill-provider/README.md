@@ -622,6 +622,25 @@ Own-Core chain evidence, economic eligibility, and authority before any effect.
 A late final response can preserve knowledge but never renew authority. No live
 financial or signing consumer uses this API yet.
 
+The separate `settle_bound_invoice` transport requires an authenticated,
+previously signature-validated original binding and already admitted durable
+debt supplied by the trusted caller. It validates the canonical preimage/hash
+before credentials, then checks original node/invoice correspondence on the
+settlement channel within one fixed budget. ACCEPTED must hold exactly the
+original amount; OPEN/CANCELED or inconsistent amounts refuse secret dispatch.
+An already SETTLED invoice succeeds without another RPC only when its reported
+paid amount covers the original amount. Otherwise it sends SettleInvoice once,
+using the original deadline and predicate at actual unary setup.
+
+No credential fallback, retry, post-settlement authentication call, or negative
+reclassification of late success occurs. A failure after dispatch can be
+ambiguous. Success means only RPC success or sufficiently paid original-invoice
+knowledge, not signing eligibility. A gRPC channel can reconnect and does not
+prove one physical connection, original process, or exclusive backend custody.
+Legacy settlement remains unchanged, and no runtime consumer uses this method
+yet. Positive bound SETTLED reconciliation remains required before future
+cooperative partial signing.
+
 The internal `_commit_reverse_proposal_debt` boundary is also preparatory. It
 requires fresh original-owner negotiation memory, the exact native-valid
 version-2 BURNED reservation and authenticated inbox proposal, a live original
