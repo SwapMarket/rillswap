@@ -13,9 +13,11 @@ import hashlib
 import logging
 import math
 import secrets
+from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, ParamSpec, Protocol, TypeVar
 
+from rill_core.errors import ValidationError
 from rill_core.settlement import (
     FundingOutput,
     UnilateralAuthorization,
@@ -35,6 +37,7 @@ from rill_provider.settlement_policy import offered_terms
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from rill_core.settlement.taproot import TaprootKeyOperations
     from rill_core.wire.messages import ContractTerms, InvoiceBinding
 
     from rill_provider.core_tx_bytes import FundedOutput, SpendScan
@@ -94,6 +97,54 @@ class ReverseChainBackend(Protocol):
 
     def fee_rate_sat_vb(self, target_blocks: int) -> float | None:
         """Fee estimate, advice only."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ReversePublicKeySnapshot:
+    """Exact-input public curve results, not crypto verification or authority.
+
+    Capture on the owner task with its native verifier before queuing Core.
+    No engine, native handle, callback, store, or private key crosses to workers.
+    This binds curve inputs only; the funding matcher and authenticated owner
+    reservation independently bind the complete contract and economic facts.
+    """
+
+    user_key: bytes
+    provider_key: bytes
+    internal: tuple[bytes, int]
+    tweak: bytes
+    output: tuple[bytes, int]
+
+    @classmethod
+    def capture(
+        cls, terms: ContractTerms, *, keys: TaprootKeyOperations
+    ) -> _ReversePublicKeySnapshot:
+        """Compute public results synchronously, never retain the supplied verifier."""
+        contract = reconstruct_taproot_contract(terms, keys=keys)
+        return cls(
+            bytes.fromhex(terms.client_contract_compressed_key),
+            bytes.fromhex(terms.provider_contract_compressed_key),
+            (contract.internal_key, contract.internal_parity),
+            contract.tap_tweak,
+            (contract.output_key, contract.output_parity),
+        )
+
+    def musig_internal_key(
+        self, user_public_key: bytes, provider_public_key: bytes
+    ) -> tuple[bytes, int]:
+        """Return only the native-verified result for these exact ordered keys."""
+        if user_public_key != self.user_key or provider_public_key != self.provider_key:
+            raise ValidationError("reverse public curve inputs differ")
+        return self.internal
+
+    def musig_output_key(
+        self, user_public_key: bytes, provider_public_key: bytes, tap_tweak: bytes
+    ) -> tuple[bytes, int]:
+        """Return only the native-verified result for these exact keys and tweak."""
+        self.musig_internal_key(user_public_key, provider_public_key)
+        if tap_tweak != self.tweak:
+            raise ValidationError("reverse public curve tweak differs")
+        return self.output
 
 
 class ReverseSettlement:

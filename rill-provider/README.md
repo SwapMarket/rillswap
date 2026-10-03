@@ -671,6 +671,15 @@ without dispatch or refund; operator repair may be needed. Missing debt never
 triggers repayment, backfill, or a startup scan. This does not enable production
 reverse cooperative negotiation.
 
+The private reverse public-key snapshot is preparatory for Core evidence
+acquisition. The owner computes native curve results before queuing a worker;
+the immutable snapshot holds only public keys, tweak, results, and parities.
+Changed ordered compressed keys or tweak refuse. This is exact-input
+memoization, not independent cryptographic verification or proof of authority.
+The normal funding matcher still checks complete economic/contract commitments.
+No runtime acquisition caller uses it yet, and startup and stored state are
+unchanged. Future callers must enforce the owner task and gate before capture.
+
 The internal `_commit_reverse_proposal_debt` boundary is also preparatory. It
 requires fresh original-owner negotiation memory, the exact native-valid
 version-2 BURNED reservation and authenticated inbox proposal, a live original
