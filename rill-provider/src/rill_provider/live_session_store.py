@@ -37,7 +37,7 @@ from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, Self, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, cast
 
 import pyrage  # type: ignore[import-untyped]
 from pyrage import x25519
@@ -508,7 +508,7 @@ class _ReverseProposalAttempt:
 
 
 @dataclass(frozen=True, slots=True)
-class _ReverseProposalAcquisitionContext:
+class _ReverseLiveProposalContext:
     """Original live read context, never debt, nonce, or signing permission."""
 
     terms: ContractTerms
@@ -3539,16 +3539,27 @@ class LiveSessionStore:
         )
         return immutable, match, binding
 
-    def _reverse_proposal_acquisition_context(
-        self, document: bytes, *, operation: ReverseOperation
-    ) -> _ReverseProposalAcquisitionContext:
-        """Preflight original read inputs; the debt writer must recheck authority.
+    def _reverse_live_proposal_context(
+        self,
+        document: bytes,
+        *,
+        operation: ReverseOperation,
+        purpose: Literal["acquisition", "paid-signing"],
+    ) -> _ReverseLiveProposalContext:
+        """Preflight original read inputs, never financial or signing authority.
 
-        Require original owner memory and exact native-valid burned reservation,
-        not reconstructed signing permission. No RPC or lifecycle write occurs.
+        Require original owner memory and exact native-valid burned reservation.
+        Acquisition requires FUNDED without debt. Paid-signing requires local
+        SETTLED with the exact retained preimage, but proves neither independent
+        repayment provenance nor current Own-LND payment or signing permission.
+        Fresh real positive bound settlement, chain, fees, and original-window
+        evidence remain mandatory before any future signing effect.
+        No RPC or lifecycle write occurs.
         Failure after identifying the original attempt abandons its window.
         """
         self.reverse_operations.check(operation)
+        if type(purpose) is not str or purpose not in ("acquisition", "paid-signing"):
+            raise LiveSessionStoreError("reverse proposal context purpose refused")
         attempt: _ReverseProposalAttempt | None = None
         try:
             with self._write() as connection:
@@ -3574,8 +3585,11 @@ class LiveSessionStore:
                 if (
                     row is None
                     or not self._matches_reverse_negotiation(outer.session_id, row[3], row[:5])
-                    or row[6] != "FUNDED"
-                    or row[7] is not None
+                    or (purpose == "acquisition" and (row[6] != "FUNDED" or row[7] is not None))
+                    or (
+                        purpose == "paid-signing"
+                        and (row[6] != "SETTLED" or row[7] != payload.payment_preimage)
+                    )
                     or type(row[8]) is not str
                     or type(row[9]) is not int
                     or type(row[10]) is not bytes
@@ -3614,7 +3628,7 @@ class LiveSessionStore:
                     raise ValueError("reverse acquisition reservation differs")  # noqa: TRY301
                 self.reverse_operations.check(operation)
                 candidate.window.evidence_time()
-                return _ReverseProposalAcquisitionContext(terms, binding, candidate.window)
+                return _ReverseLiveProposalContext(terms, binding, candidate.window)
         except StaleOwnerError:
             if attempt is not None and attempt.window is not None:
                 attempt.window.abandon()
@@ -3622,7 +3636,7 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - no archived preimage or native-context oracle
             if attempt is not None and attempt.window is not None:
                 attempt.window.abandon()
-        raise LiveSessionStoreError("reverse proposal acquisition context refused")
+        raise LiveSessionStoreError("reverse proposal live context refused")
 
     def _admit_reverse_cooperative_proposal(  # noqa: PLR0912, PLR0915 - one authenticated reservation
         self,

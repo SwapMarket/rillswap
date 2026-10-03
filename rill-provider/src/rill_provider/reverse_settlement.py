@@ -231,8 +231,8 @@ class ReverseSettlement:
                 )
                 if receipt.replay:
                     return receipt
-                context = self._store._reverse_proposal_acquisition_context(  # noqa: SLF001
-                    document, operation=operation
+                context = self._store._reverse_live_proposal_context(  # noqa: SLF001
+                    document, operation=operation, purpose="acquisition"
                 )
                 original_window = context.window
                 window = original_window

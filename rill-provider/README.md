@@ -740,6 +740,21 @@ gate indefinitely while drainage preserves exclusion. Upgrading installations
 gain no startup action; absent original memory and partial or older reservations
 never trigger acquisition or reconstruct authority.
 
+The private live-proposal context getter requires an explicit purpose.
+Acquisition still requires FUNDED without debt. The preparatory paid-signing
+purpose requires local SETTLED with the exact authenticated proposal preimage,
+the original process-local window and negotiation, and the unchanged owned
+native-valid version-2 BURNED cooperation reservation without refund artifacts.
+Released economic exposure after repayment does not erase that distinct
+cooperation reservation. No paid-signing consumer exists yet. Local SETTLED does
+not prove repayment provenance or current original-node payment; future signing
+still requires fresh actual bound positive SETTLED, Core, fee, custody, and
+original-clock evidence. The getter changes no durable lifecycle state, but a
+failed live-context check abandons its in-memory window terminally. Reconcile
+repayment before requesting paid context, never probe and retry. Unknown or
+omitted purposes cannot select a default policy. Restarted paid state remains
+history and triggers no new work or reconstructed signing permission.
+
 A retained matching preimage in `FUNDED` or `REFUNDING` means settlement is
 owed, not that LND settlement succeeded. Restart retries that obligation
 without needing Core or rediscovering a disappeared witness. Under serialized
