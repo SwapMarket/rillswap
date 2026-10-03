@@ -479,7 +479,7 @@ def test_bad_or_stale_paid_evidence_abandons_window_without_financial_or_custody
 
             selected.side_effect = delayed
         else:
-            getter = store._reverse_live_proposal_context
+            getter = store._reverse_reservation_binding
             count = 0
 
             def delayed_validation(*args: object, **kwargs: object) -> object:
@@ -489,12 +489,14 @@ def test_bad_or_stale_paid_evidence_abandons_window_without_financial_or_custody
                     reserved.clock.advance(1)
                 return getter(*args, **kwargs)
 
-            monkeypatch.setattr(store, "_reverse_live_proposal_context", delayed_validation)
+            monkeypatch.setattr(store, "_reverse_reservation_binding", delayed_validation)
         rows = store._connection.execute("SELECT * FROM swaps").fetchall()
         attempts = store._connection.execute("SELECT * FROM cooperation_attempts").fetchall()
         engine = ReverseSettlement(store, chain, hold, reserved.origin.crypto.crypto)
         with pytest.raises(LiveSessionStoreError, match="preflight refused"):
             await engine._preflight_paid_proposal(reserved.document, configured_floor_sat=floor)
+        if fault == "validation delay":
+            assert count == 2
         assert store._connection.execute("SELECT * FROM swaps").fetchall() == rows
         assert (
             store._connection.execute("SELECT * FROM cooperation_attempts").fetchall() == attempts

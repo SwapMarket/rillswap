@@ -331,7 +331,9 @@ def run_original_preflight(  # noqa: PLR0913, PLR0915 - one isolated original-se
                 assert store._reverse_proposals[origin.session_id].window is window
                 assert window.monotonic_deadline == deadline
                 assert window.time_allowed()
-                assert len(samples) == 2
+                # Acquisition, transaction-bound paid guard, and the diagnostic
+                # post-COMMIT guard all charge the unchanged original window.
+                assert len(samples) == 3
                 assert all(sample[0] is window for sample in samples)
                 assert all(0 <= sample[1] < 1 for sample in samples)
                 assert not store._cooperation_handles
@@ -351,7 +353,7 @@ def run_original_preflight(  # noqa: PLR0913, PLR0915 - one isolated original-se
                     "contract_vout": funded.contract_vout,
                     "contract_value_sat": int(funded.contract_value_sat),
                     "acquisition_interval_seconds": samples[0][1],
-                    "preflight_interval_seconds": samples[1][1],
+                    "preflight_interval_seconds": samples[-1][1],
                 }
 
             return asyncio.run(exercise())

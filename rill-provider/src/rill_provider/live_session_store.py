@@ -93,7 +93,13 @@ from rill_core.wire.types import NetworkIdentity
 
 from rill_provider._nip59_receive import _decode_gift_wrap_candidate
 from rill_provider._nip59_send import _wrap_envelope
-from rill_provider.core_tx_bytes import CooperativeClaimOutpoint
+from rill_provider.core_tx_bytes import (
+    MAX_ESTIMATE_TARGET,
+    MAX_SATS,
+    SATS_PER_BTC,
+    CooperativeClaimOutpoint,
+    CooperativeFeePolicy,
+)
 from rill_provider.handshake_store import HandshakePolicy, _expected, _features, _require_policy
 from rill_provider.issuance_reservation import _policy_bytes
 from rill_provider.lnd_hold_invoice import BoundHoldInvoiceObservation, HeldHtlc, HoldInvoiceStatus
@@ -516,6 +522,27 @@ class _ReverseLiveProposalContext:
     window: ReverseCooperationWindow
     static_match: FundingBindingTransactionMatch
     plan: CooperativeClaimPlan
+
+
+@dataclass(frozen=True, slots=True)
+class _ReversePaidProposalEvidence:
+    """Same-operation observations, not provenance or a signing capability.
+
+    Only trusted runtime actually collecting the stronger original-invoice
+    query and Core evidence can establish acquisition provenance and clock
+    origin. Structural data and matching timestamps cannot prove either.
+    Never serialize, reconstruct, or transfer this record to another operation.
+    """
+
+    operation: ReverseOperation
+    context: _ReverseLiveProposalContext
+    core: CooperativeClaimOutpoint
+    policy: CooperativeFeePolicy
+    invoice: BoundHoldInvoiceObservation
+    started_at: float
+    completed_at: float
+    configured_floor_sat: int
+    allow_regtest_fixed_fee: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -3562,75 +3589,105 @@ class LiveSessionStore:
         self.reverse_operations.check(operation)
         if type(purpose) is not str or purpose not in ("acquisition", "paid-signing"):
             raise LiveSessionStoreError("reverse proposal context purpose refused")
-        attempt: _ReverseProposalAttempt | None = None
+        context: _ReverseLiveProposalContext | None = None
         try:
             with self._write() as connection:
-                outer, payload, terms = self._authenticated_reverse_preimage(connection, document)
-                candidate = self._reverse_proposals.get(outer.session_id)
-                if (
-                    candidate is None
-                    or candidate.window is None
-                    or candidate.message_id != outer.message_id
-                    or candidate.unsigned_digest != unsigned_envelope_hash(outer).hex()
-                    or candidate.cooperation_id != payload.cooperation_id
-                ):
-                    raise ValueError("original reverse reservation absent")  # noqa: TRY301
-                attempt = candidate
-                row = connection.execute(
-                    "SELECT s.accept_bytes,s.transcript_digest,s.blocked,w.contract_hash,"
-                    "w.terms_accept,s.provider_session_key,w.state,w.preimage,"
-                    "w.funding_txid,w.funding_vout,w.funding_tx,w.refund_txid,w.refund_tx "
-                    "FROM sessions s JOIN swaps w ON w.session_id=s.session_id "
-                    "WHERE s.session_id=?",
-                    (outer.session_id,),
-                ).fetchone()
-                if (
-                    row is None
-                    or not self._matches_reverse_negotiation(outer.session_id, row[3], row[:5])
-                    or (purpose == "acquisition" and (row[6] != "FUNDED" or row[7] is not None))
-                    or (
-                        purpose == "paid-signing"
-                        and (row[6] != "SETTLED" or row[7] != payload.payment_preimage)
-                    )
-                    or type(row[8]) is not str
-                    or type(row[9]) is not int
-                    or type(row[10]) is not bytes
-                    or row[11] is not None
-                    or row[12] is not None
-                ):
-                    raise ValueError("reverse acquisition lifecycle refused")  # noqa: TRY301
-                expected, match, binding, plan = self._reverse_reservation_binding(
-                    connection,
-                    outer,
-                    payload,
-                    terms,
-                    provider=row[5],
-                    txid=row[8],
-                    vout=row[9],
-                    raw=row[10],
+                context = self._reverse_live_context_in_connection(
+                    connection, document, operation=operation, purpose=purpose
                 )
-                burned = connection.execute(
-                    "SELECT session_id,owner_generation,binding,state,deadline_at,local_nonce,"
-                    "peer_nonce,partial_signature,nonce_response_id,partial_response_id "
-                    "FROM cooperation_attempts WHERE cooperation_id=?",
-                    (bytes.fromhex(payload.cooperation_id),),
-                ).fetchone()
-                if burned != (
-                    outer.session_id,
-                    self._generation,
-                    expected,
-                    "BURNED",
-                    payload.deadline_at,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ):
-                    raise ValueError("reverse acquisition reservation differs")  # noqa: TRY301
-                self.reverse_operations.check(operation)
-                candidate.window.evidence_time()
-                return _ReverseLiveProposalContext(terms, binding, candidate.window, match, plan)
+        except StaleOwnerError:
+            if context is not None:
+                context.window.abandon()
+            raise
+        except Exception:  # noqa: BLE001 - no connection or archived-context oracle
+            if context is not None:
+                context.window.abandon()
+        else:
+            return context
+        raise LiveSessionStoreError("reverse proposal live context refused")
+
+    def _reverse_live_context_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        document: bytes,
+        *,
+        operation: ReverseOperation,
+        purpose: Literal["acquisition", "paid-signing"],
+    ) -> _ReverseLiveProposalContext:
+        """Check original context inside the caller's explicit owner transaction."""
+        self.reverse_operations.check(operation)
+        if type(purpose) is not str or purpose not in ("acquisition", "paid-signing"):
+            raise LiveSessionStoreError("reverse proposal context purpose refused")
+        if connection is not self._connection or not connection.in_transaction:
+            raise LiveSessionStoreError("reverse proposal context connection refused")
+        attempt: _ReverseProposalAttempt | None = None
+        try:
+            outer, payload, terms = self._authenticated_reverse_preimage(connection, document)
+            candidate = self._reverse_proposals.get(outer.session_id)
+            if (
+                candidate is None
+                or candidate.window is None
+                or candidate.message_id != outer.message_id
+                or candidate.unsigned_digest != unsigned_envelope_hash(outer).hex()
+                or candidate.cooperation_id != payload.cooperation_id
+            ):
+                raise ValueError("original reverse reservation absent")  # noqa: TRY301
+            attempt = candidate
+            row = connection.execute(
+                "SELECT s.accept_bytes,s.transcript_digest,s.blocked,w.contract_hash,"
+                "w.terms_accept,s.provider_session_key,w.state,w.preimage,"
+                "w.funding_txid,w.funding_vout,w.funding_tx,w.refund_txid,w.refund_tx "
+                "FROM sessions s JOIN swaps w ON w.session_id=s.session_id "
+                "WHERE s.session_id=?",
+                (outer.session_id,),
+            ).fetchone()
+            if (
+                row is None
+                or not self._matches_reverse_negotiation(outer.session_id, row[3], row[:5])
+                or (purpose == "acquisition" and (row[6] != "FUNDED" or row[7] is not None))
+                or (
+                    purpose == "paid-signing"
+                    and (row[6] != "SETTLED" or row[7] != payload.payment_preimage)
+                )
+                or type(row[8]) is not str
+                or type(row[9]) is not int
+                or type(row[10]) is not bytes
+                or row[11] is not None
+                or row[12] is not None
+            ):
+                raise ValueError("reverse acquisition lifecycle refused")  # noqa: TRY301
+            expected, match, binding, plan = self._reverse_reservation_binding(
+                connection,
+                outer,
+                payload,
+                terms,
+                provider=row[5],
+                txid=row[8],
+                vout=row[9],
+                raw=row[10],
+            )
+            burned = connection.execute(
+                "SELECT session_id,owner_generation,binding,state,deadline_at,local_nonce,"
+                "peer_nonce,partial_signature,nonce_response_id,partial_response_id "
+                "FROM cooperation_attempts WHERE cooperation_id=?",
+                (bytes.fromhex(payload.cooperation_id),),
+            ).fetchone()
+            if burned != (
+                outer.session_id,
+                self._generation,
+                expected,
+                "BURNED",
+                payload.deadline_at,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ):
+                raise ValueError("reverse acquisition reservation differs")  # noqa: TRY301
+            self.reverse_operations.check(operation)
+            candidate.window.evidence_time()
+            return _ReverseLiveProposalContext(terms, binding, candidate.window, match, plan)
         except StaleOwnerError:
             if attempt is not None and attempt.window is not None:
                 attempt.window.abandon()
@@ -3639,6 +3696,123 @@ class LiveSessionStore:
             if attempt is not None and attempt.window is not None:
                 attempt.window.abandon()
         raise LiveSessionStoreError("reverse proposal live context refused")
+
+    def _check_reverse_paid_evidence(
+        self,
+        connection: sqlite3.Connection,
+        document: bytes,
+        *,
+        operation: ReverseOperation,
+        evidence: _ReversePaidProposalEvidence,
+    ) -> _ReverseLiveProposalContext:
+        """Revalidate same-operation paid observations inside an explicit transaction.
+
+        This does not prove stronger-query provenance, clock-domain origin, or
+        atomicity. Trusted runtime must collect the actual batch itself. No RPC,
+        nonce, partial signature, reply, or lifecycle update occurs here.
+        Final native context validation is charged to the original interval.
+        """
+        self.reverse_operations.check(operation)
+        if (
+            type(evidence) is not _ReversePaidProposalEvidence
+            or evidence.operation is not operation
+            or type(evidence.context) is not _ReverseLiveProposalContext
+            or connection is not self._connection
+            or not connection.in_transaction
+        ):
+            raise LiveSessionStoreError("reverse paid evidence operation refused")
+        original_window = evidence.context.window
+        try:
+            configured_floor_sat = evidence.configured_floor_sat
+            allow_regtest_fixed_fee = evidence.allow_regtest_fixed_fee
+            if (
+                type(configured_floor_sat) is not int
+                or not 0 < configured_floor_sat <= MAX_SATS
+                or type(allow_regtest_fixed_fee) is not bool
+                or (allow_regtest_fixed_fee and self._network.name != "regtest")
+            ):
+                raise ValueError("reverse cooperative fee configuration refused")  # noqa: TRY301
+            final_context = self._reverse_live_context_in_connection(
+                connection, document, operation=operation, purpose="paid-signing"
+            )
+            binding, terms = final_context.binding, final_context.terms
+            core, invoice, policy = evidence.core, evidence.invoice, evidence.policy
+            if (
+                final_context != evidence.context
+                or type(core) is not CooperativeClaimOutpoint
+                or type(core.static_match) is not type(final_context.static_match)
+                or core.static_match != final_context.static_match
+                or core.network_identity != terms.network_identity
+                or core.funding_txid != binding.funding_txid
+                or type(core.funding_vout) is not int
+                or core.funding_vout != binding.contract_vout
+                or type(core.funding_value_sat) is not int
+                or core.funding_value_sat != int(binding.contract_value_sat)
+                or type(core.funding_script_pubkey) is not bytes
+                or core.funding_script_pubkey != bytes.fromhex(binding.contract_script_pubkey)
+                or type(core.tip_height) is not int
+                or type(core.confirmations) is not int
+                or type(core.inclusion_height) is not int
+                or not 0 < core.inclusion_height <= core.tip_height < terms.refund_lock_height
+                or core.confirmations != core.tip_height - core.inclusion_height + 1
+                or core.confirmations < terms.funding_confirmations
+                or not re.fullmatch("[0-9a-f]{64}", core.tip_hash)
+                or not re.fullmatch("[0-9a-f]{64}", core.inclusion_block_hash)
+                or (
+                    core.inclusion_height == core.tip_height
+                    and core.inclusion_block_hash != core.tip_hash
+                )
+                or type(invoice) is not BoundHoldInvoiceObservation
+                or invoice.network != terms.network_identity
+                or invoice.payment_hash != terms.invoice_binding.payment_hash
+                or invoice.bolt11_sha256 != terms.invoice_binding.bolt11_sha256
+                or invoice.node_pubkey != terms.invoice_binding.payee_compressed_pubkey
+                or invoice.status.state != "SETTLED"
+                or type(invoice.last_lnd_height) is not int
+                or (invoice.last_lnd_height, invoice.last_lnd_block_hash)
+                != (core.tip_height, core.tip_hash)
+                or type(policy) is not CooperativeFeePolicy
+                or policy.network_identity != terms.network_identity
+                or type(policy.tip_height) is not int
+                or (policy.tip_height, policy.tip_hash) != (core.tip_height, core.tip_hash)
+                or type(policy.confirmation_blocks) is not int
+                or policy.confirmation_blocks != terms.timing_policy.claim_confirmation_blocks
+                or any(
+                    type(rate) is not int or not 0 <= rate < SATS_PER_BTC
+                    for rate in (policy.min_relay_sat_kvb, policy.mempool_min_sat_kvb)
+                )
+                or type(policy.estimate_blocks) is not int
+                or not 0 <= policy.estimate_blocks <= MAX_ESTIMATE_TARGET
+                or (policy.estimate_sat_kvb is None and not allow_regtest_fixed_fee)
+                or (
+                    policy.estimate_sat_kvb is not None
+                    and (
+                        type(policy.estimate_sat_kvb) is not int
+                        or not 0 < policy.estimate_sat_kvb < SATS_PER_BTC
+                        or not 1 <= policy.estimate_blocks <= policy.confirmation_blocks
+                    )
+                )
+            ):
+                raise ValueError("reverse paid evidence differs")  # noqa: TRY301
+            plan = final_context.plan
+            vsize = (4 * len(plan.base_transaction) + 68 + 3) // 4
+            if plan.fee_sat < policy.fee_floor_sat(
+                vsize=vsize, configured_floor_sat=configured_floor_sat
+            ):
+                raise ValueError("reverse cooperative fee below floor")  # noqa: TRY301
+            self.reverse_operations.check(operation)
+            original_window.check(tip_height=core.tip_height)
+            original_window.check_evidence_interval(
+                started_at=evidence.started_at, completed_at=evidence.completed_at
+            )
+        except StaleOwnerError:
+            original_window.abandon()
+            raise
+        except Exception:  # noqa: BLE001 - no archived preimage, plan, or backend oracle
+            original_window.abandon()
+        else:
+            return final_context
+        raise LiveSessionStoreError("reverse paid proposal preflight refused")
 
     def _admit_reverse_cooperative_proposal(  # noqa: PLR0912, PLR0915 - one authenticated reservation
         self,

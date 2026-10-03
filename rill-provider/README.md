@@ -782,6 +782,19 @@ to consume that complete interval. Broader adversarial/public-network acceptance
 and authority-bearing integration remain separate requirements. Neither these
 checks nor their absence trigger startup or migration work.
 
+Paid observation batches are private records bound to the exact collecting
+operation, not just the surviving original window. They are neither serialized
+authority nor proof that the stronger query or original clock was used. Trusted
+runtime collects actual backend observations without holding a SQL transaction;
+the store revalidates authenticated context, native plan, facts, fees, and age
+inside the caller's explicit owner transaction. A different operation cannot
+consume an otherwise fresh batch. The connection-taking context guard avoids
+nested transaction acquisition. Diagnostic success still rechecks freshness
+after COMMIT, so transaction-exit latency cannot escape the one-second limit.
+This separation adds no native signing or startup action. Future native effects
+must collect and authorize through consumption and commit in one uninterrupted
+original operation/window, never await a diagnostic and then assume permission.
+
 The dedicated `provider-lnd` CI job builds native crypto and runs opt-in backend
 tests against fresh digest-pinned Core/LND/Python containers. Its sidecars use
 read-only sources and certificates, private tmpfs wallets/custody, and verified
