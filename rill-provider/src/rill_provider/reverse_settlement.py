@@ -9,10 +9,12 @@ signed transaction is recorded before it is broadcast.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import math
 import secrets
+import time
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, ParamSpec, Protocol, TypeVar
@@ -30,7 +32,7 @@ from rill_core.settlement import (
 from rill_core.wire.hashes import contract_hash
 from rill_core.wire.messages import Envelope, FundingBinding
 
-from rill_provider.live_session_store import LiveSessionStoreError, StaleSwapError
+from rill_provider.live_session_store import LiveSessionStoreError, StaleOwnerError, StaleSwapError
 from rill_provider.lnd_payment_observation import LndObservationError
 from rill_provider.settlement_policy import offered_terms
 
@@ -40,9 +42,14 @@ if TYPE_CHECKING:
     from rill_core.settlement.taproot import TaprootKeyOperations
     from rill_core.wire.messages import ContractTerms, InvoiceBinding
 
-    from rill_provider.core_tx_bytes import FundedOutput, SpendScan
-    from rill_provider.live_session_store import LiveSessionStore, SettlementItem
-    from rill_provider.lnd_hold_invoice import HoldInvoiceStatus
+    from rill_provider.core_tx_bytes import CooperativeClaimOutpoint, FundedOutput, SpendScan
+    from rill_provider.live_session_store import (
+        LiveSessionStore,
+        ReverseProposalAdmission,
+        SettlementItem,
+    )
+    from rill_provider.lnd_hold_invoice import BoundHoldInvoiceObservation, HoldInvoiceStatus
+    from rill_provider.reverse_cooperation import ReverseCooperationWindow
     from rill_provider.reverse_operations import ReverseOperation
     from rill_provider.settlement_engine import EngineCrypto
 
@@ -71,6 +78,14 @@ class HoldInvoiceBackend(Protocol):
     ) -> None:
         """Settle authenticated original-invoice debt without unbound fallback."""
 
+    def observe_bound_invoice(
+        self,
+        expected: InvoiceBinding,
+        *,
+        submission_allowed: Callable[[], bool] | None = None,
+    ) -> BoundHoldInvoiceObservation:
+        """Observe the original invoice without financial or signing permission."""
+
     def cancel(self, payment_hash: str) -> None:
         """Cancel; accepted parts are failed back."""
 
@@ -80,6 +95,11 @@ class ReverseChainBackend(Protocol):
 
     def tip_height(self) -> int:
         """Active chain height."""
+
+    def observe_cooperative_claim_outpoint(
+        self, binding: FundingBinding, terms: ContractTerms, *, keys: TaprootKeyOperations
+    ) -> CooperativeClaimOutpoint:
+        """Read the named confirmed unspent output using public-only key results."""
 
     def fund_output(
         self, script_pubkey: bytes, value_sat: int, *, max_fee_sat: int
@@ -178,6 +198,89 @@ class ReverseSettlement:
                 return await self._step(work[0], now)
             finally:
                 self._operation = None
+
+    async def _acquire_proposal_debt(
+        self,
+        document: bytes,
+        now: int,
+        *,
+        wall_clock: Callable[[], float] = time.time,
+        monotonic_clock: Callable[[], float] = time.monotonic,
+    ) -> ReverseProposalAdmission:
+        """Acquire original-owner evidence and admit debt, never activate cooperation.
+
+        INTERNAL ONLY.
+        Replays return receipts only, without backend work or renewed authority.
+        Core workers receive public snapshots; no SQLite/native handles. LND
+        uses its own transport clock plus the original-window predicate, never
+        an absolute deadline copied from a possibly unrelated clock domain.
+        Admissible evidence age is bounded, not physical worker duration.
+        No settlement, nonce, partial signature, or relay response occurs here.
+        """
+        async with self._store.reverse_operations.operation() as operation:
+            window: ReverseCooperationWindow | None = None
+            try:
+                self._store._retain_reverse_preimage_evidence(  # noqa: SLF001 - original-owner pipeline
+                    document, operation=operation, now=now
+                )
+                receipt = self._store._admit_reverse_cooperative_proposal(  # noqa: SLF001
+                    document,
+                    operation=operation,
+                    wall_clock=wall_clock,
+                    monotonic_clock=monotonic_clock,
+                )
+                if receipt.replay:
+                    return receipt
+                context = self._store._reverse_proposal_acquisition_context(  # noqa: SLF001
+                    document, operation=operation
+                )
+                original_window = context.window
+                window = original_window
+                operation.check()
+                keys = _ReversePublicKeySnapshot.capture(context.terms, keys=self._crypto)
+
+                def submission_allowed() -> bool:
+                    return operation.submission_allowed() and original_window.time_allowed()
+
+                started = original_window.evidence_time()
+                core = await operation.worker(
+                    partial(
+                        self._chain.observe_cooperative_claim_outpoint,
+                        context.binding,
+                        context.terms,
+                        keys=keys,
+                    )
+                )
+                operation.check()
+                original_window.check(tip_height=core.tip_height)
+                invoice = await operation.worker(
+                    partial(
+                        self._hold.observe_bound_invoice,
+                        context.terms.invoice_binding,
+                        submission_allowed=submission_allowed,
+                    )
+                )
+                completed = original_window.evidence_time()
+                operation.check()
+                self._store._commit_reverse_proposal_debt(  # noqa: SLF001 - single owner financial writer
+                    document,
+                    operation=operation,
+                    core=core,
+                    invoice=invoice,
+                    observations_started_at=started,
+                    observations_completed_at=completed,
+                    now=now,
+                )
+            except (asyncio.CancelledError, StaleOwnerError):
+                if window is not None:
+                    window.abandon()
+                raise
+            except Exception:  # noqa: BLE001 - no proposal/preimage/backend oracle
+                if window is not None:
+                    window.abandon()
+            else:
+                return receipt
+            raise LiveSessionStoreError("reverse proposal acquisition refused")
 
     def _check_operation(self) -> ReverseOperation:
         if self._operation is None:

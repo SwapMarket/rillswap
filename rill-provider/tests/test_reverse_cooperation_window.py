@@ -43,6 +43,36 @@ def _window(clock: Clock, *, deadline: int = 1030) -> ReverseCooperationWindow:
     )
 
 
+def test_evidence_time_samples_original_clock_without_renewing_deadline() -> None:
+    clock = Clock()
+    window = _window(clock)
+    deadline = window.monotonic_deadline
+    assert window.evidence_time() == 100.0
+    clock.advance(0.75)
+    assert window.evidence_time() == 100.75
+    window.check_evidence_interval(started_at=100.0, completed_at=100.75)
+    assert window.monotonic_deadline == deadline
+
+
+@pytest.mark.parametrize("failure", ["expiry", "regression", "nonfinite", "abandoned"])
+def test_evidence_time_failure_is_terminal(failure: str) -> None:
+    clock = Clock()
+    window = _window(clock)
+    if failure == "expiry":
+        clock.advance(30)
+    elif failure == "regression":
+        clock.monotonic = 99.0
+    elif failure == "nonfinite":
+        clock.monotonic = float("nan")
+    else:
+        window.abandon()
+    with pytest.raises(TimeoutError):
+        window.evidence_time()
+    clock.wall, clock.monotonic = 1000.0, 100.0
+    with pytest.raises(TimeoutError):
+        window.evidence_time()
+
+
 @pytest.mark.parametrize("remaining", [1, 15, 30, 1000])
 def test_signed_deadline_intersects_frozen_local_cap(remaining: int) -> None:
     clock = Clock()

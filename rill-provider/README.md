@@ -677,10 +677,12 @@ the immutable snapshot holds only public keys, tweak, results, and parities.
 Changed ordered compressed keys or tweak refuse. This is exact-input
 memoization, not independent cryptographic verification or proof of authority.
 The normal funding matcher still checks complete economic/contract commitments.
-No runtime acquisition caller uses it yet, and startup and stored state are
-unchanged. Future callers must enforce the owner task and gate before capture.
+The internal acquisition entry enforces the owner task and gate before capture;
+no production negotiation path calls that entry yet. Startup and stored formats
+are unchanged.
 
-The internal `_commit_reverse_proposal_debt` boundary is also preparatory. It
+The internal `_commit_reverse_proposal_debt` boundary requires an explicit
+original-owner acquisition. It
 requires fresh original-owner negotiation memory, the exact native-valid
 version-2 BURNED reservation and authenticated inbox proposal, a live original
 window, `FUNDED`, and no potentially issued refund. Independently acquired
@@ -698,9 +700,32 @@ failure to return is not proof that debt was absent. Independent repayment resum
 any valid retained obligation without reconstructing cooperation.
 Historical/restarted, expired, invalid-plan, or refund-issued proposals receive
 no new debt through this path. Existing debt uses its classified independent
-repayment path; its expiry or restart never renews signing. No runtime caller or
-native allocation uses this new boundary yet. Settlement on a later connection
-still needs its own original-backend association before consumer activation.
+repayment path; its expiry or restart never renews signing. No production
+negotiation caller or native nonce allocation uses this boundary yet. Featured
+repayment uses the original-backend bound path described above, not the
+acquisition observations as authorization for another connection.
+
+`ReverseSettlement._acquire_proposal_debt` is an internal, nonactivated consumer
+of that writer. Inside one store-owned operation it retains authenticated private
+knowledge, reserves the exact proposal, and preflights the original live context.
+Replays, including after restart, return receipts without backend work, new
+windows, or debt. Fresh acquisition captures public curve results on the owner,
+then collects Core and original-invoice LND observations in physically drained
+workers. It samples the original window's monotonic clock around the entire
+batch, including executor queue delay; the window also checks its original wall
+clock. Debt still requires a complete interval strictly younger than one second
+at commit, plus all existing financial prerequisites.
+
+LND receives the captured operation/window submission predicate, not an absolute
+deadline copied from a different clock domain. Its real-monotonic transport
+budget remains separate. Expiry, backend failure, cancellation, or owner loss
+abandons cooperation without clearing knowledge or any already committed debt.
+No settlement RPC, nonce, partial signature, reply, or production negotiation is
+enabled by this entry. Evidence eligibility is bounded, not physical execution:
+a started read may outlive expiry, and a trickling Core endpoint can retain the
+gate indefinitely while drainage preserves exclusion. Upgrading installations
+gain no startup action; absent original memory and partial or older reservations
+never trigger acquisition or reconstruct authority.
 
 A retained matching preimage in `FUNDED` or `REFUNDING` means settlement is
 owed, not that LND settlement succeeded. Restart retries that obligation

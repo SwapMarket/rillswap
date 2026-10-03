@@ -72,6 +72,18 @@ class ReverseCooperationWindow:
         with self._lock:
             return self._time_allowed()
 
+    def evidence_time(self) -> float:
+        """Sample this original clock, never accept a replacement timing dependency.
+
+        Call on the owning task around the complete acquisition, including
+        executor queue delay. This is a timestamp, not authority or provenance.
+        Expiry, regression, clock failure, or abandonment is terminal.
+        """
+        with self._lock:
+            if not self._time_allowed():
+                raise TimeoutError("reverse cooperation window closed")
+            return self._monotonic_high_water
+
     def _time_allowed(self) -> bool:
         if self._stopped:
             return False

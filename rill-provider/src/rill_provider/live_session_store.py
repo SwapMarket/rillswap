@@ -508,6 +508,15 @@ class _ReverseProposalAttempt:
 
 
 @dataclass(frozen=True, slots=True)
+class _ReverseProposalAcquisitionContext:
+    """Original live read context, never debt, nonce, or signing permission."""
+
+    terms: ContractTerms
+    binding: FundingBinding
+    window: ReverseCooperationWindow
+
+
+@dataclass(frozen=True, slots=True)
 class ReverseProposalAdmission:
     """Reservation receipt only, never settlement, nonce, or signing authority."""
 
@@ -3438,7 +3447,7 @@ class LiveSessionStore:
         txid: str,
         vout: int,
         raw: bytes,
-    ) -> tuple[bytes, FundingBindingTransactionMatch]:
+    ) -> tuple[bytes, FundingBindingTransactionMatch, FundingBinding]:
         """Rebuild immutable reservation bytes inside an authenticated owner write.
 
         Native static funding/plan verification is not publication, current
@@ -3500,7 +3509,7 @@ class LiveSessionStore:
             bytes.fromhex(payload.unsigned_transaction), authorization
         )
         taproot = reconstruct_taproot_contract(terms, keys=keys)
-        return canonicalize(
+        immutable = canonicalize(
             {
                 "version": 2,
                 "kind": "reverse-proposal-reservation",
@@ -3527,7 +3536,93 @@ class LiveSessionStore:
                 "deadline_at": payload.deadline_at,
                 "deadline_height": payload.deadline_height,
             }
-        ), match
+        )
+        return immutable, match, binding
+
+    def _reverse_proposal_acquisition_context(
+        self, document: bytes, *, operation: ReverseOperation
+    ) -> _ReverseProposalAcquisitionContext:
+        """Preflight original read inputs; the debt writer must recheck authority.
+
+        Require original owner memory and exact native-valid burned reservation,
+        not reconstructed signing permission. No RPC or lifecycle write occurs.
+        Failure after identifying the original attempt abandons its window.
+        """
+        self.reverse_operations.check(operation)
+        attempt: _ReverseProposalAttempt | None = None
+        try:
+            with self._write() as connection:
+                outer, payload, terms = self._authenticated_reverse_preimage(connection, document)
+                candidate = self._reverse_proposals.get(outer.session_id)
+                if (
+                    candidate is None
+                    or candidate.window is None
+                    or candidate.message_id != outer.message_id
+                    or candidate.unsigned_digest != unsigned_envelope_hash(outer).hex()
+                    or candidate.cooperation_id != payload.cooperation_id
+                ):
+                    raise ValueError("original reverse reservation absent")  # noqa: TRY301
+                attempt = candidate
+                row = connection.execute(
+                    "SELECT s.accept_bytes,s.transcript_digest,s.blocked,w.contract_hash,"
+                    "w.terms_accept,s.provider_session_key,w.state,w.preimage,"
+                    "w.funding_txid,w.funding_vout,w.funding_tx,w.refund_txid,w.refund_tx "
+                    "FROM sessions s JOIN swaps w ON w.session_id=s.session_id "
+                    "WHERE s.session_id=?",
+                    (outer.session_id,),
+                ).fetchone()
+                if (
+                    row is None
+                    or not self._matches_reverse_negotiation(outer.session_id, row[3], row[:5])
+                    or row[6] != "FUNDED"
+                    or row[7] is not None
+                    or type(row[8]) is not str
+                    or type(row[9]) is not int
+                    or type(row[10]) is not bytes
+                    or row[11] is not None
+                    or row[12] is not None
+                ):
+                    raise ValueError("reverse acquisition lifecycle refused")  # noqa: TRY301
+                expected, _, binding = self._reverse_reservation_binding(
+                    connection,
+                    outer,
+                    payload,
+                    terms,
+                    provider=row[5],
+                    txid=row[8],
+                    vout=row[9],
+                    raw=row[10],
+                )
+                burned = connection.execute(
+                    "SELECT session_id,owner_generation,binding,state,deadline_at,local_nonce,"
+                    "peer_nonce,partial_signature,nonce_response_id,partial_response_id "
+                    "FROM cooperation_attempts WHERE cooperation_id=?",
+                    (bytes.fromhex(payload.cooperation_id),),
+                ).fetchone()
+                if burned != (
+                    outer.session_id,
+                    self._generation,
+                    expected,
+                    "BURNED",
+                    payload.deadline_at,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ):
+                    raise ValueError("reverse acquisition reservation differs")  # noqa: TRY301
+                self.reverse_operations.check(operation)
+                candidate.window.evidence_time()
+                return _ReverseProposalAcquisitionContext(terms, binding, candidate.window)
+        except StaleOwnerError:
+            if attempt is not None and attempt.window is not None:
+                attempt.window.abandon()
+            raise
+        except Exception:  # noqa: BLE001 - no archived preimage or native-context oracle
+            if attempt is not None and attempt.window is not None:
+                attempt.window.abandon()
+        raise LiveSessionStoreError("reverse proposal acquisition context refused")
 
     def _admit_reverse_cooperative_proposal(  # noqa: PLR0912, PLR0915 - one authenticated reservation
         self,
@@ -3665,7 +3760,7 @@ class LiveSessionStore:
                     self._reverse_proposals[outer.session_id] = attempt
                     if state not in ("FUNDING_SENT", "FUNDED") or raw is None:
                         raise LiveSessionStoreError("reverse funding unavailable")  # noqa: TRY301
-                    immutable, _ = self._reverse_reservation_binding(
+                    immutable, _, _ = self._reverse_reservation_binding(
                         connection,
                         outer,
                         payload,
@@ -4932,7 +5027,7 @@ class LiveSessionStore:
                     or unsigned_envelope_hash(_canonical_envelope(admitted[3])).hex() != digest
                 ):
                     raise LiveSessionStoreError("reverse proposal debt reservation differs")  # noqa: TRY301
-                expected, match = self._reverse_reservation_binding(
+                expected, match, _ = self._reverse_reservation_binding(
                     connection,
                     outer,
                     payload,
