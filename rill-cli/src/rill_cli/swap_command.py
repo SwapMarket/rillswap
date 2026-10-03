@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from rill_core.recovery import (
     COOPERATIVE_RESERVATION_EXTENSION,
+    REVERSE_DISCLOSURE_EXTENSION,
     REVERSE_FALLBACK_EXTENSION,
     inspect_recovery_successor,
 )
@@ -179,6 +180,18 @@ def _snapshot_path(path: Path, document: bytes, previous: bytes | None) -> Path:
         and REVERSE_FALLBACK_EXTENSION in current_extensions
     ):
         return path.with_name(path.name + ".fallback")
+    if (
+        prior.get("profile_id") == "ln-to-btc/v1"
+        and prior_knowledge == current_knowledge
+        and isinstance(prior_extensions, dict)
+        and isinstance(current_extensions, dict)
+        and REVERSE_FALLBACK_EXTENSION in prior_extensions
+        and current_extensions.get(REVERSE_FALLBACK_EXTENSION)
+        == prior_extensions[REVERSE_FALLBACK_EXTENSION]
+        and REVERSE_DISCLOSURE_EXTENSION not in prior_extensions
+        and REVERSE_DISCLOSURE_EXTENSION in current_extensions
+    ):
+        return path.with_name(path.name + ".disclosing")
     if (
         prior_knowledge.get("preimage_known") is True
         and prior_knowledge == current_knowledge

@@ -27,7 +27,11 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol, TypeVar
 
-from rill_core.recovery import REVERSE_FALLBACK_EXTENSION, inspect_recovery_successor
+from rill_core.recovery import (
+    REVERSE_DISCLOSURE_EXTENSION,
+    REVERSE_FALLBACK_EXTENSION,
+    inspect_recovery_successor,
+)
 from rill_core.settlement import (
     FundingOutput,
     UnilateralAuthorization,
@@ -540,6 +544,91 @@ async def _publish_reverse_fallback(  # noqa: PLR0913 - exact retained predecess
     return candidate
 
 
+async def _publish_reverse_disclosure(  # noqa: PLR0913 - exact acknowledged predecessor and original proposal
+    lifetime: _ReverseLifetime,
+    *,
+    acknowledged_fallback: bytes,
+    binding: FundingBinding,
+    proposal: Envelope,
+    session: _Session,
+    write_recovery: Callable[[bytes, bytes | None], bytes | None],
+) -> bytes:
+    """Publish a local disclosure reservation without sending its proposal.
+
+    INTERNAL ONLY. The live caller must retain its exact trusted-writer fallback
+    acknowledgment, not load a restored snapshot as authority. Byte equality
+    detects accidental no-ops, not dishonest storage or lost nonce custody.
+    Core inspection preserves historical evidence; this live boundary separately
+    checks current wall time before and after publication. An uncertain or late
+    write can leave a valid file without granting transmission/signing authority.
+    """
+    lifetime.check()
+    wall_high_water: float | None = None
+    proposal_document = proposal.model_dump(mode="json")
+    signed_deadline = proposal_document["payload"].get("deadline_at")
+
+    def check_wall(predecessor_time: int) -> float:
+        nonlocal wall_high_water
+        lifetime.check()
+        wall = time.time()
+        if (
+            type(signed_deadline) is not int
+            or type(wall) not in (int, float)
+            or not math.isfinite(wall)
+            or wall < predecessor_time
+            or (wall_high_water is not None and wall < wall_high_water)
+            or wall >= signed_deadline
+        ):
+            raise SwapError("reverse disclosure publication time refused")
+        wall_high_water = wall
+        return wall
+
+    def prepare() -> tuple[bytes, int]:
+        lifetime.check()
+        record = parse_json_strict(acknowledged_fallback)
+        if not isinstance(record, dict):
+            raise SwapError("reverse disclosure predecessor unavailable")
+        extensions = record.get("extensions")
+        previous_time = record.get("updated_at")
+        if (
+            not isinstance(extensions, dict)
+            or REVERSE_FALLBACK_EXTENSION not in extensions
+            or REVERSE_DISCLOSURE_EXTENSION in extensions
+            or type(previous_time) is not int
+        ):
+            raise SwapError("reverse disclosure predecessor unavailable")
+        record["updated_at"] = int(check_wall(previous_time))
+        extensions[REVERSE_DISCLOSURE_EXTENSION] = {
+            "version": 1,
+            "funding_binding_hash": funding_binding_hash(binding).hex(),
+            "proposal": proposal_document,
+        }
+        candidate = canonicalize(record)
+        inspect_recovery_successor(
+            acknowledged_fallback, candidate, session.network, crypto=session.crypto
+        )
+        lifetime.check()
+        return candidate, previous_time
+
+    try:
+        candidate, previous_time = await lifetime.worker(prepare)
+
+        def publish() -> bytes | None:
+            check_wall(previous_time)
+            return write_recovery(candidate, acknowledged_fallback)
+
+        acknowledged = await lifetime.worker(publish)
+        check_wall(previous_time)
+    except (TimeoutError, asyncio.CancelledError):
+        raise
+    except Exception:  # noqa: BLE001 - never expose preimage, proposal, or storage details
+        raise SwapError("reverse disclosure publication uncertain; " + _UNRESOLVED) from None
+    lifetime.check()
+    if type(acknowledged) is not bytes or acknowledged != candidate:
+        raise SwapError("reverse disclosure publication not acknowledged; " + _UNRESOLVED)
+    return candidate
+
+
 async def run_reverse_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
     connection: RelayConnection,
     *,
@@ -731,7 +820,7 @@ async def run_reverse_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
             )
             if COOPERATIVE_CLAIM_FEATURE in terms.required_features:
                 prepared_claim = await lifetime.worker(lambda: sign(initial_fee, 0))
-                await _publish_reverse_fallback(
+                successor = await _publish_reverse_fallback(
                     lifetime,
                     funded_document=successor,
                     binding=binding,

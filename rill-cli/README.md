@@ -183,6 +183,23 @@ acknowledgments grant no subsequent authority, even if a valid file was created.
 Matching bytes detect accidental no-ops; they are not independent proof against
 a lying adapter. Older unilateral and forward callback behavior is unchanged.
 
+The private, nonactivated disclosure-publication helper extends those exact
+acknowledged fallback bytes without rebuilding their recovery context. Its
+create-only `.disclosing` snapshot preserves funding, knowledge, and fallback,
+adds the authenticated proposal, and records current `updated_at`. It checks
+nonregressing wall time strictly before the captured proposal deadline both
+before writing and after exact acknowledgment. Cancellation, uncertain or late
+writes, mismatched acknowledgment, and destination collisions grant no success;
+a valid file may still remain. The helper sends no proposal and broadcasts no
+claim. Publication is not proof of live nonce custody, chain-height eligibility,
+or signing authority. A future live caller must retain its actual in-memory
+acknowledgment, not substitute a restored historical predecessor.
+
+Upgrading installations perform no automatic disclosure work. Absent and older
+markers prove nothing; partial or existing disclosure markers refuse this live
+helper. Historical artifacts remain inspectable for independent recovery, never
+automatic cooperation resumption or transmission.
+
 Reverse cooperative proposal/disclosure handling is still unfinished. Featured
 terms currently stop after acknowledged preparation, preserving all snapshots
 and independent recovery rather than silently replacing the privacy commitment

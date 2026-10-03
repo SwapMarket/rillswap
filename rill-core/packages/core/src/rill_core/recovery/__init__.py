@@ -2,6 +2,7 @@
 
 from rill_core.recovery.inspection import (
     COOPERATIVE_RESERVATION_EXTENSION,
+    REVERSE_DISCLOSURE_EXTENSION,
     REVERSE_FALLBACK_EXTENSION,
     OfflineRecoveryInspection,
     SelectedRecoveryFundingContext,
@@ -15,6 +16,7 @@ from rill_core.recovery.inspection import (
 
 __all__ = [
     "COOPERATIVE_RESERVATION_EXTENSION",
+    "REVERSE_DISCLOSURE_EXTENSION",
     "REVERSE_FALLBACK_EXTENSION",
     "OfflineRecoveryInspection",
     "SelectedRecoveryFundingContext",
