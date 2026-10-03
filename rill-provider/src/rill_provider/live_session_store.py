@@ -514,6 +514,8 @@ class _ReverseLiveProposalContext:
     terms: ContractTerms
     binding: FundingBinding
     window: ReverseCooperationWindow
+    static_match: FundingBindingTransactionMatch
+    plan: CooperativeClaimPlan
 
 
 @dataclass(frozen=True, slots=True)
@@ -3447,7 +3449,7 @@ class LiveSessionStore:
         txid: str,
         vout: int,
         raw: bytes,
-    ) -> tuple[bytes, FundingBindingTransactionMatch, FundingBinding]:
+    ) -> tuple[bytes, FundingBindingTransactionMatch, FundingBinding, CooperativeClaimPlan]:
         """Rebuild immutable reservation bytes inside an authenticated owner write.
 
         Native static funding/plan verification is not publication, current
@@ -3537,7 +3539,7 @@ class LiveSessionStore:
                 "deadline_height": payload.deadline_height,
             }
         )
-        return immutable, match, binding
+        return immutable, match, binding, plan
 
     def _reverse_live_proposal_context(
         self,
@@ -3597,7 +3599,7 @@ class LiveSessionStore:
                     or row[12] is not None
                 ):
                     raise ValueError("reverse acquisition lifecycle refused")  # noqa: TRY301
-                expected, _, binding = self._reverse_reservation_binding(
+                expected, match, binding, plan = self._reverse_reservation_binding(
                     connection,
                     outer,
                     payload,
@@ -3628,7 +3630,7 @@ class LiveSessionStore:
                     raise ValueError("reverse acquisition reservation differs")  # noqa: TRY301
                 self.reverse_operations.check(operation)
                 candidate.window.evidence_time()
-                return _ReverseLiveProposalContext(terms, binding, candidate.window)
+                return _ReverseLiveProposalContext(terms, binding, candidate.window, match, plan)
         except StaleOwnerError:
             if attempt is not None and attempt.window is not None:
                 attempt.window.abandon()
@@ -3774,7 +3776,7 @@ class LiveSessionStore:
                     self._reverse_proposals[outer.session_id] = attempt
                     if state not in ("FUNDING_SENT", "FUNDED") or raw is None:
                         raise LiveSessionStoreError("reverse funding unavailable")  # noqa: TRY301
-                    immutable, _, _ = self._reverse_reservation_binding(
+                    immutable, _, _, _ = self._reverse_reservation_binding(
                         connection,
                         outer,
                         payload,
@@ -5041,7 +5043,7 @@ class LiveSessionStore:
                     or unsigned_envelope_hash(_canonical_envelope(admitted[3])).hex() != digest
                 ):
                     raise LiveSessionStoreError("reverse proposal debt reservation differs")  # noqa: TRY301
-                expected, match, _ = self._reverse_reservation_binding(
+                expected, match, _, _ = self._reverse_reservation_binding(
                     connection,
                     outer,
                     payload,

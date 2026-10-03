@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import logging
 import math
+import re
 import secrets
 import time
 from dataclasses import dataclass
@@ -32,7 +33,15 @@ from rill_core.settlement import (
 from rill_core.wire.hashes import contract_hash
 from rill_core.wire.messages import Envelope, FundingBinding
 
+from rill_provider.core_tx_bytes import (
+    MAX_ESTIMATE_TARGET,
+    MAX_SATS,
+    SATS_PER_BTC,
+    CooperativeClaimOutpoint,
+    CooperativeFeePolicy,
+)
 from rill_provider.live_session_store import LiveSessionStoreError, StaleOwnerError, StaleSwapError
+from rill_provider.lnd_hold_invoice import BoundHoldInvoiceObservation
 from rill_provider.lnd_payment_observation import LndObservationError
 from rill_provider.settlement_policy import offered_terms
 
@@ -42,13 +51,13 @@ if TYPE_CHECKING:
     from rill_core.settlement.taproot import TaprootKeyOperations
     from rill_core.wire.messages import ContractTerms, InvoiceBinding
 
-    from rill_provider.core_tx_bytes import CooperativeClaimOutpoint, FundedOutput, SpendScan
+    from rill_provider.core_tx_bytes import FundedOutput, SpendScan
     from rill_provider.live_session_store import (
         LiveSessionStore,
         ReverseProposalAdmission,
         SettlementItem,
     )
-    from rill_provider.lnd_hold_invoice import BoundHoldInvoiceObservation, HoldInvoiceStatus
+    from rill_provider.lnd_hold_invoice import HoldInvoiceStatus
     from rill_provider.reverse_cooperation import ReverseCooperationWindow
     from rill_provider.reverse_operations import ReverseOperation
     from rill_provider.settlement_engine import EngineCrypto
@@ -86,6 +95,14 @@ class HoldInvoiceBackend(Protocol):
     ) -> BoundHoldInvoiceObservation:
         """Observe the original invoice without financial or signing permission."""
 
+    def observe_bound_settled_invoice(
+        self,
+        expected: InvoiceBinding,
+        *,
+        submission_allowed: Callable[[], bool] | None = None,
+    ) -> BoundHoldInvoiceObservation:
+        """Collect actual sufficiently paid original-invoice knowledge."""
+
     def cancel(self, payment_hash: str) -> None:
         """Cancel; accepted parts are failed back."""
 
@@ -100,6 +117,11 @@ class ReverseChainBackend(Protocol):
         self, binding: FundingBinding, terms: ContractTerms, *, keys: TaprootKeyOperations
     ) -> CooperativeClaimOutpoint:
         """Read the named confirmed unspent output using public-only key results."""
+
+    def observe_cooperative_fee_policy(
+        self, target_blocks: int, *, allow_regtest_fixed_fee: bool = False
+    ) -> CooperativeFeePolicy:
+        """Read conservative estimate and relay/mempool admission floors."""
 
     def fund_output(
         self, script_pubkey: bytes, value_sat: int, *, max_fee_sat: int
@@ -281,6 +303,157 @@ class ReverseSettlement:
             else:
                 return receipt
             raise LiveSessionStoreError("reverse proposal acquisition refused")
+
+    async def _preflight_paid_proposal(
+        self,
+        document: bytes,
+        *,
+        configured_floor_sat: int,
+        allow_regtest_fixed_fee: bool = False,
+    ) -> None:
+        """Check paid cooperation prerequisites, never return signing authority.
+
+        INTERNAL ONLY, with no production caller. Reconcile independent debt
+        repayment first; requesting paid context too early abandons cooperation.
+        Success is diagnostic and must not be saved, transferred, or treated as
+        nonce/partial signing authority. Any future signing effect must repeat fresh
+        evidence and final owner validation inside the same original window.
+        No nonce, signature, reply, debt, settlement RPC, or lifecycle write.
+        """
+        async with self._store.reverse_operations.operation() as operation:
+            window: ReverseCooperationWindow | None = None
+            try:
+                if (
+                    type(configured_floor_sat) is not int
+                    or not 0 < configured_floor_sat <= MAX_SATS
+                    or type(allow_regtest_fixed_fee) is not bool
+                    or (allow_regtest_fixed_fee and self._store.network_identity.name != "regtest")
+                ):
+                    raise ValueError("reverse cooperative fee configuration refused")  # noqa: TRY301
+                context = self._store._reverse_live_proposal_context(  # noqa: SLF001 - original-owner gate
+                    document, operation=operation, purpose="paid-signing"
+                )
+                original_window = context.window
+                window = original_window
+                operation.check()
+                keys = _ReversePublicKeySnapshot.capture(context.terms, keys=self._crypto)
+
+                def submission_allowed() -> bool:
+                    return operation.submission_allowed() and original_window.time_allowed()
+
+                started = original_window.evidence_time()
+                core = await operation.worker(
+                    partial(
+                        self._chain.observe_cooperative_claim_outpoint,
+                        context.binding,
+                        context.terms,
+                        keys=keys,
+                    )
+                )
+                operation.check()
+                original_window.check(tip_height=core.tip_height)
+                policy = await operation.worker(
+                    partial(
+                        self._chain.observe_cooperative_fee_policy,
+                        context.terms.timing_policy.claim_confirmation_blocks,
+                        allow_regtest_fixed_fee=allow_regtest_fixed_fee,
+                    )
+                )
+                operation.check()
+                original_window.check(tip_height=core.tip_height)
+                # The actual stronger query, not ordinary same-type knowledge.
+                invoice = await operation.worker(
+                    partial(
+                        self._hold.observe_bound_settled_invoice,
+                        context.terms.invoice_binding,
+                        submission_allowed=submission_allowed,
+                    )
+                )
+                completed = original_window.evidence_time()
+                operation.check()
+                final_context = self._store._reverse_live_proposal_context(  # noqa: SLF001
+                    document, operation=operation, purpose="paid-signing"
+                )
+                binding, terms = final_context.binding, final_context.terms
+                if (
+                    final_context != context
+                    or type(core) is not CooperativeClaimOutpoint
+                    or type(core.static_match) is not type(final_context.static_match)
+                    or core.static_match != final_context.static_match
+                    or core.network_identity != terms.network_identity
+                    or core.funding_txid != binding.funding_txid
+                    or type(core.funding_vout) is not int
+                    or core.funding_vout != binding.contract_vout
+                    or type(core.funding_value_sat) is not int
+                    or core.funding_value_sat != int(binding.contract_value_sat)
+                    or type(core.funding_script_pubkey) is not bytes
+                    or core.funding_script_pubkey != bytes.fromhex(binding.contract_script_pubkey)
+                    or type(core.tip_height) is not int
+                    or type(core.confirmations) is not int
+                    or type(core.inclusion_height) is not int
+                    or not 0 < core.inclusion_height <= core.tip_height < terms.refund_lock_height
+                    or core.confirmations != core.tip_height - core.inclusion_height + 1
+                    or core.confirmations < terms.funding_confirmations
+                    or not re.fullmatch("[0-9a-f]{64}", core.tip_hash)
+                    or not re.fullmatch("[0-9a-f]{64}", core.inclusion_block_hash)
+                    or (
+                        core.inclusion_height == core.tip_height
+                        and core.inclusion_block_hash != core.tip_hash
+                    )
+                    or type(invoice) is not BoundHoldInvoiceObservation
+                    or invoice.network != terms.network_identity
+                    or invoice.payment_hash != terms.invoice_binding.payment_hash
+                    or invoice.bolt11_sha256 != terms.invoice_binding.bolt11_sha256
+                    or invoice.node_pubkey != terms.invoice_binding.payee_compressed_pubkey
+                    or invoice.status.state != "SETTLED"
+                    or type(invoice.last_lnd_height) is not int
+                    or (invoice.last_lnd_height, invoice.last_lnd_block_hash)
+                    != (core.tip_height, core.tip_hash)
+                    or type(policy) is not CooperativeFeePolicy
+                    or policy.network_identity != terms.network_identity
+                    or type(policy.tip_height) is not int
+                    or (policy.tip_height, policy.tip_hash) != (core.tip_height, core.tip_hash)
+                    or type(policy.confirmation_blocks) is not int
+                    or policy.confirmation_blocks != terms.timing_policy.claim_confirmation_blocks
+                    or any(
+                        type(rate) is not int or not 0 <= rate < SATS_PER_BTC
+                        for rate in (
+                            policy.min_relay_sat_kvb,
+                            policy.mempool_min_sat_kvb,
+                        )
+                    )
+                    or type(policy.estimate_blocks) is not int
+                    or not 0 <= policy.estimate_blocks <= MAX_ESTIMATE_TARGET
+                    or (policy.estimate_sat_kvb is None and not allow_regtest_fixed_fee)
+                    or (
+                        policy.estimate_sat_kvb is not None
+                        and (
+                            type(policy.estimate_sat_kvb) is not int
+                            or not 0 < policy.estimate_sat_kvb < SATS_PER_BTC
+                            or not 1 <= policy.estimate_blocks <= policy.confirmation_blocks
+                        )
+                    )
+                ):
+                    raise ValueError("reverse paid evidence differs")  # noqa: TRY301
+                plan = final_context.plan
+                vsize = (4 * len(plan.base_transaction) + 68 + 3) // 4
+                if plan.fee_sat < policy.fee_floor_sat(
+                    vsize=vsize, configured_floor_sat=configured_floor_sat
+                ):
+                    raise ValueError("reverse cooperative fee below floor")  # noqa: TRY301
+                operation.check()
+                original_window.check(tip_height=core.tip_height)
+                original_window.check_evidence_interval(started_at=started, completed_at=completed)
+            except (asyncio.CancelledError, StaleOwnerError):
+                if window is not None:
+                    window.abandon()
+                raise
+            except Exception:  # noqa: BLE001 - no archived preimage, plan, or backend oracle
+                if window is not None:
+                    window.abandon()
+            else:
+                return
+            raise LiveSessionStoreError("reverse paid proposal preflight refused")
 
     def _check_operation(self) -> ReverseOperation:
         if self._operation is None:

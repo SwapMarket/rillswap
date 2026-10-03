@@ -755,6 +755,26 @@ repayment before requesting paid context, never probe and retry. Unknown or
 omitted purposes cannot select a default policy. Restarted paid state remains
 history and triggers no new work or reconstructed signing permission.
 
+The internal `_preflight_paid_proposal` collects fresh Core confirmed-unspent
+and strict fee-policy evidence plus an actual `observe_bound_settled_invoice`
+call under that same original window and operation. It requires an explicit
+positive configured absolute fee floor. Public networks require a positive
+conservative estimate within the signed horizon, and every network enforces
+relay/mempool floors. Only an explicit boolean regtest exemption permits an
+unavailable estimate. All named tips must match; the exact native proposal plan
+must cover the resulting floor at its final key-path vsize. Final owner/native
+context revalidation counts toward the complete interval strictly younger than
+one second. The signed reverse height bound remains inclusive.
+
+This preflight performs no nonce allocation, signature, reply, settlement RPC,
+or durable lifecycle update. It has no production caller. A diagnostic success
+is not transferable permission; future signing must establish fresh evidence
+and uninterrupted original ownership through the effect. Matching named tips
+does not make separate Core/LND reads atomic. Full live provider/Core/LND
+repayment-to-preflight interoperability and subsecond fee/batch latency remain
+unproven acceptance requirements before authority-bearing integration. Neither
+these checks nor their absence trigger startup or migration work.
+
 A retained matching preimage in `FUNDED` or `REFUNDING` means settlement is
 owed, not that LND settlement succeeded. Restart retries that obligation
 without needing Core or rediscovering a disappeared witness. Under serialized
