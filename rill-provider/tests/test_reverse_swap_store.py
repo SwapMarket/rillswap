@@ -80,7 +80,14 @@ def insert_reverse_swap(
         "NULL, NULL, NULL, NULL, NULL, NULL)",
         (session, REVERSE["contract_hash"], canonicalize(offer), b"accepted", state),
     )
-    connection.execute("UPDATE sessions SET phase='ACCEPTED' WHERE session_id=?", (session,))
+    # Supply explicit historical handshake feature commitments for this manual
+    # accepted-state fixture, without pretending to authenticate reverse terms.
+    # Opaque client acceptance remains intentional for legacy repayment tests.
+    connection.execute(
+        "UPDATE sessions SET phase='ACCEPTED',accept_bytes=COALESCE(accept_bytes,?),"
+        "transcript_digest=COALESCE(transcript_digest,?) WHERE session_id=?",
+        (harness.accept, harness.source["verification_context"]["handshake_hash"], session),
+    )
     connection.execute("INSERT INTO payment_hashes VALUES (?, ?, 1000)", (HASH, session))
     request = copy.deepcopy(harness.envelopes[2])
     request.update(

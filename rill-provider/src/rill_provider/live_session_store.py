@@ -84,6 +84,7 @@ from rill_core.wire.messages import (
     HandshakeAccept,
     HandshakeAcceptPayload,
     HandshakeInit,
+    InvoiceBinding,
     require_supported_contract_features,
 )
 from rill_core.wire.quotes import TermsOfferPayload
@@ -3181,6 +3182,140 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - no signed acceptance or local policy oracle
             raise LiveSessionStoreError("cooperative admission refused") from None
 
+    def _authenticated_reverse_agreement(
+        self, row: tuple[Any, ...], session_id: str
+    ) -> tuple[HandshakeInit, HandshakeAccept, ContractTerms]:
+        """Authenticate archived agreement without proposal, time, or fresh authority."""
+        (
+            client,
+            provider,
+            phase,
+            init_bytes,
+            accept_bytes,
+            transcript,
+            digest,
+            offer_bytes,
+            accepted_bytes,
+        ) = row
+        if phase != "ACCEPTED" or self._policy.profile != "ln-to-btc/v1":
+            raise LiveSessionStoreError("no accepted reverse context")
+        initiation = parse_model_json(
+            HandshakeInit, canonicalize(_canonical_envelope(init_bytes).payload)
+        )
+        acceptance = parse_model_json(
+            HandshakeAcceptPayload, canonicalize(_canonical_envelope(accept_bytes).payload)
+        ).accept
+        offer = _canonical_envelope(offer_bytes)
+        offered = parse_model_json(TermsOfferPayload, canonicalize(offer.payload))
+        terms = offered.terms.contract_terms
+        accepted = _canonical_envelope(accepted_bytes)
+        signed_acceptance = parse_model_json(TermsAcceptPayload, canonicalize(accepted.payload))
+        acceptance.validate_against(initiation, supported_features=self._policy.features)
+        require_supported_contract_features(terms, initiation, acceptance)
+        signed = signed_acceptance.acceptance
+        if (
+            terms.profile_id != "ln-to-btc/v1"
+            or initiation.session_id != session_id
+            or initiation.profile_id != terms.profile_id
+            or initiation.network_identity != terms.network_identity
+            or terms.network_identity != self._network
+            or client != initiation.client_session_xonly_key
+            or provider != acceptance.provider_session_xonly_key
+            or handshake_hash(initiation, acceptance).hex() != transcript
+            or offered.terms.handshake_hash != transcript
+            or contract_hash(terms).hex() != digest
+            or offered.terms.contract_hash != digest
+            or offer.contract_hash != digest
+            or accepted.message_type != "terms_accept"
+            or accepted.in_reply_to != offer.message_id
+            or accepted.contract_hash != digest
+            or signed.contract_hash != digest
+            or signed.handshake_hash != transcript
+            or signed.session_id != session_id
+            or signed.client_session_xonly_key != client
+            or signed.provider_session_xonly_key != provider
+        ):
+            raise LiveSessionStoreError("reverse agreement context differs")
+        for retained, sender in ((offer_bytes, provider), (accepted_bytes, client)):
+            verify_static_signed_envelope(
+                retained,
+                expected_session_id=session_id,
+                expected_profile=self._policy.profile,
+                expected_network=self._network,
+                expected_sender_key=sender,
+                supported_features=self._policy.features,
+                crypto=self._crypto,
+            )
+        self._crypto.schnorr_verify(
+            bytes.fromhex(acceptance.provider_identity_xonly_key),
+            provider_terms_hash(offered.terms),
+            bytes.fromhex(offered.provider_terms_signature),
+        )
+        self._crypto.schnorr_verify(
+            bytes.fromhex(client),
+            client_acceptance_hash(signed),
+            bytes.fromhex(signed_acceptance.client_acceptance_signature),
+        )
+        return initiation, acceptance, terms
+
+    def _reverse_repayment_binding(self, session_id: str) -> InvoiceBinding | None:
+        """Return repayment classification/data, never proof that any debt exists.
+
+        Only exact historical empty/epoch commitments retain legacy routing.
+        Their opaque client acceptance stays outside legacy classification.
+        All other contexts require fully authenticated featured agreement;
+        partial, inconsistent, unknown, or unsupported context never downgrades.
+        No Core, live proposal/window, sequence, or knowledge backfill is needed.
+        """
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT s.client_key,s.provider_session_key,s.phase,s.init_bytes,"
+                    "s.accept_bytes,s.transcript_digest,w.contract_hash,w.terms_offer,"
+                    "w.terms_accept FROM sessions s JOIN swaps w ON w.session_id=s.session_id "
+                    "WHERE s.session_id=?",
+                    (session_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError("repayment context absent")  # noqa: TRY301
+                initiation = _canonical_envelope(row[3])
+                acceptance = _canonical_envelope(row[4])
+                offer = _canonical_envelope(row[7])
+                inner_init = initiation.payload["required_features"]
+                accepted_payload = acceptance.payload["accept"]
+                offered_payload = offer.payload["terms"]
+                if not isinstance(accepted_payload, dict) or not isinstance(offered_payload, dict):
+                    raise TypeError("repayment feature context unsupported")  # noqa: TRY301
+                contract_payload = offered_payload["contract_terms"]
+                if not isinstance(contract_payload, dict):
+                    raise TypeError("repayment contract context unsupported")  # noqa: TRY301
+                inner_accept = accepted_payload["required_features"]
+                inner_terms = contract_payload["required_features"]
+                # Parse the closed terms object without introducing historical
+                # signature or relationship checks into trusted legacy repayment.
+                terms = _offer_terms(row[7])
+                if (
+                    type(inner_terms) is list
+                    and inner_terms == []
+                    and type(inner_init) is list
+                    and type(inner_accept) is list
+                    and inner_init == inner_accept
+                    and inner_init in ([], [EPOCH_SESSION_FEATURE])
+                    and initiation.required_features == ()
+                    and acceptance.required_features == ()
+                    and offer.required_features == ()
+                ):
+                    return None
+                _, _, terms = self._authenticated_reverse_agreement(row, session_id)
+                if COOPERATIVE_CLAIM_FEATURE not in terms.required_features:
+                    raise ValueError("repayment feature unsupported")  # noqa: TRY301
+                return terms.invoice_binding
+        except StaleOwnerError:
+            raise
+        except Exception:  # noqa: BLE001, S110 - no archived signature or private-context oracle
+            pass
+        raise LiveSessionStoreError("reverse repayment context refused")
+
     def _authenticated_reverse_preimage(
         self, connection: sqlite3.Connection, document: bytes
     ) -> tuple[Envelope, CooperativeClaimPropose, ContractTerms]:
@@ -3200,17 +3335,7 @@ class LiveSessionStore:
         ).fetchone()
         if row is None or row[2] != "ACCEPTED" or self._policy.profile != "ln-to-btc/v1":
             raise LiveSessionStoreError("no accepted reverse context")
-        (
-            client,
-            provider,
-            _,
-            init_bytes,
-            accept_bytes,
-            transcript,
-            digest,
-            offer_bytes,
-            accepted_bytes,
-        ) = row
+        client = row[0]
         verify_static_signed_envelope(
             document,
             expected_session_id=outer.session_id,
@@ -3220,62 +3345,14 @@ class LiveSessionStore:
             supported_features=self._policy.features,
             crypto=self._crypto,
         )
-        initiation = parse_model_json(
-            HandshakeInit, canonicalize(_canonical_envelope(init_bytes).payload)
-        )
-        acceptance = parse_model_json(
-            HandshakeAcceptPayload, canonicalize(_canonical_envelope(accept_bytes).payload)
-        ).accept
-        offer = _canonical_envelope(offer_bytes)
-        offered = parse_model_json(TermsOfferPayload, canonicalize(offer.payload))
-        terms = offered.terms.contract_terms
-        accepted = _canonical_envelope(accepted_bytes)
-        signed_acceptance = parse_model_json(TermsAcceptPayload, canonicalize(accepted.payload))
-        acceptance.validate_against(initiation, supported_features=self._policy.features)
+        initiation, acceptance, terms = self._authenticated_reverse_agreement(row, outer.session_id)
         payload = check_cooperative_action_context(outer, terms, initiation, acceptance)
-        signed = signed_acceptance.acceptance
         if (
             not isinstance(payload, CooperativeClaimPropose)
-            or terms.profile_id != "ln-to-btc/v1"
-            or client != initiation.client_session_xonly_key
-            or provider != acceptance.provider_session_xonly_key
-            or handshake_hash(initiation, acceptance).hex() != transcript
-            or offered.terms.handshake_hash != transcript
-            or contract_hash(terms).hex() != digest
-            or offered.terms.contract_hash != digest
-            or offer.contract_hash != digest
-            or accepted.message_type != "terms_accept"
-            or accepted.in_reply_to != offer.message_id
-            or accepted.contract_hash != digest
-            or signed.contract_hash != digest
-            or signed.handshake_hash != transcript
-            or signed.session_id != outer.session_id
-            or signed.client_session_xonly_key != client
-            or signed.provider_session_xonly_key != provider
             or hashlib.sha256(bytes.fromhex(payload.payment_preimage)).hexdigest()
             != terms.invoice_binding.payment_hash
         ):
             raise LiveSessionStoreError("reverse preimage context differs")
-        for retained, sender in ((offer_bytes, provider), (accepted_bytes, client)):
-            verify_static_signed_envelope(
-                retained,
-                expected_session_id=outer.session_id,
-                expected_profile=self._policy.profile,
-                expected_network=self._network,
-                expected_sender_key=sender,
-                supported_features=self._policy.features,
-                crypto=self._crypto,
-            )
-        self._crypto.schnorr_verify(
-            bytes.fromhex(acceptance.provider_identity_xonly_key),
-            provider_terms_hash(offered.terms),
-            bytes.fromhex(offered.provider_terms_signature),
-        )
-        self._crypto.schnorr_verify(
-            bytes.fromhex(client),
-            client_acceptance_hash(signed),
-            bytes.fromhex(signed_acceptance.client_acceptance_signature),
-        )
         return outer, payload, terms
 
     def _retain_reverse_preimage_evidence(

@@ -647,6 +647,19 @@ Legacy settlement remains unchanged, and no runtime consumer uses this method
 yet. Positive bound SETTLED reconciliation remains required before future
 cooperative partial signing.
 
+The preparatory store-owned `_reverse_repayment_binding` getter classifies
+archived context, not whether settlement debt exists. Explicit empty contract
+features, matching empty or `epoch-bound-session/v1` inner handshake features,
+and empty outer handshake/terms-offer features identify historical repayment.
+That branch does not parse or reauthenticate opaque historical client acceptance.
+Other contexts require authenticated cooperative terms, their original invoice
+binding, and matching session, profile, network, transcript, and signatures.
+Missing, mixed, unsupported, or invalid archives refuse rather than downgrade.
+The getter performs no backend calls, creates no debt or signing authority, and
+requires no live proposal or cooperation window. On upgrade this preparatory
+increment changes no repayment routing or startup behavior; future routing must
+retain debt without dispatch when archives cannot establish either branch.
+
 The internal `_commit_reverse_proposal_debt` boundary is also preparatory. It
 requires fresh original-owner negotiation memory, the exact native-valid
 version-2 BURNED reservation and authenticated inbox proposal, a live original
