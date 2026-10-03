@@ -177,6 +177,46 @@ jobs:
             ../rill-provider/tmp/ci-venv/bin/python -m pytest -q -m native_crypto \
             --basetemp=tmp/pytest-ci-native
 
+  provider-lnd:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: rill-provider
+    env:
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+      PYTHONPATH: src:../rill-core/packages/core/src:../rill-crypto/python/src:tests
+      RILLSWAP_RUN_NATIVE_CRYPTO: '1'
+      RILLSWAP_RUN_LND: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.11.7'
+      - name: Build checksum-pinned native crypto dependency
+        run: |
+          cmake -S ../rill-crypto -B tmp/native -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+          cmake --build tmp/native --parallel 2
+      - name: Install sidecar-compatible provider dependencies
+        run: |
+          uv venv --python 3.14 .venv
+          uv pip install --python .venv/bin/python -r requirements-dev.txt
+      - name: Pull the fixtures' digest-pinned disposable backend images
+        run: |
+          .venv/bin/python - <<'PY'
+          import subprocess
+          from test_lnd_payment_pinned import CORE_IMAGE, LND_IMAGE, PYTHON_IMAGE
+          for image in (CORE_IMAGE, LND_IMAGE, PYTHON_IMAGE):
+              subprocess.run(["docker", "pull", image], check=True)
+          PY
+      - name: Check isolated real Core and LND interoperability
+        run: |
+          RILL_CRYPTO_LIBRARY="$PWD/tmp/native/librill_crypto.so" \
+            .venv/bin/python -m pytest -q -s -m lnd --basetemp=tmp/pytest-ci-lnd
+
   cli:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
