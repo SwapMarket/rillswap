@@ -654,6 +654,19 @@ An expired cooperation window supplies no new deadline or signing authority.
 Positive bound SETTLED reconciliation remains required before future cooperative
 partial signing; transport success alone never permits a partial signature.
 
+`observe_bound_settled_invoice` is the separate positive reconciliation query:
+the original-bound, identity-bracketed three-read batch must report SETTLED with
+paid amount at least the original invoice amount. Exact payment and overpayment
+qualify; other states and insufficient payment refuse. It performs no financial
+dispatch, retry, or fallback. Like ordinary bound observation, it requires
+authenticated original terms, `info:read`, and synchronized original LND.
+Late final knowledge retains its meaning, not freshness or signing authority.
+The returned general observation type alone does not prove this stronger query
+ran; trusted runtime must collect the actual invocation and independently check
+its original window, full evidence interval, chain, fees, and custody. No signing
+consumer uses this query yet. Upgrading installations perform no new startup
+work, and absent or older stored state supplies no payment evidence.
+
 The store-owned `_reverse_repayment_binding` getter classifies
 archived context, not whether settlement debt exists. Explicit empty contract
 features, matching empty or `epoch-bound-session/v1` inner handshake features,

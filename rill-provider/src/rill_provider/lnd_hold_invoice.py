@@ -255,6 +255,42 @@ class LndHoldInvoices:
         )
         return observation, invoice
 
+    def observe_bound_settled_invoice(
+        self,
+        expected: InvoiceBinding,
+        *,
+        deadline: float | None = None,
+        submission_allowed: Callable[[], bool] | None = None,
+    ) -> BoundHoldInvoiceObservation:
+        """Require sufficiently paid original-invoice knowledge from this invocation.
+
+        The trusted runtime must collect this actual call, not substitute an
+        ordinary observation of the same type. Successful return requires a
+        bound SETTLED invoice with paid amount at least the original amount.
+        As with observe_bound_invoice, the caller supplies authenticated original
+        terms and the credential needs info:read on synchronized original LND.
+        Three reads use one channel and a fixed setup-inclusive transport budget;
+        no settlement, fallback, retry, or nonce allocation occurs.
+
+        Late final knowledge retains its meaning, not freshness or signing
+        authority. The caller must independently recheck its original window,
+        complete acquisition interval, chain, fees, and custody before effects.
+        This is neither atomic state nor transferable acquisition provenance.
+        """
+        if not isinstance(expected, InvoiceBinding):
+            raise LndProtocolError("LND original invoice binding unsupported")
+        call_deadline = _bounded_deadline(deadline)
+        _check_submission_authority(call_deadline, submission_allowed)
+        with self._connect() as calls:
+            observation, invoice = self._observe_bound_invoice_on_calls(
+                calls, expected, call_deadline, submission_allowed
+            )
+        if invoice.state != lightning_pb2.Invoice.SETTLED or (
+            invoice.amt_paid_msat < int(expected.amount_msat)
+        ):
+            raise LndProtocolError("LND original invoice is not sufficiently settled")
+        return observation
+
     def settle_bound_invoice(
         self,
         expected: InvoiceBinding,

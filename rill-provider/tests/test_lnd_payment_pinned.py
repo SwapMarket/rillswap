@@ -1312,6 +1312,13 @@ with tempfile.TemporaryDirectory(prefix='rill-hold-reads-', dir='/tmp') as crede
                 assert bound.bolt11_sha256 == binding.bolt11_sha256
                 assert bound.node_pubkey == b_key and bound.network == network
                 assert bound.last_lnd_height == 103 and bound.last_lnd_block_hash == info.block_hash
+                try:
+                    held.observe_bound_settled_invoice(binding, deadline=time.monotonic() + 5)
+                except LndProtocolError:
+                    pass
+                else:
+                    raise AssertionError('accepted hold is not positive settled knowledge')
+                assert counter.calls == 0
                 held.settle_bound_invoice(binding, preimage.hex(), deadline=time.monotonic() + 5,
                     submission_allowed=lambda: True)
                 assert counter.calls == 1
@@ -1324,6 +1331,12 @@ with tempfile.TemporaryDirectory(prefix='rill-hold-reads-', dir='/tmp') as crede
                 assert confirmed.status.state == 'SETTLED'
                 assert confirmed.payment_hash == binding.payment_hash
                 assert confirmed.node_pubkey == b_key and confirmed.network == network
+                positive = held.observe_bound_settled_invoice(binding,
+                    deadline=time.monotonic() + 5, submission_allowed=lambda: True)
+                assert positive.status.state == 'SETTLED'
+                assert positive.payment_hash == binding.payment_hash
+                assert positive.node_pubkey == b_key and positive.network == network
+                assert counter.calls == 1
                 held.settle_bound_invoice(binding, preimage.hex(), deadline=time.monotonic() + 5,
                     submission_allowed=lambda: True)
                 assert counter.calls == 1
