@@ -35,7 +35,7 @@ from rill_provider.settlement_policy import offered_terms
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from rill_core.wire.messages import ContractTerms
+    from rill_core.wire.messages import ContractTerms, InvoiceBinding
 
     from rill_provider.core_tx_bytes import FundedOutput, SpendScan
     from rill_provider.live_session_store import LiveSessionStore, SettlementItem
@@ -58,6 +58,15 @@ class HoldInvoiceBackend(Protocol):
 
     def settle(self, preimage: str) -> None:
         """Settle with the verified preimage."""
+
+    def settle_bound_invoice(
+        self,
+        expected: InvoiceBinding,
+        preimage: str,
+        *,
+        submission_allowed: Callable[[], bool] | None = None,
+    ) -> None:
+        """Settle authenticated original-invoice debt without unbound fallback."""
 
     def cancel(self, payment_hash: str) -> None:
         """Cancel; accepted parts are failed back."""
@@ -318,11 +327,23 @@ class ReverseSettlement:
     async def _settle_claim(
         self, item: SettlementItem, terms: ContractTerms, now: int, preimage: str
     ) -> str:
-        self._check_operation()
+        operation = self._check_operation()
         self._store.record_reverse_settlement_preimage(
             item.session_id, from_state=item.state, preimage=preimage, now=now
         )
-        await self._settle(preimage, terms.invoice_binding.payment_hash)
+        binding = self._store._reverse_repayment_binding(item.session_id)  # noqa: SLF001 - owner-authenticated archive boundary
+        if binding is None:
+            await self._settle(preimage, terms.invoice_binding.payment_hash)
+        else:
+            # Capture the actual task-owned token before queuing an RPC worker.
+            # This checkpoint grants no signing authority or deadline renewal.
+            submission_allowed = operation.submission_allowed
+            await self._worker(
+                self._hold.settle_bound_invoice,
+                binding,
+                preimage,
+                submission_allowed=submission_allowed,
+            )
         return self._move(
             item, "SETTLED", now, preimage=preimage, observation={"kind": "hold_settled"}
         )

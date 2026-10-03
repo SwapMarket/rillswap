@@ -526,7 +526,7 @@ def test_recorded_debt_survives_expiry_and_restart_and_repays_without_core(
         store = reserved.store
         async with store.reverse_operations.operation() as operation:
             _prepare(reserved, operation)
-            _, core, invoice = _facts(reserved)
+            terms, core, invoice = _facts(reserved)
             _commit(reserved, operation, core, invoice)
             reserved.clock.advance(31)
             assert not store._reverse_proposals[reserved.origin.session_id].window.time_allowed()
@@ -546,8 +546,20 @@ def test_recorded_debt_survives_expiry_and_restart_and_repays_without_core(
             chain.find_spender.side_effect = OSError("witness unavailable")
             (item,) = fresh.settlement_work()
             engine = ReverseSettlement(fresh, chain, hold, NativeSigner(reserved.origin))
+
+            def settle_bound(
+                expected: object, preimage: str, *, submission_allowed: object
+            ) -> None:
+                assert expected == terms.invoice_binding
+                assert preimage == "52" * 32
+                assert callable(submission_allowed)
+                assert submission_allowed() is True
+
+            hold.settle_bound_invoice.side_effect = settle_bound
             assert await engine.advance(item, 1_700_000_032) == "SETTLED"
-            hold.settle.assert_called_once_with("52" * 32)
+            hold.settle_bound_invoice.assert_called_once()
+            hold.settle.assert_not_called()
+            hold.lookup.assert_not_called()
             hold.cancel.assert_not_called()
             assert chain.mock_calls == []
             assert not fresh._cooperation_handles

@@ -606,8 +606,9 @@ predicate returning exactly `True`. Guarded calls charge setup against a fixed
 ten-second budget capped by that deadline, then check again before RPC dispatch.
 These guards confer no financial or signing authority, do not atomically exclude
 concurrent revocation, and cannot stop an RPC already started. Late RPC results
-retain their meaning without retrying. Existing unguarded debt repayment keeps
-its post-connect budget. No runtime caller uses the new guards yet.
+retain their meaning without retrying. Historical unguarded debt repayment keeps
+its post-connect budget. Featured repayment supplies its operation's local
+submission predicate through the bound settlement API below.
 
 `LndHoldInvoices.observe_bound_invoice` checks an original, previously
 signature-validated invoice binding supplied from authenticated terms. One
@@ -616,8 +617,8 @@ again within a fixed pre-connect budget. Both node identities and Bitcoin networ
 labels must match the original payee and configured network; the returned invoice
 hash, exact ASCII BOLT11 digest, amount, and timing must match the binding.
 The configured invoices credential additionally needs `info:read` for this new
-method, with no fallback or startup change. Ordinary lookup and owed repayment
-remain unchanged.
+method, with no fallback or startup change. Ordinary lookup remains unchanged;
+featured owed repayment uses the bound settlement method below.
 
 The immutable result contains non-atomic Own-LND assertions and the last reported
 tip, not current state, an original process identity, exclusive invoice custody,
@@ -643,11 +644,17 @@ reclassification of late success occurs. A failure after dispatch can be
 ambiguous. Success means only RPC success or sufficiently paid original-invoice
 knowledge, not signing eligibility. A gRPC channel can reconnect and does not
 prove one physical connection, original process, or exclusive backend custody.
-Legacy settlement remains unchanged, and no runtime consumer uses this method
-yet. Positive bound SETTLED reconciliation remains required before future
-cooperative partial signing.
+The reverse settlement worker routes authenticated cooperative debt through
+this method, capturing its active operation's worker-safe submission predicate.
+It persists debt before classification or RPC and never falls back to ordinary
+lookup or settlement after a bound failure. Errors retain the obligation and
+economic reservation; a later tick can reconcile through this same bound API.
+Historical settlement retains its original unbound error-reconciliation path.
+An expired cooperation window supplies no new deadline or signing authority.
+Positive bound SETTLED reconciliation remains required before future cooperative
+partial signing; transport success alone never permits a partial signature.
 
-The preparatory store-owned `_reverse_repayment_binding` getter classifies
+The store-owned `_reverse_repayment_binding` getter classifies
 archived context, not whether settlement debt exists. Explicit empty contract
 features, matching empty or `epoch-bound-session/v1` inner handshake features,
 and empty outer handshake/terms-offer features identify historical repayment.
@@ -656,9 +663,13 @@ Other contexts require authenticated cooperative terms, their original invoice
 binding, and matching session, profile, network, transcript, and signatures.
 Missing, mixed, unsupported, or invalid archives refuse rather than downgrade.
 The getter performs no backend calls, creates no debt or signing authority, and
-requires no live proposal or cooperation window. On upgrade this preparatory
-increment changes no repayment routing or startup behavior; future routing must
-retain debt without dispatch when archives cannot establish either branch.
+requires no live proposal or cooperation window. On upgrade, exact supported
+historical archives keep legacy repayment. Authenticated cooperative debt
+requires original-node access, `info:read`, and synchronized LND. Absent,
+partial, mixed, unsupported, or invalid archives retain debt and reservations
+without dispatch or refund; operator repair may be needed. Missing debt never
+triggers repayment, backfill, or a startup scan. This does not enable production
+reverse cooperative negotiation.
 
 The internal `_commit_reverse_proposal_debt` boundary is also preparatory. It
 requires fresh original-owner negotiation memory, the exact native-valid
@@ -674,11 +685,11 @@ Its transaction writes only settlement debt and audit time, before any later
 settlement RPC. Failed pre-COMMIT checks, including after the tentative SQL
 update, roll back debt and abandon cooperation without erasing separately
 committed knowledge. An uncertain COMMIT may retain debt while closing ownership;
-failure to return is not proof that debt was absent. Ordinary repayment resumes
+failure to return is not proof that debt was absent. Independent repayment resumes
 any valid retained obligation without reconstructing cooperation.
 Historical/restarted, expired, invalid-plan, or refund-issued proposals receive
-no new debt through this path. Existing debt still uses ordinary independent
-repayment; its expiry or restart never renews signing. No runtime caller or
+no new debt through this path. Existing debt uses its classified independent
+repayment path; its expiry or restart never renews signing. No runtime caller or
 native allocation uses this new boundary yet. Settlement on a later connection
 still needs its own original-backend association before consumer activation.
 

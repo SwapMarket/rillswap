@@ -57,6 +57,8 @@ def backends(monkeypatch: pytest.MonkeyPatch) -> tuple[reverse.ReverseSettlement
         reverse, "reconstruct_taproot_contract", lambda *_a, **_k: Mock(script_pubkey=SCRIPT)
     )
     store, chain, hold = Mock(), Mock(), Mock()
+    # These lifecycle cases exercise explicitly unfeatured historical terms.
+    store._reverse_repayment_binding.return_value = None  # noqa: SLF001 - archive boundary mock
     store.owner_is_open = True
     store.retain_owner.side_effect = nullcontext
     store.reverse_operations = ReverseOperations(store)
