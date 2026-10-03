@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
@@ -533,5 +534,61 @@ def test_unavailable_estimate_needs_explicit_regtest_exemption(
         else:
             with pytest.raises(LiveSessionStoreError, match="preflight refused"):
                 await engine._preflight_paid_proposal(reserved.document, configured_floor_sat=1)
+
+    asyncio.run(exercise())
+
+
+def test_actual_executor_queue_delay_counts_against_original_complete_evidence_interval(
+    reserved: ReservationCase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def exercise() -> None:
+        await _debt(reserved)
+        await _repay(reserved)
+        chain, hold = _backends(reserved)
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        occupied, queued = asyncio.Event(), asyncio.Event()
+        release = threading.Event()
+
+        def occupy() -> None:
+            loop.call_soon_threadsafe(occupied.set)
+            assert release.wait(5)
+
+        blocker = loop.run_in_executor(None, occupy)
+        await asyncio.wait_for(occupied.wait(), 2)
+        original_submit = loop.run_in_executor
+
+        def submit(executor: object, function: object, *args: object) -> object:
+            future = original_submit(executor, function, *args)
+            queued.set()
+            return future
+
+        monkeypatch.setattr(loop, "run_in_executor", submit)
+        engine = ReverseSettlement(reserved.store, chain, hold, reserved.origin.crypto.crypto)
+        running = asyncio.create_task(
+            engine._preflight_paid_proposal(reserved.document, configured_floor_sat=1)
+        )
+        try:
+            await asyncio.wait_for(queued.wait(), 2)
+            chain.observe_cooperative_claim_outpoint.assert_not_called()
+            reserved.clock.advance(1)
+            release.set()
+            with pytest.raises(LiveSessionStoreError, match="preflight refused"):
+                await running
+            window = reserved.store._reverse_proposals[reserved.origin.session_id].window
+            assert window is not None
+            assert not window.time_allowed()
+            assert not reserved.store._cooperation_handles
+            hold.settle_bound_invoice.assert_not_called()
+            assert reserved.store._connection.execute(
+                "SELECT state,preimage FROM swaps"
+            ).fetchone() == (
+                "SETTLED",
+                "52" * 32,
+            )
+        finally:
+            release.set()
+            await asyncio.gather(blocker, running, return_exceptions=True)
 
     asyncio.run(exercise())

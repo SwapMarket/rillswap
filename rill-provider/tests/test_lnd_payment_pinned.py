@@ -1054,10 +1054,12 @@ HELD_HTLC_PAYMENT = (
     + """
 # Test-only SendPaymentV2 creates the incoming evidence; it is not a
 # production pay_with_deadline implementation or funding permission.
-settle_scenario = globals().get('SETTLE_BOUND_SCENARIO', False)
+reverse_preflight_scenario = globals().get('REVERSE_PREFLIGHT_SCENARIO', False)
+settle_scenario = globals().get('SETTLE_BOUND_SCENARIO', False) or reverse_preflight_scenario
 assert views[0][0].chan_id == views[1][0].chan_id != 0
 channel_id = views[0][0].chan_id
-amount_msat = 1_000_000
+amount_msat = 100_700_000 if reverse_preflight_scenario else 1_000_000
+final_cltv = 185 if reverse_preflight_scenario else 80
 print('PHASE: hold_route_preflight', file=sys.stderr)
 preflight = 'route_unavailable'
 for _ in range(100):
@@ -1076,7 +1078,7 @@ for _ in range(100):
                 available = call(a, a_secret, 'QueryRoutes',
                     ln.QueryRoutesRequest, ln.QueryRoutesResponse,
                     ln.QueryRoutesRequest(pub_key=b_key, amt_msat=amount_msat,
-                        final_cltv_delta=80, outgoing_chan_ids=[channel_id],
+                        final_cltv_delta=final_cltv, outgoing_chan_ids=[channel_id],
                         fee_limit=ln.FeeLimit(fixed_msat=0), use_mission_control=False),
                     timeout=2)
                 if (available.routes and len(available.routes[0].hops) == 1
@@ -1195,7 +1197,7 @@ with tempfile.TemporaryDirectory(prefix='rill-hold-reads-', dir='/tmp') as crede
     created = unary(b, '/invoicesrpc.Invoices/AddHoldInvoice',
         inv.AddHoldInvoiceRequest, inv.AddHoldInvoiceResp)(
         inv.AddHoldInvoiceRequest(hash=selected_hash, value_msat=amount_msat,
-                                  expiry=3600, cltv_expiry=80),
+                                  expiry=3600, cltv_expiry=final_cltv),
         metadata=metadata(b_secret), timeout=15)
     assert created.payment_request
     cancel_started = False
@@ -1288,7 +1290,7 @@ with tempfile.TemporaryDirectory(prefix='rill-hold-reads-', dir='/tmp') as crede
             assert binding.amount_msat == str(amount_msat)
             assert binding.payee_compressed_pubkey == b_key
             assert binding.expires_at - binding.created_at == 3600
-            assert binding.min_final_cltv_delta == 80
+            assert binding.min_final_cltv_delta == final_cltv
             held = LndHoldInvoices(host='127.0.0.1', port=10010,
                 tls_certificate_path='/work/public/b.cert', macaroon_path=bound_file,
                 network=network)
@@ -1319,8 +1321,25 @@ with tempfile.TemporaryDirectory(prefix='rill-hold-reads-', dir='/tmp') as crede
                 else:
                     raise AssertionError('accepted hold is not positive settled knowledge')
                 assert counter.calls == 0
-                held.settle_bound_invoice(binding, preimage.hex(), deadline=time.monotonic() + 5,
-                    submission_allowed=lambda: True)
+                if reverse_preflight_scenario:
+                    from native_reverse_preflight_story import run_original_preflight
+                    def synchronized(height):
+                        for _ in range(100):
+                            observations = [call(node, secret, 'GetInfo', ln.GetInfoRequest,
+                                ln.GetInfoResponse, ln.GetInfoRequest())
+                                for node, secret in ((a, a_secret), (b, b_secret))]
+                            if all(value.synced_to_chain and value.block_height == height
+                                   for value in observations):
+                                return
+                            time.sleep(0.1)
+                        raise AssertionError('both LND nodes did not reach actual funding tip')
+                    native_evidence = run_original_preflight(network=network, held=held,
+                        binding=binding, bolt11=created.payment_request, preimage=preimage,
+                        synchronized=synchronized)
+                else:
+                    held.settle_bound_invoice(binding, preimage.hex(),
+                        deadline=time.monotonic() + 5,
+                        submission_allowed=lambda: True)
                 assert counter.calls == 1
                 paid = observe_raw(selected_hash, ln.Invoice.SETTLED)
                 assert paid.payment_request == created.payment_request
@@ -1348,7 +1367,8 @@ with tempfile.TemporaryDirectory(prefix='rill-hold-reads-', dir='/tmp') as crede
             print(json.dumps({'funding_txid': txid, 'vout': point.output_index,
                 'capacity_sat': views[0][0].capacity, 'confirmations': output['confirmations'],
                 'bound_settled': True, 'settle_dispatches': counter.calls,
-                'repeat_no_dispatch': True}))
+                'repeat_no_dispatch': True,
+                **(native_evidence if reverse_preflight_scenario else {})}))
         else:
             print('PHASE: hold_cancel_once', file=sys.stderr)
             cancel_once()
@@ -1391,12 +1411,53 @@ with tempfile.TemporaryDirectory(prefix='rill-hold-reads-', dir='/tmp') as crede
 )
 
 
+def _copy_private_core_cookie(container: str, destination: Path) -> None:
+    """Transfer an owned tmpfs cookie without capturing or displaying its contents."""
+    __tracebackhide__ = True
+    assert DOCKER is not None
+    created = False
+    failed = False
+    try:
+        fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        created = True
+        with os.fdopen(fd, "wb") as output:
+            failed = (
+                subprocess.run(  # noqa: S603 - fixed executable/path, verified owned container
+                    [
+                        DOCKER,
+                        "exec",
+                        "--user",
+                        "bitcoin:bitcoin",
+                        container,
+                        "cat",
+                        "/home/bitcoin/.bitcoin/.rill-preflight-cookie",
+                    ],
+                    stdout=output,
+                    stderr=subprocess.PIPE,
+                    timeout=10,
+                    check=False,
+                ).returncode
+                != 0
+            )
+        if not failed:
+            from rill_provider.core_tx_bytes import _read_cookie  # noqa: PLC0415
+
+            _read_cookie(destination)
+    except (OSError, ValueError, UnicodeError, subprocess.TimeoutExpired):
+        failed = True
+    if failed:
+        if created:
+            destination.unlink(missing_ok=True)
+        raise AssertionError("isolated private Core cookie transfer failed")
+
+
 def _run_two_node_sidecar(  # noqa: PLR0915 - isolated test infrastructure
     tmp_path: Path,
     program: str,
     *,
     prefix: str,
     deadline: int,
+    native_preflight: bool = False,
 ) -> dict[str, object]:
     """Use fresh owned Core/LND containers for one bounded sidecar scenario."""
     assert DOCKER is not None
@@ -1412,7 +1473,24 @@ def _run_two_node_sidecar(  # noqa: PLR0915 - isolated test infrastructure
     b = f"rillswap-{prefix}-lnd-b-{secrets.token_hex(6)}"
     sidecar = f"rillswap-{prefix}-client-{secrets.token_hex(6)}"
     cert_a, cert_b = public / "a.cert", public / "b.cert"
+    copied_cookie: Path | None = None
     try:
+        auth = ("-rpcuser=rill-disposable", "-rpcpassword=disposable-regtest-only")
+        extra_core: tuple[str, ...] = ()
+        if native_preflight:
+            # This fresh, explicitly isolated scenario needs an actual cookie
+            # for the production reader, while existing LND setup uses rpcauth.
+            import hashlib  # noqa: PLC0415 - scenario-local credential construction
+            import hmac  # noqa: PLC0415
+
+            salt = secrets.token_hex(16)
+            digest = hmac.new(salt.encode(), b"disposable-regtest-only", hashlib.sha256).hexdigest()
+            auth = (f"-rpcauth=rill-disposable:{salt}${digest}",)
+            extra_core = (
+                "-txindex=1",
+                "-rpcpassword=",
+                "-rpccookiefile=/home/bitcoin/.bitcoin/.rill-preflight-cookie",
+            )
         _docker(
             "run",
             "--detach",
@@ -1433,8 +1511,8 @@ def _run_two_node_sidecar(  # noqa: PLR0915 - isolated test infrastructure
             "-discover=0",
             "-dnsseed=0",
             "-fallbackfee=0.00001000",
-            "-rpcuser=rill-disposable",
-            "-rpcpassword=disposable-regtest-only",
+            *auth,
+            *extra_core,
             "-rpcbind=127.0.0.1",
             "-rpcallowip=127.0.0.1",
             "-zmqpubrawblock=tcp://127.0.0.1:28332",
@@ -1442,6 +1520,35 @@ def _run_two_node_sidecar(  # noqa: PLR0915 - isolated test infrastructure
             "-printtoconsole=1",
         )
         _wait_for_core(core)
+        if native_preflight:
+            cookie = public / "core.cookie"
+            metadata = _docker(
+                "exec",
+                "--user",
+                "bitcoin:bitcoin",
+                core,
+                "stat",
+                "-c",
+                "%F %a %u:%g",
+                "/home/bitcoin/.bitcoin/.rill-preflight-cookie",
+            ).strip()
+            assert metadata == "regular file 600 101:101"
+            _copy_private_core_cookie(core, cookie)
+            copied_cookie = cookie
+            genesis = _docker(
+                "exec",
+                "--user",
+                "bitcoin:bitcoin",
+                core,
+                "bitcoin-cli",
+                "-regtest",
+                "-datadir=/home/bitcoin/.bitcoin",
+                "-rpcpassword=",
+                "-rpccookiefile=/home/bitcoin/.bitcoin/.rill-preflight-cookie",
+                "getblockhash",
+                "0",
+            ).strip()
+            assert genesis == GENESIS
         created = json.loads(_core_cli(core, "createwallet", "fund"))
         assert created["name"] == "fund"
         address = _core_cli(core, "-rpcwallet=fund", "getnewaddress", "", "bech32m")
@@ -1505,6 +1612,17 @@ def _run_two_node_sidecar(  # noqa: PLR0915 - isolated test infrastructure
             assert all(entry["Type"] != "volume" for entry in mounts)
         _wait_for_public_certificate(a, cert_a)
         _wait_for_public_certificate(b, cert_b)
+        native_mounts: tuple[str, ...] = ()
+        python_path = (
+            "/work/provider/.venv/lib/python3.14/site-packages:"
+            "/work/provider/src:/work/core/packages/core/src:/work/generated"
+        )
+        if native_preflight:
+            native_mounts = (
+                "--mount",
+                f"type=bind,src={ROOT.parent / 'rill-crypto'},dst=/work/crypto,readonly",
+            )
+            python_path += ":/work/crypto/python/src:/work/provider/tests"
         result = _docker(
             "run",
             "--rm",
@@ -1526,9 +1644,11 @@ def _run_two_node_sidecar(  # noqa: PLR0915 - isolated test infrastructure
             f"type=bind,src={public},dst=/work/public,readonly",
             "--mount",
             f"type=bind,src={generated},dst=/work/generated,readonly",
+            *native_mounts,
             "--env",
-            "PYTHONPATH=/work/provider/.venv/lib/python3.14/site-packages:"
-            "/work/provider/src:/work/core/packages/core/src:/work/generated",
+            f"PYTHONPATH={python_path}",
+            "--env",
+            "PYTHONDONTWRITEBYTECODE=1",
             PYTHON_IMAGE,
             "python",
             "-c",
@@ -1557,6 +1677,8 @@ def _run_two_node_sidecar(  # noqa: PLR0915 - isolated test infrastructure
             _cleanup_containers((sidecar, b, a, core), run_id, cert_a)
         finally:
             cert_b.unlink(missing_ok=True)
+            if copied_cookie is not None:
+                copied_cookie.unlink(missing_ok=True)
 
 
 @pytest.mark.lnd
@@ -1605,3 +1727,37 @@ def test_pinned_single_part_hold_bound_settled(tmp_path: Path) -> None:
     assert evidence["bound_settled"] is True
     assert evidence["settle_dispatches"] == 1
     assert evidence["repeat_no_dispatch"] is True
+
+
+@pytest.mark.lnd
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_LND") != "1"
+    or not (ROOT / "tmp/native/librill_crypto.so").is_file(),
+    reason="set RILLSWAP_RUN_LND=1 with the built native library for isolated preflight",
+)
+def test_pinned_original_native_reverse_repayment_and_paid_preflight(tmp_path: Path) -> None:
+    """Validate real evidence/latency, not relay or reverse signing activation."""
+    evidence = _run_two_node_sidecar(
+        tmp_path,
+        "REVERSE_PREFLIGHT_SCENARIO = True\n" + HELD_HTLC_PAYMENT,
+        prefix="reverse-preflight",
+        deadline=300,
+        native_preflight=True,
+    )
+    assert evidence["original_paid_preflight"] is True
+    assert evidence["original_window_preserved"] is True
+    assert evidence["native_allocations"] == 0
+    assert evidence["settle_dispatches"] == 1
+    assert evidence["repeat_no_dispatch"] is True
+    assert evidence["contract_value_sat"] == 100_500
+    assert 0 <= evidence["acquisition_interval_seconds"] < 1
+    assert 0 <= evidence["preflight_interval_seconds"] < 1
+    print(  # noqa: T201 - public timing evidence only
+        json.dumps(
+            {
+                key: evidence[key]
+                for key in ("acquisition_interval_seconds", "preflight_interval_seconds")
+            }
+        )
+    )

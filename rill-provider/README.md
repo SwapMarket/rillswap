@@ -770,10 +770,26 @@ This preflight performs no nonce allocation, signature, reply, settlement RPC,
 or durable lifecycle update. It has no production caller. A diagnostic success
 is not transferable permission; future signing must establish fresh evidence
 and uninterrupted original ownership through the effect. Matching named tips
-does not make separate Core/LND reads atomic. Full live provider/Core/LND
-repayment-to-preflight interoperability and subsecond fee/batch latency remain
-unproven acceptance requirements before authority-bearing integration. Neither
-these checks nor their absence trigger startup or migration work.
+does not make separate Core/LND reads atomic. An isolated pinned regtest case
+now exercises native original-session context, actual wallet funding and two
+confirmations, proposal-debt acquisition, one bound settlement dispatch, and
+paid preflight under the unchanged real-clock window. The measured complete
+acquisition and preflight intervals remain strictly below one second. It creates
+no provider MuSig nonce and explicitly bypasses the still-disabled reverse
+acceptance guard only in the fixture; it is not relay, client nonce-custody, or
+production-signing acceptance. An actual blocked executor queue is also checked
+to consume that complete interval. Broader adversarial/public-network acceptance
+and authority-bearing integration remain separate requirements. Neither these
+checks nor their absence trigger startup or migration work.
+
+The dedicated `provider-lnd` CI job builds native crypto and runs opt-in backend
+tests against fresh digest-pinned Core/LND/Python containers. Its sidecars use
+read-only sources and certificates, private tmpfs wallets/custody, and verified
+owned-container cleanup, never public-network funding. The native scenario
+alone enables a fresh Core transaction index and actual cookie authentication
+alongside test-only named `rpcauth`; the private cookie is streamed directly to
+an exclusive mode-0600 file without logging credentials. Existing settlement and
+cancellation scenarios retain their original defaults.
 
 A retained matching preimage in `FUNDED` or `REFUNDING` means settlement is
 owed, not that LND settlement succeeded. Restart retries that obligation
