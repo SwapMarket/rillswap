@@ -10,10 +10,12 @@
     "./lnd": "./src/lnd.ts",
     "./server": "./src/server.ts",
     "./sdk": "./src/sdk.ts",
-    "./tracking": "./src/tracking.ts"
+    "./tracking": "./src/tracking.ts",
+    "./discovery": "./src/discovery.ts"
   },
   "scripts": {
     "merchant": "bun src/cli.ts",
+    "probe:providers": "bun src/probe.ts",
     "build:sdk": "bun build src/sdk.ts --target browser --outfile dist/sdk.js",
     "check:schemas": "bun scripts/generate-validator.ts --check",
     "generate:schemas": "bun scripts/generate-validator.ts",

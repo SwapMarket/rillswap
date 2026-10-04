@@ -115,3 +115,19 @@ intent, amount and their order, then atomically deduplicate both event ID and
 order fulfillment. Signature verification alone does not prevent replay.
 `createMerchantService().deliverEvents` retries unchanged event IDs until the
 consumer acknowledges. `GET .../events` retains history after acknowledgment.
+
+## External provider readiness
+
+`bun run probe:providers` performs bounded read-only GET requests to the official
+Atomiq and Boltz token/limit/pair/contract endpoints. It follows no redirects,
+queries no customer URLs, creates no swaps or invoices, and uses no wallet or
+recovery storage. HTTP/DNS failures and non-JSON responses are explicit. Even a
+valid catalog response is unverified and cannot enable execution.
+
+Atomiq SDK 8.9.6 documents third-party fixed BOLT11 invoice support, but reachable
+LPs, exact connector deployments, current executable quotes and durable refunds
+remain admission gates. SDK initialization can succeed without LPs, and missing
+limits can default to 1, so neither proves support. Boltz's source and API
+contract describe external invoices and USDT0/tBTC composition; operational
+pairs/deployments and refund asset remain unverified. Stablecoin and LayerZero
+checkout execution is not yet implemented or advertised by this service.
