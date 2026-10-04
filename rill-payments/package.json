@@ -1,0 +1,17 @@
+{
+  "name": "@rillswap/payments",
+  "version": "0.1.0-dev.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "check:schemas": "bun scripts/generate-validator.ts --check",
+    "generate:schemas": "bun scripts/generate-validator.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": { "ajv": "8.17.1" },
+  "devDependencies": { "@types/bun": "1.3.11", "typescript": "7.0.2" }
+}

@@ -1,0 +1,13 @@
+{
+  "version": "checkout/0.1",
+  "policyVersion": "native-lightning/1",
+  "merchantOrigin": "https://merchant.example",
+  "intentId": "intent_fixture_0001",
+  "attemptId": "attempt_fixture_001",
+  "network": "regtest",
+  "amountMsat": "1000000",
+  "paymentHash": "1111111111111111111111111111111111111111111111111111111111111111",
+  "receiver": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+  "expiresAt": 2000000000,
+  "buyerExtraMsat": "0"
+}
