@@ -50,11 +50,33 @@ recovery scan birthday, so a wrong height can only lengthen the user's own
 lock or make offers fail. Keys exist only in the tab's memory. The terms
 recovery file must be downloaded before accepting terms, and the funded one
 before the funding binding is sent and before broadcast. If the provider does
-not pay, refund with `rill recover watch-refund` on the funded recovery file
-after the refund height; the browser does not refund. The only thing stored in the
+not pay, refund from the funded recovery file after the refund height (see
+"Refunding a stopped swap" below); the browser does not refund. The only thing stored in the
 browser is the cooperation journal below, which never grants anything, so an
 upgrade or reload reads, migrates, or resumes nothing; an interrupted swap
 continues only through the downloaded recovery file.
+
+### Refunding a stopped swap
+
+You need `rill-cli` (see its README), a synced Bitcoin Core node for the same
+network, the funded recovery file, its age key, and the funding attempt ID that
+the page printed (`attempt <ID> revision 0`). After the refund block shown by
+the page, run:
+
+```sh
+rill recover broadcast-refund --network signet.json \
+  --crypto-library /path/librill_crypto.so \
+  --funding-attempt-id ATTEMPT_ID --binding-revision 0 \
+  --rpc-cookie ~/.bitcoin/signet/.cookie --rpc-port 38332 \
+  --identity rillswap-recovery.key --fee-sat 500 \
+  --intent refund-intent.json swap-recovery-....age.funded
+```
+
+`--network` is the trusted network file (`rill-docs/networks/signet.json`). The
+refund pays the refund address you entered. `rill recover sign-refund` with
+`--output refund.tx` instead writes the signed transaction without sending it.
+`rill recover watch-refund` adds fee escalation but checks the invoice through
+your own LND, so it only works when the invoice is your own node's.
 
 Cooperation never blocks the swap. The client cosigns only after it holds the
 verified payment preimage, and BIP341 signatures commit the exact outpoint,

@@ -59,8 +59,10 @@ function mount(root: HTMLElement): void {
     node("h1", "Pay a Lightning invoice with on-chain BTC"),
     node("p", "Experimental. Signet, testnet4, and regtest only; mainnet is refused until release acceptance. " +
       "Keys live only in this tab. Keep it open until the swap finishes."),
-    node("p", "Before funding you download an age-encrypted recovery file. If the provider does not pay, " +
-      "refund after the refund height with `rill recover watch-refund` (from rill-cli) on the funded recovery file."),
+    node("p", "Before funding you download an age-encrypted recovery file. This page cannot refund you. If the " +
+      "provider does not pay, after the refund height run `rill recover broadcast-refund` (from rill-cli, " +
+      "with your own Bitcoin Core node) on the funded recovery file; the page shows the exact attempt ID it needs.",
+      "swap-refund-intro"),
     node("p", "Before you start, have: the provider's relay URL and identity key (ask the provider), a wallet that " +
       "can sign a PSBT without broadcasting it (for example Sparrow or Bitcoin Core), and an age key for your " +
       "recovery files.", "swap-prerequisites"),
@@ -223,7 +225,7 @@ async function run(
     const message = (error as Error).message;
     const next = broadcastShown
       ? "Do not fund this swap again. Keep the funded recovery file and its age key: if the invoice is " +
-        "not paid, the message above names the block after which `rill recover watch-refund` refunds you."
+        "not paid, the message above names the refund block and the `rill recover broadcast-refund` command."
       : "Nothing was broadcast by this page, so no funds are committed. Reload the page to start a new swap.";
     panel.replaceChildren(
       node("h2", "Swap stopped"),

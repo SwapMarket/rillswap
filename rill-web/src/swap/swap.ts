@@ -6,7 +6,7 @@
  * terms recovery file, accept, authorize the user's finalized funding PSBT,
  * hand the user the funded recovery file, bind, let the user broadcast, and
  * wait for the preimage. No key or record leaves memory except through the
- * user's own downloads; refunds use `rill recover watch-refund`.
+ * user's own downloads; refunds use `rill recover broadcast-refund` (or `watch-refund`).
  */
 import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
 import { bytesToHex, randomBytes } from "@noble/hashes/utils.js";
@@ -279,9 +279,9 @@ export async function runSwap(
   await hooks.broadcast(funding.raw, funding.txid);
   hooks.report(`funding ${funding.txid} broadcast; waiting for the provider to pay`);
   const hint =
-    `funds are committed; refund after block ${terms.refund_lock_height} with ` +
-    `\`rill recover watch-refund --funding-attempt-id ${binding.funding_attempt_id} --binding-revision 0\` ` +
-    "on the funded recovery file";
+    `funds are committed; after block ${terms.refund_lock_height} refund with rill-cli and your own ` +
+    `Bitcoin Core: \`rill recover broadcast-refund --funding-attempt-id ${binding.funding_attempt_id} ` +
+    "--binding-revision 0` on the funded recovery file (see the rill-web README for the full command)";
   const settled = await settle(
     {
       session,
