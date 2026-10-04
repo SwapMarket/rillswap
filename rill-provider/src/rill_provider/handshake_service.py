@@ -673,7 +673,7 @@ class HandshakeService:
             seen.popitem(last=False)
         return True
 
-    async def handle(self, event: bytes, relays: Sequence[Relay]) -> str:  # noqa: PLR0911, PLR0912 - one disposition per outcome
+    async def handle(self, event: bytes, relays: Sequence[Relay]) -> str:  # noqa: PLR0911, PLR0912, PLR0915 - one disposition per outcome
         """Route one untrusted relay event; return a content-free disposition."""
         if not self._deadline_healthy or self._readiness_closed:
             return "unavailable"  # do not mark as seen; replay is safe after restart
@@ -731,6 +731,13 @@ class HandshakeService:
                                 "cooperative completion stopped for %s", result.session_id[:16]
                             )
                     return "result-replay" if result.replay else "result-admitted"
+                if message_type == "action_request" and self._policy.profile == "ln-to-btc/v1":
+                    payload = json.loads(document).get("payload")
+                    if (
+                        isinstance(payload, dict)
+                        and payload.get("action") == "cooperative_claim_propose"
+                    ):
+                        return await self._cosign_reverse_proposal(document, relays)
                 return await self._answer(document, relays, now)
             init = store.open_epoch_frame(event, now=now, transport=self._transport)
             reserved = store.reserve(init, now=now)
@@ -1018,6 +1025,30 @@ class HandshakeService:
         ):
             await self._cancel_hold(terms.hold, operation=operation)
         return answer, sent
+
+    async def _cosign_reverse_proposal(self, document: bytes, relays: Sequence[Relay]) -> str:
+        """Cosign one LN to BTC claim proposal, or refuse without any reply.
+
+        Refusal is safe for the client: it disclosed the preimage only to
+        claim, and keeps its independent unilateral claim path.
+        """
+        settlement = self._settlement
+        if settlement is None:
+            return "refused"
+        try:
+            reply = await settlement.cosign_reverse_proposal(
+                document, now=self._live_cooperative_now()
+            )
+        except StaleOwnerError:
+            raise
+        except Exception:  # noqa: BLE001 - no proposal, preimage, or backend oracle
+            LOG.warning("reverse cooperative proposal refused")
+            return "refused"
+        if reply is None:
+            return "proposal-replay"
+        response = Envelope.model_validate_json(reply, strict=True)
+        await self._send_pending(response.message_id, relays)
+        return "proposal-signed"
 
     async def _answer(self, document: bytes, relays: Sequence[Relay], now: int) -> str:
         policy = self._policy

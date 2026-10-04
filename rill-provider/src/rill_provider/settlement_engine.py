@@ -203,6 +203,11 @@ class EngineSettings:
 
     claim_fee_sat: int = 1_000
     max_routing_fee_sat: int = 1_000
+    # Absolute minimum fee a client's LN to BTC cooperative claim must pay,
+    # on top of the fresh Core estimate. Regtest may explicitly accept a fixed
+    # fee when Core has no estimate; other networks never do.
+    cooperative_fee_floor_sat: int = 1
+    allow_regtest_fixed_fee: bool = False
 
 
 class SettlementEngine:
@@ -237,6 +242,8 @@ class SettlementEngine:
                 hold_invoices,
                 crypto,
                 refund_fee_floor_sat=self._settings.claim_fee_sat,
+                cooperative_fee_floor_sat=self._settings.cooperative_fee_floor_sat,
+                allow_regtest_fixed_fee=self._settings.allow_regtest_fixed_fee,
             )
         )
         self._claim_cursor = ""  # fair paging of the historical claim sweep
@@ -461,6 +468,16 @@ class SettlementEngine:
         except Exception:  # noqa: BLE001 - failed evidence grants no nonce effect
             return None
         return sample if time.monotonic() - started < budget else None
+
+    async def cosign_reverse_proposal(self, document: bytes, *, now: int) -> bytes | None:
+        """Answer one authenticated-on-admission LN to BTC claim proposal.
+
+        Returns the archived signed reply bytes (already committed to the
+        outbox), or None for a replay with no archived contribution.
+        """
+        if self._reverse is None:
+            raise LiveSessionStoreError("reverse cooperative signer unavailable")
+        return await self._reverse.cosign_cooperative_proposal(document, now)
 
     async def complete_cooperative_claim(  # noqa: PLR0911 - preconsumption refusals, then one commit boundary
         self,

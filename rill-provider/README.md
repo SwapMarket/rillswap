@@ -839,6 +839,17 @@ acknowledged replies; it is historical knowledge, not delivery or signing
 authority. Upgrading installations need no migration: no prior release wrote
 reverse COMPLETE rows.
 
+At runtime, an `ln-to-btc/v1` service routes each inbound
+`cooperative_claim_propose` request to `ReverseSettlement.cosign_cooperative_proposal`.
+Under the proposal's original window it admits the debt from fresh Core and LND
+facts, repays by settling the bound hold invoice, collects fresh paid evidence,
+and commits the one-shot signed reply, which the outbox then delivers. A
+relayed duplicate gets only the exact archived reply. Any refusal (unpaid
+invoice, fee below the fresh floor, expired window, closed readiness) sends no
+reply and never signs; the client keeps its unilateral claim. The fee floor is
+the engine setting `cooperative_fee_floor_sat` (default 1 sat) on top of the
+fresh Core estimate; `allow_regtest_fixed_fee` exists only for regtest.
+
 The dedicated `provider-lnd` CI job builds native crypto and runs opt-in backend
 tests against fresh digest-pinned Core/LND/Python containers. Its sidecars use
 read-only sources and certificates, private tmpfs wallets/custody, and verified

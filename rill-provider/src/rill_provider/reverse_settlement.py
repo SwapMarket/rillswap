@@ -193,7 +193,7 @@ class _ReversePublicKeySnapshot:
 class ReverseSettlement:
     """Advance fresh state inside the acquired owner's reverse execution gate."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - explicit injected backends and fee policy
         self,
         store: LiveSessionStore,
         chain: ReverseChainBackend,
@@ -201,6 +201,8 @@ class ReverseSettlement:
         crypto: EngineCrypto,
         *,
         refund_fee_floor_sat: int = 1_000,
+        cooperative_fee_floor_sat: int = 1,
+        allow_regtest_fixed_fee: bool = False,
     ) -> None:
         """Bind already-configured backends; no I/O."""
         self._store = store
@@ -208,7 +210,57 @@ class ReverseSettlement:
         self._hold = hold_invoices
         self._crypto = crypto
         self._refund_fee_floor_sat = refund_fee_floor_sat
+        self._cooperative_fee_floor_sat = cooperative_fee_floor_sat
+        self._allow_regtest_fixed_fee = allow_regtest_fixed_fee
         self._operation: ReverseOperation | None = None
+
+    async def cosign_cooperative_proposal(
+        self,
+        document: bytes,
+        now: int,
+        *,
+        wall_clock: Callable[[], float] = time.time,
+        monotonic_clock: Callable[[], float] = time.monotonic,
+    ) -> bytes | None:
+        """Answer one client claim proposal with the archived provider contribution.
+
+        Sequence, all under the proposal's original nonrenewing window: retain
+        the disclosed preimage and admit debt from fresh Core/LND facts, repay
+        by settling the bound hold invoice, collect fresh paid evidence, then
+        consume one native nonce and atomically archive the signed reply in
+        that same operation. A replayed proposal returns only the exact
+        archived reply (or None while none exists); it never signs again.
+        Every refusal is terminal for this proposal; the client keeps its
+        independent unilateral claim with the preimage it already holds.
+        """
+        from rill_crypto import Context  # noqa: PLC0415 - native boundary is opt-in
+
+        crypto = self._crypto
+        if not isinstance(crypto, Context):
+            raise LiveSessionStoreError("reverse cooperative signer unavailable")
+        receipt = await self._acquire_proposal_debt(
+            document, now, wall_clock=wall_clock, monotonic_clock=monotonic_clock
+        )
+        if receipt.replay:
+            async with self._store.reverse_operations.operation() as operation:
+                return self._store._reverse_signed_reply_replay(  # noqa: SLF001 - archive only
+                    document, operation=operation
+                )
+        work = self._store.settlement_work(session_id=receipt.session_id)
+        if len(work) == 1:
+            # Repayment of the admitted debt; a concurrent settlement pass may
+            # already have done it, which the paid evidence below rechecks.
+            await self.advance(work[0], now)
+        async with self._store.reverse_operations.operation() as operation:
+            evidence = await self._collect_paid_proposal_evidence(
+                document,
+                operation=operation,
+                configured_floor_sat=self._cooperative_fee_floor_sat,
+                allow_regtest_fixed_fee=self._allow_regtest_fixed_fee,
+            )
+            return self._store._commit_reverse_signed_reply(  # noqa: SLF001 - same operation
+                document, operation=operation, evidence=evidence, crypto=crypto, now=now
+            )
 
     async def advance(self, item: SettlementItem, now: int) -> str:
         """Reload after serialization, never execute a queued stale snapshot."""
