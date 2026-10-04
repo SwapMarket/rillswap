@@ -25,10 +25,10 @@ export interface CheckoutCheckpoint {
   };
 }
 /** begin must atomically reserve one dispatch per attempt, including across tabs. */
-export interface CheckoutStore {
-  load(attemptId: string): Promise<CheckoutCheckpoint | null>;
-  begin(record: CheckoutCheckpoint): Promise<boolean>;
-  update(record: CheckoutCheckpoint): Promise<void>;
+export interface CheckoutStore<Checkpoint extends { readonly attemptId: string } = CheckoutCheckpoint> {
+  load(attemptId: string): Promise<Checkpoint | null>;
+  begin(record: Checkpoint): Promise<boolean>;
+  update(record: Checkpoint): Promise<void>;
 }
 export interface LightningWallet {
   readonly canLimitFees: true;
@@ -127,14 +127,14 @@ export function createCheckout(options: CheckoutOptions) {
 }
 
 /** IndexedDB uniqueness is the cross-tab dispatch guard; no erased-store recovery guarantee. */
-export function indexedDbCheckoutStore(databaseName: string): CheckoutStore {
+export function indexedDbCheckoutStore<Checkpoint extends { readonly attemptId: string } = CheckoutCheckpoint>(databaseName: string): CheckoutStore<Checkpoint> {
   const open = (): Promise<IDBDatabase> => new Promise((resolve, reject) => {
     const request = indexedDB.open(databaseName, 1);
     request.onupgradeneeded = () => request.result.createObjectStore("attempts", { keyPath: "attemptId" });
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
-  const write = async (record: CheckoutCheckpoint, first: boolean): Promise<boolean> => {
+  const write = async (record: Checkpoint, first: boolean): Promise<boolean> => {
     const db = await open();
     return new Promise((resolve, reject) => {
       const tx = db.transaction("attempts", "readwrite");

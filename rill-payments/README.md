@@ -324,11 +324,65 @@ limits and private key custody; origin checks do not enforce those properties.
 Preserve capability and signing keys across restarts, never generate replacements
 on ordinary startup. Key rotation/public fulfillment is not implemented.
 
-The opt-in sandbox suite now also mounts a real Bun loopback HTTP server and
-records actual Anvil transfers through this API, reopening ledger/listener before
-funding and after signed evidence. It does not implement a native browser wallet,
-durable SDK funding checkpoint or production deployment. Those remain subsequent
-integration gates.
+The opt-in sandbox suite mounts a real Bun loopback HTTP server and records
+actual Anvil transfers through this API, reopening ledger/listener before funding
+and after signed evidence. It also exercises the sandbox SDK below with a
+private file-backed scripted wallet. No production deployment or supported
+browser-wallet adapter is enabled.
+
+### Native sandbox funding SDK
+
+`createNativeSandboxCheckout` from `@rillswap/payments/native-sdk` requires
+authoritative sandbox terms, an independently pinned merchant event key, scoped
+payment capability, fixed token/gas/fee ceilings, and a trusted
+`NativeSandboxWallet`. Keep the normal Lightning SDK and its invoice semantics
+separate. The optional native bundle is built with `bun run build:native-sdk`.
+
+Explicit `pay()` atomically reserves an operation checkpoint before any wallet
+identity or signature request. Only the successful reservation owner proceeds.
+Payer binding goes through merchant preparation with the same operation ID;
+successful preparation is required before token signing/dispatch. A dispatched
+checkpoint is durable before invoking the wallet. Deadline, merchant evidence,
+network and wallet identity guards run after awaits, before signing and before
+every broadcast. Unused nonce is required for new signing, not private wallet
+lookup or merchant observation of an already-published transaction.
+
+The wallet must durably bind each operation to the entire immutable request,
+preserve private signed raw/hash before publication, honor fee caps and invoke
+the supplied guard immediately before signing and every broadcast. Reentry may
+only use the identical private raw transaction, never a fresh nonce or repricing.
+Signing the EIP-712 receipt binding must not fund anything. `lookup` is read-only.
+Interface flags state these requirements; they do not prove an arbitrary wallet
+implements them. Only the scripted disposable adapter has been exercised here.
+
+`open()` never dispatches. Missing storage yields an explicit-payment requirement,
+not evidence that no prior payment exists. Loaded unknown/older/conflicting
+records fail without replacement. Existing reservations reconcile only their
+operation/hash; missing private lookup data requires intervention. Expiry or an
+advanced nonce does not block receipt observation. Recovery does not write stale
+checkpoint snapshots, but `/observe` can record verified merchant evidence.
+A successful wallet result only starts merchant observation.
+Contradictory status/evidence, substituted receipt events or preparation identities
+are refused. Receipt reporting stays explicitly `sandbox_receipt_recorded`, never
+production paid or fulfillment.
+
+`indexedDbCheckoutStore<NativeSandboxCheckpoint>(name)` reuses the existing
+version-one `attempts` store and `attemptId` key. The generic change is type-only,
+with no database migration. Use the same database and key domain for competing
+consumers. Existing Lightning checkpoints retain their behavior; native consumers
+reject incompatible records without releasing the reservation. `update` remains
+an unconditional put, so only the reservation owner writes funding progress.
+Do not put keys, signed raw transactions or capabilities in these public-reference
+checkpoints. Erased browser storage cannot recover private wallet history.
+
+Tests cover genuine IndexedDB native/native and native/Lightning contention,
+reopen without dispatch, malformed records, deadline/failure injection, erased
+metadata refused by existing merchant preparation, and same-operation lookup
+after ambiguous publication. The actual Anvil/HTTP scenario persists private raw
+before broadcast, loses the response, then recovers and independently observes
+the same hash without another broadcast. The browser fixture uses a wallet stub
+and does not establish browser-wallet private durability. Real wallet deployment,
+pricing, ecommerce hosting and production fulfillment remain separate gates.
 
 ## Constrained treasury payout foundation
 

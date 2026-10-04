@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Database } from "bun:sqlite";
 import { ContractFactory, FetchRequest, HDNodeWallet, Interface, JsonRpcProvider, keccak256 } from "ethers";
@@ -11,6 +11,8 @@ import { createNativeSandboxService } from "../src/nativeServer";
 import { verifyNativeSandboxReceipt, type NativeSandboxView } from "../src/nativeContract";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
+import { createNativeSandboxCheckout, type NativeSandboxCheckpoint, type NativeSandboxTransfer, type NativeSandboxWallet } from "../src/nativeSdk";
+import type { CheckoutStore } from "../src/sdk";
 import artifact from "./fixtures/sandbox-token.json";
 
 const ANVIL_SHA256 = "be5129d636ea18440d43908536f13ba6578859b695f2ca33f1f09a00aa9dc176";
@@ -179,10 +181,12 @@ sandboxTest("sandbox-only native HTTP API records actual token receipt and stabl
     const path = directory + "/native.sqlite"; ledger = NativeReceiptLedger.provision(path, config); let now = (await provider.getBlock("latest"))!.timestamp;
     const adminToken = "native_sandbox_http_admin_fixture_01", capabilityKey = new Uint8Array(32).fill(3), eventSigningKey = new Uint8Array(32).fill(4);
     const expectedPublicKey = bytesToHex(ed25519.getPublicKey(eventSigningKey));
+    let mountedOrigin = "";
     const mount = () => {
       let service: ReturnType<typeof createNativeSandboxService> | undefined;
       const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: (request) => service ? service.fetch(request) : new Response(null, { status: 503 }) }); listener = server;
       const origin = `http://127.0.0.1:${server.port}`;
+      mountedOrigin = origin;
       service = createNativeSandboxService({ ledger: ledger!, provider, adminToken, capabilityKey, eventSigningKey, transportOrigin: origin, now: () => now });
       return async (route: string, bearer: string, method = "GET", body?: unknown, key?: string) => fetch(origin + route, { method,
         headers: { Authorization: "Bearer " + bearer, ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...(key ? { "Idempotency-Key": key } : {}) },
@@ -211,5 +215,46 @@ sandboxTest("sandbox-only native HTTP API records actual token receipt and stabl
     listener!.stop(true); ledger.close(); ledger = NativeReceiptLedger.open(path, config); request = mount();
     const reopened = await (await request(route, checkout.readCapability)).json() as NativeSandboxView; expect(reopened.event).toEqual(recorded.event);
     expect(JSON.stringify(reopened)).not.toContain(checkout.paymentCapability); expect(JSON.stringify(reopened)).not.toContain(signature);
+
+    const sdkCreated = await request("/v1/native-sandbox/intents", adminToken, "POST", { orderRef: "http-sdk-order", amountBaseUnits: "1000000", expiresAt: now + 3600 }, "native_http_sdk_intent_01");
+    expect(sdkCreated.status).toBe(201); const sdkCheckout = await sdkCreated.json() as typeof checkout;
+    const operations = directory + "/payer-operations"; mkdirSync(operations, { mode: 0o700 }); let broadcasts = 0;
+    const privateOperation = (id: string) => operations + "/" + id + ".json";
+    const wallet: NativeSandboxWallet = { version: "native-sandbox-wallet/1", durableOperationIdentity: true, guardedFeeCaps: true,
+      identity: async () => ({ chainId: (await provider.getNetwork()).chainId.toString(), genesisHash: (await provider.getBlock(0))!.hash!.toLowerCase(),
+        sourceWallet: payer.address.toLowerCase(), sourceNonce: (await provider.getTransactionCount(payer.address, "pending")).toString() }),
+      signBinding: async (_id, _binding, value) => payer.signTypedData(value.domain, value.types, value.value),
+      dispatch: async (id, planned, guard) => {
+        await guard("sign"); const raw = await payer.signTransaction({ type: 2, chainId: BigInt(planned.chainId), from: planned.from, to: planned.to, value: 0n, nonce: planned.nonce,
+          data: planned.data, gasLimit: BigInt(planned.gasLimit), maxFeePerGas: BigInt(planned.maxFeePerGasWei), maxPriorityFeePerGas: BigInt(planned.maxPriorityFeePerGasWei) });
+        const record = { request: planned, raw, hash: keccak256(raw) };
+        if (existsSync(privateOperation(id))) { const previous = JSON.parse(readFileSync(privateOperation(id), "utf8")) as typeof record;
+          if (JSON.stringify(previous) !== JSON.stringify(record)) throw new Error("Immutable wallet operation changed"); }
+        else writeFileSync(privateOperation(id), JSON.stringify(record), { mode: 0o600, flag: "wx" });
+        await guard("broadcast"); await provider.broadcastTransaction(raw); broadcasts++;
+        throw new Error("simulated lost actual broadcast response");
+      }, lookup: async (id) => existsSync(privateOperation(id)) ? (JSON.parse(readFileSync(privateOperation(id), "utf8")) as { hash: string }).hash : null,
+    };
+    const checkpointPath = directory + "/browser-checkpoint.json";
+    const store: CheckoutStore<NativeSandboxCheckpoint> = {
+      load: async () => existsSync(checkpointPath) ? JSON.parse(readFileSync(checkpointPath, "utf8")) : null,
+      begin: async (record) => { try { writeFileSync(checkpointPath, JSON.stringify(record), { mode: 0o600, flag: "wx" }); return true; }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") return false; throw error; } },
+      update: async (record) => writeFileSync(checkpointPath, JSON.stringify(record), { mode: 0o600 }),
+    };
+    const sdkOrigin = mountedOrigin;
+    const sdkOptions = { intentUrl: sdkOrigin + "/v1/native-sandbox/intents/" + sdkCheckout.view.terms.intentId, transportOrigin: sdkOrigin,
+      paymentCapability: sdkCheckout.paymentCapability, terms: sdkCheckout.view.terms, merchantPublicKey: expectedPublicKey, maxTokenBaseUnits: "1000000", gasLimit: "100000",
+      maxFeePerGasWei: "1", maxPriorityFeePerGasWei: "0", maxGasCostWei: "100000", wallet, recoveryStore: store, now: () => now };
+    await expect(createNativeSandboxCheckout(sdkOptions).pay()).rejects.toThrow("lost actual broadcast");
+    const checkpoint = await store.load(sdkOptions.terms.attemptId); expect(checkpoint?.stage).toBe("ambiguous"); expect(checkpoint?.transactionHash).toBeNull();
+    const privateRecord = JSON.parse(readFileSync(privateOperation(checkpoint!.operationId), "utf8")) as { request: NativeSandboxTransfer; raw: string; hash: string };
+    expect(JSON.stringify(checkpoint)).not.toContain(privateRecord.raw); expect(JSON.stringify(checkpoint)).not.toContain(sdkCheckout.paymentCapability);
+    expect(await provider.getTransactionCount(payer.address, "pending")).toBe(Number(checkpoint!.binding!.sourceNonce) + 1);
+    const recoveredClient = createNativeSandboxCheckout(sdkOptions); expect((await recoveredClient.open()).recovery).toBe("tracking"); expect(broadcasts).toBe(1);
+    await provider.send("evm_setNextBlockTimestamp", [now + 1]); await provider.send("evm_mine", []); await provider.send("anvil_mine", ["0x5", "0x1"]); now += 6;
+    expect((await recoveredClient.open()).view.status).toBe("sandbox_receipt_recorded");
+    await expect(recoveredClient.pay()).rejects.toThrow("not payable"); expect(broadcasts).toBe(1);
+    expect(ledger.inventory()).toEqual({ held: "2000000", reserved: "0", impaired: "0" });
   } finally { listener?.stop(true); ledger?.close(); if (sandbox) await sandbox.stop(); rmSync(directory, { recursive: true, force: true }); }
 }, 90000);

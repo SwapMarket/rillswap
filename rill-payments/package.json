@@ -16,6 +16,7 @@
     "./native-ledger": "./src/nativeLedger.ts",
     "./native-contract": "./src/nativeContract.ts",
     "./native-server": "./src/nativeServer.ts",
+    "./native-sdk": "./src/nativeSdk.ts",
     "./treasury": "./src/treasury.ts",
     "./layerzero": "./src/layerZero.ts",
     "./routing": "./src/routing.ts"
@@ -24,6 +25,7 @@
     "merchant": "bun src/cli.ts",
     "probe:providers": "bun src/probe.ts",
     "build:sdk": "bun build src/sdk.ts --target browser --outfile dist/sdk.js",
+    "build:native-sdk": "bun build src/nativeSdk.ts --target browser --outfile dist/native-sdk.js",
     "check:schemas": "bun scripts/generate-validator.ts --check",
     "generate:schemas": "bun scripts/generate-validator.ts",
     "generate:sandbox-fixture": "bun scripts/generate-sandbox-fixture.ts",
