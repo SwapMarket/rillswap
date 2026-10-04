@@ -125,7 +125,7 @@ def _signed_request(  # noqa: PLR0913 - explicit signed fixture envelope fields
         "expired",
     ],
 )
-def test_featured_new_acceptance_admits_once_and_replays_without_second_effect(
+def test_featured_new_acceptance_admits_once_and_replays_without_second_effect(  # noqa: PLR0915 - one variant matrix
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variant: str
 ) -> None:
     from rill_crypto import Context  # noqa: PLC0415 - opt-in native dependency
@@ -140,7 +140,14 @@ def test_featured_new_acceptance_admits_once_and_replays_without_second_effect(
         init, accept, confirm, transcript = _featured_handshake(
             harness, crypto, featured=variant not in ("no_handshake_feature", "legacy")
         )
+        policy = store._policy  # noqa: SLF001
+        if variant in ("no_handshake_feature", "legacy"):
+            # Unfeatured sessions and their quotes exist only from before
+            # cooperation was mandatory; acceptance runs under today's policy.
+            store._policy = replace(policy, features=frozenset())  # noqa: SLF001
         session = store.reserve(init).session_id
+        if variant == "no_handshake_feature":
+            store._policy = policy  # noqa: SLF001
         store.commit_accept(accept)
         store.admit_confirm(confirm)
         source = copy.deepcopy(harness.source["contract_terms"])
@@ -171,6 +178,12 @@ def test_featured_new_acceptance_admits_once_and_replays_without_second_effect(
             payload={"kind": "btc-to-ln", "mode": "indicative"},
             featured=variant != "legacy",
         )
+        if variant == "no_handshake_feature":
+            # A historical unfeatured session cannot obtain new (cooperative) terms.
+            with pytest.raises(live.LiveSessionStoreError, match="request not admissible"):
+                store.answer_request(quote, responder=pytest.fail, signer=crypto, now=1000)
+            assert not store.pending_outbox()
+            return
         offer_answer = store.answer_request(
             quote,
             responder=lambda *_: live.Answer(
@@ -182,6 +195,7 @@ def test_featured_new_acceptance_admits_once_and_replays_without_second_effect(
             signer=crypto,
             now=1000,
         )
+        store._policy = policy  # noqa: SLF001
         offer = Envelope.model_validate_json(store.pending_outbox()[-1].canonical_bytes)
         assert offer.message_id == offer_answer.response_message_id
         client_acceptance = ClientAcceptance(

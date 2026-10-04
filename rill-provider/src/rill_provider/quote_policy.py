@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from rill_core.domain.amounts import MAX_SATS
 from rill_core.wire.canonical import canonicalize, parse_model_json
-from rill_core.wire.hashes import contract_hash
+from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE, contract_hash
 from rill_core.wire.messages import ContractTerms, InvoiceBinding, ProviderTerms
 from rill_core.wire.quotes import (
     MAX_INDICATIVE_REQUESTS_PER_SESSION,
@@ -309,7 +309,7 @@ def _firm(  # noqa: PLR0911 - one closed answer per rule
             "client_response_blocks": schedule.client_response_blocks,
             "claim_confirmation_blocks": schedule.claim_confirmation_blocks,
         },
-        "required_features": [],
+        "required_features": [COOPERATIVE_CLAIM_FEATURE] if context.cooperative else [],
         "extensions": {},
     }
     try:
@@ -453,7 +453,7 @@ def _reverse_firm(  # noqa: PLR0911 - one closed answer per rule
             "client_response_blocks": schedule.client_response_blocks,
             "claim_confirmation_blocks": schedule.claim_confirmation_blocks,
         },
-        "required_features": [],
+        "required_features": [COOPERATIVE_CLAIM_FEATURE] if context.cooperative else [],
         "extensions": {},
     }
     try:

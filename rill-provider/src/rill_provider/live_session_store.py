@@ -639,6 +639,8 @@ class RequestContext:
     swap: SwapRecord | None = None
     # False when a new firm offer would exceed unreleased economic capacity.
     economic_capacity_available: bool = True
+    # Whether both handshakes committed cooperative claims; new terms match it.
+    cooperative: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1047,13 +1049,20 @@ class LiveSessionStore:
             ).fetchall()
             if len(row) != 1 or row[0][:3] != (version, network_jcs, identity):
                 raise LiveSessionStoreError("store namespace or policy mismatch")  # noqa: TRY301
-            if row[0][3] != policy_jcs and not (
-                upgrade_from_v5 is True
-                and EPOCH_SESSION_FEATURE in policy.features
-                and row[0][3]
-                == _policy_bytes(
-                    replace(policy, features=policy.features - {EPOCH_SESSION_FEATURE})
-                )
+            # Exact additive upgrades only: a store provisioned before
+            # cooperation became intrinsic (and, from v5, before epoch binding)
+            # differs by exactly those features; anything else is a mismatch.
+            # The rewrite below commits with the new owner generation.
+            additive = [frozenset({COOPERATIVE_CLAIM_FEATURE})]
+            if upgrade_from_v5 is True:
+                additive += [
+                    frozenset({EPOCH_SESSION_FEATURE}),
+                    frozenset({EPOCH_SESSION_FEATURE, COOPERATIVE_CLAIM_FEATURE}),
+                ]
+            if row[0][3] != policy_jcs and not any(
+                added <= policy.features
+                and row[0][3] == _policy_bytes(replace(policy, features=policy.features - added))
+                for added in additive
             ):
                 raise LiveSessionStoreError("store namespace or policy mismatch")  # noqa: TRY301
             _check_provisioning(row[0][7], row[0][8])
@@ -2022,6 +2031,13 @@ class LiveSessionStore:
                     blocked = False
                     if self.requires_epoch_bound_sessions and epoch is None:
                         raise LiveSessionStoreError("new session requires epoch-bound admission")  # noqa: TRY301
+                    if (
+                        COOPERATIVE_CLAIM_FEATURE in self._policy.features
+                        and COOPERATIVE_CLAIM_FEATURE not in init.required_features
+                    ):
+                        # Mandatory for new business only; recorded sessions
+                        # (including unfeatured ones) replay above unchanged.
+                        raise LiveSessionStoreError("new session requires cooperative claims")  # noqa: TRY301
                     # Accepted sessions are retained forever but hold economic
                     # reservations instead; only pre-acceptance sessions count here.
                     (live,) = connection.execute(
@@ -2425,6 +2441,11 @@ class LiveSessionStore:
             capabilities = tuple(c for c in init.requested_capabilities if c in policy.capabilities)
             if not suites or not capabilities:
                 raise LiveSessionStoreError("no mutually supported selection")  # noqa: TRY301
+            cooperative = COOPERATIVE_CLAIM_FEATURE in init.required_features
+            if COOPERATIVE_CLAIM_FEATURE in policy.features and not cooperative:
+                # A reservation recorded before cooperation became mandatory
+                # gets no fresh accept; the client must negotiate again.
+                raise LiveSessionStoreError("new session requires cooperative claims")  # noqa: TRY301
             selection = HandshakeAccept(
                 handshake_init_hash=handshake_init_hash(init).hex(),
                 protocol="rillswap",
@@ -2440,7 +2461,12 @@ class LiveSessionStore:
                 selected_encryption_suite=suites[0],
                 selected_capabilities=capabilities,
                 transport_endpoints=tuple(transport_endpoints),
-                required_features=(EPOCH_SESSION_FEATURE,) if init.epoch_inbox_xonly_key else (),
+                required_features=tuple(
+                    sorted(
+                        ({EPOCH_SESSION_FEATURE} if init.epoch_inbox_xonly_key else set())
+                        | ({COOPERATIVE_CLAIM_FEATURE} if cooperative else set())
+                    )
+                ),
                 extensions={},
             )
             payload: dict[str, Any] = {
@@ -2948,6 +2974,24 @@ class LiveSessionStore:
                         and client_seq - FIRST_REQUEST_SEQUENCE < MAX_REQUESTS_PER_SESSION
                     ):
                         raise LiveSessionStoreError("request not admissible")  # noqa: TRY301
+                    (accept_bytes,) = connection.execute(
+                        "SELECT accept_bytes FROM sessions WHERE session_id=?",
+                        (outer.session_id,),
+                    ).fetchone()
+                    cooperative = (
+                        COOPERATIVE_CLAIM_FEATURE
+                        in HandshakeAcceptPayload.model_validate_json(
+                            canonicalize(_canonical_envelope(accept_bytes).payload), strict=True
+                        ).accept.required_features
+                    )
+                    if (
+                        outer.message_type == "quote_request"
+                        and COOPERATIVE_CLAIM_FEATURE in self._policy.features
+                        and not cooperative
+                    ):
+                        # New contracts are always cooperative, so a session
+                        # negotiated before that requirement must negotiate again.
+                        raise LiveSessionStoreError("request not admissible")  # noqa: TRY301
                     prior = tuple(
                         _canonical_envelope(document)
                         for (document,) in connection.execute(
@@ -2970,6 +3014,7 @@ class LiveSessionStore:
                             ).fetchone()
                             is not None
                         ),
+                        cooperative=cooperative,
                     )
                     reply = responder(outer, prior, context)
                     if reply.effect is not None:

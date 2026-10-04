@@ -13,6 +13,7 @@ from pathlib import Path  # noqa: TC003 - pydantic resolves field types at runti
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from rill_core.domain.amounts import MAX_SATS
+from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE
 from rill_core.wire.types import (
     NetworkIdentity,
     require_v1_destination_script,
@@ -159,7 +160,8 @@ class OperatorConfig(_Strict):
         h = self.handshake
         return HandshakePolicy(
             profile=h.profile,  # type: ignore[arg-type]
-            features=frozenset(h.features),
+            # Cooperative MuSig2 claims are intrinsic, never an operator toggle.
+            features=frozenset(h.features) | {COOPERATIVE_CLAIM_FEATURE},
             encryption_suites=frozenset(h.encryption_suites),
             capabilities=frozenset(h.capabilities),
         )

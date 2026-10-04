@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import copy
 import sqlite3
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
 import pytest
 from rill_core.wire.canonical import canonicalize
+from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE
 from test_live_session_store import Harness, swaps_as_v9, without_v12_cooperation
 
 from rill_provider import live_session_store as live
@@ -25,7 +27,13 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
 
 
 def _insert_funded_swap(store: live.LiveSessionStore, harness: Harness, state: str) -> str:
-    reservation = store.reserve(harness.init, now=1000)
+    # Historical (pre-mandatory) admission: the fixture rewrites the transcript.
+    policy = store._policy  # noqa: SLF001
+    store._policy = replace(policy, features=policy.features - {COOPERATIVE_CLAIM_FEATURE})  # noqa: SLF001
+    try:
+        reservation = store.reserve(harness.init, now=1000)
+    finally:
+        store._policy = policy  # noqa: SLF001
     source = harness.source
     offer = copy.deepcopy(harness.envelopes[1])
     offer.update(

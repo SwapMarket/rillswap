@@ -364,6 +364,18 @@ an existing installation. Omitted features keep the existing legacy policy;
 there is no silent configuration upgrade. The browser's disconnected Nostr
 verifier recognizes the same signed requirement, not live swap authority.
 
+Cooperative MuSig2 claims (`cooperative-claim/v1`) are intrinsic, not a
+configuration option: the store policy always includes the feature, every new
+session must request it, every new accept echoes it, and every new firm offer
+requires it. An installation provisioned before this requirement upgrades its
+stored policy by exactly that one feature when it next starts (any other policy
+difference still refuses). Existing records keep their signed meaning:
+unfeatured sessions replay exactly and their accepted swaps settle and refund
+unilaterally as before, but an unfeatured reservation gets no new accept and an
+unfeatured session gets no new offer; such clients must negotiate again. The
+announcement's required-feature extension is unchanged (clients always request
+cooperation).
+
 `record_announcement(created_at)` makes sure
 announcement revisions strictly increase across restarts. It runs before
 publication, and a clock rollback is refused instead of publishing a lower
@@ -681,8 +693,7 @@ historical archives keep legacy repayment. Authenticated cooperative debt
 requires original-node access, `info:read`, and synchronized LND. Absent,
 partial, mixed, unsupported, or invalid archives retain debt and reservations
 without dispatch or refund; operator repair may be needed. Missing debt never
-triggers repayment, backfill, or a startup scan. This does not enable production
-reverse cooperative negotiation.
+triggers repayment, backfill, or a startup scan.
 
 The private reverse public-key snapshot is preparatory for Core evidence
 acquisition. The owner computes native curve results before queuing a worker;
