@@ -34,7 +34,9 @@ Tor; relay traffic must not reveal your IP), Python 3.13 or later,
 2. Make a working directory (for example `/srv/rill`) and an age custody key.
    It decrypts the provider identity and store secrets; back it up offline.
 
-   Create it as the account that will run the provider:
+   Run this as the account that will run the provider; if it cannot write
+   `/srv`, first `sudo install -d -o "$USER" -m 700 /srv/rill`, or use another
+   directory and substitute its path below.
 
    ```sh
    mkdir -p -m 700 /srv/rill/macaroons
@@ -65,7 +67,7 @@ Tor; relay traffic must not reveal your IP), Python 3.13 or later,
 5. Copy [`examples/provider.signet.json`](examples/provider.signet.json) to
    `/srv/rill/provider.json` and replace these example values:
    - `provider_identity_xonly`: the key printed in step 3.
-   - `custody_recipient`: the output of `age-keygen -y custody.key`.
+   - `custody_recipient`: the output of `age-keygen -y /srv/rill/custody.key`.
    - `native_crypto_library`: the absolute path of `tmp/native/librill_crypto.so`.
    - `bitcoin_core`: Core's signet RPC port (38332 by default) and its `.cookie`.
    - `lnd`: LND's gRPC port and `tls.cert`; the macaroon paths from step 4.
