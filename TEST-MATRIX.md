@@ -145,6 +145,7 @@ checkout or multichain conformance has passed. Offline `rill-payments` and
 | M11 | Bridge/hub/second swap quote expires after first commitment | Preserve intermediate owner/recovery, stop next spend, reconcile funded operations without replacing the invoice |
 | M12 | Operational stablecoin-to-merchant-Lightning path | Pinned deployments and exact fees, independently observed receipt, loss/refund asset accounting, provider disappearance and browser/daemon restart |
 | M13 | Disposable native RPC conformance | Explicit sandbox profile, real synthetic-token receipt, local confirmation boundary, ledger restart/late/reorg handling; never claim production finality or fulfillment |
+| M14 | Sandbox native API authority and event evidence | Distinct read/payment capabilities, durable verified prebinding, authenticated real RPC receipt, closed signed historical contract/key/terms binding, late and impaired evidence; never production fulfillment |
 
 ## Test evidence and accounting
 

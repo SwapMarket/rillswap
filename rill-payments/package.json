@@ -14,6 +14,8 @@
     "./discovery": "./src/discovery.ts",
     "./evm-receipt": "./src/evmReceipt.ts",
     "./native-ledger": "./src/nativeLedger.ts",
+    "./native-contract": "./src/nativeContract.ts",
+    "./native-server": "./src/nativeServer.ts",
     "./treasury": "./src/treasury.ts",
     "./layerzero": "./src/layerZero.ts",
     "./routing": "./src/routing.ts"

@@ -265,6 +265,71 @@ This test proves local execution and ledger conformance for this fixture only.
 It does not prove Ethereum consensus finality, production token behavior,
 pricing, provider settlement, or native checkout SDK/service integration.
 
+### Sandbox-only native HTTP service
+
+`createNativeSandboxService` from `@rillswap/payments/native-server` is a separate,
+manually mounted Fetch handler. It requires an explicitly provisioned local
+chain-31337 ledger, a trusted RPC reader and supplied persistent private keys.
+It rejects canonical-network ledgers. Existing Lightning endpoints, signing
+bytes, CLI configuration and ordinary startup remain unchanged. It starts no
+provisioning, network connection, scanner, wallet or delivery worker.
+
+| Endpoint | Authority | Exact JSON body |
+| - | - | - |
+| `POST /v1/native-sandbox/intents` | Merchant admin bearer | `orderRef`, `amountBaseUnits`, `expiresAt` |
+| `GET /v1/native-sandbox/intents/{intentId}` | Scoped read/payment capability or admin | None |
+| `POST /v1/native-sandbox/intents/{intentId}/prepare` | Scoped payment capability | `binding`, payer EIP-712 `signature` |
+| `POST /v1/native-sandbox/intents/{intentId}/observe` | Scoped payment capability | `txHash` lookup hint only |
+
+Creation and preparation require an `Idempotency-Key` header. Creation returns
+separate HMAC-scoped `readCapability` and `paymentCapability`; use each as a
+Bearer header, never a URL parameter. The read capability cannot reserve funds
+or inventory, and admin credentials alone cannot prepare or observe. A payment
+capability authorizes durable mutation: a holder can reserve with their own
+signing wallet without funding. Restrict issuance to controlled sandbox clients;
+no reservation expiry, quota or production admission policy is supplied here.
+
+Preparation verifies merchant-owned terms and payer signature, checks the exact
+network/nonce/deployment, and commits the reservation before returning. The
+service never signs for the payer. Observation independently queries its trusted
+reader; hints and provider success cannot allocate a receipt. Scoped status
+returns only explicit terms, recorded receipt and historical signed event, not
+payment authority, binding signatures, keys or wallet recovery data.
+Preparation replay returns the original durable record, not fresh authorization
+to fund after expiry. A future wallet consumer must recheck deadlines and retain
+its own private operation checkpoint before signing or dispatching funds.
+
+Status uses `awaiting_funds`, `sandbox_receipt_recorded`,
+`sandbox_reconciliation`, or `sandbox_evidence_impaired`, never production
+`paid`/fulfillment. Evidence is historical bookkeeping, not a fresh canonical
+chain assertion. Late receipts survive without an outbox acceptance or event.
+Explicit administrative impairment changes status while preserving the original
+signed event and paid history; no automatic reorg monitoring is claimed.
+
+`native-sandbox-event/1` is distinct from Lightning events. Its signed type is
+`sandbox.receipt_recorded`, scope is `local_sandbox_only`, and receipt finality
+is `local_sandbox_confirmed`. The signature covers complete normalized terms,
+deployment/profile, exact receipt and original event ID/time. Verify with
+`verifyNativeSandboxReceipt` from `@rillswap/payments/native-contract`, supplying
+an independently pinned merchant key and authoritative expected terms. Replay
+remains authentic historical evidence; it never authorizes real fulfillment.
+Acknowledging the internal outbox does not erase public historical retrieval.
+
+The transport origin is separately pinned. It defaults to the merchant HTTPS
+identity; manual mounting may explicitly override it with an exact numeric
+loopback HTTP origin. `Host`/forwarded headers do not establish trust. Requests
+with mismatched URL/Origin, query tokens, unexpected fields or oversized bodies
+are refused. Mounting must supply socket isolation, deadlines, concurrency
+limits and private key custody; origin checks do not enforce those properties.
+Preserve capability and signing keys across restarts, never generate replacements
+on ordinary startup. Key rotation/public fulfillment is not implemented.
+
+The opt-in sandbox suite now also mounts a real Bun loopback HTTP server and
+records actual Anvil transfers through this API, reopening ledger/listener before
+funding and after signed evidence. It does not implement a native browser wallet,
+durable SDK funding checkpoint or production deployment. Those remain subsequent
+integration gates.
+
 ## Constrained treasury payout foundation
 
 `TreasuryTransferJournal` from `@rillswap/payments/treasury` is an explicitly

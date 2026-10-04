@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, lstatSync, openSync, realpathSync } from "node:fs";
 import { dirname } from "node:path";
-import { evmReceiptScope, observeEvmReceipt, prepareEvmBinding, receiptBindingTypedData, validateEvmAsset, type EvmReader, type EvmReceiptBinding, type EvmReceiptIntent, type EvmTokenAsset, type PreparedEvmBinding } from "./evmReceipt";
+import { evmReceiptScope, observeEvmReceipt, prepareEvmBinding, receiptBindingTypedData, validateEvmAsset, type EvmReader, type EvmReceiptBinding, type EvmReceiptIntent, type EvmTokenAsset, type PreparedEvmBinding, type VerifiedTokenReceipt } from "./evmReceipt";
 
 export interface NativeLedgerConfig {
   readonly origin: string;
@@ -24,6 +24,12 @@ export interface NativeAcceptance {
   readonly quantityBaseUnits: string;
   readonly receiptKey: string;
   readonly acceptedAt: number;
+}
+export interface NativeReceiptRecord {
+  readonly receipt: VerifiedTokenReceipt;
+  readonly acceptance: NativeAcceptance | null;
+  /** Recorded allocation evidence only; no RPC or automatic reorg detection. */
+  readonly allocationState: "finalized" | "reorged";
 }
 const id = (): string => randomBytes(24).toString("base64url");
 const digest = (input: unknown): string => createHash("sha256").update(JSON.stringify(input)).digest("hex");
@@ -170,5 +176,11 @@ export class NativeReceiptLedger {
     }).immediate();
   }
   pendingEvents(): NativeAcceptance[] { return (this.db.query("SELECT payload FROM outbox WHERE delivered=0 ORDER BY rowid").all() as { payload: string }[]).map((row) => JSON.parse(row.payload)); }
+  getReceiptRecord(intentId: string): NativeReceiptRecord | null {
+    this.getIntent(intentId);
+    const row = this.db.query("SELECT r.payload AS receipt,r.finality,o.payload AS acceptance FROM attempts a JOIN receipts r ON r.attempt_id=a.id LEFT JOIN outbox o ON o.intent_id=a.intent_id WHERE a.intent_id=?")
+      .get(intentId) as { receipt: string; finality: NativeReceiptRecord["allocationState"]; acceptance: string | null } | null;
+    return row ? { receipt: JSON.parse(row.receipt), acceptance: row.acceptance === null ? null : JSON.parse(row.acceptance), allocationState: row.finality } : null;
+  }
   acknowledgeEvent(eventId: string): void { this.db.query("UPDATE outbox SET delivered=1 WHERE id=?").run(eventId); }
 }

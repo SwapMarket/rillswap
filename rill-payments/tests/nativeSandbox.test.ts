@@ -7,6 +7,10 @@ import { Database } from "bun:sqlite";
 import { ContractFactory, FetchRequest, HDNodeWallet, Interface, JsonRpcProvider, keccak256 } from "ethers";
 import { NativeReceiptLedger, type NativeIntent, type NativeLedgerConfig } from "../src/nativeLedger";
 import { observeEvmReceipt, prepareEvmBinding, receiptBindingTypedData, type EvmReceiptBinding } from "../src/evmReceipt";
+import { createNativeSandboxService } from "../src/nativeServer";
+import { verifyNativeSandboxReceipt, type NativeSandboxView } from "../src/nativeContract";
+import { ed25519 } from "@noble/curves/ed25519.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 import artifact from "./fixtures/sandbox-token.json";
 
 const ANVIL_SHA256 = "be5129d636ea18440d43908536f13ba6578859b695f2ca33f1f09a00aa9dc176";
@@ -154,4 +158,58 @@ sandboxTest("real disposable ERC20 debit, local confirmation boundary, ledger re
   } finally {
     ledger?.close(); if (sandbox) await sandbox.stop(); rmSync(directory, { recursive: true, force: true });
   }
+}, 90000);
+
+sandboxTest("sandbox-only native HTTP API records actual token receipt and stable signed event across restart", async () => {
+  mkdirSync("tmp", { recursive: true }); const directory = mkdtempSync(resolve("tmp/native-http-"));
+  let sandbox: Awaited<ReturnType<typeof startSandbox>> | undefined, ledger: NativeReceiptLedger | undefined, listener: { stop(closeActiveConnections?: boolean): void } | undefined;
+  try {
+    sandbox = await startSandbox(directory); const { provider } = sandbox;
+    const payer = HDNodeWallet.fromPhrase(MNEMONIC, undefined, "m/44'/60'/0'/0/0"), recipient = HDNodeWallet.fromPhrase(MNEMONIC, undefined, "m/44'/60'/0'/0/1").address.toLowerCase();
+    const factory = new ContractFactory(artifact.abi, artifact.bytecode), abi = new Interface(artifact.abi);
+    const deploy = await factory.getDeployTransaction(10_000_000n);
+    const deployed = await provider.broadcastTransaction(await payer.signTransaction({ ...deploy, type: 2, chainId: 31337n, nonce: 0, gasLimit: 2_000_000n, maxFeePerGas: 0n, maxPriorityFeePerGas: 0n }));
+    await provider.send("evm_mine", []); const receipt = await provider.getTransactionReceipt(deployed.hash);
+    expect(receipt?.status).toBe(1); if (!receipt?.contractAddress) throw new Error("Missing HTTP fixture deployment");
+    const token = receipt.contractAddress.toLowerCase(), genesis = await provider.getBlock(0); if (!genesis?.hash) throw new Error("Missing HTTP fixture genesis");
+    const config: NativeLedgerConfig = { origin: "https://sandbox.invalid", recipient, inventoryCapBaseUnits: "10000000", asset: {
+      id: `eip155:31337/erc20:${token}`, chainId: "31337", genesisHash: genesis.hash.toLowerCase(), token, decimals: 6, behavior: "standard_erc20", runtimeCodeHash: keccak256(artifact.runtimeBytecode),
+      implementation: null, historicalStateVerified: true, behaviorConformanceVerified: true, localSandbox: { version: "anvil-local/1", namespace: randomBytes(24).toString("base64url"), confirmations: 6 },
+    } };
+    const path = directory + "/native.sqlite"; ledger = NativeReceiptLedger.provision(path, config); let now = (await provider.getBlock("latest"))!.timestamp;
+    const adminToken = "native_sandbox_http_admin_fixture_01", capabilityKey = new Uint8Array(32).fill(3), eventSigningKey = new Uint8Array(32).fill(4);
+    const expectedPublicKey = bytesToHex(ed25519.getPublicKey(eventSigningKey));
+    const mount = () => {
+      let service: ReturnType<typeof createNativeSandboxService> | undefined;
+      const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: (request) => service ? service.fetch(request) : new Response(null, { status: 503 }) }); listener = server;
+      const origin = `http://127.0.0.1:${server.port}`;
+      service = createNativeSandboxService({ ledger: ledger!, provider, adminToken, capabilityKey, eventSigningKey, transportOrigin: origin, now: () => now });
+      return async (route: string, bearer: string, method = "GET", body?: unknown, key?: string) => fetch(origin + route, { method,
+        headers: { Authorization: "Bearer " + bearer, ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...(key ? { "Idempotency-Key": key } : {}) },
+        body: body === undefined ? undefined : JSON.stringify(body) });
+    };
+    let request = mount(); const created = await request("/v1/native-sandbox/intents", adminToken, "POST", { orderRef: "http-sandbox-order", amountBaseUnits: "1000000", expiresAt: now + 3600 }, "native_http_intent_01");
+    expect(created.status).toBe(201); const checkout = await created.json() as { view: NativeSandboxView; readCapability: string; paymentCapability: string };
+    const terms = checkout.view.terms, route = "/v1/native-sandbox/intents/" + terms.intentId;
+    expect((await request(route + "/prepare", checkout.readCapability, "POST", {})).status).toBe(403);
+    const binding: EvmReceiptBinding = { version: "evm-receipt-binding/1", merchantOrigin: terms.merchantOrigin, intentId: terms.intentId, attemptId: terms.attemptId, assetId: terms.asset.id,
+      sourceWallet: payer.address.toLowerCase(), sourceNonce: (await provider.getTransactionCount(payer.address, "pending")).toString(), recipient, amountBaseUnits: terms.amountBaseUnits, validAfter: terms.createdAt, validBefore: terms.expiresAt };
+    const typed = receiptBindingTypedData(terms.asset, binding), signature = await payer.signTypedData(typed.domain, typed.types, typed.value);
+    expect((await request(route + "/prepare", checkout.paymentCapability, "POST", { binding, signature }, "native_http_prepare_01")).status).toBe(201);
+    const preparation = ledger.getPreparation(terms.attemptId); listener!.stop(true); ledger.close(); ledger = NativeReceiptLedger.open(path, config); request = mount();
+    expect(ledger.getPreparation(terms.attemptId)).toEqual(preparation);
+    const raw = await payer.signTransaction({ type: 2, chainId: 31337n, to: token, value: 0n, nonce: Number(binding.sourceNonce), data: abi.encodeFunctionData("transfer", [recipient, 1000000n]), gasLimit: 100000n, maxFeePerGas: 0n, maxPriorityFeePerGas: 0n });
+    const sent = await provider.broadcastTransaction(raw); await provider.send("evm_setNextBlockTimestamp", [now + 1]); await provider.send("evm_mine", []); now++;
+    const pending = await (await request(route + "/observe", checkout.paymentCapability, "POST", { txHash: sent.hash })).json() as NativeSandboxView;
+    expect(pending.status).toBe("awaiting_funds"); expect(pending.event).toBeNull();
+    await provider.send("anvil_mine", ["0x5", "0x1"]); now += 5;
+    const observed = await request(route + "/observe", checkout.paymentCapability, "POST", { txHash: sent.hash }); expect(observed.status).toBe(200);
+    const recorded = await observed.json() as NativeSandboxView;
+    expect(recorded.status).toBe("sandbox_receipt_recorded"); expect(recorded.event?.event.scope).toBe("local_sandbox_only");
+    expect(verifyNativeSandboxReceipt(recorded.event!, expectedPublicKey, terms)).toBe(true);
+    expect(ledger.inventory()).toEqual({ held: "1000000", reserved: "0", impaired: "0" });
+    listener!.stop(true); ledger.close(); ledger = NativeReceiptLedger.open(path, config); request = mount();
+    const reopened = await (await request(route, checkout.readCapability)).json() as NativeSandboxView; expect(reopened.event).toEqual(recorded.event);
+    expect(JSON.stringify(reopened)).not.toContain(checkout.paymentCapability); expect(JSON.stringify(reopened)).not.toContain(signature);
+  } finally { listener?.stop(true); ledger?.close(); if (sandbox) await sandbox.stop(); rmSync(directory, { recursive: true, force: true }); }
 }, 90000);
