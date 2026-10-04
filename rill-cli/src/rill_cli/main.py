@@ -123,7 +123,7 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - one flat command ta
         ("prepare-claim", "create encrypted LN-to-BTC claim plan (no disclosure)"),
         ("broadcast-claim", "EXPERIMENTAL regtest preimage disclosure and one send"),
         ("sign-refund", "explicit BTC-to-LN refund artifact (never broadcasts)"),
-        ("broadcast-refund", "explicit regtest refund submit (never retries)"),
+        ("broadcast-refund", "explicit refund submit (never retries)"),
         ("watch-refund", "refund a failed swap with fee escalation until it confirms"),
         ("watch-claim", "claim an LN-to-BTC swap with fee escalation until it confirms"),
     ):

@@ -66,8 +66,10 @@ The post-funding provider stream is consumed in authenticated sequence order.
 `--settle-timeout` is one finite, positive lifetime starting at the successful
 funding broadcast; nonterminal observations do not renew it. Expiry means
 settlement was not observed, not that the invoice is unpaid. Check the invoice
-and retain recovery files before taking further action. Cooperative readiness
-echoes remain disabled until the complete signing/completion handler is wired.
+and retain recovery files before taking further action. After a verified
+payment the provider's claim is cosigned as a MuSig2 key-path spend; if that
+does not finish within its short window, the CLI says why and the provider
+claims through the script path instead.
 
 ```sh
 rill swap btc-to-ln \
@@ -497,8 +499,11 @@ exceptions are not translated. Neither signal classification nor a returned
 txid proves chain inclusion or makes a second attempt safe.
 
 `rill recover watch-refund` is the automatic form for a swap the provider
-never paid: it polls until the refund confirms or the invoice settles. Before
-every attempt it asks your own LND (`--lnd-port`, `--lnd-tls-cert`,
+never paid. It needs your own LND to hold the invoice (an `invoices:read`
+lookup), so it fits paying your own node's invoice; for someone else's
+invoice use `sign-refund` or `broadcast-refund`, which need only Core. It
+polls until the refund confirms or the invoice settles. Before every attempt
+it asks your own LND (`--lnd-port`, `--lnd-tls-cert`,
 `--lnd-invoice-macaroon`, an
 `invoices:read` macaroon) for the invoice state and **refuses to refund a
 SETTLED invoice** (the provider paid you; refunding would take their funds).
@@ -534,8 +539,8 @@ LN state before any separate manual action. Even a `node_accepted` response
 can become stale or compete with a claim; `testmempoolaccept` is not a chain
 reservation. The intent directory must be operator-trusted, fsync-capable
 local storage. Partial or restored recovery files prove neither nonpayment
-nor complete funding lineage. **Do not use this regtest-only command with
-real funds or treat it as a production-ready refund broadcaster.** The
+nor complete funding lineage. **This is pre-release: do not rely on it as a
+production-ready refund broadcaster for real funds.** The
 opt-in pinned Core test submits once, verifies mempool entry, mines the refund,
 and checks exact block-qualified transaction bytes on disposable regtest.
 
