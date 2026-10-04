@@ -1595,6 +1595,8 @@ async def run_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
             write_recovery=write_recovery,
             settlement_deadline=settlement_deadline,
             configured_fee_floor_sat=limits.claim_fee_floor_sat,
+            # Regtest Core rarely estimates fees; public networks never skip it.
+            allow_regtest_fixed_fee=session.network.name == "regtest",
             monotonic_clock=asyncio.get_running_loop().time,
         )
         try:

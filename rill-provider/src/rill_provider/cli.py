@@ -37,7 +37,7 @@ from rill_provider.operator_config import (
 from rill_provider.payment_reconciliation import reconcile_payment
 from rill_provider.provider_identity import ProviderIdentity, ProviderIdentityError
 from rill_provider.relay_client import RelayConnection, RelayError, require_relay_route
-from rill_provider.settlement_engine import SettlementEngine
+from rill_provider.settlement_engine import EngineSettings, SettlementEngine
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -191,7 +191,13 @@ def _settlement(
         )
     except ValueError:
         raise OperatorConfigError("settlement requires a supported network") from None
-    return SettlementEngine(store, chain, lightning, crypto, hold_invoices=_hold_invoices(config))
+    # Regtest Core rarely has a fee estimate; its relay/mempool floors and the
+    # configured claim floor then price cooperative claims. Public networks
+    # always require an affirmative conservative estimate.
+    settings = EngineSettings(allow_regtest_fixed_fee=config.network.name == "regtest")
+    return SettlementEngine(
+        store, chain, lightning, crypto, settings, hold_invoices=_hold_invoices(config)
+    )
 
 
 def _hold_invoices(config: OperatorConfig) -> LndHoldInvoices | None:

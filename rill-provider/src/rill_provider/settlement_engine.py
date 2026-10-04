@@ -485,7 +485,7 @@ class SettlementEngine:
         cooperation_id: bytes,
         *,
         now: Callable[[], int],
-        allow_regtest_fixed_fee: bool = False,
+        allow_regtest_fixed_fee: bool | None = None,
     ) -> str | None:
         """Dormant independent completion preflight after fresh signed admission.
 
@@ -497,6 +497,11 @@ class SettlementEngine:
         deadline = time.monotonic() + COOPERATIVE_SAMPLE_SECONDS
         if not self._new_exposure_allowed or not callable(now):
             return None
+        allow_regtest_fixed_fee = (  # None selects the engine's own network policy
+            self._settings.allow_regtest_fixed_fee
+            if allow_regtest_fixed_fee is None
+            else allow_regtest_fixed_fee
+        )
         if type(allow_regtest_fixed_fee) is not bool or (
             allow_regtest_fixed_fee and self._store.network_identity.name != "regtest"
         ):
