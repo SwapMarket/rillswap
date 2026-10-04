@@ -821,6 +821,24 @@ primitive has no production caller. Archived reply routing, live client custody,
 and public/adversarial activation acceptance remain separate work. Schema 14,
 stored formats, and startup behavior are unchanged.
 
+The internal `_reverse_signed_reply_replay` read returns the exact archived
+reply bytes for a repeated proposal (a fresh client signature over identical
+unsigned content is accepted). It authenticates the historical agreement and
+proposal, requires the exact admitted inbox record, a strict canonical v2
+reservation binding with matching proposal fields, complete nonce/partial
+artifacts with paired response IDs, and exactly one correlated outbox reply
+whose provider session signature and payload match the attempt. It does not
+re-derive the funding plan, re-verify the partial, consult Core or LND, or need
+contract-key custody or funding archives; the original committing writer
+established those invariants. It still depends on the configured profile,
+network, and supported features. An absent row or an unfinished state
+(BURNED, NONCE_READY, SIGNING, ABANDONED) returns no artifact and never authorizes
+repair, regeneration, or a new nonce. A malformed, partial, or ambiguous COMPLETE
+archive is refused without writes. Retrieval works for blocked sessions and
+acknowledged replies; it is historical knowledge, not delivery or signing
+authority. Upgrading installations need no migration: no prior release wrote
+reverse COMPLETE rows.
+
 The dedicated `provider-lnd` CI job builds native crypto and runs opt-in backend
 tests against fresh digest-pinned Core/LND/Python containers. Its sidecars use
 read-only sources and certificates, private tmpfs wallets/custody, and verified

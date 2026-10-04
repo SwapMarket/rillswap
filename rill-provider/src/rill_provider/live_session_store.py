@@ -3814,6 +3814,180 @@ class LiveSessionStore:
             return final_context
         raise LiveSessionStoreError("reverse paid proposal preflight refused")
 
+    def _reverse_signed_reply_replay(
+        self, document: bytes, *, operation: ReverseOperation
+    ) -> bytes | None:
+        """Return exact authenticated archived bytes, never delivery or signing authority.
+
+        Recognized unfinished/absent attempts yield no artifact and authorize
+        no repair, regeneration, backend work, or clock/window reconstruction.
+        Completed replay authenticates historical association, not independent
+        native-plan or partial correctness. The original committing writer
+        established those invariants before signing and archiving the response.
+        """
+        self.reverse_operations.check(operation)
+        try:
+            with self._write() as connection:
+                outer, proposal, terms = self._authenticated_reverse_preimage(connection, document)
+                digest = unsigned_envelope_hash(outer).hex()
+                admitted = connection.execute(
+                    "SELECT sender_key,seq,unsigned_digest,canonical_bytes FROM inbox "
+                    "WHERE session_id=? AND message_id=?",
+                    (outer.session_id, outer.message_id),
+                ).fetchone()
+                if (
+                    admitted is None
+                    or admitted[:3] != (outer.sender_session_key, outer.sequence, digest)
+                    or unsigned_envelope_hash(_canonical_envelope(admitted[3])).hex() != digest
+                ):
+                    raise ValueError("reverse replay request differs")  # noqa: TRY301
+                row = connection.execute(
+                    "SELECT session_id,binding,state,local_nonce,peer_nonce,partial_signature,"
+                    "nonce_response_id,partial_response_id FROM cooperation_attempts "
+                    "WHERE cooperation_id=?",
+                    (bytes.fromhex(proposal.cooperation_id),),
+                ).fetchone()
+                if row is None:
+                    return None
+                if row[0] != outer.session_id:
+                    raise ValueError("reverse replay attempt differs")  # noqa: TRY301
+                if row[2] in ("BURNED", "NONCE_READY", "SIGNING", "ABANDONED"):
+                    return None
+                if row[2] != "COMPLETE":
+                    raise ValueError("reverse replay state unsupported")  # noqa: TRY301
+                bound = parse_json_strict(row[1])
+                fields = {
+                    "version",
+                    "kind",
+                    "session_id",
+                    "cooperation_id",
+                    "contract_hash",
+                    "proposal_message_id",
+                    "proposal_unsigned_digest",
+                    "funding_message_id",
+                    "funding_unsigned_digest",
+                    "funding_binding_hash",
+                    "network_identity",
+                    "claimant",
+                    "user_key",
+                    "provider_key",
+                    "tap_tweak",
+                    "funding_txid",
+                    "funding_vout",
+                    "funding_value_sat",
+                    "funding_script_pubkey",
+                    "unsigned_transaction",
+                    "signature_hash",
+                    "fee_sat",
+                    "deadline_at",
+                    "deadline_height",
+                }
+                if (
+                    not isinstance(bound, dict)
+                    or set(bound) != fields
+                    or canonicalize(bound) != row[1]
+                    or type(bound["version"]) is not int
+                    or bound["version"] != 2  # noqa: PLR2004 - immutable reverse reservation version
+                    or bound["kind"] != "reverse-proposal-reservation"
+                    or bound["session_id"] != outer.session_id
+                    or bound["cooperation_id"] != proposal.cooperation_id
+                    or bound["contract_hash"] != contract_hash(terms).hex()
+                    or bound["proposal_message_id"] != outer.message_id
+                    or bound["proposal_unsigned_digest"] != digest
+                    or bound["network_identity"] != terms.network_identity.model_dump(mode="json")
+                    or bound["claimant"] != terms.claimant
+                    or bound["user_key"] != terms.client_contract_compressed_key
+                    or bound["provider_key"] != terms.provider_contract_compressed_key
+                    or bound["unsigned_transaction"] != proposal.unsigned_transaction
+                    or type(bound["deadline_at"]) is not int
+                    or bound["deadline_at"] != proposal.deadline_at
+                    or type(bound["deadline_height"]) is not int
+                    or bound["deadline_height"] != proposal.deadline_height
+                    or any(
+                        type(bound[name]) is not str
+                        or re.fullmatch("[0-9a-f]{64}", cast("str", bound[name])) is None
+                        for name in (
+                            "funding_message_id",
+                            "funding_unsigned_digest",
+                            "funding_binding_hash",
+                            "tap_tweak",
+                            "funding_txid",
+                            "signature_hash",
+                        )
+                    )
+                    or type(bound["funding_vout"]) is not int
+                    or bound["funding_vout"] < 0
+                    or type(bound["funding_value_sat"]) is not int
+                    or not 0 < bound["funding_value_sat"] <= MAX_SATS
+                    or bound["funding_value_sat"]
+                    != int(terms.economics.model_dump()["contract_amount_sat"])
+                    or type(bound["funding_script_pubkey"]) is not str
+                    or re.fullmatch("5120[0-9a-f]{64}", bound["funding_script_pubkey"]) is None
+                    or type(bound["fee_sat"]) is not int
+                    or not 0 <= bound["fee_sat"] <= int(terms.max_claim_fee_sat)
+                    or any(
+                        type(value) is not bytes or len(value) != length
+                        for value, length in (
+                            (row[3], 66),
+                            (row[4], 66),
+                            (row[5], 32),
+                        )
+                    )
+                    or row[4].hex() != proposal.public_nonce
+                    or type(row[6]) is not str
+                    or row[6] != row[7]
+                ):
+                    raise ValueError("reverse completed replay binding differs")  # noqa: TRY301
+                replies = connection.execute(
+                    "SELECT message_id,session_id,seq,in_reply_to,canonical_bytes FROM outbox "
+                    "WHERE session_id=? AND in_reply_to=?",
+                    (outer.session_id, outer.message_id),
+                ).fetchall()
+                provider = connection.execute(
+                    "SELECT provider_session_key FROM sessions WHERE session_id=?",
+                    (outer.session_id,),
+                ).fetchone()
+                if len(replies) != 1 or provider is None:
+                    raise ValueError("reverse archived reply ambiguous or absent")  # noqa: TRY301
+                stored = replies[0]
+                reply = _canonical_envelope(stored[4])
+                verify_static_signed_envelope(
+                    stored[4],
+                    expected_session_id=outer.session_id,
+                    expected_profile=self._policy.profile,
+                    expected_network=self._network,
+                    expected_sender_key=provider[0],
+                    supported_features=self._policy.features,
+                    crypto=self._crypto,
+                )
+                payload = parse_cooperative_payload("action_result", canonicalize(reply.payload))
+                if (
+                    reply.message_type != "action_result"
+                    or reply.message_id != row[6]
+                    or stored[:4]
+                    != (reply.message_id, reply.session_id, reply.sequence, reply.in_reply_to)
+                    or reply.in_reply_to != outer.message_id
+                    or reply.contract_hash != outer.contract_hash
+                    or reply.required_features != (COOPERATIVE_CLAIM_FEATURE,)
+                    or not isinstance(payload, CooperativeClaimSigned)
+                    or payload.cooperation_id != proposal.cooperation_id
+                    or payload.public_nonce != row[3].hex()
+                    or payload.partial_signature != row[5].hex()
+                ):
+                    raise ValueError("reverse archived reply differs")  # noqa: TRY301
+                result = bytes(stored[4])
+                self.reverse_operations.check(operation)
+            self.reverse_operations.check(operation)
+        except StaleOwnerError:
+            raise
+        except Exception:  # noqa: BLE001 - no archived private-proposal or signature oracle
+            refused = True
+        else:
+            refused = False
+        if refused:
+            raise LiveSessionStoreError("reverse archived contribution replay refused")
+        return result
+
     def _commit_reverse_signed_reply(  # noqa: PLR0912, PLR0915 - one custody/consumption/response boundary
         self,
         document: bytes,
