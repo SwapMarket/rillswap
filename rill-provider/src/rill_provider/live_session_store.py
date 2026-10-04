@@ -3814,6 +3814,223 @@ class LiveSessionStore:
             return final_context
         raise LiveSessionStoreError("reverse paid proposal preflight refused")
 
+    def _commit_reverse_signed_reply(  # noqa: PLR0912, PLR0915 - one custody/consumption/response boundary
+        self,
+        document: bytes,
+        *,
+        operation: ReverseOperation,
+        evidence: _ReversePaidProposalEvidence,
+        crypto: Context,
+        now: int,
+    ) -> bytes:
+        """Consume one provider nonce and archive its correlated contribution.
+
+        INTERNAL ONLY. Trusted runtime must collect actual same-operation paid
+        evidence and keep this original gate/window through the effect. The
+        previously durable unique burn and permanent allocation tombstone
+        forbid regeneration, even after native failure or transaction rollback.
+        No contract scalar or native handle leaves the store, and no nonce or
+        partial leaves this method before its exact signed reply commits.
+        COMPLETE proves archived provider participation, not client broadcast
+        or chain disposition. Settlement debt and capacity are not changed.
+        """
+        __tracebackhide__ = True
+        self.reverse_operations.check(operation)
+        if type(now) is not int or now < 0:
+            raise LiveSessionStoreError("reverse signed reply audit time refused")
+        cooperation_id: bytes | None = None
+        window: ReverseCooperationWindow | None = None
+        attempt: MusigAttempt | None = None
+        try:
+            with self._write() as connection:
+                context = self._check_reverse_paid_evidence(
+                    connection, document, operation=operation, evidence=evidence
+                )
+                window = context.window
+                outer, proposal, terms = self._authenticated_reverse_preimage(connection, document)
+                cooperation_id = bytes.fromhex(proposal.cooperation_id)
+                if (
+                    cooperation_id in self._allocated_cooperation_ids
+                    or cooperation_id in self._cooperation_handles
+                    or connection.execute(
+                        "SELECT 1 FROM outbox WHERE session_id=? AND in_reply_to=? LIMIT 1",
+                        (outer.session_id, outer.message_id),
+                    ).fetchone()
+                    is not None
+                ):
+                    raise ValueError("reverse native contribution already unavailable")  # noqa: TRY301
+                row = connection.execute(
+                    "SELECT compressed_key,secret_age FROM contract_keys WHERE session_id=?",
+                    (outer.session_id,),
+                ).fetchone()
+                if row is None or row[0] != terms.provider_contract_compressed_key:
+                    raise ValueError("reverse contract custody differs")  # noqa: TRY301
+                plaintext = key_record = scalar_hex = scalar = None
+                try:
+                    plaintext = pyrage.decrypt(row[1], [self._custody_identity])
+                    key_record = parse_json_strict(plaintext)
+                    if not isinstance(key_record, dict):
+                        raise TypeError("reverse contract custody differs")
+                    scalar_hex = key_record.get("secret_scalar")
+                    if (
+                        key_record.get("kind") != CONTRACT_KEY_RECORD_KIND
+                        or key_record.get("store_uuid") != self._store_uuid
+                        or key_record.get("session_id") != outer.session_id
+                        or key_record.get("compressed_public_key") != row[0]
+                        or type(scalar_hex) is not str
+                        or re.fullmatch("[0-9a-f]{64}", scalar_hex) is None
+                    ):
+                        raise ValueError("reverse contract custody differs")
+                    scalar = bytes.fromhex(scalar_hex)
+                    if crypto.public_key(scalar).hex() != row[0]:
+                        raise ValueError("reverse contract key differs")
+                    self._check_reverse_paid_evidence(
+                        connection, document, operation=operation, evidence=evidence
+                    )
+                    taproot = reconstruct_taproot_contract(terms, keys=crypto)
+                    self._check_reverse_paid_evidence(
+                        connection, document, operation=operation, evidence=evidence
+                    )
+                    # Never remove this tombstone, including when begin raises.
+                    self._allocated_cooperation_ids.add(cooperation_id)
+                    attempt, public_nonce = crypto.musig_begin(
+                        secret_key=scalar,
+                        user_public_key=bytes.fromhex(terms.client_contract_compressed_key),
+                        provider_public_key=bytes.fromhex(terms.provider_contract_compressed_key),
+                        tap_tweak=taproot.tap_tweak,
+                        message=context.plan.signature_hash,
+                        cooperation_id=cooperation_id,
+                    )
+                    self._cooperation_handles[cooperation_id] = attempt
+                finally:
+                    del plaintext, key_record, scalar_hex, scalar
+                self._check_reverse_paid_evidence(
+                    connection, document, operation=operation, evidence=evidence
+                )
+                retained = self._cooperation_handles.pop(cooperation_id, None)
+                if retained is not attempt:
+                    raise ValueError("reverse native custody unavailable")  # noqa: TRY301
+                peer_nonce = bytes.fromhex(proposal.public_nonce)
+                try:
+                    partial = attempt.partial_sign_once(peer_nonce)
+                finally:
+                    attempt.close()
+                crypto.musig_partial_verify(
+                    user_public_key=bytes.fromhex(terms.client_contract_compressed_key),
+                    provider_public_key=bytes.fromhex(terms.provider_contract_compressed_key),
+                    tap_tweak=taproot.tap_tweak,
+                    message=context.plan.signature_hash,
+                    user_public_nonce=peer_nonce,
+                    provider_public_nonce=public_nonce,
+                    signer_index=1,
+                    partial_signature=partial,
+                )
+                self._check_reverse_paid_evidence(
+                    connection, document, operation=operation, evidence=evidence
+                )
+                session = connection.execute(
+                    "SELECT revision,next_provider_seq FROM sessions WHERE session_id=?",
+                    (outer.session_id,),
+                ).fetchone()
+                if session is None:
+                    raise ValueError("reverse signed response context absent")  # noqa: TRY301
+                payload = CooperativeClaimSigned(
+                    action="cooperative_claim_propose",
+                    cooperation_id=proposal.cooperation_id,
+                    status="signed",
+                    public_nonce=public_nonce.hex(),
+                    partial_signature=partial.hex(),
+                )
+                reply = Answer(
+                    "action_result",
+                    payload.model_dump(mode="json"),
+                    contract_hash=outer.contract_hash,
+                )
+                session_scalar, key = self._unseal(connection, outer.session_id)
+                try:
+                    response = self._signed_envelope(
+                        outer,
+                        key,
+                        session[1],
+                        reply,
+                        session_scalar,
+                        crypto,
+                        outer.message_id,
+                        required_features=(COOPERATIVE_CLAIM_FEATURE,),
+                    )
+                finally:
+                    del session_scalar
+                response_bytes = canonicalize(response.model_dump(mode="json"))
+                _canonical_envelope(response_bytes)  # Closed schema and canonical size bound.
+                self._check_reverse_paid_evidence(
+                    connection, document, operation=operation, evidence=evidence
+                )
+                connection.execute(
+                    "INSERT INTO outbox VALUES (?,?,?,?,?,?,'PENDING')",
+                    (
+                        response.message_id,
+                        outer.session_id,
+                        session[1],
+                        outer.message_id,
+                        response_bytes,
+                        session[0] + 1,
+                    ),
+                )
+                changed = connection.execute(
+                    "UPDATE cooperation_attempts SET state='COMPLETE',local_nonce=?,peer_nonce=?,"
+                    "partial_signature=?,nonce_response_id=?,partial_response_id=? "
+                    "WHERE cooperation_id=? AND session_id=? AND owner_generation=? "
+                    "AND state='BURNED'",
+                    (
+                        public_nonce,
+                        peer_nonce,
+                        partial,
+                        response.message_id,
+                        response.message_id,
+                        cooperation_id,
+                        outer.session_id,
+                        self._generation,
+                    ),
+                )
+                if changed.rowcount != 1:
+                    raise ValueError("reverse signed contribution state changed")  # noqa: TRY301
+                connection.execute(
+                    "UPDATE sessions SET revision=?,next_provider_seq=?,active_at=? "
+                    "WHERE session_id=?",
+                    (session[0] + 1, session[1] + 1, now, outer.session_id),
+                )
+                self.reverse_operations.check(operation)
+                window.check(tip_height=evidence.core.tip_height)
+                window.check_evidence_interval(
+                    started_at=evidence.started_at, completed_at=evidence.completed_at
+                )
+        except BaseException as error:
+            if cooperation_id is not None:
+                live = self._cooperation_handles.pop(cooperation_id, None)
+                if live is not None:
+                    with suppress(Exception):
+                        live.close()
+            if attempt is not None:
+                with suppress(Exception):
+                    attempt.close()
+            if window is not None:
+                window.abandon()
+            if cooperation_id is not None and self.owner_is_open:
+                try:
+                    with self._write() as connection:
+                        connection.execute(
+                            "UPDATE cooperation_attempts SET state='ABANDONED' "
+                            "WHERE cooperation_id=? AND owner_generation=? AND state='BURNED'",
+                            (cooperation_id, self._generation),
+                        )
+                except Exception:  # noqa: BLE001 - uncertain custody cannot retain an open owner
+                    self.close()
+            if not isinstance(error, Exception) or isinstance(error, StaleOwnerError):
+                raise
+        else:
+            return response_bytes
+        raise LiveSessionStoreError("reverse signed contribution refused")
+
     def _admit_reverse_cooperative_proposal(  # noqa: PLR0912, PLR0915 - one authenticated reservation
         self,
         document: bytes,

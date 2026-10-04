@@ -795,6 +795,32 @@ This separation adds no native signing or startup action. Future native effects
 must collect and authorize through consumption and commit in one uninterrupted
 original operation/window, never await a diagnostic and then assume permission.
 
+The internal store-owned `_commit_reverse_signed_reply` is a separate,
+nonactivated native effect. It requires that exact operation's actually
+collected paid evidence, revalidates the original reservation and full interval
+around private contract-key decryption and native work, and permanently
+tombstones allocation before native begin. It consumes the provider attempt
+once, closes custody, independently verifies its partial, and atomically archives
+one session-signed, proposal-correlated reply containing provider nonce and
+partial. Both attempt response IDs reference that same real envelope.
+
+No scalar, native handle, nonce, or partial is returned before the transaction
+commits. COMPLETE means the exact provider contribution and response were
+archived, not client broadcast or claim confirmation. An ABANDONED attempt may
+already have consumed its native nonce with the result lost. Neither state clears
+debt, changes capacity, or permits a refund. Failure, rollback, cancellation, or
+uncertain COMMIT never permits regeneration; uncertain COMMIT fences ownership
+and may leave the exact completed archive. Fresh ownership abandons unfinished
+attempts and never reconstructs signing permission.
+
+Authorization is checked immediately before COMMIT, not guaranteed at return
+time. A slow successful COMMIT preserves its archived contribution without
+renewing its original deadline; future delivery must establish its own allowed
+handoff and cannot reinterpret the bytes as fresh signing authority. This
+primitive has no production caller. Archived reply routing, live client custody,
+and public/adversarial activation acceptance remain separate work. Schema 14,
+stored formats, and startup behavior are unchanged.
+
 The dedicated `provider-lnd` CI job builds native crypto and runs opt-in backend
 tests against fresh digest-pinned Core/LND/Python containers. Its sidecars use
 read-only sources and certificates, private tmpfs wallets/custody, and verified
