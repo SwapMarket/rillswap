@@ -341,7 +341,9 @@ def provider_config(
         },
         "handshake": {
             "profile": profile,
-            "features": ["epoch-bound-session/v1"] if args.epoch_bound else [],
+            # Cooperative MuSig2 claims are mandatory; features are sorted.
+            "features": ["cooperative-claim/v1"]
+            + (["epoch-bound-session/v1"] if args.epoch_bound else []),
             "encryption_suites": ["noise-xk-secp256k1-chachapoly-sha256/v1"],
             "capabilities": ["core/v1", "recovery/v1"],
         },
@@ -414,7 +416,8 @@ def check_absolute_payment(stack: Stack, work: Path) -> None:
         "features"
     ]
     assert json.loads(init_bytes)["payload"]["required_features"] == required_features
-    assert admissions == (1 if required_features else 0)
+    assert "cooperative-claim/v1" in terms["required_features"]
+    assert admissions == (1 if "epoch-bound-session/v1" in required_features else 0)
     assert state == "SUBMITTED" and record["method"] == "SendToRouteV2"
     assert record["version"] == 1
     assert (
@@ -439,6 +442,38 @@ def check_absolute_payment(stack: Stack, work: Path) -> None:
         <= int(terms["economics"]["success_fee_sat"]) * 1000
     )
     log("one LND attempt verified against committed route and signed absolute expiry")
+
+
+def provider_claim(work: Path) -> tuple[str, str]:
+    """The provider's recorded claim txid and preimage for the only swap."""
+    with sqlite3.connect(
+        (work / "provider-store/live.sqlite").as_uri() + "?mode=ro", uri=True
+    ) as connection:
+        ((claim_txid, preimage),) = connection.execute(
+            "SELECT claim_txid, preimage FROM swaps"
+        ).fetchall()
+    return claim_txid, preimage
+
+
+def check_claim_witness(
+    stack: Stack, claim_txid: str, preimage: str, *, key_path: bool | None
+) -> bool:
+    """Prove the confirmed claim's spending path from its witness.
+
+    A cooperative key-path claim carries one 64-byte signature and never the
+    preimage; the unilateral script path reveals it. ``None`` accepts either
+    (a crash-recovered provider loses its original cooperation window).
+    """
+    tx = json.loads(stack.cli("getrawtransaction", claim_txid, "true"))
+    (contract_input,) = tx["vin"]
+    witness = contract_input["txinwitness"]
+    cooperative = len(witness) == 1 and len(witness[0]) == 128
+    if cooperative:
+        assert preimage not in "".join(witness), "key-path claim leaked the preimage"
+    else:
+        assert len(witness) == 4 and witness[1] == preimage, witness
+    log(f"claim {claim_txid[:16]} spent the {'key' if cooperative else 'script'} path")
+    return key_path is None or cooperative == key_path
 
 
 def refund_after_unpaid(  # noqa: PLR0913 - explicit scenario inputs
@@ -698,7 +733,8 @@ def ln_to_btc(  # noqa: PLR0913 - explicit scenario inputs
     if state != "SETTLED":
         return False
     check_ln_to_btc(stack, work, claim.group(1), payout)
-    return True
+    _, preimage = provider_claim(work)
+    return check_claim_witness(stack, claim.group(1), preimage, key_path=True)
 
 
 def check_ln_to_btc(stack: Stack, work: Path, claim_txid: str, payout: int) -> None:
@@ -775,8 +811,8 @@ def web_client_command(  # noqa: PLR0913 - one explicit command line
 
 
 def inspect_web_recovery(args: argparse.Namespace, work: Path) -> bool:
-    """rill-cli must accept both browser-written recovery files offline."""
-    for stage in ("terms", "funded"):
+    """rill-cli must accept every browser-written recovery file offline."""
+    for stage in ("terms", "funded", "paid"):
         inspected = subprocess.run(  # noqa: S603 - our own console script
             [
                 str(CLI / "rill"),
@@ -1077,6 +1113,13 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
         ok = swap.returncode == 0 and state == "SETTLED" and claimed
         if ok:
             check_absolute_payment(stack, work)
+            claim_txid, preimage = provider_claim(work)
+            ok = check_claim_witness(
+                stack,
+                claim_txid,
+                preimage,
+                key_path=None if args.reconcile_after_settle else True,
+            )
         if ok and args.web:
             ok = inspect_web_recovery(args, work)
         log("PASS" if ok else f"FAIL (logs in {work})")
