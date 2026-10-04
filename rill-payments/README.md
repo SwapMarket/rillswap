@@ -243,3 +243,32 @@ requires no Scan service. The 60-second artifact expiry is advisory: EndpointV2
 does not enforce it. A signing consumer must persist operation identity,
 enforce expiry and full fresh pathway/commitment/nonce/simulation checks before
 authorizing gas. Permissionless receive retry does not bypass verification.
+
+## Sequential admission and resume controls
+
+`@rillswap/payments/routing` evaluates explicit merchant-approved frozen routes,
+not untrusted discovery catalogs. Capabilities must have exact adapter/deployment
+identities, independently established operational conformance, per-step atomicity,
+owned source/destination and recovery assets, compatible signers and approved
+gas budgets. Firm quote IDs, deadlines and complete buyer costs must bind the
+same merchant intent/attempt/payment hash and shared fee policy. No current
+external capability registry is populated by this package.
+
+Every multistep route is `sequential_nonatomic`; independent atomic swaps do not
+make their composition atomic. Intermediate ownership/asset allowlists are
+explicit. Current observer admission ends at the pinned Lightning destination;
+bridged-native allocation needs a dedicated binding profile and is refused here.
+
+`nextRouteAction` consumes privileged journal checkpoints. Missing, older,
+partial, conflicting or out-of-order records require intervention. Dispatched
+operations reconcile the same identity even after expiry; an expired next-step
+quote cannot start a new funded operation or replace an unresolved invoice.
+Owner recovery can leave funds on an intermediate network. Even fully observed
+steps yield only `awaiting_merchant_receipt`, never payment acceptance.
+
+These are pure controls, not a durable route journal or executor. A consumer
+must durably publish frozen operation identities before requesting wallet
+approval, validate actual destination evidence before advancing a step, obtain
+explicit quote-refresh approval while retaining custody/recovery history, and
+rerun admission immediately before spending. No hub wallet or sequential route
+is currently activated by the native checkout SDK/service.

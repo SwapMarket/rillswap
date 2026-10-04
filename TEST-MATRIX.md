@@ -124,6 +124,27 @@
 | W13 | Fresh client with only backup, own node, and recovery binary | Unilateral claim/refund completed independently |
 | W14 | Default signet versus custom challenge / regtest namespace | Cross-network/replay confusion rejected |
 
+## Merchant checkout extension
+
+These are additional release requirements, not a declaration that funded
+checkout or multichain conformance has passed. Offline `rill-payments` and
+`rill-web` tests cover selected policy, transaction and browser boundaries.
+
+| ID | Scenario | Required result |
+| - | - | - |
+| M01 | Buyer changes price, submits provider success or a preimage | Only independently verified merchant destination receipt can emit acceptance |
+| M02 | Lost invoice-create response and merchant restart | Reconcile the same durable operation/hash; never issue a replacement payable invoice |
+| M03 | Concurrent attempts and repeated receipt allocation | One payable attempt and one receipt allocation/event; replay returns stable identity |
+| M04 | Native/wallet failure, tab closure and multiple tabs | Durable dispatch reservation before authorization; resume observation, no automatic second payment |
+| M05 | Wallet, recovery, journal or relay retry crosses funding deadline | Reject commitment under merchant, invoice and provider deadlines; retain recovery once a signed transaction was shared |
+| M06 | Token debit-wallet theft, wrong nonce/chain/contract or public hash claim | Pre-funding authenticated binding and exact source debit/subindex required |
+| M07 | Malformed finality, changed canonical view or late native deposit | No false finality; late receipt reconciles; impairment preserves earlier acceptance/history |
+| M08 | Merchant conversion/payout timeout and signer restart | Immutable nonce/terms before signing; exact signed-transaction replay and bounded fees; paid checkout unchanged |
+| M09 | LayerZero clear/nilify/skip, missing token event or failed receive | Separate commitment, delivery and actual token credit; no generic refund or Lightning-success inference |
+| M10 | Direct OFT retry without Scan | Exact packet/peer/endpoint, zero application value, fresh bounded nonce/config simulation and gas approval |
+| M11 | Bridge/hub/second swap quote expires after first commitment | Preserve intermediate owner/recovery, stop next spend, reconcile funded operations without replacing the invoice |
+| M12 | Operational stablecoin-to-merchant-Lightning path | Pinned deployments and exact fees, independently observed receipt, loss/refund asset accounting, provider disappearance and browser/daemon restart |
+
 ## Test evidence and accounting
 
 Each funded test records initial/final on-chain wallet balances, contract outputs, LN paid/received amounts, mining fees, routing fees, quoted fees, prepayment exposure, and locked-but-not-spent amounts. Do not compare only UI status labels. Record block hashes/heights and privacy mode without retaining fixture secrets in public CI artifacts.
