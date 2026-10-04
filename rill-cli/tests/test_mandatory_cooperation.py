@@ -135,3 +135,11 @@ def test_terms_without_cooperative_claims_are_refused(
         module._check_offer(offer, Mock(), **arguments)  # noqa: SLF001
     terms.required_features = (COOPERATIVE_CLAIM_FEATURE,)
     assert module._check_offer(offer, Mock(), **arguments) is terms  # noqa: SLF001
+
+
+def test_abandonment_reason_names_local_errors_without_foreign_detail() -> None:
+    from rill_cli.live_swap import SwapError, _abandon_reason  # noqa: PLC0415
+
+    assert _abandon_reason(SwapError("cooperative fee refused")) == "cooperative fee refused"
+    assert _abandon_reason(TimeoutError()) == "TimeoutError"
+    assert _abandon_reason(ValueError("peer-controlled 0xdeadbeef")) == "ValueError"

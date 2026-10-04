@@ -747,6 +747,13 @@ class _CooperativeClaimOutcome:
     recovery: bytes = field(repr=False)
     claim: ValidatedCooperativeClaim | None
     pending_recovery: bytes | None = field(default=None, repr=False)
+    # Why cooperation stopped; a local SwapError message or an exception class name.
+    abandoned_because: str | None = None
+
+
+def _abandon_reason(error: BaseException) -> str:
+    """Name a local failure without echoing adapter or peer-controlled detail."""
+    return str(error) if type(error) is SwapError else type(error).__name__
 
 
 class _CooperativeClaimAttempt:
@@ -1206,7 +1213,7 @@ class _CooperativeClaimAttempt:
             except asyncio.CancelledError:
                 self.stage = "abandoned"
                 raise
-            except Exception:  # noqa: BLE001 - no failure reopens nonce or payment authority
+            except Exception as error:  # noqa: BLE001 - no failure reopens nonce or payment authority
                 self.stage = "abandoned"
                 if self.preimage is None:
                     raise SwapError(
@@ -1215,7 +1222,11 @@ class _CooperativeClaimAttempt:
                 # This is known payment with bounded fallback, NOT cancellation
                 # of a provider's already selected key-path winner.
                 return _CooperativeClaimOutcome(
-                    self.preimage, self.recovery, None, self.pending_recovery
+                    self.preimage,
+                    self.recovery,
+                    None,
+                    self.pending_recovery,
+                    _abandon_reason(error),
                 )
 
 
@@ -1611,7 +1622,8 @@ async def run_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
             )
         if result.claim is None:
             report(
-                "payment verified; cooperation abandoned locally, not canceled at the provider; "
+                "payment verified; cooperation abandoned locally "
+                f"({result.abandoned_because}), not canceled at the provider; "
                 "preserve all recovery files, including any .cooperating snapshot; "
                 "do not retry payment or signing"
             )
