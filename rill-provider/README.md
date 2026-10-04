@@ -1689,3 +1689,72 @@ container. After confirming the associated runner is no longer active, use
 `docker rm --force --volumes` only on those verified containers; do not delete
 other test runs or any host wallet. A missing/older journal remains unknown
 after this test, never a reason to send or retry.
+
+### Funded Bun merchant conformance
+
+The independent `tests/test_bun_merchant_pinned.py` diagnostic uses the actual
+`rill-payments` Bun HTTPS/macaroons transport, merchant ledger and HTTP Fetch
+handler inside the disposable regtest namespace. It requires the existing Python
+3.14 environment, digest-pinned backend images, installed frozen payments
+dependencies, and this official Bun 1.3.11 Linux x64 toolchain. From the workspace
+root, install the pinned artifact explicitly:
+
+```sh
+mkdir -p tmp/toolchains/bun-v1.3.11
+curl -fL --retry 3 \
+  -o tmp/toolchains/bun-v1.3.11/bun-linux-x64.zip \
+  https://github.com/oven-sh/bun/releases/download/bun-v1.3.11/bun-linux-x64.zip
+printf '%s  %s\n' \
+  8611ba935af886f05a6f38740a15160326c15e5d5d07adef966130b4493607ed \
+  tmp/toolchains/bun-v1.3.11/bun-linux-x64.zip | sha256sum -c - && \
+  python -c 'from pathlib import Path; from zipfile import ZipFile; p=Path("tmp/toolchains/bun-v1.3.11"); (p/"bun").write_bytes(ZipFile(p/"bun-linux-x64.zip").read("bun-linux-x64/bun")); (p/"bun").chmod(0o755)'
+(cd rill-payments && bun install --frozen-lockfile --ignore-scripts)
+RILLSWAP_RUN_LND=1 RILLSWAP_RUN_BUN_MERCHANT=1 \
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 rill-provider/.venv/bin/python -m pytest -q \
+  rill-provider/tests/test_bun_merchant_pinned.py \
+  --basetemp=tmp/bun-merchant-pytest
+```
+
+The archive checksum applies to the ZIP; the test independently requires extracted
+binary SHA256 `6d5bb405b1d037a2a466b92757de7e47e4369930fa94bd42f8ff44ba49de6c57`
+and revision `1.3.11+af24e281e`. The child checks the complete embedded revision
+as well. The standard x64 binary requires a compatible AVX2 CPU; the actual
+artifact was exercised in the existing pinned Python image on Linux amd64.
+No executable is automatically downloaded by the test. Missing opted-in
+prerequisites fail rather than silently skip.
+
+Only the verified executable and generated bundle are mounted at fixed read-only
+destinations. The client root filesystem is read-only, capabilities are dropped,
+and new privileges are disabled. Core's `none` namespace, both LND namespace
+references and absence of host port bindings are checked. Private merchant keys,
+macaroon, journal and audit preimage remain in client `0700` tmpfs; only public
+certificates and test code are host-mounted. The generated bundle contains no
+runtime credentials. HTTP listens on numeric loopback with an OS-assigned port.
+The controller's sensitive responses stay in sidecar pipes; host evidence contains
+allowlisted phases and counts only. Audits check public response serialization
+and SQLite data/side files for key and preimage encodings. Tmpfs still does not
+prevent host swap or crash dumps.
+
+The diagnostic explicitly provisions one disposable store. Reopen never creates
+or replaces it. A loss after actual backend issuance leaves the same operation
+unresolved; process restart recovers its original invoice without another
+`AddInvoice`. A bounded read-only exact-route check precedes one payer dispatch.
+After a real one-part settlement, an injected observation exception leaves the
+merchant unpaid until process restart and fresh independent observation. Failed
+event delivery retains the original signed event; another restart delivers and
+acknowledges it once while preserving historical retrieval. Child reads, HTTP,
+RPC, shutdown and total execution are bounded; only owned children are killed
+and reaped before restart. Partial controller lines also obey the response
+deadline. The Docker sidecar phase has a 300-second bound, with separate bounded
+setup and cleanup operations. Existing hold/ordinary REST diagnostics are unchanged.
+
+These are controlled exception and process-restart checks, not arbitrary SQLite
+commit interruption, machine-crash durability, LND daemon restart or supported
+browser-wallet conformance. The fixture uses the disposable admin macaroon;
+production least-privilege provisioning is not established by this test. No
+production startup, schema, provider spending or release policy changes occur,
+so existing installations require no migration or new network work. Normal CI
+checks the TypeScript fixture and negative mount guards offline; this additional
+funded diagnostic stays explicitly manual and gated by both environment flags.
+Interrupted runs use the same label-checked cleanup procedure above for exact
+`rillswap-bun-merchant-*` resources, never unrelated wallets or containers.

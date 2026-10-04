@@ -55,6 +55,18 @@ RILLSWAP_RUN_LND=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -
   tests/test_lnd_payment_pinned.py::test_pinned_single_part_hold_bound_settled
 ```
 
+An additional independent opt-in test, `test_bun_merchant_pinned.py`, now runs
+the actual Bun TLS/macaroons adapter, merchant SQLite ledger and HTTP Fetch
+service over a funded disposable private channel. It injects losses after actual
+invoice issuance and settlement lookup, restarts the owned Bun process with the
+same private database/keys, and verifies one invoice dispatch, one payer HTLC,
+one acceptance event and stable delivery retry/history. The scripted controller
+does not prove browser-to-wallet checkout, CLI/reverse-proxy deployment, LND
+daemon restart, funded swaps, arbitrary commit interruption or machine-crash
+durability. Setup and invocation are documented in `rill-provider/README.md`.
+This fixture uses the disposable node's admin macaroon internally, not a proven
+production least-privilege provisioning policy. No raw secrets leave the sidecar.
+
 ## Regtest merchant API and SDK
 
 `bun run merchant provision /absolute/private/config.json` is an explicit

@@ -1539,17 +1539,60 @@ def _copy_private_core_cookie(container: str, destination: Path) -> None:
         raise AssertionError("isolated private Core cookie transfer failed")
 
 
-def _run_two_node_sidecar(  # noqa: PLR0915 - isolated test infrastructure
+def _merchant_fixture_mounts(profile: str, bundle: Path | None) -> tuple[str, ...]:
+    if bundle is None:
+        return ()
+    if profile != "merchant_receipt":
+        raise ValueError("Bun fixture requires the isolated merchant REST profile")
+    binary = ROOT.parent / "tmp/toolchains/bun-v1.3.11/bun"
+    for source in (binary, bundle):
+        if (
+            source.is_symlink()
+            or not source.is_file()
+            or not source.resolve(strict=True).is_relative_to(
+                (ROOT.parent / "tmp").resolve(strict=True)
+            )
+        ):
+            raise ValueError("Bun fixture requires a repository-local regular source file")
+    if (
+        hashlib.sha256(binary.read_bytes()).hexdigest()
+        != "6d5bb405b1d037a2a466b92757de7e47e4369930fa94bd42f8ff44ba49de6c57"
+    ):
+        raise ValueError("Bun fixture executable checksum mismatch")
+    return (
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--mount",
+        f"type=bind,src={binary.resolve(strict=True)},dst=/work/bun,readonly",
+        "--mount",
+        f"type=bind,src={bundle.resolve(strict=True)},dst=/work/merchant.js,readonly",
+    )
+
+
+def _assert_merchant_namespace(core: str, nodes: tuple[str, str]) -> None:
+    core_id = _docker("inspect", core, "--format", "{{.Id}}")
+    for name in (core, *nodes):
+        config = json.loads(_docker("inspect", name, "--format", "{{json .HostConfig}}"))
+        assert config["NetworkMode"] == ("none" if name == core else f"container:{core_id}")
+        assert not config["PortBindings"]
+
+
+def _run_two_node_sidecar(  # noqa: PLR0913, PLR0915 - isolated test infrastructure
     tmp_path: Path,
     program: str,
     *,
     prefix: str,
     deadline: int,
     profile: Literal["baseline", "native_reverse", "merchant_receipt"] = "baseline",
+    merchant_bun_bundle: Path | None = None,
 ) -> dict[str, object]:
     """Use fresh owned Core/LND containers for one bounded sidecar scenario."""
     native_preflight = profile == "native_reverse"
     merchant_rest = profile == "merchant_receipt"
+    merchant_mounts = _merchant_fixture_mounts(profile, merchant_bun_bundle)
     assert DOCKER is not None
     public = tmp_path / "public"
     public.mkdir(mode=0o700)
@@ -1700,6 +1743,8 @@ def _run_two_node_sidecar(  # noqa: PLR0915 - isolated test infrastructure
             assert path in tmpfs
             mounts = json.loads(_docker("inspect", container, "--format", "{{json .Mounts}}"))
             assert all(entry["Type"] != "volume" for entry in mounts)
+        if merchant_bun_bundle is not None:
+            _assert_merchant_namespace(core, (a, b))
         _wait_for_public_certificate(a, cert_a)
         _wait_for_public_certificate(b, cert_b)
         native_mounts: tuple[str, ...] = ()
@@ -1735,6 +1780,7 @@ def _run_two_node_sidecar(  # noqa: PLR0915 - isolated test infrastructure
             "--mount",
             f"type=bind,src={generated},dst=/work/generated,readonly",
             *native_mounts,
+            *merchant_mounts,
             "--env",
             f"PYTHONPATH={python_path}",
             "--env",
