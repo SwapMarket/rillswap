@@ -21,9 +21,11 @@ from test_reverse_proposal_debt import (
 from test_reverse_proposal_reservation import NativeSigner
 from test_reverse_proposal_reservation import reserved as reserved  # noqa: PLC0414 - fixture
 
+from rill_provider import reverse_settlement
 from rill_provider.handshake_service import HandshakeService, ServicePolicy
 from rill_provider.live_session_store import LiveSessionStoreError, StaleOwnerError
 from rill_provider.lnd_hold_invoice import HoldInvoiceStatus
+from rill_provider.lnd_payment_observation import LndNotSyncedError
 from rill_provider.reverse_settlement import ReverseSettlement
 
 if TYPE_CHECKING:
@@ -55,6 +57,86 @@ async def _cosign(engine: ReverseSettlement, reserved: ReservationCase) -> bytes
         wall_clock=reserved.clock.utc,
         monotonic_clock=reserved.clock.steady,
     )
+
+
+@pytest.mark.native_crypto
+@native_marks[1]
+@pytest.mark.parametrize("confirmed", [True, False])
+def test_proposal_first_runs_the_providers_own_funding_depth_step(
+    reserved: ReservationCase, monkeypatch: pytest.MonkeyPatch, *, confirmed: bool
+) -> None:
+    """A client whose node saw the depth first must not race the periodic pass."""
+
+    async def exercise() -> None:
+        terms, core, invoice = _facts(reserved)
+        chain, hold = _backends(reserved)
+        hold.observe_bound_invoice.return_value = invoice
+        depth = terms.funding_confirmations - (0 if confirmed else 1)
+        chain.confirmations.return_value = depth
+        chain.tip_height.return_value = core.tip_height
+        store = reserved.store
+        engine = ReverseSettlement(store, chain, hold, reserved.origin.crypto.crypto)
+        if confirmed:
+            assert await _cosign(engine, reserved) is not None
+        else:
+            monkeypatch.setattr(
+                reserved.origin.crypto.crypto,
+                "musig_begin",
+                Mock(side_effect=AssertionError("no nonce before the provider's own depth")),
+            )
+            with pytest.raises(LiveSessionStoreError):
+                await _cosign(engine, reserved)
+            ((state,),) = store._connection.execute(
+                "SELECT state FROM swaps WHERE session_id=?", (reserved.origin.session_id,)
+            ).fetchall()
+            assert state == "FUNDING_SENT"
+        chain.confirmations.assert_called()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.native_crypto
+@native_marks[1]
+@pytest.mark.parametrize("lag", ["unsynced", "behind"])
+def test_lnd_lagging_core_by_a_block_is_resampled_not_refused(
+    reserved: ReservationCase, monkeypatch: pytest.MonkeyPatch, lag: str
+) -> None:
+    async def exercise() -> None:
+        monkeypatch.setattr(reverse_settlement, "TIP_AGREEMENT_PAUSE_SECONDS", 0)
+        engine, _, hold = _funded_engine(reserved)
+        invoice = hold.observe_bound_invoice.return_value
+        stale = (
+            LndNotSyncedError("LND invoice observation requires a synchronized tip")
+            if lag == "unsynced"
+            else replace(invoice, last_lnd_height=invoice.last_lnd_height - 1)
+        )
+        hold.observe_bound_invoice.side_effect = [stale, invoice]
+        assert await _cosign(engine, reserved) is not None
+        assert hold.observe_bound_invoice.call_count == 2
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.native_crypto
+@native_marks[1]
+def test_persistent_tip_disagreement_refuses_without_a_nonce(
+    reserved: ReservationCase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def exercise() -> None:
+        monkeypatch.setattr(reverse_settlement, "TIP_AGREEMENT_PAUSE_SECONDS", 0)
+        engine, _, hold = _funded_engine(reserved)
+        invoice = hold.observe_bound_invoice.return_value
+        hold.observe_bound_invoice.return_value = replace(invoice, last_lnd_block_hash="00" * 32)
+        monkeypatch.setattr(
+            reserved.origin.crypto.crypto,
+            "musig_begin",
+            Mock(side_effect=AssertionError("no nonce without agreeing tips")),
+        )
+        with pytest.raises(LiveSessionStoreError):
+            await _cosign(engine, reserved)
+        assert hold.observe_bound_invoice.call_count == reverse_settlement.TIP_AGREEMENT_ATTEMPTS
+
+    asyncio.run(exercise())
 
 
 @pytest.mark.native_crypto

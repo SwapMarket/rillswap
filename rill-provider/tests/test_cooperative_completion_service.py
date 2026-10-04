@@ -34,6 +34,7 @@ def _service(*, status: str = "signed", replay: bool = False) -> tuple:
     ).encode()
     store = Mock()
     store.open_mailbox_frame.return_value = document
+    store.pending_outbox.return_value = ()  # nothing queued for the immediate flush
     store._admit_cooperative_result.return_value = CooperativeResultAdmission(  # noqa: SLF001 - authenticated admission stub
         SESSION, "33" * 32, status, replay
     )
@@ -77,8 +78,10 @@ def test_only_fresh_signed_admission_triggers_independent_completion(
             assert call.args == (SESSION, bytes.fromhex(COOPERATION))
             assert callable(call.kwargs["now"])
             assert call.kwargs["now"]() == 123
+            store.pending_outbox.assert_called()  # completion is flushed, not left for a tick
         else:
             settlement.complete_cooperative_claim.assert_not_called()
+            store.pending_outbox.assert_not_called()
         store.answer_request.assert_not_called()
         assert relay.published == []
 

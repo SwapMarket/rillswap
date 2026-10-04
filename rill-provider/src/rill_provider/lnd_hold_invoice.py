@@ -29,6 +29,7 @@ from rill_provider.lnd_payment_observation import (
     MAX_MACAROON_BYTES,
     MAX_MESSAGE_BYTES,
     MAX_PORT,
+    LndNotSyncedError,
     LndObservationError,
     LndProtocolError,
     LndUnavailableError,
@@ -438,7 +439,9 @@ def _invoice_status(invoice: lightning_pb2.Invoice) -> HoldInvoiceStatus:
 
 def _bound_tip(info: lightning_pb2.GetInfoResponse, key: bytes, network: str) -> tuple[int, str]:
     snapshot = _info_snapshot(info, key, network)
-    if not snapshot.synced_to_chain or snapshot.block_height <= 0:
+    if not snapshot.synced_to_chain:
+        raise LndNotSyncedError("LND invoice observation requires a synchronized tip")
+    if snapshot.block_height <= 0:
         raise LndProtocolError("LND invoice observation requires a synchronized tip")
     try:
         valid_hash = _hash_bytes(info.block_hash).hex() == info.block_hash

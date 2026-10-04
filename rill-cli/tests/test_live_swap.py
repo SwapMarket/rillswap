@@ -339,6 +339,12 @@ def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
                         assert "do not retry payment" in str(error.value)
                     else:
                         outcome = await swap()
+                        # The completion now arrives at once; the provider
+                        # broadcasts its key-path claim on its next tick.
+                        for _ in range(50):
+                            if chain.broadcasts:
+                                break
+                            await asyncio.sleep(0.1)
             finally:
                 stop.set()
                 await runner

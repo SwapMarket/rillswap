@@ -299,6 +299,7 @@ def test_live_echo_is_consumed_before_fallback_preparation(  # noqa: PLR0915 - o
         challenge = ReadinessChallenge(session, "bb" * 32, "cc" * 32, contract, 1, 1000, 1030, 1094)
         window = ClaimProbeWindow(session, contract, 1, 1000, 1030, time.monotonic())
         store = Mock(generation=1)
+        store.pending_outbox.return_value = ()  # nothing queued for the immediate flush
         store.admit_cooperative_readiness.return_value = CooperativeResultAdmission(
             session, "ee" * 32, "ready", replay=False
         )

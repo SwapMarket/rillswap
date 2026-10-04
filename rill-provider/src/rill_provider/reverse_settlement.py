@@ -43,11 +43,11 @@ from rill_provider.live_session_store import (
     StaleSwapError,
     _ReversePaidProposalEvidence,
 )
-from rill_provider.lnd_payment_observation import LndObservationError
+from rill_provider.lnd_payment_observation import LndNotSyncedError, LndObservationError
 from rill_provider.settlement_policy import offered_terms
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from rill_core.settlement.taproot import TaprootKeyOperations
     from rill_core.wire.messages import ContractTerms, InvoiceBinding
@@ -68,6 +68,39 @@ REFUND_ESTIMATE_TARGET = 6
 PREIMAGE_BYTES = 32
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
+# Right after a block LND briefly lags Core. Resample a few times inside the
+# same nonrenewing window instead of burning the proposal on that race.
+TIP_AGREEMENT_ATTEMPTS = 4
+TIP_AGREEMENT_PAUSE_SECONDS = 0.5
+
+
+async def _tip_agreeing[T](
+    window: ReverseCooperationWindow,
+    observe: Callable[
+        [], Awaitable[tuple[CooperativeClaimOutpoint, BoundHoldInvoiceObservation, T]]
+    ],
+) -> tuple[CooperativeClaimOutpoint, BoundHoldInvoiceObservation, T, float, float]:
+    """Return one read-only Core and LND sample that names the same tip.
+
+    A disagreement or an unsynchronized LND proves nothing, so it is only
+    resampled; the window is never renewed and still bounds every attempt.
+    Returns the sample with its own evidence interval.
+    """
+    for attempt in range(TIP_AGREEMENT_ATTEMPTS):
+        if attempt:
+            await asyncio.sleep(TIP_AGREEMENT_PAUSE_SECONDS)
+        started = window.evidence_time()
+        try:
+            core, invoice, extra = await observe()
+        except LndNotSyncedError:
+            continue
+        completed = window.evidence_time()
+        if (invoice.last_lnd_height, invoice.last_lnd_block_hash) == (
+            core.tip_height,
+            core.tip_hash,
+        ):
+            return core, invoice, extra, started, completed
+    raise LiveSessionStoreError("Core and LND tips did not agree")
 
 
 class HoldInvoiceBackend(Protocol):
@@ -238,6 +271,7 @@ class ReverseSettlement:
         crypto = self._crypto
         if not isinstance(crypto, Context):
             raise LiveSessionStoreError("reverse cooperative signer unavailable")
+        await self._catch_up_funding(document, now)
         receipt = await self._acquire_proposal_debt(
             document, now, wall_clock=wall_clock, monotonic_clock=monotonic_clock
         )
@@ -261,6 +295,25 @@ class ReverseSettlement:
             return self._store._commit_reverse_signed_reply(  # noqa: SLF001 - same operation
                 document, operation=operation, evidence=evidence, crypto=crypto, now=now
             )
+
+    async def _catch_up_funding(self, document: bytes, now: int) -> None:
+        """Run this swap's own funding depth step before admitting its proposal.
+
+        The client proposes as soon as its node sees the signed depth, which
+        usually precedes the next periodic settlement pass here. Only the
+        provider's own Core observation can move FUNDING_SENT to FUNDED; the
+        proposal merely selects which retained session to check first. Any
+        failure leaves the state unchanged and admission then refuses.
+        """
+        try:
+            session_id = Envelope.model_validate_json(document, strict=True).session_id
+            work = self._store.settlement_work(session_id=session_id)
+            if len(work) == 1 and work[0].state == "FUNDING_SENT":
+                await self.advance(work[0], now)
+        except (asyncio.CancelledError, StaleOwnerError):
+            raise
+        except Exception:  # noqa: BLE001 - admission still requires FUNDED
+            LOG.debug("funding catch-up before a reverse proposal did not complete")
 
     async def advance(self, item: SettlementItem, now: int) -> str:
         """Reload after serialization, never execute a queued stale snapshot."""
@@ -317,25 +370,29 @@ class ReverseSettlement:
                 def submission_allowed() -> bool:
                     return operation.submission_allowed() and original_window.time_allowed()
 
-                started = original_window.evidence_time()
-                core = await operation.worker(
-                    partial(
-                        self._chain.observe_cooperative_claim_outpoint,
-                        context.binding,
-                        context.terms,
-                        keys=keys,
+                async def observe() -> tuple[
+                    CooperativeClaimOutpoint, BoundHoldInvoiceObservation, None
+                ]:
+                    core = await operation.worker(
+                        partial(
+                            self._chain.observe_cooperative_claim_outpoint,
+                            context.binding,
+                            context.terms,
+                            keys=keys,
+                        )
                     )
-                )
-                operation.check()
-                original_window.check(tip_height=core.tip_height)
-                invoice = await operation.worker(
-                    partial(
-                        self._hold.observe_bound_invoice,
-                        context.terms.invoice_binding,
-                        submission_allowed=submission_allowed,
+                    operation.check()
+                    original_window.check(tip_height=core.tip_height)
+                    invoice = await operation.worker(
+                        partial(
+                            self._hold.observe_bound_invoice,
+                            context.terms.invoice_binding,
+                            submission_allowed=submission_allowed,
+                        )
                     )
-                )
-                completed = original_window.evidence_time()
+                    return core, invoice, None
+
+                core, invoice, _, started, completed = await _tip_agreeing(original_window, observe)
                 operation.check()
                 self._store._commit_reverse_proposal_debt(  # noqa: SLF001 - single owner financial writer
                     document,
@@ -440,34 +497,40 @@ class ReverseSettlement:
             def submission_allowed() -> bool:
                 return operation.submission_allowed() and original_window.time_allowed()
 
-            started = original_window.evidence_time()
-            core = await operation.worker(
-                partial(
-                    self._chain.observe_cooperative_claim_outpoint,
-                    context.binding,
-                    context.terms,
-                    keys=keys,
+            async def observe() -> tuple[
+                CooperativeClaimOutpoint, BoundHoldInvoiceObservation, CooperativeFeePolicy
+            ]:
+                core = await operation.worker(
+                    partial(
+                        self._chain.observe_cooperative_claim_outpoint,
+                        context.binding,
+                        context.terms,
+                        keys=keys,
+                    )
                 )
-            )
-            operation.check()
-            original_window.check(tip_height=core.tip_height)
-            policy = await operation.worker(
-                partial(
-                    self._chain.observe_cooperative_fee_policy,
-                    context.terms.timing_policy.claim_confirmation_blocks,
-                    allow_regtest_fixed_fee=allow_regtest_fixed_fee,
+                operation.check()
+                original_window.check(tip_height=core.tip_height)
+                policy = await operation.worker(
+                    partial(
+                        self._chain.observe_cooperative_fee_policy,
+                        context.terms.timing_policy.claim_confirmation_blocks,
+                        allow_regtest_fixed_fee=allow_regtest_fixed_fee,
+                    )
                 )
-            )
-            operation.check()
-            original_window.check(tip_height=core.tip_height)
-            invoice = await operation.worker(
-                partial(
-                    self._hold.observe_bound_settled_invoice,
-                    context.terms.invoice_binding,
-                    submission_allowed=submission_allowed,
+                operation.check()
+                original_window.check(tip_height=core.tip_height)
+                invoice = await operation.worker(
+                    partial(
+                        self._hold.observe_bound_settled_invoice,
+                        context.terms.invoice_binding,
+                        submission_allowed=submission_allowed,
+                    )
                 )
+                return core, invoice, policy
+
+            core, invoice, policy, started, completed = await _tip_agreeing(
+                original_window, observe
             )
-            completed = original_window.evidence_time()
             operation.check()
             return _ReversePaidProposalEvidence(
                 operation,

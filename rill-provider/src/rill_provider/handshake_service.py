@@ -489,6 +489,27 @@ class HandshakeService:
             if message_id not in {entry.message_id for entry in self._store.pending_outbox()}:
                 del state.attempts[message_id]
 
+    async def _send_fresh_outbox(self, relays: Sequence[Relay]) -> None:
+        """Send never-attempted entries now through the tick's checked sender.
+
+        A cooperative proposal or completion shares a deadline of seconds, so
+        waiting for the next tick would usually miss it. Retries stay with tick.
+        """
+        fresh = [
+            entry.message_id
+            for entry in self._store.pending_outbox()
+            if entry.message_id not in self._state.attempts
+        ]
+        if not fresh:
+            return
+        results = await asyncio.gather(
+            *(self._send_pending(message_id, relays) for message_id in fresh),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, StaleOwnerError):
+                raise result
+
     async def _begin_paid_probe(self, session_id: str, moved: str, relays: Sequence[Relay]) -> None:
         """Send a challenge only for this owner's fresh PAID transition gate."""
         if moved != "PAID" or not self._probe_supervision_needed or self._settlement is None:
@@ -708,7 +729,14 @@ class HandshakeService:
                         isinstance(payload, dict)
                         and payload.get("action") == "cooperative_claim_ready"
                     ):
-                        return await self._admit_ready_result(document, envelope.get("session_id"))
+                        disposition = await self._admit_ready_result(
+                            document, envelope.get("session_id")
+                        )
+                        if disposition == "readiness-prepared":
+                            # The proposal shares the echo's short window; a
+                            # tick-later send would usually miss it.
+                            await self._send_fresh_outbox(relays)
+                        return disposition
                     result = store._admit_cooperative_result(document, now=now)  # noqa: SLF001 - store-owned admission; no signer or reply
                     if (
                         self._settlement is not None
@@ -730,6 +758,9 @@ class HandshakeService:
                             LOG.warning(
                                 "cooperative completion stopped for %s", result.session_id[:16]
                             )
+                        else:
+                            # Deliver the completion before the shared deadline.
+                            await self._send_fresh_outbox(relays)
                     return "result-replay" if result.replay else "result-admitted"
                 if message_type == "action_request" and self._policy.profile == "ln-to-btc/v1":
                     payload = json.loads(document).get("payload")
