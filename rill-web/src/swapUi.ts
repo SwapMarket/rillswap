@@ -76,11 +76,13 @@ function mount(root: HTMLElement): void {
   const identity = field(form, "swap-provider", "Provider identity (x-only public key, hex)", "",
     "64 hex characters, from the provider. The page checks its signed announcement on the relay.");
   const invoice = field(form, "swap-invoice", "Lightning invoice to pay (BOLT11)");
-  const refund = field(form, "swap-refund", "Your refund address (P2WPKH or P2TR)");
+  const refund = field(form, "swap-refund", "Your refund address (P2WPKH or P2TR)", "",
+    "A fresh Receive address from your own wallet (tb1q... or tb1p... on signet and testnet4).");
   const tip = field(form, "swap-tip", "Current block height", "", "From a block explorer or your node; " +
     "it caps how long your funds can be locked.");
   const age = field(form, "swap-age", "Recovery file age recipient (age1...)", "",
-    "Run `age-keygen -o rillswap-recovery.key` and paste the public key it prints (age1...). Keep that key " +
+    "Install age (for example `apt install age` or `brew install age`), then in a terminal run " +
+    "`age-keygen -o rillswap-recovery.key` and paste the public key it prints (age1...). Keep that key " +
     "file private and backed up: it is the only way to open your recovery files.");
   form.append(node("p", "The limits below are caps, not charges: the swap stops before funding if the " +
     "provider's signed terms exceed any of them.", "swap-limits-hint"));
@@ -151,7 +153,8 @@ function fundingPrompt(panel: HTMLElement, networkName: NetworkName, request: Fu
     node("pre", scriptAddress(request.contractScript, networkName), "swap-contract-address"),
     node("p", `Keep the network fee at or below ${request.maxFundingFeeSat} sat. Use only native segwit inputs. ` +
       "Sign and finalize in your wallet, then paste the finalized PSBT (base64 or hex) here. Do not broadcast yet. " +
-      "In Sparrow, create, finalize, and sign the transaction, then export the PSBT instead of broadcasting. " +
+      "In Sparrow: on the Send tab choose Create Transaction, then Finalize Transaction for Signing, then Sign; " +
+      "copy or save the signed PSBT as Base64 and do not click Broadcast Transaction. " +
       "In Bitcoin Core, run walletcreatefundedpsbt, then walletprocesspsbt, and copy its psbt field."),
     node("p", `If the provider does not pay, you can refund after block ${request.refundLockHeight}.`),
     node("p", "Pay this address once, in this one transaction. A second payment to it is not a new swap: " +
