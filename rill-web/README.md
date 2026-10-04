@@ -61,35 +61,46 @@ continues only through the downloaded recovery file.
 You need `rill-cli` (see its README), a synced Bitcoin Core node for the same
 network, the funded recovery file, its age key, and the funding attempt ID that
 the page printed (`attempt <ID> revision 0`). After the refund block shown by
-the page, run:
+the page, run (it waits for that block if started earlier):
 
 ```sh
-rill recover broadcast-refund --network signet.json \
+mkdir -m 700 refund-attempts
+rill recover watch-refund --chain-only --network signet.json \
   --crypto-library /path/librill_crypto.so \
   --funding-attempt-id ATTEMPT_ID --binding-revision 0 \
   --rpc-cookie ~/.bitcoin/signet/.cookie --rpc-port 38332 \
-  --identity rillswap-recovery.key --fee-sat 500 \
-  --intent refund-intent.json swap-recovery-....age.funded
+  --identity rillswap-recovery.key --intent-dir refund-attempts \
+  --initial-fee-sat 300 --max-fee-sat 3000 rillswap-funded-recovery-....age
 ```
 
 `--network` is the trusted network file (`rill-docs/networks/signet.json`). The
 refund pays the refund address you entered. `rill recover sign-refund` with
 `--output refund.tx` instead writes the signed transaction without sending it.
-`rill recover watch-refund` adds fee escalation but checks the invoice through
-your own LND, so it only works when the invoice is your own node's.
+`--chain-only` means the refund relies on the contract alone: it is sent only
+after the refund block while the provider has not claimed. If the invoice is
+your own node's, use `--lnd-port`, `--lnd-tls-cert`, and
+`--lnd-invoice-macaroon` instead so it also refuses once the invoice is paid.
+`rill recover broadcast-refund` (one fixed `--fee-sat`, `--intent FILE`) sends
+a single refund without escalation.
 
 Cooperation never blocks the swap. The client cosigns only after it holds the
 verified payment preimage, and BIP341 signatures commit the exact outpoint,
 amount, and output, so a cosignature can only let the provider take the output
 it is already owed. Without a chain backend the browser cannot check
 confirmations or fee policy like the CLI does; it trusts the provider for
-confirmation and fee liveness only. Any refusal, timeout, or missing browser
+confirmation and fee liveness only. That costs the user nothing: the claim fee
+is capped by the signed terms and comes out of the provider's own output, and a
+wrong report only delays the provider's claim. Any refusal, timeout, or missing browser
 capability abandons cooperation and the provider claims with the preimage
 instead, costing privacy only. Before allocating its nonce the client holds an
 exclusive Web Lock and commits a create-only IndexedDB record (database
-`rillswap-cooperation`, keyed by contract hash, holding the cooperation ID and
+`rillswap-cooperation`, keyed by contract hash, code in
+`src/swap/cooperationJournal.ts`, browser tests in
+`tests/cooperationJournal.spec.ts`, holding the cooperation ID and
 sighash, no secrets or preimage) with strict durability. An existing record
-refuses; an absent one proves nothing. The secret nonce lives only inside one
+refuses whatever its age or shape; an absent one proves nothing. Records are
+never pruned (one small record per swap): neither age nor a free lock proves
+that every context able to sign for that contract is gone. The secret nonce lives only inside one
 WASM handle and is never stored, and a page restored from the back/forward
 cache never signs. After payment the page offers an optional paid recovery file
 with the preimage and any reservation.
