@@ -11,6 +11,9 @@ test("the swap page loads locally, offers no mainnet, and connects to nothing be
   await expect(page.getByRole("heading", { name: "Pay a Lightning invoice with on-chain BTC" })).toBeVisible();
   const options = await page.locator("#swap-network option").allTextContents();
   expect(options).toEqual(["signet", "testnet4", "regtest"]);
+  // A first-time user learns the prerequisites and how to make the age key on the page itself.
+  await expect(page.locator("#swap-prerequisites")).toContainText("PSBT");
+  await expect(page.getByText("age-keygen -o rillswap-recovery.key", { exact: false })).toBeVisible();
   const csp = await page.locator("meta[http-equiv='Content-Security-Policy']").getAttribute("content");
   expect(csp).toContain("connect-src 'self' wss: ws://127.0.0.1:* ws://localhost:*;");
   expect(csp).toContain("script-src 'self' 'wasm-unsafe-eval';");

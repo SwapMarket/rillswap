@@ -60,7 +60,10 @@ function mount(root: HTMLElement): void {
     node("p", "Experimental. Signet, testnet4, and regtest only; mainnet is refused until release acceptance. " +
       "Keys live only in this tab. Keep it open until the swap finishes."),
     node("p", "Before funding you download an age-encrypted recovery file. If the provider does not pay, " +
-      "refund after the refund height with `rill recover watch-refund` on the funded recovery file."),
+      "refund after the refund height with `rill recover watch-refund` (from rill-cli) on the funded recovery file."),
+    node("p", "Before you start, have: the provider's relay URL and identity key (ask the provider), a wallet that " +
+      "can sign a PSBT without broadcasting it (for example Sparrow or Bitcoin Core), and an age key for your " +
+      "recovery files.", "swap-prerequisites"),
   );
   const form = node("form", "", "swap-form");
   const networkLabel = node("label", "Network");
@@ -68,19 +71,25 @@ function mount(root: HTMLElement): void {
   networkLabel.htmlFor = network.id;
   for (const name of Object.keys(NETWORKS)) network.append(Object.assign(node("option", name), { value: name }));
   form.append(networkLabel, network);
-  const relay = field(form, "swap-relay", "Relay (wss://)", "", "The relay the provider announces on.");
-  const identity = field(form, "swap-provider", "Provider identity (x-only public key, hex)");
+  const relay = field(form, "swap-relay", "Relay (wss://)", "", "The relay the provider announces on; " +
+    "the provider publishes it with its identity.");
+  const identity = field(form, "swap-provider", "Provider identity (x-only public key, hex)", "",
+    "64 hex characters, from the provider. The page checks its signed announcement on the relay.");
   const invoice = field(form, "swap-invoice", "Lightning invoice to pay (BOLT11)");
   const refund = field(form, "swap-refund", "Your refund address (P2WPKH or P2TR)");
   const tip = field(form, "swap-tip", "Current block height", "", "From a block explorer or your node; " +
     "it caps how long your funds can be locked.");
   const age = field(form, "swap-age", "Recovery file age recipient (age1...)", "",
-    "The files are encrypted to this key; keep its identity safe.");
+    "Run `age-keygen -o rillswap-recovery.key` and paste the public key it prints (age1...). Keep that key " +
+    "file private and backed up: it is the only way to open your recovery files.");
+  form.append(node("p", "The limits below are caps, not charges: the swap stops before funding if the " +
+    "provider's signed terms exceed any of them.", "swap-limits-hint"));
   const successFee = field(form, "swap-success-fee", "Maximum provider fee (sat)", "2000");
   const fundingFee = field(form, "swap-funding-fee", "Maximum funding fee (sat)", "5000");
   const claimFee = field(form, "swap-claim-fee", "Maximum claim fee (sat)", "5000");
   const refundFee = field(form, "swap-refund-fee", "Maximum refund fee (sat)", "5000");
-  const delay = field(form, "swap-delay", "Maximum refund delay (blocks)", "288");
+  const delay = field(form, "swap-delay", "Maximum refund delay (blocks)", "288",
+    "If the provider never pays, your refund unlocks within this many blocks (288 is about two days).");
   const start = node("button", "Start swap", "swap-start");
   start.type = "submit";
   form.append(start);
@@ -135,19 +144,25 @@ function offerDownload(panel: HTMLElement, file: Uint8Array, name: string): void
 function fundingPrompt(panel: HTMLElement, networkName: NetworkName, request: FundingRequest): Promise<string> {
   panel.replaceChildren(
     node("h2", "Fund the swap from your wallet"),
-    node("p", `Send exactly ${btc(request.amountSat)} BTC (${request.amountSat} sat, including a ` +
-      `${request.successFeeSat} sat provider fee) to:`),
+    node("p", "Do not use your wallet's normal Send button: it broadcasts immediately. Instead create a " +
+      "transaction, sign and finalize it as a PSBT, and paste it below. The page checks it first."),
+    node("p", `The transaction must pay exactly ${btc(request.amountSat)} BTC (${request.amountSat} sat, ` +
+      `including a ${request.successFeeSat} sat provider fee) to:`),
     node("pre", scriptAddress(request.contractScript, networkName), "swap-contract-address"),
     node("p", `Keep the network fee at or below ${request.maxFundingFeeSat} sat. Use only native segwit inputs. ` +
-      "Sign and finalize in your wallet, then paste the finalized PSBT (base64 or hex) here. Do not broadcast yet."),
+      "Sign and finalize in your wallet, then paste the finalized PSBT (base64 or hex) here. Do not broadcast yet. " +
+      "In Sparrow, create, finalize, and sign the transaction, then export the PSBT instead of broadcasting. " +
+      "In Bitcoin Core, run walletcreatefundedpsbt, then walletprocesspsbt, and copy its psbt field."),
     node("p", `If the provider does not pay, you can refund after block ${request.refundLockHeight}.`),
     node("p", "Pay this address once, in this one transaction. A second payment to it is not a new swap: " +
       "it is never paid over Lightning, the refund tools cover only the bound funding output, and once " +
       "the provider knows the preimage it can claim any output at this address. It may be lost.",
     "swap-second-deposit-warning"),
   );
+  const psbtLabel = node("label", "Finalized PSBT (base64 or hex)");
   const psbt = node("textarea", "", "swap-psbt");
-  panel.append(psbt);
+  psbtLabel.htmlFor = psbt.id;
+  panel.append(psbtLabel, psbt);
   return waitForClick(panel, "Check funding").then(() => psbt.value);
 }
 
@@ -159,6 +174,7 @@ async function run(
   report: (line: string) => void,
 ): Promise<void> {
   let relay: RelayConnection | null = null;
+  let broadcastShown = false;
   try {
     relay = await RelayConnection.open(relayUrl);
     report("relay connected");
@@ -180,7 +196,10 @@ async function run(
           node("p", `The provider acknowledged funding ${txid}. Broadcast this exact transaction from your wallet ` +
             "or node:"),
           node("pre", raw, "swap-funding-raw"),
+          node("p", "Most wallets broadcast a finalized PSBT or raw transaction from a Broadcast or Send " +
+            "Transaction menu; with Bitcoin Core use sendrawtransaction."),
         );
+        broadcastShown = true;
         await waitForClick(panel, "I broadcast it");
         panel.replaceChildren(node("p", "Waiting for the provider to pay the invoice..."));
       },
@@ -199,7 +218,15 @@ async function run(
     offerDownload(panel, outcome.paidRecovery, `rillswap-paid-recovery-${Math.floor(Date.now() / 1000)}.age`);
   } catch (error) {
     const message = (error as Error).message;
-    panel.replaceChildren(node("h2", "Swap stopped"), node("p", message, "swap-error"));
+    const next = broadcastShown
+      ? "Do not fund this swap again. Keep the funded recovery file and its age key: if the invoice is " +
+        "not paid, the message above names the block after which `rill recover watch-refund` refunds you."
+      : "Nothing was broadcast by this page, so no funds are committed. Reload the page to start a new swap.";
+    panel.replaceChildren(
+      node("h2", "Swap stopped"),
+      node("p", message, "swap-error"),
+      node("p", next, "swap-next-step"),
+    );
     report(`stopped: ${message}`);
   } finally {
     relay?.close();
