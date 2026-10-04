@@ -131,3 +131,34 @@ limits can default to 1, so neither proves support. Boltz's source and API
 contract describe external invoices and USDT0/tBTC composition; operational
 pairs/deployments and refund asset remain unverified. Stablecoin and LayerZero
 checkout execution is not yet implemented or advertised by this service.
+
+## Experimental EVM receipt verification
+
+`@rillswap/payments/evm-receipt` verifies prebound direct EOA ERC20 transfers.
+It is an observer, not an enabled checkout rail. Ethereum mainnet and Sepolia
+canonical genesis identities and Ethereum L1 `finalized` semantics are required;
+no L2 or custom-fork finality inference is made. A trusted RPC can still present
+a dishonest chain view, and chain ID plus genesis does not exclude a later fork.
+
+The authoritative merchant intent and asset deployment are loaded independently
+of buyer input. `prepareEvmBinding` verifies an EIP-712 debit-wallet signature,
+unused nonce, exact merchant/asset/recipient/amount/window and historical token
+pins before funding. The caller must atomically reserve network/wallet/nonce
+globally and durably preserve preparation before publishing instructions.
+Never fabricate missing preparation for an already-known transaction or give
+a buyer control over the persisted preparation record.
+
+`observeEvmReceipt` checks exact transaction calldata and a unique Transfer log,
+successful debit from the bound EOA, actual pinned token behavior, historical
+code/decimals/proxy identity, preparation anchor and finalized canonical receipt.
+Late receipts are returned as `timing: "late"` for reconciliation, not acceptance.
+Globally deduplicate the returned transaction/log key in a ledger transaction.
+The verifier alone cannot allocate an order or fulfill it.
+
+Smart accounts, fee-on-transfer/rebasing tokens, relayers, exchange withdrawals,
+beacon proxies and nonstandard proxy upgrades require dedicated adapters.
+ERC-1967 proxy support requires independently vetted upgrade-event behavior;
+same-block upgrades are refused. Historical-state and standard-token conformance
+flags must be affirmative deployment evidence supplied by trusted configuration,
+not assumed from a symbol or copied from customer requests. No deployed token,
+live native checkout pricing or funded receipt conformance is claimed here.
