@@ -6,6 +6,7 @@ import asyncio
 import json
 import threading
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 from rill_core.recovery import REVERSE_DISCLOSURE_EXTENSION, REVERSE_FALLBACK_EXTENSION
@@ -37,7 +38,11 @@ async def _prepared(
         fixture.write(candidate, previous)
         return candidate
 
-    with pytest.raises(SwapError, match="not yet available"):
+    # Stop at the cooperative consumer to exercise disclosure publication alone.
+    monkeypatch.setattr(
+        reverse, "_cooperative_claim", AsyncMock(side_effect=SwapError("cooperative stop"))
+    )
+    with pytest.raises(SwapError, match="cooperative stop"):
         await fixture.run(write)
     assert all(
         call.args[0].message_type != "action_request"

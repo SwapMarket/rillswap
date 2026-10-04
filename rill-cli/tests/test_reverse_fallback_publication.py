@@ -105,9 +105,13 @@ def test_featured_reverse_fallback_is_published_read_back_without_implicit_discl
             fixture.write(candidate, previous)
             return candidate
 
-        with pytest.raises(SwapError, match="reverse cooperative settlement is not yet available"):
+        cooperative = AsyncMock(side_effect=SwapError("cooperative stop"))
+        monkeypatch.setattr(reverse, "_cooperative_claim", cooperative)
+        with pytest.raises(SwapError, match="cooperative stop"):
             await fixture.run(write)
         assert len(fixture.documents) == 3
+        # The consumer receives exactly the acknowledged fallback snapshot.
+        assert cooperative.await_args.kwargs["acknowledged_fallback"] == fixture.documents[2]
         initial, funded, prepared = map(json.loads, fixture.documents)
         assert (tmp_path / "reverse.age").exists()
         assert (tmp_path / "reverse.age.funded").exists()

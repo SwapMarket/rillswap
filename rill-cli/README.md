@@ -126,8 +126,7 @@ never funded. Check `lncli listpayments` and do not retry payment automatically.
 Nonfinite or nonpositive settlement timeout values are refused before discovery
 or payment. One absolute settlement deadline starts immediately before queuing
 the exact hold payment. Queueing, preparation, uncertain submission, funding,
-depth, and claim watching consume that same budget; no stage renews it. This
-does not activate reverse cooperative signing.
+depth, and claim watching consume that same budget; no stage renews it.
 
 The hold payer accepts optional absolute monotonic submission authority for
 the shared reverse lifetime. It caps existing planning/submission
@@ -200,11 +199,19 @@ markers prove nothing; partial or existing disclosure markers refuse this live
 helper. Historical artifacts remain inspectable for independent recovery, never
 automatic cooperation resumption or transmission.
 
-Reverse cooperative proposal/disclosure handling is still unfinished. Featured
-terms currently stop after acknowledged preparation, preserving all snapshots
-and independent recovery rather than silently replacing the privacy commitment
-with a script-path broadcast. Production negotiation remains disabled until the
-cooperative consumer and provider admission are implemented and accepted.
+With featured terms the client then tries one private key-path claim. It
+publishes the exact disclosure snapshot first, sends one signed
+`cooperative_claim_propose` (preimage, MuSig2 public nonce, unsigned key-path
+claim, a 20 second deadline, and the claim-confirmation height), and waits at
+most 25 seconds for the provider's signed reply. It verifies the provider's
+partial signature, adds its own (the native nonce is used once and closed on
+every path), checks the aggregate BIP340 signature, and broadcasts a claim whose
+only witness is that 64-byte signature. The key-path claim pays the same
+absolute fee as the first script-path claim, so the watcher's bump schedule is
+unchanged; it rebroadcasts the key-path claim until a due bump replaces it with
+the already durable script-path claim. A tip at or past the claim-confirmation
+height, a relay failure, timeout, decline, or invalid partial costs only
+privacy: the client claims with the preimage as before.
 
 ```sh
 rill swap ln-to-btc \

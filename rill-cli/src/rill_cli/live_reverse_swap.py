@@ -6,7 +6,9 @@ picks the preimage), verify the terms and the hold invoice, write the
 encrypted recovery file (with the preimage), accept, pay the hold invoice
 from the local LND, wait for the provider's signed ``funding_binding``,
 verify it, write the funded recovery snapshot, wait for the signed depth,
-then claim the contract to the client's destination revealing the preimage.
+then claim the contract to the client's destination: by key path with the
+provider's MuSig2 partial when the terms require cooperative claims, otherwise
+(or after any cooperative failure) by script path revealing the preimage.
 
 Nothing of the client's is at risk before the hold is paid; after that the
 Lightning funds stay held until the claim reveals the preimage or the
@@ -35,13 +37,19 @@ from rill_core.recovery import (
 from rill_core.settlement import (
     FundingOutput,
     UnilateralAuthorization,
+    build_cooperative_claim,
     build_unilateral_spend,
     check_funding_binding_transaction,
+    finalize_cooperative_claim,
     finalize_unilateral_spend,
     max_spendable_fee,
     reconstruct_taproot_contract,
 )
 from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_model_json
+from rill_core.wire.cooperative_messages import (
+    CooperativeClaimSigned,
+    check_cooperative_action_context,
+)
 from rill_core.wire.hashes import (
     COOPERATIVE_CLAIM_FEATURE,
     client_acceptance_hash,
@@ -59,7 +67,7 @@ from rill_core.wire.reverse_quotes import (
 from rill_core.wire.settlement_messages import FundingBindingPayload, parse_observation
 from rill_provider.lnd_payment_observation import LndObservationError
 
-from rill_cli.claim_watcher import ClaimWatcher
+from rill_cli.claim_watcher import ClaimAttempt, ClaimWatcher
 from rill_cli.live_swap import (
     SwapError,
     _handshake,
@@ -75,7 +83,14 @@ if TYPE_CHECKING:
     from types import TracebackType
     from typing import Any, Self
 
-    from rill_core.wire.messages import ContractTerms, Envelope, FundingBinding, InvoiceBinding
+    from rill_core.wire.messages import (
+        ContractTerms,
+        Envelope,
+        FundingBinding,
+        HandshakeAccept,
+        HandshakeInit,
+        InvoiceBinding,
+    )
     from rill_core.wire.types import NetworkIdentity
     from rill_crypto import Context
     from rill_provider.relay_client import RelayConnection
@@ -85,6 +100,9 @@ if TYPE_CHECKING:
 
 PROFILE: Literal["ln-to-btc/v1"] = "ln-to-btc/v1"
 POLL_SECONDS = 5.0
+# The provider caps its own nonrenewing window at 30 s; stay inside it.
+REVERSE_PROPOSAL_SECONDS = 20
+REVERSE_REPLY_GRACE_SECONDS = 5
 _T = TypeVar("_T")
 _UNRESOLVED = (
     "reverse swap status unresolved; preserve all recovery files, check `lncli listpayments`, "
@@ -629,6 +647,145 @@ async def _publish_reverse_disclosure(  # noqa: PLR0913 - exact acknowledged pre
     return candidate
 
 
+async def _cooperative_claim(  # noqa: PLR0913, PLR0915 - one original-session key-path attempt
+    lifetime: _ReverseLifetime,
+    *,
+    session: _Session,
+    init: HandshakeInit,
+    accept: HandshakeAccept,
+    terms: ContractTerms,
+    binding: FundingBinding,
+    script: bytes,
+    contract_secret: bytes,
+    preimage: bytes,
+    fee_sat: int,
+    acknowledged_fallback: bytes,
+    wallet: ClaimWallet,
+    write_recovery: Callable[[bytes, bytes | None], bytes | None],
+    report: Callable[[str], None],
+) -> ClaimAttempt | None:
+    """Try the private key-path claim once; None means claim unilaterally.
+
+    The signed script-path fallback is already durable, so the preimage leaves
+    this process only inside a proposal whose exact disclosure snapshot was
+    acknowledged first. The native nonce is used for at most this one reply
+    and closed on every path. Any refusal, timeout, or invalid reply returns
+    None; the caller's watcher then claims with the preimage as before.
+    """
+    crypto = session.crypto
+    funding = FundingOutput(
+        txid=bytes.fromhex(binding.funding_txid),
+        output_index=binding.contract_vout,
+        value_sat=int(terms.economics.contract_amount_sat),
+        script_pubkey=script,
+    )
+    authorization = UnilateralAuthorization.from_terms(terms, funding, "claim", keys=crypto)
+    plan = build_cooperative_claim(authorization, fee_sat=fee_sat)
+    tweak = reconstruct_taproot_contract(terms, keys=crypto).tap_tweak
+    deadline_height = terms.refund_lock_height - terms.timing_policy.claim_confirmation_blocks
+    try:
+        tip = await lifetime.worker(wallet.tip_height)
+    except (TimeoutError, asyncio.CancelledError):
+        raise
+    except Exception:  # noqa: BLE001 - no fresh tip, no disclosure; claim unilaterally
+        tip = None
+    if type(tip) is not int or tip >= deadline_height:
+        report("cooperative claim window unavailable; claiming unilaterally")
+        return None
+    user_key = bytes.fromhex(terms.client_contract_compressed_key)
+    provider_key = bytes.fromhex(terms.provider_contract_compressed_key)
+    cooperation_id = secrets.token_bytes(32)
+    lifetime.check()
+    attempt, nonce = crypto.musig_begin(
+        secret_key=contract_secret,
+        user_public_key=user_key,
+        provider_public_key=provider_key,
+        tap_tweak=tweak,
+        message=plan.signature_hash,
+        cooperation_id=cooperation_id,
+    )
+    try:
+        proposal = session.envelope(
+            "action_request",
+            {
+                "action": "cooperative_claim_propose",
+                "cooperation_id": cooperation_id.hex(),
+                "unsigned_transaction": plan.base_transaction.hex(),
+                "payment_preimage": preimage.hex(),
+                "public_nonce": nonce.hex(),
+                "deadline_at": int(time.time()) + REVERSE_PROPOSAL_SECONDS,
+                "deadline_height": deadline_height,
+            },
+            contract=contract_hash(terms).hex(),
+            required_features=(COOPERATIVE_CLAIM_FEATURE,),
+        )
+        try:
+            await _publish_reverse_disclosure(
+                lifetime,
+                acknowledged_fallback=acknowledged_fallback,
+                binding=binding,
+                proposal=proposal,
+                session=session,
+                write_recovery=write_recovery,
+            )
+        except SwapError:
+            report("cooperative disclosure not recorded; claiming unilaterally")
+            return None
+        try:
+            await session.send(proposal, session.provider_key or "")
+            report("cooperative claim proposed; waiting for the provider's signature")
+            reply = await session.receive(
+                lambda item: item.in_reply_to == proposal.message_id,
+                timeout=REVERSE_PROPOSAL_SECONDS + REVERSE_REPLY_GRACE_SECONDS,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - relay loss or reply timeout; the claim must proceed
+            lifetime.check()  # An expired swap lifetime is not a cooperative refusal.
+            report("no cooperative signature in time; claiming unilaterally")
+            return None
+        lifetime.check()
+        try:
+            payload = check_cooperative_action_context(
+                reply, terms, init, accept, prior_request=proposal
+            )
+            if not isinstance(payload, CooperativeClaimSigned):
+                report("provider declined cooperation; claiming unilaterally")
+                return None
+            transcript = {
+                "user_public_key": user_key,
+                "provider_public_key": provider_key,
+                "tap_tweak": tweak,
+                "message": plan.signature_hash,
+                "user_public_nonce": nonce,
+                "provider_public_nonce": bytes.fromhex(payload.public_nonce),
+            }
+            provider_partial = bytes.fromhex(payload.partial_signature)
+            crypto.musig_partial_verify(
+                **transcript, signer_index=1, partial_signature=provider_partial
+            )
+            user_partial = attempt.partial_sign_once(transcript["provider_public_nonce"])
+            signature = crypto.musig_aggregate(
+                **transcript,
+                user_partial_signature=user_partial,
+                provider_partial_signature=provider_partial,
+            )
+            claim = finalize_cooperative_claim(plan, signature, verifier=crypto)
+        except Exception:  # noqa: BLE001 - an invalid reply only costs privacy, never funds
+            report("provider cooperative signature invalid; claiming unilaterally")
+            return None
+    finally:
+        attempt.close()
+    accepted = await lifetime.worker(
+        lambda: _submit(wallet, claim.raw_transaction, claim.txid, lifetime)
+    )
+    report(
+        f"cooperative claim {claim.txid} at {claim.fee_sat} sat "
+        f"{'broadcast' if accepted else 'not accepted yet'}"
+    )
+    return ClaimAttempt(claim.txid, claim.raw_transaction, claim.fee_sat, claim.vsize, tip)
+
+
 async def run_reverse_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
     connection: RelayConnection,
     *,
@@ -818,6 +975,7 @@ async def run_reverse_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
             initial_fee = max(
                 1, min(ceiling, math.ceil(limits.claim_fee_rate_sat_vb * probe_vsize))
             )
+            cooperative: ClaimAttempt | None = None
             if COOPERATIVE_CLAIM_FEATURE in terms.required_features:
                 prepared_claim = await lifetime.worker(lambda: sign(initial_fee, 0))
                 successor = await _publish_reverse_fallback(
@@ -828,11 +986,24 @@ async def run_reverse_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
                     session=session,
                     write_recovery=write_recovery,
                 )
-                report("private signed fallback snapshot acknowledged; cooperation remains gated")
-                # Do not turn a negotiated privacy commitment into an implicit
-                # script-path claim while the cooperative consumer is unfinished.
-                raise SwapError(
-                    "reverse cooperative settlement is not yet available; " + _UNRESOLVED
+                report("private signed fallback snapshot acknowledged")
+                # Same absolute fee as the unilateral claim: a higher feerate
+                # for the smaller key-path spend, and a consistent bump schedule.
+                cooperative = await _cooperative_claim(
+                    lifetime,
+                    session=session,
+                    init=init,
+                    accept=accept,
+                    terms=terms,
+                    binding=binding,
+                    script=script,
+                    contract_secret=contract_secret,
+                    preimage=preimage,
+                    fee_sat=initial_fee,
+                    acknowledged_fallback=successor,
+                    wallet=wallet,
+                    write_recovery=write_recovery,
+                    report=report,
                 )
 
             watcher = ClaimWatcher(
@@ -849,12 +1020,16 @@ async def run_reverse_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
                 deadline=lifetime.deadline,
                 effect_allowed=lifetime.allowed,
             )
+            if cooperative is not None:
+                # Rebroadcast the key-path claim; only a due fee bump replaces
+                # it with the (already durable) script-path claim.
+                watcher.attempts.append(cooperative)
             outcome, claim_txid = await lifetime.worker(watcher.run)
             if outcome == "claim_window_passed":
                 raise SwapError("the claim window closed; " + _UNRESOLVED)
             if outcome != "claim_confirmed" or claim_txid is None:
                 raise SwapError("the contract was spent by another transaction; " + _UNRESOLVED)
-            report(f"claim {claim_txid} confirmed; the provider settles the hold from its witness")
+            report(f"claim {claim_txid} confirmed")
             return ReverseSwapOutcome(
                 session.session_id, contract, binding.funding_txid, claim_txid, value
             )
