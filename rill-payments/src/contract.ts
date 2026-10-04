@@ -29,5 +29,7 @@ export function parseTerms(input: unknown): Readonly<NativeLightningTerms> {
   if (amount > MAX_MSAT || amount % 1000n !== 0n || BigInt(terms.buyerExtraMsat) > MAX_MSAT) {
     throw new Error("Unsupported Lightning quantity");
   }
-  return Object.freeze({ ...terms });
+  return Object.freeze({ version: terms.version, policyVersion: terms.policyVersion, merchantOrigin: terms.merchantOrigin,
+    intentId: terms.intentId, attemptId: terms.attemptId, network: terms.network, amountMsat: terms.amountMsat,
+    paymentHash: terms.paymentHash, receiver: terms.receiver, expiresAt: terms.expiresAt, buyerExtraMsat: terms.buyerExtraMsat });
 }

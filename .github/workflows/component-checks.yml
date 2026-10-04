@@ -26,7 +26,12 @@ jobs:
         run: |
           bun run check:schemas
           bun run typecheck
-          bun test
+          bun run test
+          bun run build:sdk
+      - name: Install pinned Chromium for checkout persistence tests
+        run: bunx playwright install --with-deps chromium
+      - name: Check native checkout cross-tab and reopen behavior
+        run: bun run test:browser
 
   core:
     runs-on: ubuntu-24.04

@@ -6,13 +6,20 @@
   "exports": {
     ".": "./src/index.ts",
     "./bolt11": "./src/bolt11.ts",
-    "./merchant": "./src/merchant.ts"
+    "./merchant": "./src/merchant.ts",
+    "./lnd": "./src/lnd.ts",
+    "./server": "./src/server.ts",
+    "./sdk": "./src/sdk.ts",
+    "./tracking": "./src/tracking.ts"
   },
   "scripts": {
+    "merchant": "bun src/cli.ts",
+    "build:sdk": "bun build src/sdk.ts --target browser --outfile dist/sdk.js",
     "check:schemas": "bun scripts/generate-validator.ts --check",
     "generate:schemas": "bun scripts/generate-validator.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test tests",
+    "test:browser": "playwright test"
   },
   "dependencies": {
     "ajv": "8.17.1",
@@ -20,5 +27,5 @@
     "@noble/hashes": "2.0.1",
     "@scure/base": "2.0.0"
   },
-  "devDependencies": { "@types/bun": "1.3.11", "typescript": "7.0.2" }
+  "devDependencies": { "@types/bun": "1.3.11", "typescript": "7.0.2", "@playwright/test": "1.63.0" }
 }

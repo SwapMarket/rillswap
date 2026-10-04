@@ -246,6 +246,10 @@ export class MerchantLedger {
     }).immediate();
   }
   pendingAttempts(): Attempt[] { return this.db.query("SELECT * FROM attempts ORDER BY rowid").all() as Attempt[]; }
+  attemptForIntent(intentId: string): Attempt | null { return this.db.query("SELECT * FROM attempts WHERE intent_id=?").get(intentId) as Attempt | null; }
+  eventsForIntent(intentId: string): AcceptanceEvent[] {
+    return (this.db.query("SELECT payload FROM outbox WHERE intent_id=? ORDER BY rowid").all(intentId) as { payload: string }[]).map((x) => JSON.parse(x.payload));
+  }
   pendingEvents(): AcceptanceEvent[] {
     return (this.db.query("SELECT payload FROM outbox WHERE delivered=0 ORDER BY rowid").all() as { payload: string }[]).map((x) => JSON.parse(x.payload));
   }

@@ -744,6 +744,44 @@ finally:
 closed = observer.lookup(selected, deadline_seconds=5)
 assert closed.state == 'CANCELED' and closed.htlcs == ()
 assert closed.payment_hash == selected.hex()
+# Ordinary merchant issuance is independently recoverable without any funded
+# channel. Verify the actual REST wire mapping used by the checkout backend.
+import base64, hashlib, ssl, httpx
+preimage = secrets.token_bytes(32)
+ordinary_hash = hashlib.sha256(preimage).hexdigest()
+tls = ssl.create_default_context(cafile='/work/public/tls.cert')
+headers = {'Grpc-Metadata-macaroon': combined.hex()}
+with httpx.Client(base_url='https://127.0.0.1:8080', verify=tls,
+                  headers=headers, timeout=10, trust_env=False) as rest:
+    node = rest.get('/v1/getinfo')
+    node.raise_for_status()
+    assert node.json()['identity_pubkey'] == reported.identity_pubkey
+    missing = rest.get('/v1/invoice/' + ordinary_hash)
+    assert missing.is_error and missing.json()['code'] == 5
+    issued = rest.post('/v1/invoices', json={
+        'r_preimage': base64.b64encode(preimage).decode(),
+        'value_msat': '1000', 'expiry': '600', 'memo': 'Unfunded checkout fixture'})
+    issued.raise_for_status()
+    first = issued.json()
+    assert first['r_hash'] == base64.b64encode(bytes.fromhex(ordinary_hash)).decode()
+    duplicate = rest.post('/v1/invoices', json={
+        'r_preimage': base64.b64encode(preimage).decode(), 'value_msat': '1000', 'expiry': '600'})
+    assert duplicate.is_error
+    recovered = rest.get('/v1/invoice/' + ordinary_hash)
+    recovered.raise_for_status()
+    record = recovered.json()
+    assert record['payment_request'] == first['payment_request']
+    assert record['add_index'] == first['add_index']
+    assert record['value_msat'] == '1000' and record['amt_paid_msat'] == '0'
+    assert record['state'] == 'OPEN' and record['settle_date'] == '0'
+    # Read credentials expose the preimage: merchant status must never forward
+    # this raw response, even while the invoice is still unpaid.
+    assert record['r_preimage'] == base64.b64encode(preimage).decode()
+# Fresh client reconstructs issuance progress using only the durable hash.
+with httpx.Client(base_url='https://127.0.0.1:8080', verify=tls,
+                  headers=headers, timeout=10, trust_env=False) as restarted:
+    restarted_invoice = restarted.get('/v1/invoice/' + ordinary_hash).json()
+    assert restarted_invoice['payment_request'] == first['payment_request']
 private.unlink()
 bound_private.unlink()
 decode_private.unlink()
@@ -835,6 +873,7 @@ def test_pinned_lnd_unfunded_invoice_observation(tmp_path: Path) -> None:
             "--bitcoind.zmqpubrawblock=tcp://127.0.0.1:28332",
             "--bitcoind.zmqpubrawtx=tcp://127.0.0.1:28333",
             "--rpclisten=127.0.0.1:10009",
+            "--restlisten=127.0.0.1:8080",
             "--nolisten",
             "--nobootstrap",
         )

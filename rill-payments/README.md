@@ -40,3 +40,78 @@ refund. Observe expired invoices too. Payment and merchant conversion are distin
 cannot bypass expiry or chronology. Injected test adapters prove ledger behavior,
 not operational settlement or provider availability. Real backend adapters require
 separate conformance evidence before enabling funds.
+
+## Regtest merchant API and SDK
+
+`bun run merchant provision /absolute/private/config.json` is an explicit
+one-time operation. `bun run merchant serve /absolute/private/config.json` opens
+only that existing store and serves on `127.0.0.1:8787`. Put an HTTPS reverse
+proxy at the configured merchant origin; checkout and API must share that origin.
+LND REST is numeric-loopback HTTPS and regtest only, with a trusted TLS certificate
+and a macaroon granting `info:read`, `invoices:read`, and `invoices:write`, not
+outgoing-payment permissions. LND invoice-read credentials can reveal preimages:
+restrict the backend and never proxy raw LND responses to customers.
+
+Configuration contains exactly these string fields:
+
+```json
+{
+  "origin": "https://merchant.example",
+  "receiver": "<actual LND compressed node public key>",
+  "endpoint": "https://127.0.0.1:8080",
+  "ledgerPath": "/absolute/private/merchant/ledger.sqlite",
+  "certificatePath": "/absolute/path/to/lnd/tls.cert",
+  "macaroonPath": "/absolute/private/merchant/invoice.macaroon",
+  "issuanceKeyPath": "/absolute/private/merchant/issuance.key",
+  "statusKeyPath": "/absolute/private/merchant/status.key",
+  "eventKeyPath": "/absolute/private/merchant/events.key",
+  "adminTokenPath": "/absolute/private/merchant/admin.token"
+}
+```
+
+Use a mode-0700 ledger directory and mode-0600 config, macaroon and secret files.
+Explicitly create three independent random 32-byte binary keys and a separate
+32-to-128-character base64url or hex admin token. Back them up securely with the
+database and LND state. Startup never generates replacements. Changing the
+issuance key changes issuer identity and refuses the existing ledger; changing
+status/event keys breaks previously issued capabilities/key pins. Key rotation
+is not currently supported.
+
+An authenticated ecommerce backend creates an order using `POST /v1/intents`
+with `{orderRef, amountMsat, expiresAt}` and a stable `Idempotency-Key`. The price
+must come from trusted commerce logic, not a browser. Then it calls
+`POST /v1/intents/{id}/attempts` with `{}` and another idempotency key. Responses
+include frozen invoice terms; intent creation also returns an opaque read token.
+The browser uses that token only in `Authorization: Bearer ...`, never a query
+string. `GET /v1/intents/{id}` reports authoritative status; `GET .../events`
+returns signed acceptance events. Evidence submission cannot accept payment.
+Failed issuance returns an action-required view while the worker reconciles the
+same operation. Expired issued invoices continue to be observed.
+
+```typescript
+import { createCheckout, indexedDbCheckoutStore } from "@rillswap/payments/sdk";
+import { mountTracking } from "@rillswap/payments/tracking";
+
+const checkout = createCheckout({
+  intentUrl, statusToken, policy: independentlyPinnedMerchantPolicy,
+  wallet: feeBoundedLightningWallet,
+  recoveryStore: indexedDbCheckoutStore("merchant-checkout")
+});
+mountTracking(document.querySelector("#tracking")!, checkout);
+// Only an explicit customer action should call checkout.pay().
+```
+
+`bun run build:sdk` builds the browser entry without merchant/node dependencies.
+`bun run test:browser` checks actual IndexedDB contention and reopen behavior.
+Wallet success is progress only; an ambiguous result permanently prevents
+automatic redispatch for this attempt. Resume by loading the same intent and
+keeping the store. Erased browser storage cannot guarantee duplicate prevention
+or reconstruct signing authority; retain the wallet's own payment history.
+
+Acceptance events use Ed25519 over a domain-prefixed JSON array of all declared
+event fields. `verifyAcceptance` takes an independently pinned public key, not
+the key attached to an untrusted event. Consumers must also match merchant,
+intent, amount and their order, then atomically deduplicate both event ID and
+order fulfillment. Signature verification alone does not prevent replay.
+`createMerchantService().deliverEvents` retries unchanged event IDs until the
+consumer acknowledges. `GET .../events` retains history after acknowledgment.

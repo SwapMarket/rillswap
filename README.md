@@ -15,7 +15,7 @@ This is one Git repository containing seven components:
 | `rill-provider/` | Provider experiments and disposable backend diagnostics |
 | `rill-cli/` | Offline recovery and experimental regtest actions |
 | `rill-web/` | Browser preview and disconnected recovery container export |
-| `rill-payments/` | Experimental checkout contracts and shared pure policy |
+| `rill-payments/` | Experimental checkout SDK, merchant ledger and shared policy |
 
 Each component retains its own dependency lock, local development setup, and
 README. The pinned provider integration lock is a **historical** snapshot, not
