@@ -5,6 +5,8 @@ invoices. Its separate OPEN/CANCELED invoice counterpart mines one unspendable
 OP_RETURN block and creates one unfunded hold, with no channel or payment.
 The third test funds a private channel between two disposable nodes, with no
 invoice or payment. All keep credentials in container tmpfs, never host wallets.
+The bound-settled scenario additionally verifies ordinary merchant invoice REST
+settlement over that disposable channel, without printing invoice secrets.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ import subprocess
 import time
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import pytest
 
@@ -1403,10 +1405,57 @@ with tempfile.TemporaryDirectory(prefix='rill-hold-reads-', dir='/tmp') as crede
             succeeded = next_status(iter(sending), selected_hash, ln.Payment.SUCCEEDED)
             assert succeeded.htlcs[0].attempt_id == live.htlcs[0].attempt_id
             one_attempt(succeeded, ln.HTLCAttempt.SUCCEEDED, b_key, channel_id, amount_msat)
+            ordinary_evidence = {}
+            if not reverse_preflight_scenario:
+                import base64, ssl, httpx
+                ordinary_preimage = secrets.token_bytes(32)
+                ordinary_hash = hashlib.sha256(ordinary_preimage).digest()
+                tls = ssl.create_default_context(cafile='/work/public/b.cert')
+                with httpx.Client(base_url='https://127.0.0.1:8081', verify=tls,
+                                  headers={'Grpc-Metadata-macaroon': b_secret.hex()},
+                                  timeout=10, trust_env=False) as rest:
+                    issued = rest.post('/v1/invoices', json={
+                        'r_preimage': base64.b64encode(ordinary_preimage).decode(),
+                        'value_msat': str(amount_msat), 'expiry': '3600',
+                        'memo': 'Disposable regtest merchant receipt'})
+                    issued.raise_for_status()
+                    ordinary = issued.json()
+                    lookup_path = '/v1/invoice/' + ordinary_hash.hex()
+                    initial = rest.get(lookup_path)
+                    initial.raise_for_status()
+                    opened = initial.json()
+                    assert opened['state'] == 'OPEN' and opened['amt_paid_msat'] == '0'
+                    assert opened['settle_date'] == '0'
+                    assert opened['payment_request'] == ordinary['payment_request']
+                    paying = send(router.SendPaymentRequest(
+                        payment_request=ordinary['payment_request'], max_parts=1,
+                        outgoing_chan_ids=[channel_id], no_inflight_updates=False,
+                        fee_limit_msat=0, timeout_seconds=30),
+                        metadata=metadata(a_secret), timeout=90)
+                    completed = next_status(iter(paying), ordinary_hash, ln.Payment.SUCCEEDED)
+                    one_attempt(completed, ln.HTLCAttempt.SUCCEEDED,
+                                b_key, channel_id, amount_msat)
+                    for _ in range(100):
+                        result = rest.get(lookup_path)
+                        result.raise_for_status()
+                        received = result.json()
+                        if received['state'] == 'SETTLED':
+                            break
+                        time.sleep(0.1)
+                    else:
+                        raise AssertionError('ordinary merchant invoice not settled')
+                    assert received['payment_request'] == ordinary['payment_request']
+                    assert received['r_hash'] == ordinary['r_hash']
+                    assert received['value_msat'] == received['amt_paid_msat'] == str(amount_msat)
+                    assert received['settle_date'].isdigit() and int(received['settle_date']) > 0
+                    assert int(received['settle_date']) <= int(time.time())
+                    ordinary_evidence = {'merchant_rest_settled': True,
+                        'merchant_received_msat': amount_msat, 'merchant_settlement_time': True}
             print(json.dumps({'funding_txid': txid, 'vout': point.output_index,
                 'capacity_sat': views[0][0].capacity, 'confirmations': output['confirmations'],
                 'bound_settled': True, 'settle_dispatches': counter.calls,
                 'repeat_no_dispatch': True,
+                **ordinary_evidence,
                 **(native_evidence if reverse_preflight_scenario else {})}))
         else:
             print('PHASE: hold_cancel_once', file=sys.stderr)
@@ -1496,9 +1545,11 @@ def _run_two_node_sidecar(  # noqa: PLR0915 - isolated test infrastructure
     *,
     prefix: str,
     deadline: int,
-    native_preflight: bool = False,
+    profile: Literal["baseline", "native_reverse", "merchant_receipt"] = "baseline",
 ) -> dict[str, object]:
     """Use fresh owned Core/LND containers for one bounded sidecar scenario."""
+    native_preflight = profile == "native_reverse"
+    merchant_rest = profile == "merchant_receipt"
     assert DOCKER is not None
     public = tmp_path / "public"
     public.mkdir(mode=0o700)
@@ -1635,7 +1686,7 @@ def _run_two_node_sidecar(  # noqa: PLR0915 - isolated test infrastructure
                 "--bitcoind.zmqpubrawtx=tcp://127.0.0.1:28333",
                 f"--rpclisten=127.0.0.1:{port}",
                 f"--listen=127.0.0.1:{peer_port}",
-                "--norest",
+                "--restlisten=127.0.0.1:8081" if merchant_rest and name == b else "--norest",
                 "--nobootstrap",
             )
         for container, path in (
@@ -1762,10 +1813,14 @@ def test_pinned_single_part_hold_bound_settled(tmp_path: Path) -> None:
         "SETTLE_BOUND_SCENARIO = True\n" + HELD_HTLC_PAYMENT,
         prefix="hold-settle",
         deadline=270,
+        profile="merchant_receipt",
     )
     assert evidence["bound_settled"] is True
     assert evidence["settle_dispatches"] == 1
     assert evidence["repeat_no_dispatch"] is True
+    assert evidence["merchant_rest_settled"] is True
+    assert evidence["merchant_received_msat"] == 1_000_000
+    assert evidence["merchant_settlement_time"] is True
 
 
 @pytest.mark.lnd
@@ -1782,7 +1837,7 @@ def test_pinned_original_native_reverse_repayment_and_paid_preflight(tmp_path: P
         "REVERSE_PREFLIGHT_SCENARIO = True\n" + HELD_HTLC_PAYMENT,
         prefix="reverse-preflight",
         deadline=300,
-        native_preflight=True,
+        profile="native_reverse",
     )
     assert evidence["original_paid_preflight"] is True
     assert evidence["original_window_preserved"] is True

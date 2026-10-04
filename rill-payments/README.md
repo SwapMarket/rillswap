@@ -41,6 +41,20 @@ cannot bypass expiry or chronology. Injected test adapters prove ledger behavior
 not operational settlement or provider availability. Real backend adapters require
 separate conformance evidence before enabling funds.
 
+Pinned LND v0.21.0-beta diagnostics exercise ordinary REST invoice creation,
+duplicate-hash rejection, hash-based lookup recovery and actual settlement over
+a disposable private regtest channel. They verify the wire fields
+`value_msat`, `amt_paid_msat` and `settle_date` without printing raw invoice
+responses. These tests use Python REST inside isolated containers; they do not
+prove the Bun HTTPS transport, full merchant service or funded swap checkout
+end to end. From `rill-provider`, run:
+
+```sh
+RILLSWAP_RUN_LND=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q \
+  tests/test_lnd_payment_pinned.py::test_pinned_lnd_unfunded_invoice_observation \
+  tests/test_lnd_payment_pinned.py::test_pinned_single_part_hold_bound_settled
+```
+
 ## Regtest merchant API and SDK
 
 `bun run merchant provision /absolute/private/config.json` is an explicit
