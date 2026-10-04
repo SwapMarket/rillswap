@@ -170,9 +170,10 @@ export class Session {
     return { ...unsigned, signature: bytesToHex(schnorr.sign(digest, this.secret, randomBytes(32))) };
   }
 
-  async send(envelope: Envelope, recipient: string): Promise<void> {
+  async send(envelope: Envelope, recipient: string, beforePublish?: () => void): Promise<void> {
     const event = wrapPrivateRegtestEnvelope(new TextDecoder().decode(jcs(envelope)), this.secret, recipient);
     for (let attempt = 0; attempt < 3; attempt += 1) {
+      beforePublish?.();
       if (await this.relay.publish(event)) return;
     }
     throw new SwapError(`relay did not accept ${envelope.message_type}`);

@@ -37,6 +37,15 @@ async function deliver(from: Session, to: Session, envelope: Envelope, relay: Me
 }
 
 describe("client session inbox", () => {
+  test("a commitment guard runs immediately before every relay retry", async () => {
+    const relay = new MemoryRelay(); let now = 1999, checks = 0;
+    relay.publish = async (event) => { relay.published.push(event); now = 2000; return false; };
+    const client = new Session(relay, regtest, PROFILE), provider = new Session(new MemoryRelay(), regtest, PROFILE);
+    const envelope = client.envelope("ack", { acknowledged_message_id: "00".repeat(32) });
+    await expect(client.send(envelope, provider.key, () => { checks++; if (now >= 2000) throw new SwapError("expired"); })).rejects.toThrow("expired");
+    expect(checks).toBe(2); expect(relay.published).toHaveLength(1);
+  });
+
   test("a signed provider envelope round-trips once", async () => {
     const { client, provider, relay } = pair();
     const request = client.envelope("quote_request", { kind: "btc-to-ln" });

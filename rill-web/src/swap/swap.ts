@@ -56,6 +56,8 @@ export interface SwapRequest {
   readonly tipHeight: number;
   readonly ageRecipient: string;
   readonly limits: UserLimits;
+  /** A merchant checkout can expire earlier than the invoice. */
+  readonly checkoutExpiresAt?: number;
 }
 
 export interface FundingRequest {
@@ -64,6 +66,7 @@ export interface FundingRequest {
   readonly maxFundingFeeSat: bigint;
   readonly refundLockHeight: number;
   readonly successFeeSat: bigint;
+  readonly termsExpiry?: number;
 }
 
 /** Every step that needs the user; each promise resolves once the user acted. */
@@ -75,6 +78,8 @@ export interface SwapHooks {
   fundingPsbt(request: FundingRequest): Promise<string>;
   /** Show the signed transaction; resolve once the user broadcast it. */
   broadcast(rawTransaction: string, txid: string): Promise<void>;
+  /** Persist public references before releasing a signed transaction to the provider. */
+  beforeFundingCommit?(txid: string, termsExpiry: number): Promise<void>;
   /** The MuSig2 signer and cross-tab reservation journal for the key-path claim. */
   readonly cosigner: Cosigner;
 }
@@ -181,6 +186,8 @@ export async function runSwap(
 ): Promise<SwapOutcome> {
   const seconds = (): number => Math.floor(clock() / 1000);
   const invoice = checkRequest(request, seconds());
+  const checkoutExpiry = request.checkoutExpiresAt ?? invoice.expires_at;
+  if (!Number.isSafeInteger(checkoutExpiry) || checkoutExpiry <= seconds()) throw new SwapError("checkout expiry invalid");
   const { identity, network } = request;
   const provider = await discoverProvider(relay, identity, network, PROFILE);
   hooks.report(`provider found (revision ${provider.revision})`);
@@ -255,6 +262,7 @@ export async function runSwap(
   };
   await hooks.saveRecovery(await encryptRecovery(record, request.ageRecipient), "terms");
   hooks.report("recovery file saved (terms, no funding yet)");
+  assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry);
   const accepted = session.envelope(
     "terms_accept",
     { acceptance, client_acceptance_signature: acceptanceSignature },
@@ -264,6 +272,7 @@ export async function runSwap(
   await session.replyTo(accepted, "ack");
 
   const funding = await authorizeUserFunding(terms, hooks);
+  assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry);
   const binding = fundingBinding(contractHash, funding, bytesToHex(randomBytes(32)), seconds());
   const bindingSignature = sign(fundingBindingHash(binding), session.secret);
   const funded = { ...record, updatedAt: seconds(), funding: [{ binding, signature: bindingSignature }] };
@@ -274,8 +283,13 @@ export async function runSwap(
     { binding, funding_binding_signature: bindingSignature, funding_transaction: funding.raw },
     { contract: contractHash },
   );
-  await session.send(bound, providerKey);
+  // Publishing a signed transaction to the provider can commit funds even if
+  // the customer's later broadcast callback never runs.
+  await hooks.beforeFundingCommit?.(funding.txid, terms.terms_expiry);
+  assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry);
+  await session.send(bound, providerKey, () => assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry));
   await session.replyTo(bound, "ack");
+  assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry);
   await hooks.broadcast(funding.raw, funding.txid);
   hooks.report(`funding ${funding.txid} broadcast; waiting for the provider to pay`);
   const hint =
@@ -330,6 +344,13 @@ export async function runSwap(
 
 const MAX_FUNDING_ATTEMPTS = 5;
 
+/** Never fund expired terms after a wallet, recovery or provider prompt. */
+export function assertFundingWindow(termsExpiry: number, invoiceExpiry: number, now: number, checkoutExpiry = invoiceExpiry): void {
+  if (![termsExpiry, invoiceExpiry, checkoutExpiry, now].every(Number.isSafeInteger) || now >= termsExpiry || now >= invoiceExpiry || now >= checkoutExpiry) {
+    throw new SwapError("funding deadline exceeded; retain recovery and monitor any transaction already shared with the provider");
+  }
+}
+
 /** Ask for the wallet's finalized PSBT until one passes authorization. */
 async function authorizeUserFunding(terms: BtcToLnTerms, hooks: SwapHooks): Promise<AuthorizedFunding> {
   const request: FundingRequest = {
@@ -338,6 +359,7 @@ async function authorizeUserFunding(terms: BtcToLnTerms, hooks: SwapHooks): Prom
     maxFundingFeeSat: BigInt(terms.max_funding_fee_sat),
     refundLockHeight: terms.refund_lock_height,
     successFeeSat: BigInt(terms.economics.success_fee_sat),
+    termsExpiry: terms.terms_expiry,
   };
   for (let attempt = 1; ; attempt += 1) {
     const psbt = await hooks.fundingPsbt(request);

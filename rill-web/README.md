@@ -7,6 +7,25 @@ reliable `file://` operation is not promised.
 
 Status: pre-release and not suitable for real funds.
 
+## Merchant invoice adapter
+
+`src/swap/merchantCheckout.ts` adapts the existing regtest BTC-to-Lightning
+flow to independently pinned merchant checkout terms. Supply the merchant's
+approved provider IDs, explicit wallet/refund/fee limits and a payer-controlled
+durable encrypted recovery store. All fee ceilings together must satisfy the
+buyer cap, and the invoice needs at least 1,800 seconds before initial quoting.
+Native checkout and swap dispatch share the same attempt reservation, preventing
+automatic payment by another rail after an ambiguous attempt.
+
+The adapter returns public tracking references, never the preimage or claim
+secrets. Provider completion means waiting for merchant receipt, not fulfillment.
+Expired terms are rechecked after prompts and before giving a signed funding
+transaction to the provider. Once that transaction has been shared, retain
+recovery and monitor it even if the customer's broadcast callback fails.
+Existing payer recovery works through the CLI; a closed tab cannot autonomously
+sign refunds. This adapter is not yet advertised by the native-only merchant
+HTTP service and has no end-to-end funded checkout conformance evidence.
+
 The site has two pages. `index.html` is a **local-only development preview**
 that makes no connection: chain-mode selection does not contact or verify a
 node; the provider-description field renders only inert pasted text; the

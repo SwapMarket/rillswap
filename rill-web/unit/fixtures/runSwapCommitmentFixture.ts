@@ -1,0 +1,57 @@
+// Run in its own process: mocked protocol verification must not affect other unit tests.
+import { mock } from "bun:test";
+import { receiver, testInvoice } from "../../../rill-payments/tests/helpers";
+import type { CheckoutCheckpoint } from "@rillswap/payments/sdk";
+import type { MerchantSwapOptions } from "../../src/swap/merchantCheckout";
+
+const scenario = process.argv[2]; let now = 1200, shared = 0, broadcasts = 0;
+const recoveryStages: string[] = []; let checkpoint: CheckoutCheckpoint | null = null;
+const terms = { terms_expiry: 5000, refund_lock_height: 200, max_funding_fee_sat: "10",
+  economics: { contract_amount_sat: "1040", success_fee_sat: "10" } };
+class FixtureSession {
+  sessionId = "5".repeat(64); key = receiver.slice(2); providerKey = "8".repeat(64);
+  secret = new Uint8Array(32); constructor() { this.secret[31] = 1; }
+  envelope(kind: string, payload: unknown) { return { kind, payload, message_id: kind }; }
+  async listen() {}
+  async send(message: { kind: string }) { if (message.kind === "funding_binding") { shared++;
+    if (scenario === "transport_after_share") throw new Error("response lost after provider received signed transaction"); } }
+  async replyTo(message: { kind: string }, kind: string) {
+    if (message.kind === "funding_binding" && scenario === "ack_delay") now = 3000;
+    if (kind === "terms_offer") return { payload: { terms: { contract_hash: "6".repeat(64) } }, contract_hash: "6".repeat(64) };
+    return { payload: { provider_identity_signature: "0".repeat(128) }, sender_session_key: this.providerKey };
+  }
+}
+mock.module("../../src/swap/session", () => ({ Session: FixtureSession, SwapError: Error }));
+mock.module("../../src/swap/discovery", () => ({ discoverProvider: async () => ({ advertisedEpochInboxKeys: ["8".repeat(64)], requiresEpochBinding: false, revision: 1 }) }));
+mock.module("../../src/swap/wire", () => ({ checkHandshakeAccept: () => ({}), checkTermsOffer: () => terms, requireShape: (_name: string, value: unknown) => value,
+  COOPERATIVE_CLAIM_FEATURE: "fixture", EPOCH_SESSION_EXTENSION: "fixture", EPOCH_SESSION_FEATURE: "fixture" }));
+mock.module("../../src/swap/hashes", () => ({ clientAcceptanceHash: () => new Uint8Array(32), fundingBindingHash: () => new Uint8Array(32),
+  epochBoundSessionId: () => new Uint8Array(32), handshakeHash: () => new Uint8Array(32) }));
+mock.module("../../src/swap/funding", () => ({ authorizeFundingPsbt: () => ({ txid: "7".repeat(64), raw: "fixture transaction" }),
+  fundingBinding: () => ({ funding_attempt_id: "9".repeat(64) }) }));
+mock.module("../../src/swap/taproot", () => ({ reconstructTaprootContract: () => ({ script_pubkey: "5120" + "1".repeat(64) }) }));
+mock.module("../../src/swap/recovery", () => ({ encryptRecovery: async () => new Uint8Array([1]) }));
+mock.module("../../src/swap/cooperative", () => ({ COOPERATIVE_RESERVATION_EXTENSION: "fixture", settle: async () => ({
+  cooperation: "abandoned", claimTxid: null, preimage: "private fixture preimage", reservation: null }) }));
+const { executeMerchantSwap } = await import("../../src/swap/merchantCheckout");
+const { invoiceBinding } = await import("../../src/swap/bolt11");
+const invoice = testInvoice("actual_runner_sequence", "1000000", 1000, 6000); const binding = invoiceBinding(invoice, "regtest");
+const options: MerchantSwapOptions = {
+  invoice, terms: { version: "checkout/0.1", policyVersion: "native-lightning/1", merchantOrigin: "https://merchant.example",
+    intentId: "merchant_intent_001", attemptId: "merchant_attempt_01", network: "regtest", amountMsat: "1000000", buyerExtraMsat: "0",
+    receiver, paymentHash: binding.payment_hash, expiresAt: 3000 },
+  policy: { version: "native-lightning/1", merchantOrigin: "https://merchant.example", receiver, network: "regtest", maxBuyerExtraMsat: "100000", maxBuyerExtraBps: 1000, approvedRillProviders: ["4".repeat(64)] },
+  relay: { publish: async () => false, subscribe: async () => {}, next: async () => null, query: async () => ({ events: [], truncated: false }) },
+  request: { identity: "4".repeat(64), network: { name: "regtest" }, refundScript: "fixture", tipHeight: 100, ageRecipient: "fixture",
+    limits: { maxSuccessFeeSat: 10n, maxFundingFeeSat: 10n, maxClaimFeeSat: 10n, maxRefundFeeSat: 10n, maxRefundDelayBlocks: 100 } },
+  hooks: { report: () => {}, fundingPsbt: async () => { if (scenario === "wallet_delay") now = 3000; return "fixture"; },
+    broadcast: async () => { broadcasts++; }, cosigner: { loadMusig: async () => { throw new Error(); }, reserve: async () => { throw new Error(); } } },
+  recoveryStore: { load: async () => checkpoint, begin: async (record) => { if (checkpoint) return false; checkpoint = record; return true; },
+    update: async (record) => { checkpoint = record; if (scenario === "checkpoint_delay" && record.route?.fundingTxid) now = 3000; } },
+  savePayerRecovery: async (_file, stage) => { recoveryStages.push(stage); if (scenario === "funded_recovery_delay" && stage === "funded") now = 3000; return "wallet:" + stage; },
+  now: () => now,
+};
+let failed = false; try { await executeMerchantSwap(options); } catch { failed = true; }
+now = 1200; let redispatchRefused = false;
+try { await executeMerchantSwap(options); } catch (error) { redispatchRefused = (error as Error).message.includes("already dispatched"); }
+console.log(JSON.stringify({ failed, shared, broadcasts, recoveryStages, checkpoint, redispatchRefused }));

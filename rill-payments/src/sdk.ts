@@ -15,6 +15,14 @@ export interface CheckoutCheckpoint {
   readonly invoice: string;
   readonly terms: NativeLightningTerms;
   readonly stage: "dispatched" | "ambiguous" | "observing";
+  /** Public routing references only; absent metadata never authorizes another dispatch. */
+  readonly route?: {
+    readonly adapter: "rillswap-btc-ln/1";
+    readonly providerId: string;
+    readonly recoveryRef?: string;
+    readonly swapId?: string;
+    readonly fundingTxid?: string;
+  };
 }
 /** begin must atomically reserve one dispatch per attempt, including across tabs. */
 export interface CheckoutStore {
