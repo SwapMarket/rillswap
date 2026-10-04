@@ -146,7 +146,7 @@ signature MUST verify against the exact tweaked output key before use. Profile
 documents define directional authorization conditions. Cooperative failure
 MUST immediately leave unilateral recovery available.
 
-### 5.1 Negotiated action payloads (implementation pending)
+### 5.1 Negotiated action payloads
 
 For **new** swaps, `cooperative-claim/v1` is required in both authenticated
 handshake halves and signed contract terms. An accepted older swap without it
@@ -157,6 +157,16 @@ receiver independently checks the claimant/cosigner sender role, message
 sequence, exact `in_reply_to`, signed feature negotiation, frozen transaction,
 funding state, deadline, and one-shot burn. A parsed payload alone grants no
 signing authority.
+
+For BTC to LN the provider first proves the client is live without exposing a
+nonce: a closed `action_request` with `action` = `cooperative_claim_ready`, a
+32-byte `challenge`, the 32-byte `payment_preimage`, and integer
+`deadline_at` (at most 30 seconds ahead) and `deadline_height` (above the
+current tip and at most `refund_lock_height - claim_confirmation_blocks`).
+The client verifies the preimage against the payment hash and answers with an
+`action_result` echoing the action and challenge with `status` = `ready`. The
+proposal that follows MUST repeat that preimage and both deadlines exactly.
+LN to BTC has no readiness step: the client, as claimant, proposes directly.
 
 The closed `action_request` proposal carries `action` =
 `cooperative_claim_propose`, a 32-byte `cooperation_id`, lowercase hex

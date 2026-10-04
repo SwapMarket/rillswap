@@ -707,11 +707,11 @@ async def _answer_cooperative_readiness(  # noqa: PLR0913 - explicit independent
     now: int,
     tip_height: int,
 ) -> str:
-    """Revalidate then echo one readiness request, still dormant in production.
+    """Revalidate then echo one readiness request, outside the attempt owner.
 
-    A complete original-session signing/completion handler must first use the
-    validation-only helper and publish its learned-preimage recovery successor.
-    Do not wire this echo into dispatch until that entire handler is available.
+    Production dispatch echoes through ``_CooperativeClaimAttempt._ready``,
+    which first publishes its learned-preimage recovery successor; this
+    standalone helper never does, so it must not be wired into dispatch.
     """
     payload = _validate_cooperative_readiness(
         session,
@@ -755,8 +755,8 @@ class _CooperativeClaimAttempt:
     One consumer, one budget, one reservation and one partial. The caller must
     retain the crypto context until wait_for_workers finishes, even after
     cancellation. A canceled to_thread await does not stop a writer or RPC.
-    Forward dispatch constructs this only for authenticated featured terms;
-    production feature negotiation remains disabled until release acceptance.
+    Forward dispatch constructs this for every authenticated featured swap;
+    new swaps always negotiate the feature.
     """
 
     def __init__(  # noqa: PLR0913 - independently retained live bindings

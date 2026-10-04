@@ -129,9 +129,8 @@ class OriginHarness(fixtures.Harness):
             reply = answer_client_request(*args)
             if not self.featured or reply.message_type != "terms_offer":
                 return reply
-            # Runtime featured negotiation remains disabled. This fixture
-            # supplies an explicitly signed, negotiated contract to isolate
-            # store provenance without pretending to activate production.
+            # This fixture signs the negotiated contract directly to
+            # isolate store provenance from the quote policy.
             offer = TermsOfferPayload.model_validate_json(canonicalize(reply.payload), strict=True)
             terms = offer.terms.contract_terms.model_copy(
                 update={"required_features": (COOPERATIVE_CLAIM_FEATURE,)}
