@@ -9,11 +9,11 @@
  * user's own downloads; refunds use `rill recover watch-refund`.
  */
 import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
-import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex, hexToBytes, randomBytes } from "@noble/hashes/utils.js";
+import { bytesToHex, randomBytes } from "@noble/hashes/utils.js";
 
 import type { AnnouncementCandidate } from "../nostrProviderAnnouncement";
 import { invoiceBinding } from "./bolt11";
+import { COOPERATIVE_RESERVATION_EXTENSION, type Cosigner, settle } from "./cooperative";
 import { type AnnouncementSource, discoverProvider } from "./discovery";
 import { type AuthorizedFunding, authorizeFundingPsbt, type FundingBinding, fundingBinding } from "./funding";
 import { clientAcceptanceHash, epochBoundSessionId, fundingBindingHash, handshakeHash } from "./hashes";
@@ -24,6 +24,7 @@ import {
   type BtcToLnTerms,
   checkHandshakeAccept,
   checkTermsOffer,
+  COOPERATIVE_CLAIM_FEATURE,
   EPOCH_SESSION_EXTENSION,
   EPOCH_SESSION_FEATURE,
   type FirmQuoteRequest,
@@ -74,6 +75,8 @@ export interface SwapHooks {
   fundingPsbt(request: FundingRequest): Promise<string>;
   /** Show the signed transaction; resolve once the user broadcast it. */
   broadcast(rawTransaction: string, txid: string): Promise<void>;
+  /** The MuSig2 signer and cross-tab reservation journal for the key-path claim. */
+  readonly cosigner: Cosigner;
 }
 
 export interface SwapOutcome {
@@ -82,6 +85,11 @@ export interface SwapOutcome {
   readonly fundingTxid: string;
   readonly preimage: string;
   readonly refundLockHeight: number;
+  /** "verified": the provider holds a private key-path claim; "abandoned": it claims with the preimage. */
+  readonly cooperation: "verified" | "abandoned";
+  readonly claimTxid: string | null;
+  /** Optional paid recovery file (age-encrypted): preimage and any cooperative reservation. */
+  readonly paidRecovery: Uint8Array;
 }
 
 export interface SwapTimeouts {
@@ -112,7 +120,10 @@ async function handshake(session: Session, provider: AnnouncementCandidate, iden
     expected_provider_identity_xonly_key: identity,
     requested_encryption_suites: ENCRYPTION_SUITES,
     requested_capabilities: CAPABILITIES,
-    required_features: provider.requiresEpochBinding ? [EPOCH_SESSION_FEATURE] : [],
+    // Cooperative claims are mandatory; features are sorted like every signed list.
+    required_features: provider.requiresEpochBinding
+      ? [COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE]
+      : [COOPERATIVE_CLAIM_FEATURE],
     extensions: provider.requiresEpochBinding ? { [EPOCH_SESSION_EXTENSION]: { epoch_inbox_xonly_key: epoch } } : {},
   };
   const request = session.envelope("handshake_init", init as unknown as Record<string, unknown>, { signed: false });
@@ -267,13 +278,53 @@ export async function runSwap(
   await session.replyTo(bound, "ack");
   await hooks.broadcast(funding.raw, funding.txid);
   hooks.report(`funding ${funding.txid} broadcast; waiting for the provider to pay`);
-  const preimage = await awaitSettlement(session, terms, contractHash, binding, timeouts.settleMs);
+  const hint =
+    `funds are committed; refund after block ${terms.refund_lock_height} with ` +
+    `\`rill recover watch-refund --funding-attempt-id ${binding.funding_attempt_id} --binding-revision 0\` ` +
+    "on the funded recovery file";
+  const settled = await settle(
+    {
+      session,
+      providerKey,
+      terms,
+      contractHash,
+      binding,
+      contractSecret: contract.secret,
+      tipHeight: request.tipHeight,
+      settleMs: timeouts.settleMs,
+      cosigner: hooks.cosigner,
+      report: hooks.report,
+    },
+    hint,
+  );
+  hooks.report(
+    settled.cooperation === "verified"
+      ? `cooperative key-path claim ${settled.claimTxid} verified; the provider claims privately`
+      : "cooperation skipped; the provider claims with the preimage",
+  );
+  const reserved = settled.reservation;
+  const paid: RecoveryParts = {
+    ...funded,
+    // A reservation is dated when it was journaled, before its proposal deadline.
+    updatedAt: Math.max(funded.updatedAt, reserved?.recordedAt ?? seconds()),
+    preimage: settled.preimage,
+    extensions: reserved === null ? {} : {
+      [COOPERATIVE_RESERVATION_EXTENSION]: {
+        version: 1,
+        proposal: reserved.proposal,
+        signature_hash: reserved.signature_hash,
+      },
+    },
+  };
   return {
     sessionId: session.sessionId,
     contractHash,
     fundingTxid: funding.txid,
-    preimage,
+    preimage: settled.preimage,
     refundLockHeight: terms.refund_lock_height,
+    cooperation: settled.cooperation,
+    claimTxid: settled.claimTxid,
+    paidRecovery: await encryptRecovery(paid, request.ageRecipient),
   };
 }
 
@@ -296,50 +347,5 @@ async function authorizeUserFunding(terms: BtcToLnTerms, hooks: SwapHooks): Prom
       if (attempt >= MAX_FUNDING_ATTEMPTS) throw new SwapError("no acceptable funding transaction; nothing was funded");
       hooks.report(`${(error as Error).message}; nothing was sent, try again`);
     }
-  }
-}
-
-interface Observation {
-  readonly kind: "payment_settled" | "payment_failed" | "claim_broadcast";
-  readonly payment_preimage?: string;
-  readonly claim_txid?: string;
-}
-
-/** Wait for the provider's settlement report and verify the preimage. */
-async function awaitSettlement(
-  session: Session,
-  terms: BtcToLnTerms,
-  contractHash: string,
-  binding: FundingBinding,
-  settleMs: number,
-): Promise<string> {
-  const hint =
-    `funds are committed; refund after block ${terms.refund_lock_height} with ` +
-    `\`rill recover watch-refund --funding-attempt-id ${binding.funding_attempt_id} --binding-revision 0\` ` +
-    "on the funded recovery file";
-  const deadline = session.clock() + settleMs;
-  for (;;) {
-    let envelope: Awaited<ReturnType<Session["receive"]>>;
-    try {
-      envelope = await session.receive(
-        (item) => item.message_type === "observation" && item.in_reply_to === null && item.contract_hash === contractHash,
-        Math.max(0, deadline - session.clock()),
-      );
-    } catch {
-      throw new SwapError(`provider did not pay in time; ${hint}`);
-    }
-    let seen: Observation;
-    try {
-      seen = requireShape<Observation>("validateObservation", envelope.payload);
-    } catch {
-      continue;
-    }
-    if (seen.kind === "payment_settled") {
-      if (bytesToHex(sha256(hexToBytes(seen.payment_preimage!))) !== terms.invoice_binding.payment_hash) {
-        throw new SwapError(`provider sent a wrong preimage; ${hint}`);
-      }
-      return seen.payment_preimage!;
-    }
-    if (seen.kind === "payment_failed") throw new SwapError(`provider reports the payment failed; ${hint}`);
   }
 }

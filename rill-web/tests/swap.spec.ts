@@ -12,10 +12,30 @@ test("the swap page loads locally, offers no mainnet, and connects to nothing be
   const options = await page.locator("#swap-network option").allTextContents();
   expect(options).toEqual(["signet", "testnet4", "regtest"]);
   const csp = await page.locator("meta[http-equiv='Content-Security-Policy']").getAttribute("content");
-  expect(csp).toContain("connect-src wss: ws://127.0.0.1:* ws://localhost:*;");
-  expect(csp).toContain("script-src 'self';");
+  expect(csp).toContain("connect-src 'self' wss: ws://127.0.0.1:* ws://localhost:*;");
+  expect(csp).toContain("script-src 'self' 'wasm-unsafe-eval';");
   for (const url of requests) expect(new URL(url).host).toBe("127.0.0.1:18765");
   expect(sockets).toEqual([]);
+});
+
+test("the CSP admits the same-origin MuSig2 WASM and the cooperation journal APIs", async ({ page }) => {
+  await page.goto(SWAP);
+  const result = await page.evaluate(async () => {
+    const listing = await (await fetch("assets/")).text();
+    const name = /rill_crypto_wasm-[\w-]+\.wasm/.exec(listing)?.[0];
+    if (!name) return "wasm asset missing";
+    const module = await WebAssembly.compile(await (await fetch(`assets/${name}`)).arrayBuffer());
+    if (WebAssembly.Module.exports(module).length < 10) return "wasm exports missing"; // names are minified
+    if (!navigator.locks) return "web locks missing";
+    let blocked = "no";
+    try {
+      await fetch("https://example.invalid/");
+    } catch {
+      blocked = "yes";
+    }
+    return `ok ${blocked}`;
+  });
+  expect(result).toBe("ok yes");
 });
 
 test("invalid input is refused before any relay connection", async ({ page }) => {

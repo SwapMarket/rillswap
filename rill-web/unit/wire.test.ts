@@ -4,11 +4,12 @@ import { resolve } from "node:path";
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 
-import { contractHash, handshakeAcceptHash, providerTermsHash } from "../src/swap/hashes";
+import { contractHash, handshakeAcceptHash, handshakeInitHash, providerTermsHash } from "../src/swap/hashes";
 import {
   type BtcToLnTerms,
   checkHandshakeAccept,
   checkTermsOffer,
+  COOPERATIVE_CLAIM_FEATURE,
   type FirmQuoteRequest,
   type HandshakeInit,
   ProtocolError,
@@ -31,13 +32,37 @@ test("vendored wire schemas equal rill-docs", () => {
 
 describe("handshake accept", () => {
   const vector = auth.valid.find((item) => item.profile_id === "btc-to-ln/v1")!;
-  const init = vector.handshake_init.object as unknown as HandshakeInit;
-  const accept = vector.handshake_accept.object as Record<string, unknown>;
-  const payload = { accept, provider_identity_signature: vector.handshake_accept.signature };
+  const secret = hexToBytes(vector.handshake_accept.signer_secret_key);
+  // The vector predates mandatory cooperation; both halves now carry the feature.
+  const featured = (initFeatures: string[], acceptFeatures: string[]) => {
+    const init = { ...(vector.handshake_init.object as unknown as HandshakeInit), required_features: initFeatures };
+    const accept: Record<string, unknown> = {
+      ...(vector.handshake_accept.object as Record<string, unknown>),
+      handshake_init_hash: bytesToHex(handshakeInitHash(init)),
+      required_features: acceptFeatures,
+    };
+    const signature = bytesToHex(schnorr.sign(handshakeAcceptHash(accept), secret));
+    return { init, accept, payload: { accept, provider_identity_signature: signature } };
+  };
+  const { init, accept, payload } = featured([COOPERATIVE_CLAIM_FEATURE], [COOPERATIVE_CLAIM_FEATURE]);
   const sender = accept.provider_session_xonly_key as string;
 
-  test("the authentication vector is accepted", () => {
+  test("a jointly cooperative accept is accepted", () => {
     expect(checkHandshakeAccept(clone(payload), init, sender).session_id).toBe(init.session_id);
+  });
+
+  test("cooperation missing from either half is refused", () => {
+    const unfeatured = {
+      accept: vector.handshake_accept.object,
+      provider_identity_signature: vector.handshake_accept.signature,
+    };
+    const legacy = vector.handshake_init.object as unknown as HandshakeInit;
+    expect(() => checkHandshakeAccept(unfeatured, legacy, sender)).toThrow("cooperative claim must be jointly");
+    const halves: Array<[string[], string[]]> = [[[COOPERATIVE_CLAIM_FEATURE], []], [[], [COOPERATIVE_CLAIM_FEATURE]]];
+    for (const [initFeatures, acceptFeatures] of halves) {
+      const half = featured(initFeatures, acceptFeatures);
+      expect(() => checkHandshakeAccept(half.payload, half.init, sender)).toThrow("cooperative claim must be jointly");
+    }
   });
 
   test("another sender, identity, echo, or signature is refused", () => {
@@ -51,17 +76,19 @@ describe("handshake accept", () => {
   });
 
   test("an unrequested required feature is refused even when signed", () => {
-    const secret = hexToBytes(vector.handshake_accept.signer_secret_key);
-    const featured = { ...accept, required_features: ["unknown-feature/v1"] };
-    const signature = bytesToHex(schnorr.sign(handshakeAcceptHash(featured), secret));
+    const unknown = { ...accept, required_features: [COOPERATIVE_CLAIM_FEATURE, "unknown-feature/v1"] };
+    const signature = bytesToHex(schnorr.sign(handshakeAcceptHash(unknown), secret));
     expect(() =>
-      checkHandshakeAccept({ accept: featured, provider_identity_signature: signature }, init, sender),
+      checkHandshakeAccept({ accept: unknown, provider_identity_signature: signature }, init, sender),
     ).toThrow(ProtocolError);
   });
 });
 
 describe("terms offer", () => {
-  const terms = clone(taproot.valid[0]!.contract_terms) as unknown as BtcToLnTerms;
+  const terms = {
+    ...(clone(taproot.valid[0]!.contract_terms) as unknown as BtcToLnTerms),
+    required_features: [COOPERATIVE_CLAIM_FEATURE],
+  } as BtcToLnTerms;
   const transcript = "ab".repeat(32);
   const request: FirmQuoteRequest = {
     kind: "btc-to-ln",
@@ -98,6 +125,13 @@ describe("terms offer", () => {
 
   test("a signed offer within the limits is accepted", () => {
     expect(checkTermsOffer(sign(terms), context).refund_lock_height).toBe(terms.refund_lock_height);
+  });
+
+  test("an offer without cooperative claims is refused", () => {
+    const unfeatured = { ...terms, required_features: [] } as unknown as BtcToLnTerms;
+    expect(() =>
+      checkTermsOffer(sign(unfeatured), { ...context, envelopeContractHash: bytesToHex(contractHash(unfeatured)) }),
+    ).toThrow("terms offer does not commit to cooperative claims");
   });
 
   test("offers above a limit or bound elsewhere are refused", () => {

@@ -11,6 +11,7 @@ import { parseArgs } from "node:util";
 import { addressScript, scriptAddress } from "../src/swap/address";
 import { RelayConnection } from "../src/swap/relay";
 import { runSwap } from "../src/swap/swap";
+import { memoryCosigner } from "./memoryCosigner";
 
 const { values } = parseArgs({
   options: {
@@ -90,10 +91,13 @@ try {
         const sent = await rpc<string>("sendrawtransaction", [raw]);
         if (sent !== txid) throw new Error("Core broadcast another transaction");
       },
+      cosigner: memoryCosigner(),
     },
     { replyMs: 60_000, settleMs: Number(values["settle-timeout"]) * 1000 },
   );
-  console.log(JSON.stringify(outcome));
+  writeFileSync(join(out, "web-recovery-paid.age"), outcome.paidRecovery, { mode: 0o600 });
+  const { paidRecovery: _paid, ...summary } = outcome;
+  console.log(JSON.stringify(summary));
 } finally {
   relay.close();
 }

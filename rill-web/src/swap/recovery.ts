@@ -27,6 +27,8 @@ export interface RecoveryParts {
   readonly updatedAt: number;
   readonly funding: readonly { readonly binding: FundingBinding; readonly signature: string }[];
   readonly preimage: string | null;
+  /** Recovery extensions, such as the cooperative reservation; empty by default. */
+  readonly extensions?: Readonly<Record<string, unknown>>;
 }
 
 export function recoveryDocument(parts: RecoveryParts): Uint8Array {
@@ -66,7 +68,7 @@ export function recoveryDocument(parts: RecoveryParts): Uint8Array {
       preimage: parts.preimage,
       dangerous_signature_issued: false,
     },
-    extensions: {},
+    extensions: parts.extensions ?? {},
   });
   if (text === undefined) throw new Error("recovery document is not JSON");
   return new TextEncoder().encode(text);

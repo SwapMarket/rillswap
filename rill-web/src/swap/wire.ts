@@ -14,6 +14,8 @@ import { contractHash, handshakeInitHash, handshakeAcceptHash, jcs, providerTerm
 
 export const EPOCH_SESSION_FEATURE = "epoch-bound-session/v1";
 export const EPOCH_SESSION_EXTENSION = "rillswap/epoch-bound-session";
+/** Mandatory: every new swap commits to attempting a private MuSig2 key-path claim. */
+export const COOPERATIVE_CLAIM_FEATURE = "cooperative-claim/v1";
 export const MAX_SATS = 2_100_000_000_000_000n;
 
 export class ProtocolError extends Error {
@@ -121,8 +123,14 @@ export function checkHandshakeAccept(payload: unknown, init: HandshakeInit, send
     throw new ProtocolError("provider selected something that was not requested");
   }
   const required = new Set([...init.required_features, ...accept.required_features]);
-  if ([...required].some((feature) => feature !== EPOCH_SESSION_FEATURE)) {
+  if ([...required].some((feature) => feature !== EPOCH_SESSION_FEATURE && feature !== COOPERATIVE_CLAIM_FEATURE)) {
     throw new ProtocolError("handshake requires an unknown feature");
+  }
+  if (
+    !init.required_features.includes(COOPERATIVE_CLAIM_FEATURE) ||
+    !accept.required_features.includes(COOPERATIVE_CLAIM_FEATURE)
+  ) {
+    throw new ProtocolError("cooperative claim must be jointly negotiated");
   }
   if (required.has(EPOCH_SESSION_FEATURE)) {
     const epoch = (init.extensions[EPOCH_SESSION_EXTENSION] as { epoch_inbox_xonly_key?: string } | undefined)
@@ -246,7 +254,10 @@ export function checkBtcToLnTerms(terms: BtcToLnTerms): void {
   if (timing.max_outgoing_htlc_expiry_height + timing.learn_and_claim_blocks >= terms.refund_lock_height + 1) {
     throw new ProtocolError("outgoing HTLC exposure does not fit before refund");
   }
-  if (terms.required_features.length > 0) throw new ProtocolError("terms require an unknown feature");
+  // Both handshake halves already carry the feature (checkHandshakeAccept).
+  if (terms.required_features.length !== 1 || terms.required_features[0] !== COOPERATIVE_CLAIM_FEATURE) {
+    throw new ProtocolError("terms offer does not commit to cooperative claims");
+  }
 }
 
 export interface OfferContext {

@@ -53,6 +53,7 @@ jobs:
         run: bun install --frozen-lockfile --ignore-scripts
       - name: Build and test disconnected browser source
         run: |
+          (cd src/vendor/rill-crypto && sha256sum -c SHA256SUMS)
           bun run build
           bun test unit
       - name: Install matching Chromium for pinned Playwright
@@ -100,6 +101,10 @@ jobs:
             tmp/ci-venv/bin/python -m pytest -q tests/python --basetemp=tmp/pytest-ci
       - name: Build pinned WASM and run signature smoke test
         run: ./scripts/test-wasm.sh
+      - name: Require the web client's vendored WASM to equal this build
+        run: |
+          cmp tmp/wasm/rill_crypto_wasm.mjs ../rill-web/src/vendor/rill-crypto/rill_crypto_wasm.mjs
+          cmp tmp/wasm/rill_crypto_wasm.wasm ../rill-web/src/vendor/rill-crypto/rill_crypto_wasm.wasm
       - name: Test typed WASM verification facade
         run: |
           bun install --frozen-lockfile --ignore-scripts

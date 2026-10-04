@@ -144,7 +144,7 @@ export class Session {
   envelope(
     messageType: string,
     payload: Record<string, unknown>,
-    options: { inReplyTo?: string; contract?: string; signed?: boolean } = {},
+    options: { inReplyTo?: string; contract?: string; signed?: boolean; requiredFeatures?: readonly string[] } = {},
   ): Envelope {
     const unsigned: Envelope = {
       protocol: "rillswap",
@@ -159,7 +159,7 @@ export class Session {
       contract_hash: options.contract ?? null,
       message_type: messageType,
       payload,
-      required_features: [],
+      required_features: [...(options.requiredFeatures ?? [])],
       extensions: {},
       signature: null,
     };

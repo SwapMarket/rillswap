@@ -9,6 +9,7 @@ import signet from "./networks/signet.json";
 import testnet4 from "./networks/testnet4.json";
 import { addressScript, scriptAddress } from "./swap/address";
 import { RelayConnection } from "./swap/relay";
+import { browserCosigner } from "./swap/browserCosigner";
 import { type FundingRequest, runSwap, type SwapRequest } from "./swap/swap";
 
 const NETWORKS = { signet, testnet4, regtest } as const;
@@ -183,12 +184,19 @@ async function run(
         await waitForClick(panel, "I broadcast it");
         panel.replaceChildren(node("p", "Waiting for the provider to pay the invoice..."));
       },
+      cosigner: browserCosigner,
     });
     panel.replaceChildren(
       node("h2", "Invoice paid"),
       node("p", "The provider paid the invoice; this preimage proves it:"),
       node("pre", outcome.preimage, "swap-preimage"),
+      node("p", outcome.cooperation === "verified"
+        ? "You cosigned the provider's private key-path claim, so the swap leaves no script trace on chain."
+        : "The provider claims with the preimage (cooperation was skipped). Nothing else is needed from you.",
+        "swap-cooperation"),
+      node("p", "Optional: keep this paid recovery file as a record of the completed swap."),
     );
+    offerDownload(panel, outcome.paidRecovery, `rillswap-paid-recovery-${Math.floor(Date.now() / 1000)}.age`);
   } catch (error) {
     const message = (error as Error).message;
     panel.replaceChildren(node("h2", "Swap stopped"), node("p", message, "swap-error"));

@@ -33,7 +33,16 @@ rill-cli's `run_swap`:
 - funding from the user's own wallet: the user pastes a **finalized PSBT**
   (native segwit inputs with `witness_utxo`, so the signed maximum funding fee
   is checkable), the client requires exactly one contract output with the
-  exact amount and P2WPKH/P2TR other outputs, and the user broadcasts.
+  exact amount and P2WPKH/P2TR other outputs, and the user broadcasts;
+- the mandatory cooperative MuSig2 claim (`cooperative-claim/v1`): every
+  handshake requests it and accepts or terms without it are refused. After the
+  provider pays, the client verifies the preimage, echoes one readiness
+  challenge, reconstructs the proposed key-path claim byte for byte (outpoint,
+  provider destination, fee within the signed cap, non-dust output, BIP341
+  sighash), journals a reservation, and cosigns once with the vendored
+  rill-crypto WASM build (`src/vendor/rill-crypto`, the same libsecp256k1
+  MuSig2 code as the CLI and provider). It then verifies the provider's
+  partial and the aggregate signature before its receipt.
 
 There is no chain backend in the browser. The user enters the current block
 height; it sets the refund-height ceiling (`tip + max refund delay`) and the
@@ -42,9 +51,26 @@ lock or make offers fail. Keys exist only in the tab's memory. The terms
 recovery file must be downloaded before accepting terms, and the funded one
 before the funding binding is sent and before broadcast. If the provider does
 not pay, refund with `rill recover watch-refund` on the funded recovery file
-after the refund height; the browser does not refund. Nothing is stored in the
-browser, so an upgrade or reload reads, migrates, or resumes nothing; an
-interrupted swap continues only through the downloaded recovery file.
+after the refund height; the browser does not refund. The only thing stored in the
+browser is the cooperation journal below, which never grants anything, so an
+upgrade or reload reads, migrates, or resumes nothing; an interrupted swap
+continues only through the downloaded recovery file.
+
+Cooperation never blocks the swap. The client cosigns only after it holds the
+verified payment preimage, and BIP341 signatures commit the exact outpoint,
+amount, and output, so a cosignature can only let the provider take the output
+it is already owed. Without a chain backend the browser cannot check
+confirmations or fee policy like the CLI does; it trusts the provider for
+confirmation and fee liveness only. Any refusal, timeout, or missing browser
+capability abandons cooperation and the provider claims with the preimage
+instead, costing privacy only. Before allocating its nonce the client holds an
+exclusive Web Lock and commits a create-only IndexedDB record (database
+`rillswap-cooperation`, keyed by contract hash, holding the cooperation ID and
+sighash, no secrets or preimage) with strict durability. An existing record
+refuses; an absent one proves nothing. The secret nonce lives only inside one
+WASM handle and is never stored, and a page restored from the back/forward
+cache never signs. After payment the page offers an optional paid recovery file
+with the preimage and any reservation.
 There is no service worker or in-page update check: a new release takes
 effect only when the user reloads, which also discards the in-memory keys.
 
@@ -56,7 +82,9 @@ The relay also sees the client's IP address unless the browser uses Tor or a
 VPN. This is not anonymity.
 
 The swap page's CSP allows `connect-src wss:` plus plain `ws://` to loopback
-(for a local regtest relay); `RelayConnection` enforces the same rule. The
+(for a local regtest relay); `RelayConnection` enforces the same rule. It also
+allows `connect-src 'self'` and `script-src 'wasm-unsafe-eval'` so the page can
+fetch and compile its own bundled MuSig2 WASM (loaded only after funding). The
 preview page keeps `connect-src 'none'`.
 
 The HTML contains a meta Content Security Policy that restricts later script,
@@ -72,8 +100,8 @@ persistent browser storage. Startup and reload do not open a database or ask
 for persistence. A successful diagnostic proves neither long-term durability
 nor recovery; interruption may leave an inert diagnostic database. The preview
 never scans, repairs, or reuses old/partial databases automatically. There is
-no swap database, encrypted-record format, per-swap lock, or auto-migration to
-claim. A future release must establish those together before any commitment.
+no swap database, encrypted-record format, or auto-migration to claim; the
+swap page's cooperation journal is separate and refusal-only.
 Absence of a database proves nothing about prior browser use or safe funding.
 
 `src/nip59Transport.ts` is the gift-wrap producer the swap client uses
