@@ -3,7 +3,103 @@
 RillSwap provider policy, treasury management, persistence, reconciliation,
 watching, and the authoritative cross-repository integration harness.
 
-Status: pre-release and not suitable for real funds.
+Status: pre-release and not suitable for real funds. Regtest, signet, and
+testnet4 serve both swap directions; mainnet serving stays refused until a
+release accepts it.
+
+## Operator quickstart (signet)
+
+The rest of this README is design and upgrade notes. This section is the
+supported path to a running signet provider.
+
+**You need:** Bitcoin Core (synced signet, RPC on loopback), LND on the same
+host (synced, with outbound liquidity and one channel for BTC to LN, or
+inbound liquidity and an on-chain wallet in Core for LN to BTC), Tor with an
+`HTTPTunnelPort` (relay traffic must not reveal your IP), Python 3.13 or later,
+`uv`, `cmake` with a C compiler, and `age-keygen`.
+
+1. Check out `rill-core`, `rill-crypto`, and `rill-provider` side by side
+   (this monorepo already does), then install from `rill-provider/`:
+
+   ```sh
+   uv venv --python 3.14 .venv
+   uv pip install --python .venv/bin/python -r requirements-dev.txt
+   source .venv/bin/activate          # puts `rill-provider` on PATH
+   cmake -S ../rill-crypto -B tmp/native -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+   cmake --build tmp/native           # builds tmp/native/librill_crypto.so
+   ```
+
+2. Make a working directory (for example `/srv/rill`) and an age custody key.
+   It decrypts the provider identity and store secrets; back it up offline.
+
+   ```sh
+   age-keygen -o /srv/rill/custody.key && chmod 600 /srv/rill/custody.key
+   ```
+
+3. Create the provider identity, encrypted to that key's public recipient. The
+   command prints the identity's x-only public key: that is
+   `provider_identity_xonly`, and what clients paste as "Provider identity".
+
+   ```sh
+   rill-provider provision-identity --out /srv/rill/provider-identity.age \
+       --recipient "$(age-keygen -y /srv/rill/custody.key)" \
+       --native-crypto-library "$PWD/tmp/native/librill_crypto.so"
+   ```
+
+4. Bake narrow LND macaroons (never use `admin.macaroon` in production):
+
+   ```sh
+   lncli bakemacaroon offchain:read info:read --save_to /srv/rill/macaroons/read.macaroon
+   lncli bakemacaroon offchain:read offchain:write info:read \
+       --save_to /srv/rill/macaroons/payment.macaroon
+   # LN to BTC only:
+   lncli bakemacaroon invoices:read invoices:write info:read \
+       --save_to /srv/rill/macaroons/invoices.macaroon
+   ```
+
+5. Copy [`examples/provider.signet.json`](examples/provider.signet.json) to
+   `/srv/rill/provider.json` and replace every example value: the printed
+   identity key, `custody_recipient` (`age-keygen -y custody.key`), the native
+   library path, Core's RPC port and `.cookie`, LND's gRPC port and
+   `tls.cert`, `provider_destination_script` (the scriptPubKey hex of your own
+   P2WPKH or P2TR address, from `bitcoin-cli getaddressinfo`; claimed swap
+   funds go there), your relays, and your Tor `relay_proxy`. Relative paths
+   resolve from the config file. Core and LND are reached on `127.0.0.1`. The
+   example's test (`tests/test_cli.py`) proves it passes every startup check.
+   For LN to BTC, set `handshake.profile` and `terms.profiles` to
+   `ln-to-btc/v1`, add `lnd.invoices_macaroon`, and set `bitcoin_core.wallet`
+   to the Core wallet that funds swaps.
+
+6. Create the store once, then serve:
+
+   ```sh
+   rill-provider provision-store --config /srv/rill/provider.json
+   rill-provider serve --config /srv/rill/provider.json   # stop with SIGINT/SIGTERM
+   ```
+
+   `serve` warns only if no relay accepts its signed announcement. To confirm
+   discovery, list verified announcements with `rill-cli` (read-only):
+
+   ```sh
+   rill providers list --network ../rill-docs/networks/signet.json        --crypto-library "$PWD/tmp/native/librill_crypto.so"        --relay wss://your.relay --relay-proxy http://127.0.0.1:9080
+   ```
+
+   Your identity key should appear with your terms.
+
+**Cooperative claims.** Every new swap negotiates `cooperative-claim/v1`; you
+cannot turn it off. After the swap settles, the provider and client cosign a
+MuSig2 key-path spend that looks like any single-key Taproot payment. The
+cooperative fee equals the unilateral claim fee. If the peer is unreachable or
+anything does not match within a short nonrenewing window (at most 30 s), each
+side simply uses its own script-path claim or refund, so cooperation never
+blocks recovery. Nothing needs configuring.
+
+**Operating.** Back up the custody key and the identity file offline; never
+restore an old copy of the store (a restored snapshot is refused rather than
+trusted). Keep exactly one `serve` per store. Use `inspect-swaps` to list
+retained swaps offline and `reconcile-payment` for a stuck `PAYING` swap. On
+upgrade, stop the service, install the new version, and start it again: stores
+v8 to v13 upgrade on open; v5 to v7 need `migrate-store` first (below).
 
 The provider's first implementation is an append-only SQLite reservation
 ledger. Its explicit `create` operation refuses existing files and remains
@@ -30,7 +126,6 @@ mkdir -p tmp
 .venv/bin/ruff check src tests
 ```
 
-No provider network service or release-safe funding workflow exists yet.
 
 The explicit `handshake_diagnostic.verify_handshake_diagnostic` uses the pinned
 `rill-crypto` Python adapter and a caller-selected **absolute** native library
@@ -610,7 +705,8 @@ advances each swap one step per tick:
   looking for a late claim (which still settles). The hold is canceled
   only once the refund has `refund_resolution_confirmations` (`REFUNDED`).
 
-Cooperative MuSig2 claims are not negotiated yet.
+The client normally claims with a cooperative key-path spend that the provider
+cosigns (described below); its own script-path claim stays the fallback.
 
 `LndHoldInvoices.settle` accepts optional transport guards: an absolute
 monotonic `deadline` and a repeatable, nonconsuming `submission_allowed`
@@ -888,7 +984,7 @@ does not prove an unpaid invoice or create a recovery action. Older terminal
 A preimage already lost by a previous-release crash cannot be reconstructed by
 this fix and remains an unresolved recovery case.
 
-### Operator entrypoint (private regtest only)
+### Operator entrypoint
 
 ```sh
 rill-provider provision-identity --out id.age --recipient age1... \
@@ -926,8 +1022,8 @@ attempts and closes unfinished arbitration windows. Missing evidence remains
 unknown: there is no backfill, scan, RPC, payment retry, debt conversion, or new
 signing permission. Partial schemas refuse without repair; interrupted DDL rolls
 back the table and both version markers. A binary rollback from v14 is not
-supported. Production reverse cooperation remains disabled pending integration
-and acceptance.
+supported. Mainnet serving, in either direction, stays refused until a release
+accepts it.
 
 On the current version, a *new* BTC-to-LN acceptance can record an `ADMITTED`
 arbitration row only when both retained authenticated handshake halves and the
@@ -936,8 +1032,7 @@ acceptance is independently signature-verified, and the signed acknowledgment
 is bound to that contract in the same transaction. Mixed feature commitments
 are refused instead of silently downgraded. Old or fully unfeatured accepted
 swaps get no row. `ADMITTED` alone starts no cooperation window and does not
-delay the normal unilateral claim. Live quotes do not yet offer this feature;
-the scheduler and crash-safe fallback are still required before activation.
+delay the normal unilateral claim. Every new live quote requires this feature.
 
 Upgrading an authoritative v5, v6, or v7 installation is an explicit offline operation:
 
@@ -962,7 +1057,7 @@ refuses the whole upgrade. The check uses the exact hash bound by the
 retained accepted offer, not any hash of that session. Upgraded providers with many retained swaps can
 therefore start at or above `max_active_reservations`.
 It does not start relays, scan a chain, send payments, publish messages, or delete
-history. Interrupted upgrades roll back; `serve` never migrates automatically.
+history. Interrupted upgrades roll back; `serve` never migrates a v5 to v7 store.
 Missing, partial, copied, foreign, and unsupported older stores remain refused.
 An already-current store is safe to pass to this command again.
 

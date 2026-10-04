@@ -270,3 +270,25 @@ def test_every_lnd_credential_resolves_relative_to_the_config(tmp_path: Path) ->
     assert config.lnd is not None
     assert config.lnd.payment_macaroon == tmp_path / "pay.macaroon"
     assert config.lnd.invoices_macaroon == tmp_path / "invoices.macaroon"
+
+
+def test_signet_example_config_is_servable_as_documented() -> None:
+    """The README quickstart example must load and pass every startup gate."""
+    from rill_core.networks import require_funding_release  # noqa: PLC0415
+
+    from rill_provider.relay_client import RelayConnection, require_relay_route  # noqa: PLC0415
+
+    example = Path(__file__).parents[1] / "examples" / "provider.signet.json"
+    config = load_config(example)
+    assert config.network.name == "signet"
+    require_funding_release(config.network)
+    assert "cooperative-claim/v1" in config.handshake_policy().features
+    assert config.lnd is not None
+    assert config.lnd.payment_macaroon is not None
+    assert config.bitcoin_core is not None
+    proxy = require_relay_route(
+        config.network, config.relay_proxy, allow_direct=config.allow_direct_relays
+    )
+    for url in config.relay_urls:
+        RelayConnection(url, proxy=proxy)
+    assert config.service_policy().profiles == (config.handshake.profile,)

@@ -1,0 +1,63 @@
+{
+  "network": {
+    "family": "bitcoin",
+    "name": "signet",
+    "genesis_hash": "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6",
+    "signet_challenge": "512103ad5e0edad18cb1f0fc0d28a3d4f1f3e445640337489abb10404f2d1e086be430210359ef5021964fe22d6f8e05b2463c9540ce96883fe3b278760f048f5189f2e6c452ae",
+    "consensus_profile": "bitcoin-core-v30.0",
+    "deployment_namespace": null
+  },
+  "provider_identity_xonly": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+  "identity_file": "provider-identity.age",
+  "store_path": "store/live.sqlite",
+  "custody_recipient": "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p",
+  "custody_identity_file": "custody.key",
+  "native_crypto_library": "/opt/rill-crypto/librill_crypto.so",
+  "bitcoin_core": {
+    "port": 38332,
+    "cookie_file": "/var/lib/bitcoind/signet/.cookie"
+  },
+  "lnd": {
+    "port": 10009,
+    "tls_certificate": "/var/lib/lnd/tls.cert",
+    "macaroon": "macaroons/read.macaroon",
+    "payment_macaroon": "macaroons/payment.macaroon"
+  },
+  "provider_destination_script": "512079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+  "authority": {
+    "volume_label": "rill-provider-signet",
+    "outside_restore_domain": true,
+    "single_host": true
+  },
+  "handshake": {
+    "profile": "btc-to-ln/v1",
+    "features": [
+      "cooperative-claim/v1"
+    ],
+    "encryption_suites": [
+      "noise-xk-secp256k1-chachapoly-sha256/v1"
+    ],
+    "capabilities": [
+      "core/v1",
+      "recovery/v1"
+    ]
+  },
+  "terms": {
+    "profiles": [
+      "btc-to-ln/v1"
+    ],
+    "amount_bands": [
+      [
+        10000,
+        1000000
+      ]
+    ],
+    "base_fee_sat": 100,
+    "proportional_millionths": 2000,
+    "slot": "signet-1"
+  },
+  "relay_urls": [
+    "wss://relay.example.com"
+  ],
+  "relay_proxy": "http://127.0.0.1:9080"
+}
