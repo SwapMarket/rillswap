@@ -103,6 +103,9 @@ POLL_SECONDS = 5.0
 # The provider caps its own nonrenewing window at 30 s; stay inside it.
 REVERSE_PROPOSAL_SECONDS = 20
 REVERSE_REPLY_GRACE_SECONDS = 5
+# Settlement lifetime that must remain after the cooperative wait, so a silent
+# provider costs privacy only, never the bounded unilateral claim.
+REVERSE_UNILATERAL_RESERVE_SECONDS = 60
 _T = TypeVar("_T")
 _UNRESOLVED = (
     "reverse swap status unresolved; preserve all recovery files, check `lncli listpayments`, "
@@ -315,6 +318,8 @@ def _check_offer(  # noqa: PLR0913 - every binding checked explicitly
         and now < terms.terms_expiry
     ):
         raise SwapError("terms offer is not bound to this provider, network, or time")
+    if COOPERATIVE_CLAIM_FEATURE not in terms.required_features:
+        raise SwapError("terms offer does not commit to cooperative claims")
     return terms
 
 
@@ -689,7 +694,11 @@ async def _cooperative_claim(  # noqa: PLR0913, PLR0915 - one original-session k
         raise
     except Exception:  # noqa: BLE001 - no fresh tip, no disclosure; claim unilaterally
         tip = None
-    if type(tip) is not int or tip >= deadline_height:
+    remaining = lifetime.deadline - time.monotonic()
+    needed = (
+        REVERSE_PROPOSAL_SECONDS + REVERSE_REPLY_GRACE_SECONDS + REVERSE_UNILATERAL_RESERVE_SECONDS
+    )
+    if type(tip) is not int or tip >= deadline_height or remaining < needed:
         report("cooperative claim window unavailable; claiming unilaterally")
         return None
     user_key = bytes.fromhex(terms.client_contract_compressed_key)

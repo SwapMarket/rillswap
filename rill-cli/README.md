@@ -211,7 +211,14 @@ absolute fee as the first script-path claim, so the watcher's bump schedule is
 unchanged; it rebroadcasts the key-path claim until a due bump replaces it with
 the already durable script-path claim. A tip at or past the claim-confirmation
 height, a relay failure, timeout, decline, or invalid partial costs only
-privacy: the client claims with the preimage as before.
+privacy: the client claims with the preimage as before. The client skips the
+attempt when less than 85 seconds of `--settle-timeout` remain (the 25 second
+wait plus a 60 second reserve for the unilateral claim).
+
+Cooperative MuSig2 claims are mandatory for new swaps in both directions. Every
+`handshake_init` requests `cooperative-claim/v1`; the client refuses a
+handshake accept that does not echo it and a terms offer that does not commit
+to it, before any funding or payment.
 
 ```sh
 rill swap ln-to-btc \

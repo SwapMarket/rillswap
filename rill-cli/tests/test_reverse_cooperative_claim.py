@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 PROVIDER_CONTRACT = (11).to_bytes(32, "big")
 PROVIDER_SESSION = (9).to_bytes(32, "big")
 KEY_PATH_SIGNATURE = 64
+LIFETIME = 120  # long enough for the cooperative wait plus its unilateral reserve
 
 
 def _provider(fixture: NativeSdk) -> _Session:
@@ -147,7 +148,7 @@ def _run(
             fixture.write(candidate, previous)
             return candidate
 
-        return fixture, await fixture.run(write)
+        return fixture, await fixture.run(write, settle_timeout=LIFETIME)
 
     with Context(library_path=NATIVE_LIBRARY) as crypto:
         return asyncio.run(exercise(crypto))
@@ -216,7 +217,7 @@ def test_tip_past_cooperative_deadline_never_discloses(
             fixture.write(candidate, previous)
             return candidate
 
-        await fixture.run(write)
+        await fixture.run(write, settle_timeout=LIFETIME)
         assert "cooperative claim window unavailable; claiming unilaterally" in fixture.reports
         assert all(
             call.args[0].message_type != "action_request"
@@ -226,6 +227,39 @@ def test_tip_past_cooperative_deadline_never_discloses(
             REVERSE_DISCLOSURE_EXTENSION not in json.loads(document)["extensions"]
             for document in fixture.documents
         )
+
+    with Context(library_path=NATIVE_LIBRARY) as crypto:
+        asyncio.run(exercise(crypto))
+
+
+@NATIVE_ONLY
+@pytest.mark.native_crypto
+def test_short_settlement_lifetime_never_discloses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wait that could exhaust the lifetime would risk the unilateral claim."""
+
+    async def exercise(crypto: Context) -> None:
+        fixture = NativeSdk(crypto, tmp_path, monkeypatch)
+        _featured(fixture, monkeypatch)
+
+        def write(candidate: bytes, previous: bytes | None) -> bytes:
+            fixture.write(candidate, previous)
+            return candidate
+
+        needed = (
+            reverse.REVERSE_PROPOSAL_SECONDS
+            + reverse.REVERSE_REPLY_GRACE_SECONDS
+            + reverse.REVERSE_UNILATERAL_RESERVE_SECONDS
+        )
+        await fixture.run(write, settle_timeout=needed - 1)
+        assert "cooperative claim window unavailable; claiming unilaterally" in fixture.reports
+        assert all(
+            call.args[0].message_type != "action_request"
+            for call in fixture.session.send.call_args_list
+        )
+        (raw,) = fixture.broadcasts
+        assert fixture.preimage in _segwit_claim(raw)[1]
 
     with Context(library_path=NATIVE_LIBRARY) as crypto:
         asyncio.run(exercise(crypto))

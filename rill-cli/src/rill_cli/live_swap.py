@@ -105,6 +105,8 @@ PROFILE: Literal["btc-to-ln/v1"] = "btc-to-ln/v1"
 type ProfileId = Literal["btc-to-ln/v1", "ln-to-btc/v1"]
 ENCRYPTION_SUITES = ("noise-xk-secp256k1-chachapoly-sha256/v1",)
 CAPABILITIES = ("core/v1", "recovery/v1")
+# Handshake features this client negotiates; cooperative claims are always requested.
+NEGOTIATED_FEATURES = frozenset({EPOCH_SESSION_FEATURE, COOPERATIVE_CLAIM_FEATURE})
 NIP59_BACKDATE_SECONDS = 2 * 24 * 60 * 60
 MAX_PROVIDER_SEQUENCE_WINDOW = 16
 MAX_PROVIDER_PENDING_BYTES = 256 * 1024
@@ -427,9 +429,7 @@ class _Session:
                 return False
             payload = parse_model_json(HandshakeAcceptPayload, canonicalize(envelope.payload))
             accepted = payload.accept
-            accepted.validate_against(
-                initiation, supported_features=frozenset({EPOCH_SESSION_FEATURE})
-            )
+            accepted.validate_against(initiation, supported_features=NEGOTIATED_FEATURES)
             if accepted.provider_session_xonly_key != envelope.sender_session_key:
                 return False
             self.crypto.schnorr_verify(
@@ -1320,7 +1320,13 @@ async def _handshake(
         expected_provider_identity_xonly_key=identity,
         requested_encryption_suites=ENCRYPTION_SUITES,
         requested_capabilities=CAPABILITIES,
-        required_features=(EPOCH_SESSION_FEATURE,) if epoch_bound else (),
+        # Cooperative MuSig2 claims are mandatory; a provider that does not
+        # echo them fails ``validate_against`` below before any terms.
+        required_features=(
+            (COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE)
+            if epoch_bound
+            else (COOPERATIVE_CLAIM_FEATURE,)
+        ),
         extensions={EPOCH_SESSION_EXTENSION: {"epoch_inbox_xonly_key": epoch}}
         if epoch_bound
         else {},
@@ -1332,7 +1338,7 @@ async def _handshake(
     answer = await session.reply_to(request, "handshake_accept")
     accept = parse_model_json(HandshakeAccept, canonicalize(answer.payload["accept"]))
     signature = str(answer.payload["provider_identity_signature"])
-    accept.validate_against(init, supported_features=frozenset({EPOCH_SESSION_FEATURE}))
+    accept.validate_against(init, supported_features=NEGOTIATED_FEATURES)
     session.crypto.schnorr_verify(
         bytes.fromhex(identity), handshake_accept_hash(accept), bytes.fromhex(signature)
     )
@@ -1380,6 +1386,8 @@ def _check_offer(  # noqa: PLR0913 - every binding checked explicitly
         and now < terms.terms_expiry
     ):
         raise SwapError("terms offer is not bound to this provider, network, or time")
+    if COOPERATIVE_CLAIM_FEATURE not in terms.required_features:
+        raise SwapError("terms offer does not commit to cooperative claims")
     return terms
 
 

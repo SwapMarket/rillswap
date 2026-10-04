@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 PAYOUT = 50_000
+TIP_HASH = "61" * 32  # the one block both Core and LND report at TIP
 
 
 def _varint(raw: bytes, at: int) -> tuple[int, int]:
@@ -115,6 +116,30 @@ class FakeHold:
             "ACCEPTED", (HeldHtlc(invoice["msat"], TIP + invoice["cltv"] + 10),)
         )
 
+    def observe_bound_invoice(self, expected: InvoiceBinding, **_options: Any) -> Any:  # noqa: ANN401
+        from rill_provider.lnd_hold_invoice import BoundHoldInvoiceObservation  # noqa: PLC0415
+
+        return BoundHoldInvoiceObservation(
+            expected.payment_hash,
+            expected.bolt11_sha256,
+            expected.payee_compressed_pubkey,
+            NETWORK,
+            self.lookup(expected.payment_hash),
+            TIP,
+            TIP_HASH,
+        )
+
+    observe_bound_settled_invoice = observe_bound_invoice
+
+    def settle_bound_invoice(
+        self,
+        expected: InvoiceBinding,
+        preimage: str,
+        **_options: Any,  # noqa: ANN401 - provider settle options
+    ) -> None:
+        assert hashlib.sha256(bytes.fromhex(preimage)).hexdigest() == expected.payment_hash
+        self.settle(preimage)
+
     def settle(self, preimage: str) -> None:
         self.settled.append(hashlib.sha256(bytes.fromhex(preimage)).hexdigest())
 
@@ -173,6 +198,37 @@ class FakeChain:
     def fee_rate_sat_vb(self, _target: int) -> float | None:
         return None
 
+    def observe_cooperative_claim_outpoint(
+        self,
+        binding: Any,  # noqa: ANN401
+        terms: Any,  # noqa: ANN401
+        *,
+        keys: Any,  # noqa: ANN401
+    ) -> Any:  # noqa: ANN401 - provider Core evidence double
+        from rill_core.settlement import check_funding_binding_transaction  # noqa: PLC0415
+        from rill_provider.core_tx_bytes import CooperativeClaimOutpoint  # noqa: PLC0415
+
+        raw, _script, _value = self.funded[binding.funding_txid]
+        depth = max(terms.funding_confirmations, 2)
+        return CooperativeClaimOutpoint(
+            terms.network_identity,
+            check_funding_binding_transaction(raw, binding, terms, keys=keys),
+            binding.funding_txid,
+            binding.contract_vout,
+            int(binding.contract_value_sat),
+            bytes.fromhex(binding.contract_script_pubkey),
+            TIP_HASH,
+            TIP,
+            depth,
+            TIP - depth + 1,
+            "62" * 32,
+        )
+
+    def observe_cooperative_fee_policy(self, blocks: int, **_options: Any) -> Any:  # noqa: ANN401
+        from rill_provider.core_tx_bytes import CooperativeFeePolicy  # noqa: PLC0415
+
+        return CooperativeFeePolicy(NETWORK, TIP_HASH, TIP, blocks, 100, 1000, 1000, blocks)
+
     # The client's wallet view.
     def new_destination_script(self) -> bytes:
         return bytes.fromhex("5120" + "33" * 32)
@@ -218,6 +274,7 @@ def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(  # noqa:
     sys.path.insert(0, str(PROVIDER_TESTS))
     from fake_relay import FakeRelay  # type: ignore[import-not-found]  # noqa: PLC0415
     from pyrage import x25519  # noqa: PLC0415
+    from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE  # noqa: PLC0415
     from rill_crypto import Context  # noqa: PLC0415
     from rill_provider.handshake_service import HandshakeService, ServicePolicy  # noqa: PLC0415
     from rill_provider.handshake_store import HandshakePolicy  # noqa: PLC0415
@@ -237,7 +294,7 @@ def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(  # noqa:
     recoveries: list[bytes] = []
     policy_store = HandshakePolicy(
         profile="ln-to-btc/v1",
-        features=frozenset(),
+        features=frozenset({COOPERATIVE_CLAIM_FEATURE}),
         encryption_suites=frozenset({"noise-xk-secp256k1-chachapoly-sha256/v1"}),
         capabilities=frozenset({"core/v1", "recovery/v1"}),
     )
@@ -288,16 +345,18 @@ def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(  # noqa:
             ),
         )
 
-        def write_recovery(document: bytes, previous: bytes | None) -> None:
+        def write_recovery(document: bytes, previous: bytes | None) -> bytes:
             _write_recovery_snapshot(
                 output, document, previous, NETWORK, credentials=credentials, crypto=crypto
             )
-            target = output if previous is None else tmp_path / "swap.age.funded"
+            suffix = ("", ".funded", ".fallback", ".disclosing")[len(recoveries)]
+            target = tmp_path / f"swap.age{suffix}"
             verify_export_ciphertext(
                 target.read_bytes(), document, NETWORK, credentials=credentials, crypto=crypto
             )
             assert not (tmp_path / "swap.age.paid").exists()
             recoveries.append(document)
+            return document  # the trusted writer's exact acknowledgment
 
         stop = asyncio.Event()
         with LiveSessionStore.acquire(
@@ -350,7 +409,7 @@ def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(  # noqa:
                         ),
                         crypto=crypto,
                         timeout=10,
-                        settle_timeout=10,
+                        settle_timeout=120,
                     )
                 async with asyncio.timeout(5):
                     while not hold.settled:  # noqa: ASYNC110 - polling a fake backend
@@ -376,7 +435,13 @@ def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(  # noqa:
     preimage = initial["monotonic_knowledge"]["preimage"]
     assert hold.settled == [hashlib.sha256(bytes.fromhex(preimage)).hexdigest()]
     assert hold.canceled == []
-    assert len(recoveries) == 2  # terms (with preimage) first, then the funded snapshot
+    # terms (with preimage), funded, signed fallback, then the disclosure reservation
+    assert len(recoveries) == 4
+    # The client claimed by key path with the provider's partial: no preimage on chain.
+    (claim,) = chain.claims
+    _, witness = _segwit_claim(claim)
+    assert [len(item) for item in witness] == [64]
+    assert bytes.fromhex(preimage) not in claim
     funded = json.loads(recoveries[1])
     (record,) = funded["funding_history"]
     assert record["binding"]["funder_role"] == "provider"

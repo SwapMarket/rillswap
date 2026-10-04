@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import time
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -57,8 +58,53 @@ def _invoice(now: int) -> InvoiceBinding:
     )
 
 
+def chain_outpoint(binding: Any, terms: Any, **_keys: Any) -> Any:  # noqa: ANN401 - Core double
+    """Fresh confirmed contract outpoint at ``TIP``, as Core would report it."""
+    from rill_core.settlement import FundingBindingTransactionMatch  # noqa: PLC0415
+    from rill_provider.core_tx_bytes import CooperativeClaimOutpoint  # noqa: PLC0415
+
+    return CooperativeClaimOutpoint(
+        terms.network_identity,
+        FundingBindingTransactionMatch(
+            binding.funding_txid,
+            binding.contract_vout,
+            binding.lineage_anchor_txid,
+            binding.lineage_anchor_vout,
+        ),
+        binding.funding_txid,
+        binding.contract_vout,
+        int(binding.contract_value_sat),
+        bytes.fromhex(binding.contract_script_pubkey),
+        "aa" * 32,
+        TIP,
+        terms.funding_confirmations,
+        TIP - terms.funding_confirmations + 1,
+        "bb" * 32,
+    )
+
+
+def fee_policy(network: Any, blocks: int, **_options: Any) -> Any:  # noqa: ANN401 - Core double
+    """1 sat/vB everywhere at ``TIP``, matching ``chain_outpoint``."""
+    from rill_provider.core_tx_bytes import CooperativeFeePolicy  # noqa: PLC0415
+
+    return CooperativeFeePolicy(network, "aa" * 32, TIP, blocks, 100, 1000, 1000, blocks)
+
+
 class FakeWallet:
     """Funds from one P2WPKH coin; records the broadcast."""
+
+    def observe_cooperative_claim_evidence(
+        self,
+        binding: Any,  # noqa: ANN401
+        terms: Any,  # noqa: ANN401
+        **_options: Any,  # noqa: ANN401
+    ) -> Any:  # noqa: ANN401
+        from rill_cli.wallet_rpc import CooperativeClaimEvidence  # noqa: PLC0415
+
+        return CooperativeClaimEvidence(
+            chain_outpoint(binding, terms),
+            fee_policy(terms.network_identity, terms.timing_policy.claim_confirmation_blocks),
+        )
 
     def __init__(self) -> None:
         self.broadcasts: list[bytes] = []
@@ -109,7 +155,10 @@ def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
         SignedFundingBinding,
         verify_static_signed_funding_binding_history,
     )
-    from rill_core.wire.hashes import EPOCH_SESSION_FEATURE  # noqa: PLC0415
+    from rill_core.wire.hashes import (  # noqa: PLC0415
+        COOPERATIVE_CLAIM_FEATURE,
+        EPOCH_SESSION_FEATURE,
+    )
     from rill_core.wire.messages import (  # noqa: PLC0415
         ContractTerms,
         FundingBinding,
@@ -142,7 +191,9 @@ def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
     sent: list[dict[str, Any]] = []
     policy_store = HandshakePolicy(
         profile="btc-to-ln/v1",
-        features=frozenset({EPOCH_SESSION_FEATURE}) if epoch_bound else frozenset(),
+        features=frozenset({EPOCH_SESSION_FEATURE, COOPERATIVE_CLAIM_FEATURE})
+        if epoch_bound
+        else frozenset({COOPERATIVE_CLAIM_FEATURE}),
         encryption_suites=frozenset({"noise-xk-secp256k1-chachapoly-sha256/v1"}),
         capabilities=frozenset({"core/v1", "recovery/v1"}),
     )
@@ -190,6 +241,8 @@ def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
         )
         chain.broadcast = lambda raw, txid: chain.broadcasts.append(raw) or txid
         chain.confirmations = lambda _txid: 0
+        chain.observe_cooperative_claim_outpoint = chain_outpoint
+        chain.observe_cooperative_fee_policy = partial(fee_policy, NETWORK)
 
         prepared: list[dict[str, Any]] = []
 
@@ -290,7 +343,9 @@ def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
                 stop.set()
                 await runner
                 await relay.stop()
-        for document, suffix in zip(recoveries, ("", ".funded", ".paid"), strict=False):
+        for document, suffix in zip(
+            recoveries, ("", ".funded", ".paid", ".cooperating"), strict=False
+        ):
             verify_export_ciphertext(
                 output.with_name(output.name + suffix).read_bytes(),
                 document,
@@ -313,7 +368,8 @@ def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
                 )
             return
         assert outcome.payment_preimage == PREIMAGE
-        assert len(recoveries) == 3  # terms, funded, and learned-preimage successor
+        # terms, funded, learned-preimage, and the pre-nonce cooperation reservation
+        assert len(recoveries) == 4
         assert json.loads(recoveries[2])["monotonic_knowledge"] == {
             "preimage_known": True,
             "preimage": PREIMAGE,
@@ -342,7 +398,11 @@ def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
                 )
         assert not (tmp_path / "invalid.age.paid").exists()
         context = json.loads(recoveries[0])["verification_context"]
-        expected_features = [EPOCH_SESSION_FEATURE] if epoch_bound else []
+        expected_features = (
+            [COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE]
+            if epoch_bound
+            else [COOPERATIVE_CLAIM_FEATURE]
+        )
         assert context["handshake_init"]["required_features"] == expected_features
         assert context["handshake_accept"]["required_features"] == expected_features
         funded = json.loads(recoveries[1])
@@ -369,7 +429,12 @@ def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
         assert len(wallet.broadcasts) == 1
         assert outcome.funding_txid == wallet.broadcast(wallet.broadcasts[0])
         assert [item["invoice"] for item in sent] == [INVOICE]  # paid exactly once
-        assert len(chain.broadcasts) >= 1  # provider claimed with the preimage
+        # The provider claimed by key path: one 64-byte signature, no preimage.
+        assert outcome.cooperation == "verified"
+        (claim,) = set(chain.broadcasts)  # the watcher may rebroadcast it
+        assert outcome.cooperative_claim_txid is not None
+        assert bytes.fromhex(PREIMAGE) not in claim
+        assert claim[-(1 + 1 + 64 + 4) :][:2] == b"\x01\x40"  # one 64-byte witness item
 
     with Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto:
         asyncio.run(scenario(crypto))
