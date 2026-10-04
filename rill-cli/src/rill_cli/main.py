@@ -174,11 +174,18 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - one flat command ta
                 "--escalate-blocks", type=int, default=12, help="blocks to reach the maximum"
             )
             operation.add_argument("--poll-seconds", type=float, default=30.0)
-            operation.add_argument("--lnd-port", required=True, type=int)
-            operation.add_argument("--lnd-tls-cert", required=True)
-            operation.add_argument(
-                "--lnd-invoice-macaroon", required=True, help="invoices:read macaroon"
+            evidence = operation.add_mutually_exclusive_group(required=True)
+            evidence.add_argument(
+                "--lnd-port", type=int, help="your LND holding the invoice (with the two below)"
             )
+            evidence.add_argument(
+                "--chain-only",
+                action="store_true",
+                help="the invoice is not in your LND: refund past the lock height while the "
+                "funding output is unspent, without checking whether the invoice was paid",
+            )
+            operation.add_argument("--lnd-tls-cert")
+            operation.add_argument("--lnd-invoice-macaroon", help="invoices:read macaroon")
         if command == "watch-claim":
             operation.add_argument("--initial-fee-sat", required=True, type=int)
             operation.add_argument(
@@ -701,13 +708,23 @@ def _watch_refund(  # noqa: PLR0913 - explicit wiring of the collaborators
         raise RecoveryCLIError("intent directory must exist")
     attempts = refund_watcher.load_attempts(intent_dir, authorization, verifier=crypto)
     chain, confirmations, submit = refund_watcher.core_collaborators(reader, binding=binding)
-    observer = LndInvoiceObserver(
-        host="127.0.0.1",
-        port=args.lnd_port,
-        tls_certificate_path=args.lnd_tls_cert,
-        invoice_macaroon_path=args.lnd_invoice_macaroon,
-        network=network,
-    )
+    invoice_state = None
+    if args.chain_only:
+        if args.lnd_tls_cert is not None or args.lnd_invoice_macaroon is not None:
+            raise RecoveryCLIError("--chain-only takes no LND credentials")
+    else:
+        if args.lnd_tls_cert is None or args.lnd_invoice_macaroon is None:
+            raise RecoveryCLIError("--lnd-port needs --lnd-tls-cert and --lnd-invoice-macaroon")
+        observer = LndInvoiceObserver(
+            host="127.0.0.1",
+            port=args.lnd_port,
+            tls_certificate_path=args.lnd_tls_cert,
+            invoice_macaroon_path=args.lnd_invoice_macaroon,
+            network=network,
+        )
+        invoice_state = refund_watcher.lnd_invoice_state(
+            observer, terms.invoice_binding.payment_hash
+        )
 
     def sign(fee: int, tip: int) -> tuple[bytes, str, int, int]:
         signed = construct_container_selected_refund(
@@ -735,9 +752,7 @@ def _watch_refund(  # noqa: PLR0913 - explicit wiring of the collaborators
         max_fee_sat=min(args.max_fee_sat, max_spendable_fee(authorization)),
         escalate_blocks=args.escalate_blocks,
         chain=chain,
-        invoice_state=refund_watcher.lnd_invoice_state(
-            observer, terms.invoice_binding.payment_hash
-        ),
+        invoice_state=invoice_state,
         sign=sign,
         submit=submit,
         confirmations=confirmations,

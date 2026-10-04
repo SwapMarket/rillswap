@@ -1,7 +1,10 @@
 """``rill recover watch-refund``: refund a failed BTC-to-LN swap with fee escalation.
 
 The watcher never refunds a swap the provider paid: the client's own LND must
-report the invoice as not SETTLED before every attempt. Every signed attempt
+report the invoice as not SETTLED before every attempt. Only an explicit
+operator choice (``invoice_state=None``, the CLI's ``--chain-only``) skips that
+check for an invoice no local LND holds; the contract's refund lock and an
+unspent funding output then decide alone, and the outcome says so. Every signed attempt
 is written to a create-only file before its broadcast; those files are the
 durable state, so a restart continues from the highest recorded fee and
 never signs a lower one. Any recorded attempt may confirm.
@@ -166,7 +169,7 @@ class RefundWatcher:
         max_fee_sat: int,
         escalate_blocks: int,
         chain: Callable[[], ChainView | None],
-        invoice_state: Callable[[], str | None],
+        invoice_state: Callable[[], str | None] | None,
         sign: Callable[[int, int], tuple[bytes, str, int, int]],
         submit: Callable[[bytes, str], bool],
         confirmations: Callable[[str], int | None],
@@ -201,12 +204,13 @@ class RefundWatcher:
 
     def step(self) -> dict[str, Any] | None:  # noqa: PLR0911 - one closed rule per branch
         """One poll: refuse, finish, wait, rebroadcast, or record and send a bump."""
-        invoice = self._invoice_state()
-        if invoice is None:
-            LOG.info("invoice state unavailable; not refunding without it")
-            return None
-        if invoice == "SETTLED":
-            return self._outcome("invoice_settled", refund="refused: the provider paid")
+        if self._invoice_state is not None:
+            invoice = self._invoice_state()
+            if invoice is None:
+                LOG.info("invoice state unavailable; not refunding without it")
+                return None
+            if invoice == "SETTLED":
+                return self._outcome("invoice_settled", refund="refused: the provider paid")
         view = self._chain()
         if view is None or not view.unspent_on_chain:
             for attempt in reversed(self.attempts):
@@ -266,6 +270,7 @@ class RefundWatcher:
         return {
             "kind": "btc-to-ln-refund-watch/v1",
             "outcome": outcome,
+            "invoice_check": "lnd" if self._invoice_state is not None else "skipped-chain-only",
             "attempts": [
                 {"attempt": a.attempt, "refund_txid": a.txid, "fee_sat": a.fee_sat}
                 for a in self.attempts

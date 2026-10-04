@@ -552,12 +552,20 @@ def refund_after_unpaid(  # noqa: PLR0913 - explicit scenario inputs
             str(stack.host_port(stack.core, 18443)),
             "--identity",
             str(work / "user-age.key"),
-            "--lnd-port",
-            str(stack.host_port(stack.lnd["user"], 10009)),
-            "--lnd-tls-cert",
-            str(work / "user-tls.cert"),
-            "--lnd-invoice-macaroon",
-            str(work / "user-admin.macaroon"),
+            # A web payer usually pays someone else's invoice: refund from
+            # chain state alone. The CLI run checks its own LND's invoice.
+            *(
+                ["--chain-only"]
+                if args.web
+                else [
+                    "--lnd-port",
+                    str(stack.host_port(stack.lnd["user"], 10009)),
+                    "--lnd-tls-cert",
+                    str(work / "user-tls.cert"),
+                    "--lnd-invoice-macaroon",
+                    str(work / "user-admin.macaroon"),
+                ]
+            ),
             "--intent-dir",
             str(work),
             "--initial-fee-sat",
@@ -589,6 +597,10 @@ def refund_after_unpaid(  # noqa: PLR0913 - explicit scenario inputs
     if watch.returncode != 0:
         return False
     outcome = json.loads(stdout)
+    expected_check = "skipped-chain-only" if args.web else "lnd"
+    if outcome.get("invoice_check") != expected_check:
+        log(f"watch-refund invoice check {outcome.get('invoice_check')} != {expected_check}")
+        return False
     if outcome["outcome"] != "refund_confirmed" or not outcome["attempts"]:
         return False
     refund = json.loads(stack.cli("getrawtransaction", outcome["refund_txid"], "true"))

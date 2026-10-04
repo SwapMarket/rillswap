@@ -73,7 +73,9 @@ class _World:
     recorded_before_send: list[int] = field(default_factory=list)
 
 
-def _watcher(tmp_path: Path, world: _World, monkeypatch: pytest.MonkeyPatch) -> RefundWatcher:
+def _watcher(
+    tmp_path: Path, world: _World, monkeypatch: pytest.MonkeyPatch, *, chain_only: bool = False
+) -> RefundWatcher:
     monkeypatch.setattr(
         refund_watcher,
         "validate_unilateral_spend",
@@ -100,7 +102,7 @@ def _watcher(tmp_path: Path, world: _World, monkeypatch: pytest.MonkeyPatch) -> 
         max_fee_sat=5_000,
         escalate_blocks=10,
         chain=lambda: world.view,
-        invoice_state=lambda: world.invoice,
+        invoice_state=None if chain_only else (lambda: world.invoice),
         sign=sign,
         submit=submit,
         confirmations=world.depths.get,
@@ -200,3 +202,51 @@ def test_cli_registers_watch_refund_with_lnd_evidence() -> None:
              "--rpc-port", "1", "--identity", "i", "--intent-dir", "d",
              "--initial-fee-sat", "1", "--max-fee-sat", "2", "f"]
         )  # fmt: skip
+
+
+def test_chain_only_refunds_past_the_lock_without_any_invoice_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = _World(invoice=None, view=ChainView(LOCK, unspent_on_chain=True))
+    watcher = _watcher(tmp_path, world, monkeypatch, chain_only=True)
+    assert watcher.step() is None  # at the lock height: still the provider's window
+    assert world.submitted == []
+    world.view = ChainView(LOCK + 1, unspent_on_chain=True)
+    assert watcher.step() is None
+    assert len(world.submitted) == 1
+    world.view = ChainView(LOCK + 2, unspent_on_chain=False)
+    world.depths[watcher.attempts[0].txid] = 1
+    outcome = watcher.step()
+    assert outcome is not None
+    assert outcome["outcome"] == "refund_confirmed"
+    assert outcome["invoice_check"] == "skipped-chain-only"
+
+
+def test_chain_only_still_stops_when_the_provider_claimed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = _World(view=ChainView(LOCK + 1, unspent_on_chain=False))
+    outcome = _watcher(tmp_path, world, monkeypatch, chain_only=True).step()
+    assert outcome is not None
+    assert outcome["outcome"] == "outpoint_spent_elsewhere"
+    assert world.submitted == []
+
+
+def test_lnd_checked_outcomes_say_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    outcome = _watcher(tmp_path, _World(invoice="SETTLED"), monkeypatch).step()
+    assert outcome is not None
+    assert outcome["invoice_check"] == "lnd"
+
+
+def test_cli_chain_only_is_explicit_and_excludes_lnd() -> None:
+    from rill_cli.main import _parser  # noqa: PLC0415
+
+    base = ["recover", "watch-refund", "--network", "n", "--crypto-library", "l",
+            "--funding-attempt-id", "a", "--binding-revision", "0", "--rpc-cookie", "c",
+            "--rpc-port", "1", "--identity", "i", "--intent-dir", "d",
+            "--initial-fee-sat", "1", "--max-fee-sat", "2"]  # fmt: skip
+    args = _parser().parse_args([*base, "--chain-only", "f"])
+    assert args.chain_only is True
+    assert args.lnd_port is None
+    with pytest.raises(SystemExit):
+        _parser().parse_args([*base, "--chain-only", "--lnd-port", "1", "f"])

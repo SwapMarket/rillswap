@@ -499,9 +499,12 @@ exceptions are not translated. Neither signal classification nor a returned
 txid proves chain inclusion or makes a second attempt safe.
 
 `rill recover watch-refund` is the automatic form for a swap the provider
-never paid. It needs your own LND to hold the invoice (an `invoices:read`
-lookup), so it fits paying your own node's invoice; for someone else's
-invoice use `sign-refund` or `broadcast-refund`, which need only Core. It
+never paid. With `--lnd-port`, `--lnd-tls-cert`, and
+`--lnd-invoice-macaroon` it checks the invoice in your own LND before every
+attempt, which fits paying your own node's invoice. For someone else's invoice
+pass `--chain-only` instead: it then refunds only past the refund lock height
+while the funding output is still unspent, without knowing whether the invoice
+was paid, and its JSON reports `"invoice_check":"skipped-chain-only"`. It
 polls until the refund confirms or the invoice settles. Before every attempt
 it asks your own LND (`--lnd-port`, `--lnd-tls-cert`,
 `--lnd-invoice-macaroon`, an
