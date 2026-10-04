@@ -148,6 +148,7 @@ checkout or multichain conformance has passed. Offline `rill-payments` and
 | M14 | Sandbox native API authority and event evidence | Distinct read/payment capabilities, durable verified prebinding, authenticated real RPC receipt, closed signed historical contract/key/terms binding, late and impaired evidence; never production fulfillment |
 | M15 | Sandbox SDK funding/recovery | Shared atomic attempt reservation before wallet authorization, immutable private operation, guarded signing/broadcast, contradictory response rejection, same-hash observation after ambiguity/expiry; unknown metadata never auto-dispatches |
 | M16 | Disposable Bun merchant LND conformance | Actual TLS/macaroons issuance and funded receipt, same-operation recovery across merchant-process restart, one atomic acceptance, stable signed delivery retry/history and secret projection; not browser-wallet, daemon-restart or production conformance |
+| M17 | Scoped Bun merchant credentials | Documented permissions suffice for funded recovery flow; read-only write refusal with absent probe hash, independent TLS/signature failure causes and SendPaymentV2 denial; not formal minimality or full spending isolation |
 
 ## Test evidence and accounting
 

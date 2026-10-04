@@ -43,7 +43,7 @@ const service = createMerchantService({ ledger, adminToken, statusKey, eventSign
 const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: service.fetch });
 const publicKey = bytesToHex(ed25519.getPublicKey(eventKey));
 const secrets = (): Buffer[] => [issuanceKey, statusKey, eventKey, macaroon,
-  ...(existsSync(root + "/audit.preimage") ? [readFileSync(root + "/audit.preimage")] : [])];
+  ...["audit.preimage", "probe.preimage", "reader.macaroon", "invalid.macaroon"].filter((name) => existsSync(root + "/" + name)).map((name) => readFileSync(root + "/" + name))];
 const secretEncodings = (): string[] => secrets().flatMap((value) => [value.toString("hex"), value.toString("base64")]);
 console.log(JSON.stringify({ ready: true, publicKey }));
 try {
@@ -83,6 +83,17 @@ try {
       } else if (command.action === "verify") {
         const events = command.body as SignedAcceptance[];
         result = { valid: events.length === 1 && verifyAcceptance(events[0]!, publicKey) };
+      } else if (command.action === "credentials") {
+        const cert = readFileSync("/work/public/b.cert"), reader = lndRestTransport("https://127.0.0.1:8081/", cert, readFileSync(root + "/reader.macaroon"));
+        const attempt = ledger.attemptForIntent(command.intentId!); if (!attempt?.payment_hash) throw new Error("Original invoice required");
+        const info = await reader.call("GET", "/v1/getinfo"), invoice = await reader.call("GET", "/v1/invoice/" + attempt.payment_hash);
+        if (info.identity_pubkey !== config.receiver || invoice.payment_request !== attempt.invoice) throw new Error("Credential identity mismatch");
+        const reject = async (operation: () => Promise<unknown>): Promise<boolean> => { try { await operation(); return false; } catch { return true; } };
+        const preimage = readFileSync(root + "/probe.preimage");
+        result = { readInfo: true, readInvoice: true,
+          writeRefused: await reject(() => reader.call("POST", "/v1/invoices", { r_preimage: preimage.toString("base64"), value_msat: "1000", expiry: "600" })),
+          wrongCaRefused: await reject(() => lndRestTransport("https://127.0.0.1:8081/", readFileSync("/work/public/a.cert"), macaroon).call("GET", "/v1/getinfo")),
+          invalidSignatureRefused: await reject(() => lndRestTransport("https://127.0.0.1:8081/", cert, readFileSync(root + "/invalid.macaroon")).call("GET", "/v1/getinfo")) };
       } else if (command.action === "stop") { console.log(JSON.stringify({ ok: true })); break; }
       else throw new Error("Unknown harness command");
       console.log(JSON.stringify({ ok: true, result }));

@@ -1751,10 +1751,36 @@ setup and cleanup operations. Existing hold/ordinary REST diagnostics are unchan
 These are controlled exception and process-restart checks, not arbitrary SQLite
 commit interruption, machine-crash durability, LND daemon restart or supported
 browser-wallet conformance. The fixture uses the disposable admin macaroon;
-production least-privilege provisioning is not established by this test. No
+production least-privilege provisioning is not established by that baseline. No
 production startup, schema, provider spending or release policy changes occur,
 so existing installations require no migration or new network work. Normal CI
 checks the TypeScript fixture and negative mount guards offline; this additional
 funded diagnostic stays explicitly manual and gated by both environment flags.
 Interrupted runs use the same label-checked cleanup procedure above for exact
 `rillswap-bun-merchant-*` resources, never unrelated wallets or containers.
+
+The same opt-in command also runs an independent scoped-credential scenario.
+The Python controller bakes exactly `info:read`, `invoices:read` and
+`invoices:write`, and supplies that credential instead of the admin macaroon to
+the Bun service. The complete funded issuance/receipt/event restart assertions
+are retained, establishing sufficiency of the documented permissions, not
+mathematical minimality or production key custody. Python still owns its admin
+credential for disposable setup; this is not OS-level isolation between processes.
+
+A separate read-only credential positively reads the actual node identity and
+the existing merchant invoice. Valid small `AddInvoice` probes are rejected by
+actual Bun transport; independent private REST checks require the pinned server's
+HTTP 500, JSON code 2 and permission-denied cause, then confirm the fresh probe
+hash is absent with HTTP 404/code 5. This unusual error mapping matches pinned
+LND's `UNKNOWN` permission behavior; generic errors alone are not evidence.
+An empty `SendPaymentV2` request with the scoped credential likewise requires
+`UNKNOWN` with a private permission-denied cause. It contains no payment
+destination and proves denial of that RPC only, not every spending method.
+
+The scenario also checks Bun rejection of a valid foreign CA and a structurally
+valid macaroon with one changed signature byte. Independent private TLS checks
+require certificate verification failure; invalid-signature REST checks require
+HTTP 500/code 2 and a signature-mismatch cause. Raw error messages and credentials
+are never host evidence. Probes occur after disposable channel setup and before
+the payer's invoice payment, not before wallet funding. No production permission
+minting, transport expansion, key replacement or new persisted format is added.

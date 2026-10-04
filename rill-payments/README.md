@@ -64,8 +64,12 @@ one acceptance event and stable delivery retry/history. The scripted controller
 does not prove browser-to-wallet checkout, CLI/reverse-proxy deployment, LND
 daemon restart, funded swaps, arbitrary commit interruption or machine-crash
 durability. Setup and invocation are documented in `rill-provider/README.md`.
-This fixture uses the disposable node's admin macaroon internally, not a proven
-production least-privilege provisioning policy. No raw secrets leave the sidecar.
+The baseline uses the disposable node's admin macaroon. A second independent
+case proves that the documented `info:read,invoices:read,invoices:write` set
+suffices for the same Bun checkout/restart flow. It separately verifies read-only
+issuance refusal, invalid-signature and foreign-CA refusal, and denial of an
+empty `SendPaymentV2` call. This is not formal minimum privilege, comprehensive
+spending isolation or production key custody. No raw secrets leave the sidecar.
 
 ## Regtest merchant API and SDK
 

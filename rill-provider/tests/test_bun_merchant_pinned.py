@@ -58,7 +58,29 @@ BUN_MERCHANT = (
         'origin': 'https://merchant.invalid', 'receiver': b_key}))
     for name in ('issuance.key', 'status.key', 'event.key'):
         (private / name).write_bytes(secrets.token_bytes(32))
-    (private / 'macaroon').write_bytes(b_secret)
+    scoped_scenario = bool(globals().get('LEAST_PRIVILEGE_SCENARIO', False))
+    def bake(permissions):
+        value = call(b, b_secret, 'BakeMacaroon', ln.BakeMacaroonRequest,
+            ln.BakeMacaroonResponse, ln.BakeMacaroonRequest(permissions=[
+                ln.MacaroonPermission(entity=entity, action=action)
+                for entity, action in permissions], root_key_id=0,
+                allow_external_permissions=False)).macaroon
+        credential = bytes.fromhex(value)
+        assert 0 < len(credential) <= 4096
+        return credential
+    merchant_credential = b_secret
+    if scoped_scenario:
+        merchant_credential = bake([('info', 'read'), ('invoices', 'read'),
+            ('invoices', 'write')])
+        reader = bake([('info', 'read'), ('invoices', 'read')])
+        assert merchant_credential != b_secret and reader != merchant_credential
+        assert merchant_credential[-34:-32] == bytes([6, 32])
+        invalid = bytearray(merchant_credential)
+        invalid[-1] ^= 1  # Preserve the v2 packet structure, invalidate only signature.
+        (private / 'reader.macaroon').write_bytes(reader)
+        (private / 'invalid.macaroon').write_bytes(invalid)
+        (private / 'probe.preimage').write_bytes(secrets.token_bytes(32))
+    (private / 'macaroon').write_bytes(merchant_credential)
     (private / 'admin.token').write_text(secrets.token_urlsafe(32))
     (private / 'journal.json').write_text(json.dumps({'addCalls': 0}))
     env = {'PATH': '/usr/bin:/bin', 'HOME': str(private),
@@ -139,6 +161,61 @@ BUN_MERCHANT = (
         assert after['state'] == 'ready'
         assert command('audit', intentId=intent)['addCalls'] == 1
         assert command('http', path=route + '/events', token=token)['body'] == []
+        credential_evidence = {}
+        if scoped_scenario:
+            print('PHASE: bun_merchant_credentials', file=sys.stderr)
+            probes = command('credentials', intentId=intent)
+            assert probes == {'readInfo': True, 'readInvoice': True,
+                'writeRefused': True, 'wrongCaRefused': True,
+                'invalidSignatureRefused': True}
+            import base64, socket, ssl
+            tls = ssl.create_default_context(cafile='/work/public/b.cert')
+            preimage = (private / 'probe.preimage').read_bytes()
+            probe_hash = hashlib.sha256(preimage).hexdigest()
+            with httpx.Client(base_url='https://127.0.0.1:8081', verify=tls,
+                    headers={'Grpc-Metadata-macaroon': reader.hex()}, timeout=10,
+                    trust_env=False, follow_redirects=False) as rest:
+                denied = rest.post('/v1/invoices', json={
+                    'r_preimage': base64.b64encode(preimage).decode(),
+                    'value_msat': '1000', 'expiry': '600'})
+                detail = denied.json()
+                assert denied.status_code == 500 and detail.get('code') == 2
+                assert 'permission denied' in str(detail.get('message', '')).lower()
+                absent = rest.get('/v1/invoice/' + probe_hash)
+                assert absent.status_code == 404 and absent.json().get('code') == 5
+            print('PHASE: bun_merchant_invalid_signature', file=sys.stderr)
+            with httpx.Client(base_url='https://127.0.0.1:8081', verify=tls,
+                    headers={'Grpc-Metadata-macaroon': bytes(invalid).hex()}, timeout=10,
+                    trust_env=False, follow_redirects=False) as rest:
+                denied = rest.get('/v1/getinfo')
+                detail = denied.json()
+                assert denied.status_code == 500 and detail.get('code') == 2
+                assert 'signature mismatch' in str(detail.get('message', '')).lower()
+            print('PHASE: bun_merchant_wrong_ca', file=sys.stderr)
+            foreign_ca = ssl.create_default_context(cafile='/work/public/a.cert')
+            try:
+                with socket.create_connection(('127.0.0.1', 8081), timeout=5) as sock:
+                    with foreign_ca.wrap_socket(sock, server_hostname='127.0.0.1'):
+                        raise AssertionError('foreign CA unexpectedly trusted')
+            except ssl.SSLCertVerificationError:
+                pass
+            print('PHASE: bun_merchant_spending_denied', file=sys.stderr)
+            # Test on b, whose scoped macaroon this is. No invoice or destination.
+            spending = b.unary_stream('/routerrpc.Router/SendPaymentV2',
+                request_serializer=router.SendPaymentRequest.SerializeToString,
+                response_deserializer=ln.Payment.FromString)
+            try:
+                list(spending(router.SendPaymentRequest(),
+                    metadata=metadata(merchant_credential), timeout=5))
+            except grpc.RpcError as error:
+                assert error.code() == grpc.StatusCode.UNKNOWN
+                assert 'permission denied' in (error.details() or '').lower()
+            else:
+                raise AssertionError('scoped credential unexpectedly allows SendPaymentV2')
+            credential_evidence = {'scoped_permissions_sufficient': True,
+                'readonly_write_denied': True, 'probe_hash_absent': True,
+                'wrong_ca_rejected': True, 'invalid_signature_rejected': True,
+                'send_payment_rpc_denied': True}
         forged = command('http', path=route + '/evidence', method='POST', token=token,
             body={'accepted': True, 'preimage': '00' * 32})
         assert forged['status'] == 202 and forged['body']['accepted'] is False
@@ -226,7 +303,7 @@ BUN_MERCHANT = (
             'issuance_restart_same_operation': True, 'receipt_restart_once': True,
             'event_restart_same_id': True, 'secret_free': True,
             'invoice_dispatches': audited['addCalls'], 'payer_htlcs': len(succeeded.htlcs),
-            'merchant_received_msat': succeeded.value_msat}))
+            'merchant_received_msat': succeeded.value_msat, **credential_evidence}))
     finally:
         stop(crash=True)
 """
@@ -240,6 +317,20 @@ BUN_MERCHANT = (
 )
 def test_pinned_bun_merchant_checkout_restart(tmp_path: Path) -> None:
     """Use actual TLS/macaroons, invoice settlement and merchant journal restarts."""
+    evidence = _run_bun_fixture(tmp_path, BUN_MERCHANT)
+    for field in (
+        "bun_lnd_checkout",
+        "issuance_restart_same_operation",
+        "receipt_restart_once",
+        "event_restart_same_id",
+        "secret_free",
+    ):
+        assert evidence[field] is True
+    assert evidence["invoice_dispatches"] == evidence["payer_htlcs"] == 1
+    assert evidence["merchant_received_msat"] == 1_000_000
+
+
+def _run_bun_fixture(tmp_path: Path, program: str) -> dict[str, object]:
     bun = ROOT.parent / "tmp/toolchains/bun-v1.3.11/bun"
     assert hashlib.sha256(bun.read_bytes()).hexdigest() == BUN_SHA256
     revision = subprocess.run(  # noqa: S603 - digest-verified pinned executable
@@ -267,20 +358,36 @@ def test_pinned_bun_merchant_checkout_restart(tmp_path: Path) -> None:
             check=False,
         )
         assert built.returncode == 0, "merchant fixture bundle failed to build"
-        evidence = _run_two_node_sidecar(
+        return _run_two_node_sidecar(
             tmp_path,
-            BUN_MERCHANT,
+            program,
             prefix="bun-merchant",
             deadline=300,
             profile="merchant_receipt",
             merchant_bun_bundle=bundle,
         )
+
+
+@pytest.mark.lnd
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_LND") != "1" or os.environ.get("RILLSWAP_RUN_BUN_MERCHANT") != "1",
+    reason="set both opt-in flags for scoped merchant credential conformance",
+)
+def test_pinned_bun_merchant_scoped_credentials(tmp_path: Path) -> None:
+    """Documented permissions suffice; rejected probes cannot create an invoice."""
+    evidence = _run_bun_fixture(tmp_path, "LEAST_PRIVILEGE_SCENARIO = True\n" + BUN_MERCHANT)
     for field in (
         "bun_lnd_checkout",
         "issuance_restart_same_operation",
         "receipt_restart_once",
         "event_restart_same_id",
         "secret_free",
+        "scoped_permissions_sufficient",
+        "readonly_write_denied",
+        "probe_hash_absent",
+        "wrong_ca_rejected",
+        "invalid_signature_rejected",
+        "send_payment_rpc_denied",
     ):
         assert evidence[field] is True
     assert evidence["invoice_dispatches"] == evidence["payer_htlcs"] == 1
