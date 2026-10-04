@@ -603,7 +603,7 @@ class SettlementEngine:
                 return None
             vsize = (4 * len(plan.base_transaction) + 68 + 3) // 4
             fee_floor = policy.fee_floor_sat(
-                vsize=vsize, configured_floor_sat=self._settings.claim_fee_sat
+                vsize=vsize, configured_floor_sat=self._claim_fee_floor(terms, binding)
             )
             if plan.fee_sat < fee_floor:
                 return None
@@ -652,13 +652,13 @@ class SettlementEngine:
             or candidate.owner_generation != self._store.generation
             or type(started_at) is not int
             or not 0 <= started_at < candidate.deadline_at
-            or candidate.fee_sat < self._settings.claim_fee_sat
         ):
             return None
         terms, binding = self._validate_prepared_fallback(candidate)
         if (
             terms.network_identity != self._store.network_identity
             or COOPERATIVE_CLAIM_FEATURE not in terms.required_features
+            or candidate.fee_sat < self._claim_fee_floor(terms, binding)
         ):
             return None
         plan = build_cooperative_claim(
@@ -1425,7 +1425,7 @@ class SettlementEngine:
         takes over from whatever this chooses.
         """
         ceiling = max_spendable_fee(self._authorization(terms, binding))
-        floor = min(self._settings.claim_fee_sat, ceiling)
+        floor = self._claim_fee_floor(terms, binding)
         spend = self._claim(item, terms, binding, floor)
         if not use_estimate:
             return spend  # deadline recovery never waits for fee advice
@@ -1438,6 +1438,18 @@ class SettlementEngine:
             return spend
         wanted = min(ceiling, max(floor, math.ceil(rate * spend.vsize)))
         return spend if wanted == floor else self._claim(item, terms, binding, wanted)
+
+    def _claim_fee_floor(self, terms: ContractTerms, binding: FundingBinding) -> int:
+        """Return the configured claim floor, lowered only to what the signed terms allow.
+
+        The fallback claim and the cooperative claim share this one floor, so
+        a signed cap below the configured floor cannot silently disable
+        cooperation while the fallback pays that same capped fee.
+        """
+        return min(
+            self._settings.claim_fee_sat,
+            max_spendable_fee(self._authorization(terms, binding)),
+        )
 
     def _claim(
         self, item: SettlementItem, terms: ContractTerms, binding: FundingBinding, fee: int

@@ -3166,7 +3166,7 @@ class LiveSessionStore:
         replied: tuple[bytes] | None,
         now: int,
     ) -> None:
-        """Affirmatively mark only a newly featured, independently signed swap.
+        """Authenticate a newly featured acceptance; mark only BTC to LN claims.
 
         This runs in the same write transaction as first acceptance. An
         ADMITTED row alone can never delay the existing unilateral claim,
@@ -3217,7 +3217,7 @@ class LiveSessionStore:
                 or request.in_reply_to != offer.message_id
                 or request.session_id != initiation.session_id
                 or offer.session_id != initiation.session_id
-                or request.profile_id != "btc-to-ln/v1"
+                or request.profile_id != self._policy.profile
                 or offer.profile_id != request.profile_id
                 or terms.profile_id != request.profile_id
                 or initiation.profile_id != request.profile_id
@@ -3257,11 +3257,15 @@ class LiveSessionStore:
                 client_acceptance_hash(signed),
                 bytes.fromhex(accepted.client_acceptance_signature),
             )
-            connection.execute(
-                "INSERT INTO claim_arbitration (session_id,contract_hash,version,state) "
-                "VALUES (?,?,1,'ADMITTED')",
-                (request.session_id, digest),
-            )
+            if request.profile_id == "btc-to-ln/v1":
+                # Only the provider claims BTC to LN swaps. The LN to BTC
+                # client claims, so its acceptance is authenticated here but
+                # has no provider claim to arbitrate.
+                connection.execute(
+                    "INSERT INTO claim_arbitration (session_id,contract_hash,version,state) "
+                    "VALUES (?,?,1,'ADMITTED')",
+                    (request.session_id, digest),
+                )
         except Exception:  # noqa: BLE001 - no signed acceptance or local policy oracle
             raise LiveSessionStoreError("cooperative admission refused") from None
 

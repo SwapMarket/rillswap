@@ -372,32 +372,23 @@ def test_nonfeatured_reverse_negotiation_has_no_cooperative_origin(
         assert not store._reverse_negotiations
 
 
-def test_production_featured_reverse_acceptance_guard_still_refuses_and_rolls_back(
+def test_production_featured_reverse_acceptance_is_authenticated_without_claim_arbitration(
     origin: OriginHarness,
 ) -> None:
     with origin.acquire() as store:
         _handshake(store, origin)
         service, document, digest = origin.acceptance(store)  # Deliberately no isolated seam.
-        before = store._connection.execute(
-            "SELECT revision,next_client_seq,next_provider_seq FROM sessions WHERE session_id=?",
-            (origin.session_id,),
-        ).fetchone()
-        with pytest.raises(LiveSessionStoreError, match="cooperative admission refused"):
-            asyncio.run(service._answer(document, (), 1_700_000_000))
-        assert store._connection.execute("SELECT count(*) FROM swaps").fetchone() == (0,)
-        assert (
-            store._connection.execute(
-                "SELECT revision,next_client_seq,next_provider_seq FROM sessions "
-                "WHERE session_id=?",
-                (origin.session_id,),
-            ).fetchone()
-            == before
-        )
-        assert not any(
+        asyncio.run(service._answer(document, (), 1_700_000_000))
+        assert store._connection.execute("SELECT count(*) FROM swaps").fetchone() == (1,)
+        assert any(
             b'"message_type":"ack"' in entry.canonical_bytes for entry in store.pending_outbox()
         )
-        assert not store._has_original_reverse_negotiation(origin.session_id, digest)
-        assert store._reverse_negotiations[origin.session_id].contract_hash is None
+        assert store._has_original_reverse_negotiation(origin.session_id, digest)
+        # The client claims LN to BTC swaps: no provider claim is arbitrated.
+        assert store._connection.execute("SELECT count(*) FROM claim_arbitration").fetchone() == (
+            0,
+        )
+        assert not store.admitted_featured_claim(origin.session_id, digest)
 
 
 def test_fresh_accept_without_confirmation_cannot_create_final_origin(

@@ -157,6 +157,35 @@ def test_proposal_is_durable_before_its_message_id_is_returned(runtime: tuple) -
     assert store.pending_sendable(proposal_id, now=1001, tip_height=sample.tip_height)
 
 
+def test_signed_fee_cap_below_configured_floor_still_cooperates(
+    runtime: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback already pays the capped fee; refusing would only cost privacy."""
+    engine, store, _ = runtime
+    engine._settings = EngineSettings(claim_fee_sat=1_000)  # noqa: SLF001 - operator floor
+    monkeypatch.setattr(engine_module, "max_spendable_fee", lambda _authorization: 300)
+    proposal_id = asyncio.run(
+        engine.initiate_cooperative_proposal(_session(store), now=lambda: 1001)
+    )
+    assert proposal_id is not None
+    monkeypatch.setattr(engine_module, "max_spendable_fee", lambda _authorization: 301)
+    assert engine._claim_fee_floor(*_fallback_contract(store)) == 301  # noqa: SLF001
+
+
+def _fallback_contract(store: LiveSessionStore) -> tuple:
+    (candidate,) = store.prepared_fallbacks()
+    row = store._connection.execute(  # noqa: SLF001 - fixture contract
+        "SELECT terms_offer,funding_binding FROM swaps WHERE session_id=?",
+        (candidate.session_id,),
+    ).fetchone()
+    terms = offered_terms(Envelope.model_validate_json(row[0], strict=True))
+    binding = parse_model_json(
+        FundingBindingPayload,
+        canonicalize(Envelope.model_validate_json(row[1], strict=True).payload),
+    ).binding
+    return terms, binding
+
+
 @pytest.mark.parametrize("change", ["clock delay", "revocation"])
 def test_proposal_clock_return_is_fenced_before_burn(
     runtime: tuple,
