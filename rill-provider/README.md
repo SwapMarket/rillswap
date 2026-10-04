@@ -15,10 +15,11 @@ supported path to a running signet provider.
 **You need:** Bitcoin Core (synced signet, RPC on loopback), LND on the same
 host (synced, with outbound liquidity and one channel for BTC to LN, or
 inbound liquidity and an on-chain wallet in Core for LN to BTC), Tor with an
-`HTTPTunnelPort` (relay traffic must not reveal your IP), Python 3.13 or later,
+`HTTPTunnelPort` (add `HTTPTunnelPort 127.0.0.1:9080` to `torrc` and restart
+Tor; relay traffic must not reveal your IP), Python 3.13 or later,
 `uv`, `cmake` with a C compiler, and `age-keygen`.
 
-1. Check out `rill-core`, `rill-crypto`, and `rill-provider` side by side
+1. Check out `rill-core`, `rill-crypto`, `rill-provider`, and `rill-cli` side by side
    (this monorepo already does), then install from `rill-provider/`:
 
    ```sh
@@ -27,12 +28,16 @@ inbound liquidity and an on-chain wallet in Core for LN to BTC), Tor with an
    source .venv/bin/activate          # puts `rill-provider` on PATH
    cmake -S ../rill-crypto -B tmp/native -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
    cmake --build tmp/native           # builds tmp/native/librill_crypto.so
+   uv pip install --python .venv/bin/python -e ../rill-cli   # `rill`, for step 6
    ```
 
 2. Make a working directory (for example `/srv/rill`) and an age custody key.
    It decrypts the provider identity and store secrets; back it up offline.
 
+   Create it as the account that will run the provider:
+
    ```sh
+   mkdir -p -m 700 /srv/rill/macaroons
    age-keygen -o /srv/rill/custody.key && chmod 600 /srv/rill/custody.key
    ```
 
@@ -58,17 +63,30 @@ inbound liquidity and an on-chain wallet in Core for LN to BTC), Tor with an
    ```
 
 5. Copy [`examples/provider.signet.json`](examples/provider.signet.json) to
-   `/srv/rill/provider.json` and replace every example value: the printed
-   identity key, `custody_recipient` (`age-keygen -y custody.key`), the native
-   library path, Core's RPC port and `.cookie`, LND's gRPC port and
-   `tls.cert`, `provider_destination_script` (the scriptPubKey hex of your own
-   P2WPKH or P2TR address, from `bitcoin-cli getaddressinfo`; claimed swap
-   funds go there), your relays, and your Tor `relay_proxy`. Relative paths
-   resolve from the config file. Core and LND are reached on `127.0.0.1`. The
-   example's test (`tests/test_cli.py`) proves it passes every startup check.
-   For LN to BTC, set `handshake.profile` and `terms.profiles` to
-   `ln-to-btc/v1`, add `lnd.invoices_macaroon`, and set `bitcoin_core.wallet`
-   to the Core wallet that funds swaps.
+   `/srv/rill/provider.json` and replace these example values:
+   - `provider_identity_xonly`: the key printed in step 3.
+   - `custody_recipient`: the output of `age-keygen -y custody.key`.
+   - `native_crypto_library`: the absolute path of `tmp/native/librill_crypto.so`.
+   - `bitcoin_core`: Core's signet RPC port (38332 by default) and its `.cookie`.
+   - `lnd`: LND's gRPC port and `tls.cert`; the macaroon paths from step 4.
+   - `provider_destination_script`: the scriptPubKey hex of a fresh P2WPKH or
+     P2TR address of your own (`bitcoin-cli -signet getaddressinfo <address>`);
+     claimed swap funds go there.
+   - `relay_urls`: Nostr relay WebSocket URLs (`wss://...`) that accept your
+     announcements; clients must use one of them. None is supplied here.
+   - `relay_proxy`: your Tor `HTTPTunnelPort` URL.
+   - `terms`: your amount band (sat), base fee, proportional fee (millionths),
+     and any short `slot` label.
+   - `authority`: your attestation that the store's volume (any label) is
+     outside every backup or snapshot that could be restored, and that only
+     this host uses it. Both must be `true`; the store refuses otherwise.
+
+   Leave `network`, `handshake`, and the remaining fields as they are. Relative
+   paths resolve from the config file. Core and LND are reached on `127.0.0.1`.
+   `tests/test_cli.py` proves the example passes every startup check. For LN to
+   BTC, set `handshake.profile` and `terms.profiles` to `ln-to-btc/v1`, add
+   `lnd.invoices_macaroon`, and set `bitcoin_core.wallet` to the Core wallet
+   that funds swaps.
 
 6. Create the store once, then serve:
 
@@ -78,7 +96,8 @@ inbound liquidity and an on-chain wallet in Core for LN to BTC), Tor with an
    ```
 
    `serve` warns only if no relay accepts its signed announcement. To confirm
-   discovery, list verified announcements with `rill-cli` (read-only):
+   discovery, in a second terminal with the same environment active and
+   `rill-provider/` as the working directory, list verified announcements:
 
    ```sh
    rill providers list --network ../rill-docs/networks/signet.json        --crypto-library "$PWD/tmp/native/librill_crypto.so"        --relay wss://your.relay --relay-proxy http://127.0.0.1:9080
