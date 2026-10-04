@@ -162,3 +162,28 @@ same-block upgrades are refused. Historical-state and standard-token conformance
 flags must be affirmative deployment evidence supplied by trusted configuration,
 not assumed from a symbol or copied from customer requests. No deployed token,
 live native checkout pricing or funded receipt conformance is claimed here.
+
+### Sepolia native payment and inventory ledger
+
+`NativeReceiptLedger` from `@rillswap/payments/native-ledger` explicitly provisions
+a separate private Sepolia-only database. It leaves Lightning and provider stores
+unchanged. Ordinary open rejects missing, partial, foreign and unsupported stores;
+it performs SQLite integrity checks, but no network scan, migration or spending.
+Each configured exact asset/recipient/cap is immutable for this store version.
+
+Trusted commerce creates intents, then `prepare` verifies the buyer binding and
+atomically reserves the nonce and inventory capacity before returning funding
+instructions. Use one shared database as the reservation authority, not separate
+databases for competing processes. Expired reservations are not automatically
+released: expiry cannot prove funds were never sent. `observe` runs the trusted
+receipt verifier internally and atomically allocates the transaction/log key,
+replaces the reservation with held inventory and creates one native acceptance
+event. Native events carry exact asset base units, never a Lightning amount.
+
+Late receipt stays in reconciliation with held inventory and no acceptance.
+Explicit `recordReorg` impairs inventory and blocks admission while preserving
+paid history and prior events. It is an administrative evidence update, not an
+automatic scanner or a claim that Ethereum finalized receipts ordinarily reorg.
+Native events currently have only an internal outbox, not a signed public API.
+No native SDK send path, deployed affordable asset, or automatic merchant
+conversion is enabled. Operational native checkout remains a separate gate.

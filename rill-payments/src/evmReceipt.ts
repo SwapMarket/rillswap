@@ -80,6 +80,7 @@ export interface VerifiedTokenReceipt {
   readonly deduplicationKey: string;
   readonly blockHash: string;
   readonly blockNumber: number;
+  readonly blockTimestamp: number;
   readonly finality: "ethereum_l1_finalized";
   readonly timing: "timely" | "late";
 }
@@ -185,6 +186,6 @@ export async function observeEvmReceipt(asset: EvmTokenAsset, intent: EvmReceipt
   }
   const logIndex = matched[0]!.index;
   return Object.freeze({ assetId: asset.id, quantityBaseUnits: binding.amountBaseUnits, recipient: binding.recipient, transactionHash, logIndex,
-    deduplicationKey: `${asset.chainId}:${asset.genesisHash}:${transactionHash}:${logIndex}`, blockHash: receipt.blockHash.toLowerCase(), blockNumber: receipt.blockNumber,
+    deduplicationKey: `${asset.chainId}:${asset.genesisHash}:${transactionHash}:${logIndex}`, blockHash: receipt.blockHash.toLowerCase(), blockNumber: receipt.blockNumber, blockTimestamp: canonical.timestamp,
     finality: "ethereum_l1_finalized", timing: canonical.timestamp < binding.validBefore ? "timely" : "late" });
 }

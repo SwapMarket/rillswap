@@ -12,7 +12,8 @@
     "./sdk": "./src/sdk.ts",
     "./tracking": "./src/tracking.ts",
     "./discovery": "./src/discovery.ts",
-    "./evm-receipt": "./src/evmReceipt.ts"
+    "./evm-receipt": "./src/evmReceipt.ts",
+    "./native-ledger": "./src/nativeLedger.ts"
   },
   "scripts": {
     "merchant": "bun src/cli.ts",
