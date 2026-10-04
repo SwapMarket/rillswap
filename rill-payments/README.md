@@ -212,3 +212,34 @@ authorization ceilings, even after settlement; these are conservative lifetime
 spend budgets, not inventory balances. No signer/observer deployment, native
 inventory synchronization, batching, conversion output or automatic job runner
 is enabled. Payout failure cannot reopen a paid native or Lightning order.
+
+## LayerZero receive/retry artifacts
+
+`@rillswap/payments/layerzero` implements an inactive, source-pinned PacketV1
+observer and unsigned direct-delivery retry builder, not an enabled bridge rail.
+Protocol source pin is `9c741e7f9790639537b1710a203bcdfd73b0b9ac`; OFT source
+pin is `4973ba8bef7b0fdf7268469abea3ea50dbd4bbd8`. Package metadata alone does
+not establish that a deployed USDT0 contract matches either source.
+
+Trusted configuration must independently validate both directional EIDs,
+endpoint/OFT/token/library code, peers, units and standard zero-value credit.
+Only nonupgradeable Ethereum L1/Sepolia profiles are handled; proxies, L2s,
+custom implementations and compose require dedicated profiles. No deployed
+USDT/USDT0 pathway or operational fee/recovery conformance is configured here.
+
+`readSourceOftPacket` verifies finalized endpoint PacketSent routing evidence,
+not payer debit ownership or order acceptance. `observeOftReceive` distinguishes
+exact destination commitment, nilification, unresolved state and finalized
+destination token credit. Zero payload hash and advanced nonces do not prove
+delivery. Endpoint PacketDelivered alone can come from `clear`; exact OFTReceived
+and actual token Transfer must also match the GUID/origin/recipient/quantity.
+Token credit still does not establish a subsequent Lightning payment.
+
+`buildOftRetry` derives zero-value `EndpointV2.lzReceive` calldata from an exact
+committed noncompose packet, validates a bounded predecessor nonce window,
+simulates and estimates gas, then rechecks those conditions. It produces no
+signature or transaction submission, has no principal-refund mechanism and
+requires no Scan service. The 60-second artifact expiry is advisory: EndpointV2
+does not enforce it. A signing consumer must persist operation identity,
+enforce expiry and full fresh pathway/commitment/nonce/simulation checks before
+authorizing gas. Permissionless receive retry does not bypass verification.

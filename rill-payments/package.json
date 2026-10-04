@@ -14,7 +14,8 @@
     "./discovery": "./src/discovery.ts",
     "./evm-receipt": "./src/evmReceipt.ts",
     "./native-ledger": "./src/nativeLedger.ts",
-    "./treasury": "./src/treasury.ts"
+    "./treasury": "./src/treasury.ts",
+    "./layerzero": "./src/layerZero.ts"
   },
   "scripts": {
     "merchant": "bun src/cli.ts",
