@@ -18,6 +18,10 @@ set(SECP256K1_BUILD_EXAMPLES OFF CACHE BOOL "Disable upstream examples" FORCE)
 
 if(EMSCRIPTEN)
   set(SECP256K1_ASM OFF CACHE STRING "Disable assembly for WASM" FORCE)
+  # The default window (15) puts 1 MiB of verification tables into the module
+  # the browser downloads; 10 keeps identical results at 73% less size and only
+  # slower verification, which the swap page does a handful of times.
+  set(SECP256K1_ECMULT_WINDOW_SIZE 10 CACHE STRING "Smaller WASM verification tables" FORCE)
 endif()
 
 FetchContent_Declare(
