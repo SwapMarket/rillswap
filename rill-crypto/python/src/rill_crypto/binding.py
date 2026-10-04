@@ -394,33 +394,44 @@ class Context:
     ) -> tuple[MusigAttempt, bytes]:
         """Allocate an opaque one-shot native nonce handle."""
         with self._operation():
-            secret = self._native.input(secret_key, 32, "secret_key")
-            random_input = self._native.input(os.urandom(32), 32, "session_random")
             attempt_pointer = self._native.ffi.new("rill_musig_attempt **")
-            public_nonce = self._native.output(66)
+            ownership = _MusigAttemptOwnership(self, attempt_pointer)
+            secret = random_input = None
             try:
-                _check(
-                    self._native.lib.rill_musig_begin(
-                        self._pointer,
-                        secret,
-                        self._native.input(user_public_key, 33, "user_public_key"),
-                        self._native.input(provider_public_key, 33, "provider_public_key"),
-                        self._native.input(tap_tweak, 32, "tap_tweak"),
-                        self._native.input(message, 32, "message"),
-                        self._native.input(cooperation_id, 32, "cooperation_id"),
-                        random_input,
-                        attempt_pointer,
-                        public_nonce,
-                    ),
+                try:
+                    secret = self._native.input(secret_key, 32, "secret_key")
+                    random_input = self._native.input(os.urandom(32), 32, "session_random")
+                    public_nonce = self._native.output(66)
+                    _check(
+                        self._native.lib.rill_musig_begin(
+                            self._pointer,
+                            secret,
+                            self._native.input(user_public_key, 33, "user_public_key"),
+                            self._native.input(provider_public_key, 33, "provider_public_key"),
+                            self._native.input(tap_tweak, 32, "tap_tweak"),
+                            self._native.input(message, 32, "message"),
+                            self._native.input(cooperation_id, 32, "cooperation_id"),
+                            random_input,
+                            attempt_pointer,
+                            public_nonce,
+                        ),
+                    )
+                finally:
+                    try:
+                        if secret is not None:
+                            self._native.wipe(secret, 32)
+                    finally:
+                        if random_input is not None:
+                            self._native.wipe(random_input, 32)
+                self._active_attempts += 1
+                ownership.charged = True
+                return (
+                    MusigAttempt(self, ownership, _ATTEMPT_TOKEN),
+                    self._native.bytes(public_nonce, 66),
                 )
-            finally:
-                self._native.wipe(secret, 32)
-                self._native.wipe(random_input, 32)
-            self._active_attempts += 1
-            return (
-                MusigAttempt(self, attempt_pointer[0], _ATTEMPT_TOKEN),
-                self._native.bytes(public_nonce, 66),
-            )
+            except BaseException:
+                ownership.release()
+                raise
 
     def musig_partial_verify(
         self,
@@ -486,23 +497,52 @@ class Context:
             return self._native.bytes(output, 64)
 
 
+class _MusigAttemptOwnership:
+    """Exactly one release shared by failed construction, finalization and close."""
+
+    __slots__ = ("charged", "context", "output")
+
+    def __init__(self, context: Context, output: Any) -> None:
+        self.context = context
+        # Own the zero-initialized native output slot before allocation. No
+        # post-allocation pointer extraction is required to establish cleanup.
+        self.output = output
+        self.charged = False
+
+    @property
+    def pointer(self) -> Any:
+        return self.output[0]
+
+    def release(self) -> None:
+        # A forked finalizer must neither mutate nor destroy parent-owned state.
+        if os.getpid() != self.context._owner_pid:
+            return
+        with self.context._lock:
+            pointer = self.output[0]
+            if pointer == self.context._native.ffi.NULL:
+                return
+            self.output[0] = self.context._native.ffi.NULL
+            self.context._native.lib.rill_musig_attempt_destroy(pointer)
+            if self.charged:
+                self.context._active_attempts -= 1
+                self.charged = False
+
+
 class MusigAttempt:
     """Nonserializable ownership token for exactly one native partial-sign call."""
 
-    def __init__(self, context: Context, pointer: Any, token: object) -> None:
+    def __init__(self, context: Context, ownership: _MusigAttemptOwnership, token: object) -> None:
         if token is not _ATTEMPT_TOKEN:
             raise TypeError("MuSig attempts can only be created by Context.musig_begin")
         self._context = context
-        self._pointer = pointer
-        self._finalizer = weakref.finalize(self, self._destroy, context, pointer)
+        self._ownership = ownership
+        self._finalizer = weakref.finalize(self, ownership.release)
 
-    @staticmethod
-    def _destroy(context: Context, pointer: Any) -> None:
-        if os.getpid() != context._owner_pid:
-            return
-        context._native.lib.rill_musig_attempt_destroy(pointer)
-        with context._lock:
-            context._active_attempts -= 1
+    @property
+    def _pointer(self) -> Any:
+        # Read-through only: cleanup during a failed constructor must also
+        # invalidate wrappers retained by exception tracebacks.
+        return self._ownership.pointer
 
     def partial_sign_once(self, other_public_nonce: bytes) -> bytes:
         """Consume the native secret nonce and return one partial signature."""
@@ -526,7 +566,6 @@ class MusigAttempt:
         with self._context._lock:
             if self._pointer != self._context._native.ffi.NULL:
                 self._finalizer()
-                self._pointer = self._context._native.ffi.NULL
 
     def __enter__(self) -> Self:
         self._context._require_owner()

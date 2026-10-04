@@ -6,6 +6,17 @@ attempt handles. Secret nonce serialization is intentionally impossible.
 
 Status: feasibility work only, unaudited, and not suitable for real funds.
 
+Python MuSig attempt construction establishes one idempotent native owner
+before allocation. Construction failures, failed input wipes, counter charging,
+nonce conversion, explicit close, and garbage collection share that owner, so
+retained exception tracebacks cannot keep an allocated nonce usable or cause
+double destruction. Pointer state is authoritative and invalidated on release;
+forked finalizers never mutate parent-owned state. Both input wipes are attempted
+even when one raises. This does not guarantee erasure if a wipe fails before
+writing, reliable erasure of immutable Python secrets, or protection against
+arbitrary interruption of cleanup itself. The native ABI and successful Python
+API are unchanged; no persisted state or automatic upgrade work is introduced.
+
 `rill_nip44_shared_x`/`Context.nip44_shared_x` is a narrow, **optional ABI-v1**
 constant-time ECDH primitive for a future NIP-44 v2 receive boundary. It
 validates a private scalar and an even-Y-lifted x-only peer point, then returns
