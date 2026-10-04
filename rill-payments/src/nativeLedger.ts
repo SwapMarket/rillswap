@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, lstatSync, openSync, realpathSync } from "node:fs";
 import { dirname } from "node:path";
-import { observeEvmReceipt, prepareEvmBinding, receiptBindingTypedData, type EvmReader, type EvmReceiptBinding, type EvmReceiptIntent, type EvmTokenAsset, type PreparedEvmBinding } from "./evmReceipt";
+import { evmReceiptScope, observeEvmReceipt, prepareEvmBinding, receiptBindingTypedData, validateEvmAsset, type EvmReader, type EvmReceiptBinding, type EvmReceiptIntent, type EvmTokenAsset, type PreparedEvmBinding } from "./evmReceipt";
 
 export interface NativeLedgerConfig {
   readonly origin: string;
@@ -45,13 +45,16 @@ function privateStore(path: string): void {
   if (!directory.isDirectory() || directory.isSymbolicLink() || (directory.mode & 0o077) !== 0 || !file.isFile() || file.isSymbolicLink() || file.nlink !== 1 || (file.mode & 0o077) !== 0) throw new Error("Native ledger requires private regular storage");
 }
 function configCopy(config: NativeLedgerConfig): NativeLedgerConfig {
-  if (new URL(config.origin).origin !== config.origin || !config.origin.startsWith("https://") || !/^0x[0-9a-f]{40}$/.test(config.recipient) || config.asset.chainId !== "11155111") throw new Error("Native ledger is Sepolia-only");
+  validateEvmAsset(config.asset);
+  if (new URL(config.origin).origin !== config.origin || !config.origin.startsWith("https://") || !/^0x[0-9a-f]{40}$/.test(config.recipient) ||
+      (config.asset.chainId !== "11155111" && config.asset.localSandbox === undefined)) throw new Error("Native ledger supports Sepolia or an affirmative local sandbox only");
   quantity(config.inventoryCapBaseUnits);
   const asset = config.asset;
   return Object.freeze({ origin: config.origin, recipient: config.recipient, inventoryCapBaseUnits: config.inventoryCapBaseUnits,
     asset: Object.freeze({ id: asset.id, chainId: asset.chainId, genesisHash: asset.genesisHash, token: asset.token, decimals: asset.decimals, behavior: asset.behavior,
       runtimeCodeHash: asset.runtimeCodeHash, implementation: asset.implementation === null ? null : Object.freeze({ ...asset.implementation }),
-      historicalStateVerified: asset.historicalStateVerified, behaviorConformanceVerified: asset.behaviorConformanceVerified }) });
+      historicalStateVerified: asset.historicalStateVerified, behaviorConformanceVerified: asset.behaviorConformanceVerified,
+      ...(asset.localSandbox === undefined ? {} : { localSandbox: Object.freeze({ version: asset.localSandbox.version, namespace: asset.localSandbox.namespace, confirmations: asset.localSandbox.confirmations }) }) }) });
 }
 
 /** Separate native payment/inventory accounting. No signer, conversion, network rescan or provisioning on open. */
@@ -125,7 +128,7 @@ export class NativeReceiptLedger {
       const time = now(); timestamp(time); if (time >= prepared.binding.validBefore || time < prepared.preparedAt) throw new Error("Preparation expired");
       const inventory = this.inventory();
       if (BigInt(inventory.impaired) !== 0n || BigInt(inventory.held) + BigInt(inventory.reserved) + quantity(intent.amountBaseUnits) > quantity(this.config.inventoryCapBaseUnits)) throw new Error("Native inventory capacity unavailable");
-      const nonceKey = `${this.config.asset.chainId}:${this.config.asset.genesisHash}:${input.sourceWallet}:${input.sourceNonce}`;
+      const nonceKey = `${evmReceiptScope(this.config.asset)}:${input.sourceWallet}:${input.sourceNonce}`;
       this.db.query("INSERT INTO attempts VALUES (?,?,?,?,NULL)").run(intent.attemptId, intentId, nonceKey, JSON.stringify(prepared));
       this.db.query("INSERT INTO reservations VALUES (?,?)").run(intent.attemptId, intent.amountBaseUnits);
       this.db.query("INSERT INTO idempotency VALUES ('attempt',?,?,?)").run(key, fingerprint, intent.attemptId); return prepared;
@@ -142,6 +145,8 @@ export class NativeReceiptLedger {
     return this.db.transaction(() => {
       const previous = this.db.query("SELECT payload,finality FROM receipts WHERE attempt_id=?").get(attemptId) as { payload: string; finality: string } | null;
       if (previous) { if (previous.payload !== JSON.stringify(receipt) || previous.finality !== "finalized") throw new Error("Native receipt requires reconciliation"); return this.getIntent(row.intent_id); }
+      // 'finalized' is the original allocation-state marker, not a public consensus
+      // claim. The receipt payload carries the exact canonical or sandbox profile.
       this.db.query("INSERT INTO receipts VALUES (?,?,?,'finalized')").run(receipt.deduplicationKey, attemptId, JSON.stringify(receipt));
       this.db.query("UPDATE attempts SET transaction_hash=? WHERE id=?").run(transactionHash, attemptId);
       this.db.query("INSERT INTO inventory_entries VALUES (?,?,?,'held')").run(id(), receipt.deduplicationKey, receipt.quantityBaseUnits);

@@ -23,6 +23,13 @@ export interface EvmTokenAsset {
   readonly implementation: { readonly address: string; readonly codeHash: string } | null;
   readonly historicalStateVerified: true;
   readonly behaviorConformanceVerified: true;
+  /** Affirmative disposable test-network profile; absence never authorizes a local chain. */
+  readonly localSandbox?: LocalAnvilReceiptProfile;
+}
+export interface LocalAnvilReceiptProfile {
+  readonly version: "anvil-local/1";
+  readonly namespace: string;
+  readonly confirmations: 6;
 }
 export interface EvmReceiptBinding {
   readonly version: "evm-receipt-binding/1";
@@ -81,7 +88,7 @@ export interface VerifiedTokenReceipt {
   readonly blockHash: string;
   readonly blockNumber: number;
   readonly blockTimestamp: number;
-  readonly finality: "ethereum_l1_finalized";
+  readonly finality: "ethereum_l1_finalized" | "local_sandbox_confirmed";
   readonly timing: "timely" | "late";
 }
 const BINDING_TYPES = { ReceiptBinding: [
@@ -95,11 +102,21 @@ export function receiptBindingTypedData(asset: EvmTokenAsset, binding: EvmReceip
       assetId: binding.assetId, sourceWallet: binding.sourceWallet, sourceNonce: binding.sourceNonce, recipient: binding.recipient,
       amountBaseUnits: binding.amountBaseUnits, validAfter: binding.validAfter, validBefore: binding.validBefore } };
 }
-function validate(asset: EvmTokenAsset, intent: EvmReceiptIntent, binding: EvmReceiptBinding, signature: string): void {
-  if (!Object.hasOwn(GENESIS, asset.chainId) || asset.genesisHash !== GENESIS[asset.chainId] || asset.historicalStateVerified !== true || asset.behaviorConformanceVerified !== true ||
+export function validateEvmAsset(asset: EvmTokenAsset): void {
+  if (asset.localSandbox !== undefined && (!asset.localSandbox || asset.chainId !== "31337" || asset.localSandbox.version !== "anvil-local/1" ||
+      typeof asset.localSandbox.namespace !== "string" || !/^[A-Za-z0-9_-]{16,64}$/.test(asset.localSandbox.namespace) || asset.localSandbox.confirmations !== 6)) throw new Error("Invalid affirmative local sandbox profile");
+  if ((asset.localSandbox === undefined && (!Object.hasOwn(GENESIS, asset.chainId) || asset.genesisHash !== GENESIS[asset.chainId])) || asset.historicalStateVerified !== true || asset.behaviorConformanceVerified !== true ||
       asset.id !== `eip155:${asset.chainId}/erc20:${asset.token}` || !address(asset.token) || !hash(asset.genesisHash) ||
       !hash(asset.runtimeCodeHash) || !Number.isInteger(asset.decimals) || asset.decimals < 0 || asset.decimals > 36 || asset.behavior !== "standard_erc20" ||
       (asset.implementation !== null && (!address(asset.implementation.address) || !hash(asset.implementation.codeHash)))) throw new Error("Unpinned ERC20 asset");
+}
+/** Shared receipt/nonce bookkeeping scope, not authentication of a cloned RPC environment. */
+export function evmReceiptScope(asset: EvmTokenAsset): string {
+  validateEvmAsset(asset);
+  return `${asset.chainId}:${asset.genesisHash}${asset.localSandbox ? ":sandbox:" + asset.localSandbox.namespace : ""}`;
+}
+function validate(asset: EvmTokenAsset, intent: EvmReceiptIntent, binding: EvmReceiptBinding, signature: string): void {
+  validateEvmAsset(asset);
   if (binding.version !== "evm-receipt-binding/1" || binding.assetId !== asset.id || !address(binding.sourceWallet) || !address(binding.recipient) || binding.sourceWallet === binding.recipient ||
       ![binding.intentId, binding.attemptId].every((value) => /^[A-Za-z0-9_-]{16,128}$/.test(value)) ||
       new URL(binding.merchantOrigin).origin !== binding.merchantOrigin || !binding.merchantOrigin.startsWith("https://") ||
@@ -134,7 +151,6 @@ export async function prepareEvmBinding(asset: EvmTokenAsset, intent: EvmReceipt
     assetId: input.assetId, sourceWallet: input.sourceWallet, sourceNonce: input.sourceNonce, recipient: input.recipient, amountBaseUnits: input.amountBaseUnits,
     validAfter: input.validAfter, validBefore: input.validBefore });
   validate(asset, intent, binding, signature);
-  if (!["1", "11155111"].includes(asset.chainId)) throw new Error("Unsupported finality profile");
   const checkTime = (): number => { const now = clock(); if (!Number.isSafeInteger(now) || now < binding.validAfter || now >= binding.validBefore) throw new Error("Receipt binding expired"); return now; };
   checkTime();
   const block = await provider.getBlock("latest");
@@ -148,8 +164,9 @@ export async function prepareEvmBinding(asset: EvmTokenAsset, intent: EvmReceipt
 export async function observeEvmReceipt(asset: EvmTokenAsset, intent: EvmReceiptIntent, prepared: PreparedEvmBinding, transactionHash: string, provider: EvmReader): Promise<VerifiedTokenReceipt | null> {
   validate(asset, intent, prepared.binding, prepared.signature);
   const binding = prepared.binding;
-  // Only known Ethereum L1 finality semantics. L2s require their own explicit observer/profile.
-  if (!["1", "11155111"].includes(asset.chainId) || !hash(transactionHash) || !Number.isSafeInteger(prepared.preparedAt) || prepared.preparedAt < binding.validAfter || prepared.preparedAt >= binding.validBefore ||
+  // Canonical networks use Ethereum L1 finality; only the affirmative disposable
+  // profile below uses local block depth. L2s need a dedicated observer/profile.
+  if (!hash(transactionHash) || !Number.isSafeInteger(prepared.preparedAt) || prepared.preparedAt < binding.validAfter || prepared.preparedAt >= binding.validBefore ||
       !Number.isSafeInteger(prepared.preparedBlockNumber) || !hash(prepared.preparedBlockHash)) throw new Error("Unsupported finality profile or checkpoint");
   const receipt = await provider.getTransactionReceipt(transactionHash);
   if (!receipt) return null;
@@ -157,11 +174,13 @@ export async function observeEvmReceipt(asset: EvmTokenAsset, intent: EvmReceipt
   if (!transaction || receipt.status !== 1 || receipt.hash.toLowerCase() !== transactionHash || transaction.hash.toLowerCase() !== transactionHash ||
       transaction.chainId !== BigInt(asset.chainId) || transaction.from.toLowerCase() !== binding.sourceWallet || transaction.nonce !== Number(binding.sourceNonce) ||
       transaction.to?.toLowerCase() !== asset.token || transaction.value !== 0n || !Number.isSafeInteger(receipt.blockNumber) || receipt.blockNumber <= prepared.preparedBlockNumber || !hash(receipt.blockHash.toLowerCase())) throw new Error("Receipt is not the prebound token debit");
-  const finalized = await provider.getBlock("finalized");
+  // Local block-depth arithmetic is never substituted for canonical-network finality.
+  const finalized = await provider.getBlock(asset.localSandbox ? "latest" : "finalized");
   if (!finalized) return null;
   if (!Number.isSafeInteger(finalized.number) || finalized.number < 0 || !Number.isSafeInteger(finalized.timestamp) || finalized.timestamp < 0 ||
       !finalized.hash || !hash(finalized.hash.toLowerCase())) throw new Error("Invalid finalized checkpoint");
   if (receipt.blockNumber > finalized.number) return null;
+  if (asset.localSandbox && finalized.number - receipt.blockNumber + 1 < asset.localSandbox.confirmations) return null;
   const canonical = await provider.getBlock(receipt.blockNumber), anchor = await provider.getBlock(prepared.preparedBlockNumber);
   if (!canonical || canonical.number !== receipt.blockNumber || !Number.isSafeInteger(canonical.timestamp) || canonical.timestamp < 0 || canonical.hash?.toLowerCase() !== receipt.blockHash.toLowerCase() ||
       anchor?.number !== prepared.preparedBlockNumber || anchor.hash?.toLowerCase() !== prepared.preparedBlockHash) throw new Error("Receipt or preparation reorged");
@@ -186,6 +205,6 @@ export async function observeEvmReceipt(asset: EvmTokenAsset, intent: EvmReceipt
   }
   const logIndex = matched[0]!.index;
   return Object.freeze({ assetId: asset.id, quantityBaseUnits: binding.amountBaseUnits, recipient: binding.recipient, transactionHash, logIndex,
-    deduplicationKey: `${asset.chainId}:${asset.genesisHash}:${transactionHash}:${logIndex}`, blockHash: receipt.blockHash.toLowerCase(), blockNumber: receipt.blockNumber, blockTimestamp: canonical.timestamp,
-    finality: "ethereum_l1_finalized", timing: canonical.timestamp < binding.validBefore ? "timely" : "late" });
+    deduplicationKey: `${evmReceiptScope(asset)}:${transactionHash}:${logIndex}`, blockHash: receipt.blockHash.toLowerCase(), blockNumber: receipt.blockNumber, blockTimestamp: canonical.timestamp,
+    finality: asset.localSandbox ? "local_sandbox_confirmed" : "ethereum_l1_finalized", timing: canonical.timestamp < binding.validBefore ? "timely" : "late" });
 }

@@ -25,6 +25,7 @@ jobs:
       - name: Check checkout contracts and offline behavior
         run: |
           bun run check:schemas
+          bun run check:sandbox-fixture
           bun run typecheck
           bun run test
           bun run build:sdk

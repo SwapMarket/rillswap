@@ -1,15 +1,16 @@
 import { expect, test } from "bun:test";
 import { Interface, Wallet, keccak256, type Provider } from "ethers";
-import { observeEvmReceipt, prepareEvmBinding, receiptBindingTypedData, type EvmBlock, type EvmReader, type EvmReceiptBinding, type EvmReceiptIntent, type EvmTokenAsset } from "../src/evmReceipt";
+import { observeEvmReceipt, prepareEvmBinding, receiptBindingTypedData, validateEvmAsset, type EvmBlock, type EvmReader, type EvmReceiptBinding, type EvmReceiptIntent, type EvmTokenAsset } from "../src/evmReceipt";
 
 const abi = new Interface(["function transfer(address,uint256) returns(bool)", "function decimals() view returns(uint8)", "event Transfer(address indexed from,address indexed to,uint256 value)"]);
 const blockHash = (height: number) => "0x" + height.toString(16).padStart(64, "0");
 const shape: (provider: Provider) => EvmReader = (provider) => provider; void shape;
-async function fixture() {
+async function fixture(sandbox = false) {
   const wallet = new Wallet("0x" + "0".repeat(63) + "1"); // Public test key, never an application key.
   const token = "0x" + "1".repeat(40), recipient = "0x" + "2".repeat(40), code = "0x60016000";
   const asset: EvmTokenAsset = { id: `eip155:11155111/erc20:${token}`, chainId: "11155111", genesisHash: "0x25a5cc106eea7138acab33231d7160d69cb777ee0c2c553fcddf5138993e6dd9",
-    token, decimals: 6, behavior: "standard_erc20", runtimeCodeHash: keccak256(code), implementation: null, historicalStateVerified: true, behaviorConformanceVerified: true };
+    token, decimals: 6, behavior: "standard_erc20", runtimeCodeHash: keccak256(code), implementation: null, historicalStateVerified: true, behaviorConformanceVerified: true,
+    ...(sandbox ? { id: `eip155:31337/erc20:${token}`, chainId: "31337", genesisHash: blockHash(0), localSandbox: { version: "anvil-local/1", namespace: "sandbox_fixture_0001", confirmations: 6 } } : {}) };
   const binding: EvmReceiptBinding = { version: "evm-receipt-binding/1", merchantOrigin: "https://merchant.example", intentId: "native_intent_0001", attemptId: "native_attempt_001",
     assetId: asset.id, sourceWallet: wallet.address.toLowerCase(), sourceNonce: "2", recipient, amountBaseUnits: "1000000", validAfter: 1000, validBefore: 2000 };
   const intent: EvmReceiptIntent = { merchantOrigin: binding.merchantOrigin, intentId: binding.intentId, attemptId: binding.attemptId, assetId: asset.id,
@@ -17,15 +18,16 @@ async function fixture() {
   const typed = receiptBindingTypedData(asset, binding); const signature = await wallet.signTypedData(typed.domain, typed.types, typed.value);
   const event = abi.encodeEventLog(abi.getEvent("Transfer")!, [wallet.address, recipient, 1000000n]);
   const transactionHash = "0x" + "8".repeat(64);
-  const transaction = { hash: transactionHash, chainId: 11155111n, nonce: 2, from: wallet.address, to: token, value: 0n, data: abi.encodeFunctionData("transfer", [recipient, 1000000n]) };
+  const transaction = { hash: transactionHash, chainId: BigInt(asset.chainId), nonce: 2, from: wallet.address, to: token, value: 0n, data: abi.encodeFunctionData("transfer", [recipient, 1000000n]) };
   const receipt = { hash: transactionHash, blockHash: blockHash(42), blockNumber: 42, status: 1, logs: [{ address: token, topics: event.topics, data: event.data, index: 7 }] };
-  let finalizedHeight: number | null = 50, timestamp = 1200, canonicalHash = blockHash(42);
+  let finalizedHeight: number | null = 50, latestHeight = 40, timestamp = 1200, canonicalHash = blockHash(42);
   const historicalBlocks: number[] = [];
   const provider: EvmReader = {
-    getNetwork: async () => ({ chainId: 11155111n }),
+    getNetwork: async () => ({ chainId: BigInt(asset.chainId) }),
     getBlock: async (tag) => tag === "finalized" ? (finalizedHeight === null ? null : { number: finalizedHeight, hash: blockHash(finalizedHeight), timestamp: 1800 }) :
       tag === 0 ? { number: 0, hash: asset.genesisHash, timestamp: 0 } : tag === 42 ? { number: 42, hash: canonicalHash, timestamp } :
-      tag === "latest" || tag === 40 ? { number: 40, hash: blockHash(40), timestamp: 1000 } : { number: tag, hash: blockHash(tag), timestamp: 1800 },
+      tag === "latest" ? { number: latestHeight, hash: blockHash(latestHeight), timestamp: latestHeight === 40 ? 1000 : 1800 } :
+      tag === 40 ? { number: 40, hash: blockHash(40), timestamp: 1000 } : { number: tag, hash: blockHash(tag), timestamp: 1800 },
     getCode: async (account, block) => { if (block !== undefined) historicalBlocks.push(block); return account === token ? code : "0x"; },
     getStorage: async () => "0x" + "0".repeat(64),
     call: async (tx) => { expect(tx.blockTag).toBeDefined(); return abi.encodeFunctionResult("decimals", [6]); },
@@ -33,8 +35,25 @@ async function fixture() {
   };
   const prepared = await prepareEvmBinding(asset, intent, binding, signature, provider, () => 1100);
   return { asset, intent, binding, signature, provider, prepared, transactionHash, transaction, receipt, wallet, historicalBlocks,
-    finalize: (height: number | null) => { finalizedHeight = height; }, reorg: () => { canonicalHash = blockHash(99); }, late: () => { timestamp = 2000; } };
+    finalize: (height: number | null) => { finalizedHeight = height; }, latest: (height: number) => { latestHeight = height; }, reorg: () => { canonicalHash = blockHash(99); }, late: () => { timestamp = 2000; } };
 }
+test("affirmative sandbox profile requires six inclusion-counted confirmations and never reads finalized", async () => {
+  const f = await fixture(true); const provider = { ...f.provider, getBlock: async (tag: number | "latest" | "finalized") => {
+    if (tag === "finalized") throw new Error("Sandbox must not request Ethereum finality"); return f.provider.getBlock(tag);
+  } };
+  f.latest(46); expect(await observeEvmReceipt(f.asset, f.intent, f.prepared, f.transactionHash, provider)).toBeNull();
+  f.latest(47); const receipt = await observeEvmReceipt(f.asset, f.intent, f.prepared, f.transactionHash, provider);
+  expect(receipt?.finality).toBe("local_sandbox_confirmed");
+  expect(receipt?.deduplicationKey).toBe(`31337:${f.asset.genesisHash}:sandbox:sandbox_fixture_0001:${f.transactionHash}:7`);
+  f.reorg(); await expect(observeEvmReceipt(f.asset, f.intent, f.prepared, f.transactionHash, provider)).rejects.toThrow("reorged");
+});
+test("missing, partial and canonical-network sandbox profiles never implicitly enable a local chain", async () => {
+  const f = await fixture(true);
+  for (const profile of [undefined, null, {}, { ...f.asset.localSandbox, confirmations: 5 }, { ...f.asset.localSandbox, version: "anvil-local/0" }, { ...f.asset.localSandbox, namespace: "bad:namespace" }]) {
+    expect(() => validateEvmAsset({ ...f.asset, localSandbox: profile } as EvmTokenAsset)).toThrow();
+  }
+  const canonical = await fixture(); expect(() => validateEvmAsset({ ...canonical.asset, localSandbox: f.asset.localSandbox })).toThrow("sandbox profile");
+});
 test("authenticated prebound token receipt uses historical pins and exact unique subindex", async () => {
   const f = await fixture(); const receipt = await observeEvmReceipt(f.asset, f.intent, f.prepared, f.transactionHash, f.provider);
   expect(receipt?.quantityBaseUnits).toBe("1000000"); expect(receipt?.logIndex).toBe(7); expect(receipt?.timing).toBe("timely");

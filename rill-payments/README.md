@@ -174,13 +174,14 @@ beacon proxies and nonstandard proxy upgrades require dedicated adapters.
 ERC-1967 proxy support requires independently vetted upgrade-event behavior;
 same-block upgrades are refused. Historical-state and standard-token conformance
 flags must be affirmative deployment evidence supplied by trusted configuration,
-not assumed from a symbol or copied from customer requests. No deployed token,
-live native checkout pricing or funded receipt conformance is claimed here.
+not assumed from a symbol or copied from customer requests. No production token,
+live native checkout pricing or public-network receipt conformance is claimed here.
 
 ### Sepolia native payment and inventory ledger
 
 `NativeReceiptLedger` from `@rillswap/payments/native-ledger` explicitly provisions
-a separate private Sepolia-only database. It leaves Lightning and provider stores
+a separate private Sepolia database, or an explicitly scoped disposable sandbox
+database as described below. It leaves Lightning and provider stores
 unchanged. Ordinary open rejects missing, partial, foreign and unsupported stores;
 it performs SQLite integrity checks, but no network scan, migration or spending.
 Each configured exact asset/recipient/cap is immutable for this store version.
@@ -201,6 +202,68 @@ automatic scanner or a claim that Ethereum finalized receipts ordinarily reorg.
 Native events currently have only an internal outbox, not a signed public API.
 No native SDK send path, deployed affordable asset, or automatic merchant
 conversion is enabled. Operational native checkout remains a separate gate.
+
+### Disposable native RPC conformance
+
+The opt-in native sandbox test deploys the source-controlled `SandboxToken.sol`
+fixture and exercises real RPC transactions against a private Anvil child.
+It verifies exact receipt/log ingestion, five-versus-six local confirmations,
+durable prebinding and acceptance across ledger reopen, late receipt handling,
+and a controlled chain rewind followed by explicit inventory impairment.
+No public endpoint, fork, existing wallet or real asset is used.
+
+The affirmative asset `localSandbox` profile requires chain `31337`, version
+`anvil-local/1`, a unique delimiter-safe namespace and exactly six confirmations,
+counting inclusion as one. The actual block-zero hash is pinned in the ordinary
+asset `genesisHash`. Observation uses local head depth, never the `finalized`
+tag, and persists `finality: "local_sandbox_confirmed"`. Canonical Ethereum and
+Sepolia policy cannot acquire this profile. Missing, partial or incompatible
+profiles do not enable local-chain support.
+
+Sandbox namespace scopes receipt and nonce bookkeeping; it is not authenticated
+by the wallet signature and cannot distinguish cloned RPC environments. The
+internal SQLite `finalized` allocation marker is not a consensus guarantee.
+Receipt payloads retain the explicit local evidence label; sandbox outbox events
+have sandbox-scoped keys and must stay inside the disposable harness, not real
+fulfillment consumers. Native public API/event integration is still disabled.
+Previous version-one Sepolia config, keys and stores open unchanged without
+migration or backfill. A sandbox store reopens only with its exact profile.
+
+On Linux amd64, install the official pinned toolchain from the repository root:
+
+```sh
+mkdir -p tmp/toolchains/foundry-v1.8.4
+curl -fL --retry 3 \
+  -o tmp/toolchains/foundry-v1.8.4/foundry_v1.8.4_linux_amd64.tar.gz \
+  https://github.com/foundry-rs/foundry/releases/download/v1.8.4/foundry_v1.8.4_linux_amd64.tar.gz
+printf '%s  %s\n' \
+  699e2207a6a9b27ca17c48c81e56f1677ed9c58b623b59128b4e15ec9da0625e \
+  tmp/toolchains/foundry-v1.8.4/foundry_v1.8.4_linux_amd64.tar.gz | sha256sum -c - && \
+  tar -xzf tmp/toolchains/foundry-v1.8.4/foundry_v1.8.4_linux_amd64.tar.gz \
+    -C tmp/toolchains/foundry-v1.8.4 anvil
+cd rill-payments
+bun install --frozen-lockfile --ignore-scripts
+bun run check:sandbox-fixture
+bun run test:native-sandbox
+```
+
+Foundry version is `1.8.4`, source commit
+`50af4efe189dc64bad2b75ed6990b835de66c4ae`. The harness checks the extracted
+binary SHA256 as well as version/commit, launches its own nonforking process
+on numeric loopback with an OS-assigned port, and waits for owned-process
+termination before deleting its unique local `tmp/` directory. Startup and RPC
+calls have deadlines. Test keys are public and disposable. No untrusted RPC URL
+or automatically downloaded executable is accepted. Nonfork/loopback settings
+do not provide OS-enforced outbound network isolation.
+
+Solidity fixture generation uses pinned npm `solc@0.8.30`, compiler
+`0.8.30+commit.73712a01`, targeting Prague. `bun run generate:sandbox-fixture`
+reproduces the checked-in ABI/bytecode, and CI checks fixture freshness offline.
+The actual process test is manual and skipped unless
+`RILLSWAP_RUN_NATIVE_SANDBOX=1`; an opted-in missing toolchain fails, not skips.
+This test proves local execution and ledger conformance for this fixture only.
+It does not prove Ethereum consensus finality, production token behavior,
+pricing, provider settlement, or native checkout SDK/service integration.
 
 ## Constrained treasury payout foundation
 

@@ -46,6 +46,15 @@ test("absent/partial/foreign/schema-modified native stores never bootstrap thems
   const db = new Database(f.path); db.exec("CREATE TRIGGER sqliteXerase AFTER INSERT ON outbox BEGIN DELETE FROM outbox; END;"); db.close();
   expect(() => NativeReceiptLedger.open(f.path, f.config)).toThrow("schema mismatch");
 });
+test("existing canonical version-one config bytes and receipt keys remain unchanged without sandbox metadata", async () => {
+  const f = fixture(), db = new Database(f.path);
+  expect((db.query("SELECT value FROM metadata WHERE key='config'").get() as { value: string }).value).toBe(JSON.stringify(f.config)); db.close();
+  const intent = f.ledger.createIntent("canonical", "1000000", 2000, "canonical_intent_01", 1000), signed = await f.sign(intent);
+  await f.ledger.prepare(intent.intentId, signed.binding, signed.signature, "canonical_attempt_01", f.provider, () => 1100);
+  const hash = f.settle(); await f.ledger.observe(intent.attemptId, hash, f.provider, () => 1300);
+  expect(f.ledger.pendingEvents()[0]?.receiptKey).toBe(`11155111:${f.config.asset.genesisHash}:${hash}:7`);
+  f.ledger.close(); const restarted = f.open(); expect(restarted.getIntent(intent.intentId).status).toBe("paid");
+});
 test("native prebinding atomically reserves capacity and globally unique debit nonce", async () => {
   const f = fixture("1000000"), second = f.open();
   const first = f.ledger.createIntent("one", "1000000", 2000, "native_intent_key_1", 1000), other = f.ledger.createIntent("two", "1000000", 2000, "native_intent_key_2", 1000);
