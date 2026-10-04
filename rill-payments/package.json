@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./bolt11": "./src/bolt11.ts",
+    "./merchant": "./src/merchant.ts"
   },
   "scripts": {
     "check:schemas": "bun scripts/generate-validator.ts --check",
@@ -12,6 +14,11 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   },
-  "dependencies": { "ajv": "8.17.1" },
+  "dependencies": {
+    "ajv": "8.17.1",
+    "@noble/curves": "2.0.1",
+    "@noble/hashes": "2.0.1",
+    "@scure/base": "2.0.0"
+  },
   "devDependencies": { "@types/bun": "1.3.11", "typescript": "7.0.2" }
 }
