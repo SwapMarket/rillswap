@@ -13,7 +13,8 @@
     "./tracking": "./src/tracking.ts",
     "./discovery": "./src/discovery.ts",
     "./evm-receipt": "./src/evmReceipt.ts",
-    "./native-ledger": "./src/nativeLedger.ts"
+    "./native-ledger": "./src/nativeLedger.ts",
+    "./treasury": "./src/treasury.ts"
   },
   "scripts": {
     "merchant": "bun src/cli.ts",

@@ -187,3 +187,28 @@ automatic scanner or a claim that Ethereum finalized receipts ordinarily reorg.
 Native events currently have only an internal outbox, not a signed public API.
 No native SDK send path, deployed affordable asset, or automatic merchant
 conversion is enabled. Operational native checkout remains a separate gate.
+
+## Constrained treasury payout foundation
+
+`TreasuryTransferJournal` from `@rillswap/payments/treasury` is an explicitly
+provisioned private Sepolia journal, not an automatic conversion adapter or a
+wallet balance. Immutable policy pins the source wallet/token, recipient
+allowlist and lifetime token/gas authorization ceilings. Unknown/partial state
+never starts spending. Startup checks persisted transaction and reservation
+invariants and does not repair inconsistent records.
+
+Prepare a fixed nonce and exact EIP-1559 token transfer before invoking an
+isolated `MerchantTransferSigner`. That wallet/process must durably deduplicate
+operation IDs and never broadcast while signing. The journal independently
+checks the signed transaction's source, chain, calldata and fee bounds, persists
+it privately and records dispatch before invoking the broadcaster. Ambiguous
+broadcast resumes with the exact raw transaction, never a fresh nonce. Public
+operation views exclude signed raw transactions and keys.
+
+An independently conformant `MerchantTransferObserver` must establish the exact
+canonical finalized debit/credit and gas cost. A reverted or contradictory
+operation requires intervention. Failed and ambiguous jobs retain their entire
+authorization ceilings, even after settlement; these are conservative lifetime
+spend budgets, not inventory balances. No signer/observer deployment, native
+inventory synchronization, batching, conversion output or automatic job runner
+is enabled. Payout failure cannot reopen a paid native or Lightning order.
