@@ -1,4 +1,4 @@
-"""Owned incoming-only accounting and original funded reverse receipt, no release.
+"""Owned incoming accounting, original receipts and explicit completion conformance.
 
 The initial authenticated merchant flow is the unchanged M29 diagnostic template.
 Checked test-only substitutions change only this scenario's amount/provider/
@@ -12,6 +12,7 @@ not rewritten. This is not a production accounting projector or relay policy.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import os
 import subprocess
@@ -21,9 +22,68 @@ from pathlib import Path
 
 import pytest
 
+CRASH_CHILD = """
+import json, os, signal, sys
+from contextlib import contextmanager
+from pathlib import Path
+from rill_crypto import Context
+from rill_cli.age_container import X25519Credentials
+from rill_cli.conversion_journal import ConversionJournal, SourceAuthority
+from rill_cli.reverse_conversion import ReverseExecutionConfig
+from rill_cli.reverse_reconciliation import BlockHint, DestinationCustody, reconcile_conversion
+
+stage='inputs'
+try:
+    value = json.loads(sys.stdin.buffer.read(65537))
+    assert value['boundary'] in ('before_commit','after_commit')
+    directory = Path(value['directory'])
+    assert directory.stat().st_uid == os.getuid()
+    authority = SourceAuthority.model_validate(value['authority'])
+    custody = DestinationCustody.model_validate(value['custody'])
+    configuration = value['config']
+    for name in ('lnd_tls_root_path','lnd_read_macaroon_path','lnd_payment_macaroon_path','core_cookie_path'):
+        configuration[name] = Path(configuration[name])
+    config = ReverseExecutionConfig(**configuration)
+    credentials = X25519Credentials(**value['credentials'])
+    stage='open'
+    journal = ConversionJournal.open(directory,Path(value['fence']),authority)
+    original_transaction, original_complete = journal._transaction, journal.complete
+    def terminate():
+        sys.stdout.write('BOUNDARY:' + value['boundary'] + '\\n')
+        sys.stdout.flush()
+        os.kill(os.getpid(),signal.SIGKILL)
+    @contextmanager
+    def killed_transaction():
+        with original_transaction() as db:
+            yield db
+            # Only successful completion-body exit reaches the kill hook.
+            if value['boundary']=='before_commit': terminate()
+        if value['boundary']=='after_commit': terminate()
+    def complete(*args,**kwargs):
+        journal._transaction=killed_transaction
+        try: return original_complete(*args,**kwargs)
+        finally: journal._transaction=original_transaction
+    journal.complete=complete
+    stage='native_reconciliation'
+    with Context(library_path='/work/provider/tmp/native/librill_crypto.so') as crypto:
+        reconcile_conversion(journal,value['operation_id'],config=config,credentials=credentials,crypto=crypto,
+            funding_recovery_path=Path(value['candidate']),funding_attempt_id=value['funding_attempt_id'],
+            binding_revision=value['binding_revision'],funding_block=BlockHint.model_validate(value['funding_block']),
+            claim_txid=value['claim_txid'],claim_path='cooperative',custody=custody)
+    sys.stdout.write('UNEXPECTED:boundary_not_reached\\n')
+    sys.stdout.flush()
+    os._exit(91)
+except BaseException:
+    # Never expose secret input, validation values, upstream errors or traceback.
+    sys.stdout.write('REFUSED:'+stage+'\\n')
+    sys.stdout.flush()
+    os._exit(92)
+"""
+
 EXTRA = """
-    import asyncio, logging
+    import asyncio, logging, signal
     from pyrage import x25519
+    from rill_core.wire.canonical import canonicalize
     from rill_crypto import Context
     from fake_relay import FakeRelay
     from rill_provider.core_tx_bytes import CoreTransactionReader
@@ -49,6 +109,65 @@ EXTRA = """
     from rill_cli import reverse_reconciliation as reconciliation_module
     logging.basicConfig(level=logging.CRITICAL)
     provider_data = None
+
+    def claim_receipt_ready(states,transaction,minimum_depth):
+        depth=transaction.get('confirmations')
+        return states==[('SETTLED',)] and type(depth) is int and depth>=minimum_depth
+
+    def inventory_snapshot(journal):
+        with sqlite3.connect((journal.directory/'inventory.sqlite').as_uri()+'?mode=ro',uri=True) as inventory:
+            return (inventory.execute('SELECT * FROM metadata ORDER BY id').fetchall(),
+                inventory.execute('SELECT * FROM jobs ORDER BY operation_id').fetchall(),
+                inventory.execute('SELECT * FROM credits ORDER BY payment_hash').fetchall(),
+                inventory.execute('SELECT * FROM holds ORDER BY kind,owner,payment_hash').fetchall())
+
+    async def crash_completion(journal,config,credentials,crypto,candidate,binding,funding_info,claim_txid,custody,data):
+        before = inventory_snapshot(journal)
+        generation = journal.begin_capacity_query().generation
+        private_paths = (journal.directory/'recovery'/'owned_treasury_reverse_01.age',candidate,
+            journal.source_fence,journal.directory.parent/'provider.age',
+            config.core_cookie_path,config.lnd_tls_root_path,config.lnd_read_macaroon_path,
+            config.lnd_payment_macaroon_path,data['cert_a'],data['mac_a'])
+        private_before = immutable(private_paths)
+        original_payments = call(b,b_secret,'ListPayments',ln.ListPaymentsRequest,ln.ListPaymentsResponse,
+            ln.ListPaymentsRequest(include_incomplete=True)).SerializeToString()
+        payload = dict(boundary=CRASH_BOUNDARY,directory=str(journal.directory),fence=str(journal.source_fence),
+            operation_id='owned_treasury_reverse_01',authority=journal.authority.model_dump(mode='json'),
+            custody=custody.model_dump(mode='json'),credentials=dict(recipient=credentials.recipient,identity=credentials.identity),
+            config=dict(lnd_port=config.lnd_port,lnd_tls_root_path=str(config.lnd_tls_root_path),
+                lnd_read_macaroon_path=str(config.lnd_read_macaroon_path),lnd_payment_macaroon_path=str(config.lnd_payment_macaroon_path),
+                core_port=config.core_port,core_cookie_path=str(config.core_cookie_path),core_wallet=config.core_wallet),
+            candidate=str(candidate),funding_attempt_id=binding['funding_attempt_id'],binding_revision=binding['binding_revision'],
+            funding_block=dict(height=funding_info['blockheight'],block_hash=funding_info['blockhash']),claim_txid=claim_txid)
+        encoded=canonicalize(payload)
+        assert len(encoded)<=65536
+        child = None
+        try:
+            child=await asyncio.to_thread(subprocess.run,[sys.executable,'-c',CRASH_CHILD],
+                input=encoded,capture_output=True,timeout=45,check=False)
+        except Exception: pass
+        # Fixed messages only: timeout/CompletedProcess may retain captured data.
+        assert child is not None,'owned reconciliation child unavailable'
+        for phase in ('inputs','open','native_reconciliation'):
+            if child.stdout==('REFUSED:'+phase+'\\n').encode():
+                print('PHASE: owned_child_refused_'+phase,file=sys.stderr)
+        assert child.returncode==-signal.SIGKILL,'owned reconciliation child did not reach kill boundary'
+        assert child.stdout==('BOUNDARY:'+CRASH_BOUNDARY+'\\n').encode(),'unexpected owned child marker'
+        assert child.stderr==b'','owned reconciliation child emitted diagnostics'
+        reopened = ConversionJournal.open(journal.directory,journal.source_fence,journal.authority)
+        job = reopened.status('owned_treasury_reverse_01')
+        if CRASH_BOUNDARY=='before_commit':
+            assert inventory_snapshot(reopened)==before
+            assert job.state=='dispatched' and job.receipt is None
+            assert reopened.begin_capacity_query().generation==generation
+        else:
+            assert job.state=='complete' and job.receipt is not None
+            assert reopened.begin_capacity_query().generation==generation+1
+        assert immutable(private_paths)==private_before
+        final_payments = call(b,b_secret,'ListPayments',ln.ListPaymentsRequest,ln.ListPaymentsResponse,
+            ln.ListPaymentsRequest(include_incomplete=True)).SerializeToString()
+        assert final_payments==original_payments
+        return reopened,(original_payments,private_paths,private_before)
 
     def synchronize():
         height = rpc('getblockcount', [])
@@ -212,8 +331,25 @@ EXTRA = """
                 print('PHASE: original_reserved_reverse',file=sys.stderr)
                 native_runner = original_reverse.run_reverse_swap
                 stage = ['starting']
+                cooperative_events = []
                 def trace(message):
                     # Print only fixed progress categories, never SDK payloads.
+                    cooperation = {
+                        'cooperative claim window unavailable; claiming unilaterally':'window_unavailable',
+                        'cooperative disclosure not recorded; claiming unilaterally':'disclosure_unrecorded',
+                        "cooperative claim proposed; waiting for the provider's signature":'proposal_sent',
+                        'no cooperative signature in time; claiming unilaterally':'signature_timeout',
+                        'provider declined cooperation; claiming unilaterally':'provider_declined',
+                        'provider cooperative signature invalid; claiming unilaterally':'signature_invalid',
+                    }
+                    if message in cooperation:
+                        cooperative_events.append(cooperation[message])
+                        print('PHASE: original_reverse_cooperative_'+cooperation[message],file=sys.stderr)
+                        return
+                    if message.startswith('cooperative claim '):
+                        cooperative_events.append('claim_submitted')
+                        print('PHASE: original_reverse_cooperative_claim_submitted',file=sys.stderr)
+                        return
                     for prefix,label in (('session ','session'),('terms: ','terms'),
                         ('recovery file written','checkpoint'),('hold payment observed','payment'),
                         ('funding ','funding'),('claim ','claim')):
@@ -240,7 +376,8 @@ EXTRA = """
                 async with asyncio.timeout(30):
                     while True:
                         states=store._connection.execute('SELECT state FROM swaps').fetchall()
-                        if len(states)==1 and states[0][0]=='SETTLED': break
+                        transaction=await asyncio.to_thread(rpc,'gettransaction',[outcome.claim_txid],wallet='merchant')
+                        if claim_receipt_ready(states,transaction,reservation.job.request.confirmation_blocks): break
                         await asyncio.sleep(0.2)
                 mining_stop.set()
                 await mining
@@ -257,12 +394,53 @@ EXTRA = """
                 funding_info = await asyncio.to_thread(rpc,'gettransaction',[outcome.funding_txid],wallet='provider')
                 custody = DestinationCustody(network=authority.network,script=authority.treasury_script,
                     core_wallet='merchant',destination_keys_controlled=True)
-                receipt = await asyncio.to_thread(collect_conversion_receipt,journal,
-                    reservation.job.request.operation_id,config=config,credentials=credentials,crypto=crypto,
-                    funding_recovery_path=candidate_path,funding_attempt_id=binding['funding_attempt_id'],
-                    binding_revision=binding['binding_revision'],
-                    funding_block=BlockHint(height=funding_info['blockheight'],block_hash=funding_info['blockhash']),
-                    claim_txid=outcome.claim_txid,claim_path='cooperative',custody=custody)
+                targets = (
+                    (reconciliation_module.CoreTransactionReader,'observe_block_transaction','block_bytes'),
+                    (reconciliation_module,'check_funding_binding_transaction','funding_binding'),
+                    (reconciliation_module.WalletRpc,'observe_historical_wallet_output','destination_history'),
+                    (reconciliation_module,'validate_cooperative_claim','cooperative_validation'),
+                    (reconciliation_module.LndTreasuryObserver,'observe_completed_payment','source_payment'),
+                    (reconciliation_module.CoreTransactionReader,'observe_source','chain_sample'),
+                    (reconciliation_module,'_collect','receipt_join'),
+                )
+                originals = []
+                raised_phase=['receipt_join']
+                def diagnostic(original,label):
+                    def observed(*args,**kwargs):
+                        print('PHASE: receipt_'+label+'_enter',file=sys.stderr)
+                        try: result=original(*args,**kwargs)
+                        except Exception as error:
+                            if label!='receipt_join': raised_phase[0]=label
+                            if label=='receipt_join':
+                                reasons={
+                                    'source and contract chain observations contradict':'chain_correspondence',
+                                    'historical claim depth below approval':'claim_depth',
+                                    'conversion observations changed during acquisition':'generation_or_clock',
+                                    'historical conversion acquisition expired':'acquisition_expired',
+                                }
+                                for message,tag in reasons.items():
+                                    if error.args==(message,):
+                                        print('PHASE: receipt_join_'+tag,file=sys.stderr)
+                                        raise
+                            event=cooperative_events[-1] if cooperative_events else 'no_cooperative_event'
+                            print('PHASE: receipt_'+raised_phase[0]+'_raised_after_'+event,file=sys.stderr)
+                            raise
+                        print('PHASE: receipt_'+label+'_returned',file=sys.stderr)
+                        return result
+                    return observed
+                try:
+                    for owner,name,label in targets:
+                        original=getattr(owner,name)
+                        originals.append((owner,name,original))
+                        setattr(owner,name,diagnostic(original,label))
+                    receipt = await asyncio.to_thread(collect_conversion_receipt,journal,
+                        reservation.job.request.operation_id,config=config,credentials=credentials,crypto=crypto,
+                        funding_recovery_path=candidate_path,funding_attempt_id=binding['funding_attempt_id'],
+                        binding_revision=binding['binding_revision'],
+                        funding_block=BlockHint(height=funding_info['blockheight'],block_hash=funding_info['blockhash']),
+                        claim_txid=outcome.claim_txid,claim_path='cooperative',custody=custody)
+                finally:
+                    for owner,name,original in originals: setattr(owner,name,original)
                 job = journal.status(reservation.job.request.operation_id)
                 assert job.state == 'dispatched' and job.receipt is None
                 assert receipt.payment_hash == job.prepared.payment_hash
@@ -292,12 +470,30 @@ EXTRA = """
                 assert payment.htlcs[0].route.first_hop_amount_msat==receipt.amount_msat+receipt.routing_fee_msat
                 if COMPLETION_SCENARIO:
                     print('PHASE: explicit_verified_completion',file=sys.stderr)
-                    completed = await asyncio.to_thread(reconcile_conversion,journal,
-                        reservation.job.request.operation_id,config=config,credentials=credentials,crypto=crypto,
-                        funding_recovery_path=candidate_path,funding_attempt_id=binding['funding_attempt_id'],
-                        binding_revision=binding['binding_revision'],
-                        funding_block=BlockHint(height=funding_info['blockheight'],block_hash=funding_info['blockhash']),
-                        claim_txid=outcome.claim_txid,claim_path='cooperative',custody=custody)
+                    crash_snapshot = None
+                    if CRASH_BOUNDARY is not None:
+                        print('PHASE: completion_process_death_'+CRASH_BOUNDARY,file=sys.stderr)
+                        journal,crash_snapshot=await crash_completion(journal,config,credentials,crypto,candidate_path,binding,
+                            funding_info,outcome.claim_txid,custody,data)
+                        assert store._connection.execute('SELECT state FROM swaps').fetchall()==[('SETTLED',)]
+                    reopened_before = inventory_snapshot(journal)
+                    after_kill_factories = {}
+                    def no_acquisition(*args,**kwargs):
+                        raise AssertionError('terminal status must not acquire or execute')
+                    if CRASH_BOUNDARY=='after_commit':
+                        after_kill_factories={name:getattr(reconciliation_module,name) for name in (
+                            'CoreTransactionReader','WalletRpc','LndTreasuryObserver','collect_conversion_receipt')}
+                        for name in after_kill_factories: setattr(reconciliation_module,name,no_acquisition)
+                    try:
+                        completed = await asyncio.to_thread(reconcile_conversion,journal,
+                            reservation.job.request.operation_id,config=config,credentials=credentials,crypto=crypto,
+                            funding_recovery_path=candidate_path,funding_attempt_id=binding['funding_attempt_id'],
+                            binding_revision=binding['binding_revision'],
+                            funding_block=BlockHint(height=funding_info['blockheight'],block_hash=funding_info['blockhash']),
+                            claim_txid=outcome.claim_txid,claim_path='cooperative',custody=custody)
+                    finally:
+                        for name,factory in after_kill_factories.items(): setattr(reconciliation_module,name,factory)
+                    if CRASH_BOUNDARY=='after_commit': assert inventory_snapshot(journal)==reopened_before
                     assert completed.state=='complete' and completed.receipt==receipt
                     assert journal.begin_capacity_query().generation==after_receipt.generation+1
                     with sqlite3.connect((journal.directory/'inventory.sqlite').as_uri()+'?mode=ro',uri=True) as inventory:
@@ -308,10 +504,9 @@ EXTRA = """
                         assert consumed==receipt.amount_msat+receipt.routing_fee_msat
                         assert stored_credit['amount_msat']-consumed==200000000-receipt.amount_msat-receipt.routing_fee_msat
                     before_terminal=journal.begin_capacity_query()
+                    persisted_before_terminal=inventory_snapshot(journal)
                     factories={name:getattr(reconciliation_module,name) for name in (
                         'CoreTransactionReader','WalletRpc','LndTreasuryObserver','collect_conversion_receipt')}
-                    def no_acquisition(*args,**kwargs):
-                        raise AssertionError('terminal status must not acquire or execute')
                     for name in factories: setattr(reconciliation_module,name,no_acquisition)
                     try:
                         terminal = reconcile_conversion(journal,reservation.job.request.operation_id,
@@ -323,13 +518,20 @@ EXTRA = """
                     finally:
                         for name,factory in factories.items(): setattr(reconciliation_module,name,factory)
                     assert journal.begin_capacity_query().generation==before_terminal.generation
+                    assert inventory_snapshot(journal)==persisted_before_terminal
                     final_paid=call(b,b_secret,'ListPayments',ln.ListPaymentsRequest,ln.ListPaymentsResponse,
                         ln.ListPaymentsRequest(include_incomplete=True))
                     assert len(final_paid.payments)==1 and len(final_paid.payments[0].htlcs)==1
+                    if crash_snapshot is not None:
+                        original_payments,private_paths,private_before=crash_snapshot
+                        assert final_paid.SerializeToString()==original_payments
+                        assert immutable(private_paths)==private_before
+                assert store._connection.execute('SELECT state FROM swaps').fetchall()==[('SETTLED',)]
                 return dict(original_reverse_receipt=True,source_debit_msat=receipt.amount_msat+receipt.routing_fee_msat,
                     destination_value_sat=receipt.destination_value_sat,claim_depth=receipt.confirmation_blocks,
                     original_source_attempts=1,inventory_hold_retained=not COMPLETION_SCENARIO,
-                    verified_completion=COMPLETION_SCENARIO,accounting_admission=True)
+                    verified_completion=COMPLETION_SCENARIO,accounting_admission=True,
+                    process_death_boundary=CRASH_BOUNDARY)
             finally:
                 mining_stop.set()
                 try: await mining
@@ -348,7 +550,9 @@ EXTRA = """
 """
 
 
-def _program(original: str | None = None, *, completion: bool = False) -> str:
+def _program(
+    original: str | None = None, *, completion: bool = False, crash_boundary: str | None = None
+) -> str:
     fixture = import_module("test_merchant_source_pinned")
     setup = import_module("test_lnd_payment_pinned").CHANNEL_SETUP
     if original is None:
@@ -413,7 +617,14 @@ def _program(original: str | None = None, *, completion: bool = False) -> str:
         marker,
         "            finally:\n                try: child.stdout.close(); child.stderr.close()\n                finally:\n                    if provider_data is not None: provider_data['crypto'].close()",
     )
-    return setup + f"\n    COMPLETION_SCENARIO = {completion!r}\n" + EXTRA + body
+    assert crash_boundary in (None, "before_commit", "after_commit")
+    assert crash_boundary is None or completion
+    child_program = CRASH_CHILD if crash_boundary is not None else ""
+    controls = (
+        f"\n    COMPLETION_SCENARIO = {completion!r}\n"
+        f"    CRASH_BOUNDARY = {crash_boundary!r}\n    CRASH_CHILD = {child_program!r}\n"
+    )
+    return setup + controls + EXTRA + body
 
 
 def test_combined_funded_program_compiles_and_preserves_original_template() -> None:
@@ -427,6 +638,13 @@ def test_combined_funded_program_compiles_and_preserves_original_template() -> N
     completed = _program(completion=True)
     assert "COMPLETION_SCENARIO = True" in completed
     compile(completed, "<owned-merchant-completion>", "exec")
+    compile(CRASH_CHILD, "<owned-completion-child>", "exec")
+    for boundary in ("before_commit", "after_commit"):
+        compile(
+            _program(completion=True, crash_boundary=boundary),
+            "<owned-completion-process-death>",
+            "exec",
+        )
 
 
 @pytest.mark.parametrize("fault", ["inserted_statement", "same_count_wrong_context"])
@@ -446,6 +664,43 @@ def test_template_drift_refuses_before_any_effects(fault: str) -> None:
         AssertionError, match=r"merchant (amount statement|evidence/cleanup span) changed"
     ):
         _program(original)
+
+
+@pytest.mark.parametrize(
+    ("states", "transaction", "expected"),
+    [
+        ([("SETTLED",)], {"confirmations": 3}, True),
+        ([("SETTLED",)], {"confirmations": 4}, True),
+        ([("SETTLED",)], {"confirmations": 2}, False),
+        ([("SETTLED",)], {"confirmations": 0}, False),
+        ([("SETTLED",)], {"confirmations": -1}, False),
+        ([("SETTLED",)], {"confirmations": True}, False),
+        ([("SETTLED",)], {"confirmations": "3"}, False),
+        ([("SETTLED",)], {"confirmations": 3.0}, False),
+        ([("SETTLED",)], {}, False),
+        ([("FUNDED",)], {"confirmations": 3}, False),
+        ([], {"confirmations": 3}, False),
+        ([("SETTLED",), ("SETTLED",)], {"confirmations": 3}, False),
+    ],
+)
+def test_actual_fixture_readiness_requires_settlement_and_strict_original_depth(
+    states: list[tuple[str]], transaction: dict[str, object], *, expected: bool
+) -> None:
+    functions: list[ast.stmt] = [
+        node
+        for node in ast.walk(ast.parse(_program()))
+        if isinstance(node, ast.FunctionDef) and node.name == "claim_receipt_ready"
+    ]
+    assert len(functions) == 1
+    # Execute only the actual effect-free predicate, never the surrounding RPC
+    # program. This protects the readiness contract rather than restating it.
+    namespace: dict[str, object] = {}
+    exec(  # noqa: S102 - fixed test-owned function AST
+        compile(ast.Module(body=functions, type_ignores=[]), "<claim-readiness>", "exec"), namespace
+    )
+    ready = namespace["claim_receipt_ready"]
+    assert callable(ready)
+    assert ready(states, transaction, 3) is expected
 
 
 def test_combined_profile_preserves_proof_mounts_and_refuses_missing_inputs() -> None:
@@ -495,7 +750,22 @@ def test_pinned_explicit_verified_merchant_conversion_completion(tmp_path: Path)
     assert evidence["verified_completion"] is True
 
 
-def _funded_evidence(tmp_path: Path, *, completion: bool) -> dict[str, object]:
+@pytest.mark.lnd
+@pytest.mark.native_crypto
+@pytest.mark.parametrize("boundary", ["before_commit", "after_commit"])
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_LND") != "1" or os.environ.get("RILLSWAP_RUN_BUN_MERCHANT") != "1",
+    reason="explicit owned process-death conformance opt-ins",
+)
+def test_pinned_verified_completion_process_death(tmp_path: Path, boundary: str) -> None:
+    evidence = _funded_evidence(tmp_path, completion=True, crash_boundary=boundary)
+    assert evidence["verified_completion"] is True
+    assert evidence["process_death_boundary"] == boundary
+
+
+def _funded_evidence(
+    tmp_path: Path, *, completion: bool, crash_boundary: str | None = None
+) -> dict[str, object]:
     fixture = import_module("test_merchant_source_pinned")
     helpers = import_module("test_lnd_payment_pinned")
     tls_helpers = import_module("test_lnd_payment_tls")
@@ -536,8 +806,12 @@ def _funded_evidence(tmp_path: Path, *, completion: bool) -> dict[str, object]:
         assert built.returncode == 0, "owned merchant compilation refused"
         evidence: dict[str, object] = helpers._run_two_node_sidecar(  # noqa: SLF001 - additive isolated fixture profile
             tmp_path,
-            _program(completion=completion),
-            prefix="merchant-completion" if completion else "merchant-conversion",
+            _program(completion=completion, crash_boundary=crash_boundary),
+            prefix="merchant-crash"
+            if crash_boundary is not None
+            else "merchant-completion"
+            if completion
+            else "merchant-conversion",
             deadline=420,
             profile="merchant_conversion",
             merchant_bun_bundle=bundle,

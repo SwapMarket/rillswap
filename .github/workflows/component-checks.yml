@@ -282,6 +282,11 @@ jobs:
           RILLSWAP_RUN_BUN_MERCHANT=1 .venv/bin/python -m pytest -q \
             tests/test_merchant_conversion_pinned.py::test_pinned_explicit_verified_merchant_conversion_completion \
             --basetemp=tmp/pytest-ci-merchant-completion
+      - name: Check completion process death at both commit boundaries
+        run: |
+          RILLSWAP_RUN_BUN_MERCHANT=1 .venv/bin/python -m pytest -q \
+            tests/test_merchant_conversion_pinned.py::test_pinned_verified_completion_process_death \
+            --basetemp=tmp/pytest-ci-merchant-crash
 
   cli:
     runs-on: ubuntu-24.04

@@ -1677,6 +1677,30 @@ terminal status without RPCs or another payer attempt. The original receipt-only
 case still retains its entire allocation. This is controlled regtest financial
 conformance, not automatic production completion, crash recovery or reorg safety.
 
+The separate `test_pinned_verified_completion_process_death` cases kill an owned
+Python reconciliation child with SIGKILL immediately before or after the original
+completion transaction commits. Core, LND, the provider and private parent-owned
+files stay alive. Before-commit reopening must preserve every journal row and its
+full hold; a fresh explicit reconciliation then completes once. After-commit
+reopening must find the actual debit and receipt already recorded; terminal
+reconciliation performs no recovery-key/candidate/custody acquisition or RPCs and
+leaves all rows unchanged. Original payment/HTLC identity and private inputs stay
+unchanged. Child inputs use a private pipe and only fixed public markers escape.
+
+This is completion atomicity and lost-acknowledgment conformance across process
+death at two selected boundaries. It does not establish that a hot journal was
+encountered, machine power-loss durability, torn or mid-commit writes, daemon
+restarts, original SDK interruption, or restored database/fence safety. Normal
+SQLite reopening of an existing positively identified database is not application
+metadata repair. Missing or incompatible application state still grants no work.
+The test-only increment changes no stored format or startup behavior.
+
+The owned miner stops only after provider settlement **and** the merchant wallet
+reports the originally requested claim depth. SDK claim success and provider
+settlement alone do not establish that depth. Fixed diagnostic tags distinguish
+SDK cooperation, actual observation/validation boundaries and receipt joins
+without revealing payloads or changing the cooperative-path expectation.
+
 An internal **treasury accounting observer** is available as
 `rill_provider.lnd_treasury_observation.LndTreasuryObserver`. Provision a protected
 credential with only `info:read` and `offchain:read`, numeric loopback endpoint,

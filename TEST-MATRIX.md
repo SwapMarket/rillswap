@@ -170,8 +170,14 @@ checkout or multichain conformance has passed. Offline `rill-payments` and
 | M36 | Original conversion receipt collection (read-only regtest) | Exact encrypted anchor and native signed successor/funding/claim correspondence, independent source debit and output facts, explicit destination custody, fee/depth caps and final common sampled chain; native unrelated-prevout and contradictory-evidence rejection with synthetic transports, no completion/release or funded treasury proof |
 | M37 | Controlled funded merchant-to-BTC receipt | New isolated 200k-sat merchant receipt, known incoming-only accounting admission, original reserved SDK/provider operation, actual source debit and native confirmed claim to owned Core destination; receipt-only collection retains the entire hold and zero consumption, no production projection, release or crash-recovery proof |
 | M38 | Explicit fenced regtest completion | Fresh native acquisition followed immediately by atomic query identity/generation/age admission, actual debit consumption, full hold release and generation increment; preserves manual/idempotent and receipt-only contracts, no startup action, saved-receipt authority or production enablement |
+| M39 | Completion process-death boundaries | Owned child SIGKILL before/after original SQL commit with actual funded proof, normal fresh reopen and explicit reconciliation; compares all persisted rows, original payment/HTLC and private inputs, no assumed hot-journal mechanism, machine power-loss, service restart or original-SDK crash coverage |
 
 ## Test evidence and accounting
+
+M39 readiness now waits for the original claim depth before stopping its owned
+miner. Earlier funded runs also showed an intermittent cooperative-validation
+refusal that remains unexplained. Fixed, nonsecret diagnostics retain that
+distinction; passing boundary cases do not establish production stability.
 
 Each funded test records initial/final on-chain wallet balances, contract outputs, LN paid/received amounts, mining fees, routing fees, quoted fees, prepayment exposure, and locked-but-not-spent amounts. Do not compare only UI status labels. Record block hashes/heights and privacy mode without retaining fixture secrets in public CI artifacts.
 
