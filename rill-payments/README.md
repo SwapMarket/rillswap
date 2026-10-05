@@ -138,6 +138,47 @@ merchant/LND restart, machine-crash durability, production deployment or
 stablecoin route conformance. Ordinary installations have no startup or storage
 migration changes. Existing checkpoints never authorize replacement funding.
 
+### Isolated HTTPS listener profile (diagnostic only)
+
+The existing `scripts/regtest-merchant.ts provision|serve` configuration and
+ephemeral plain-HTTP listener remain unchanged. That diagnostic records
+`https://merchant.invalid` as an application origin but does **not** establish
+authenticated HTTPS acquisition under that origin.
+
+Select the separate profile explicitly:
+
+```sh
+RILLSWAP_REGTEST_MERCHANT=1 bun scripts/regtest-merchant.ts provision-https /absolute/private/config.json
+RILLSWAP_REGTEST_MERCHANT=1 bun scripts/regtest-merchant.ts serve-https /absolute/private/config.json
+```
+
+The strict configuration has the original ten string fields plus
+`profile: "regtest-merchant-https/1"`, `listenerPort` (canonical decimal string,
+1024 through 65535), `listenerCertificatePath`, and `listenerKeyPath`. Its origin
+must be exactly `https://127.0.0.1:<listenerPort>`. Listener TLS files are separate
+from `certificatePath`, which authenticates outbound LND REST. All inputs belong
+to the same canonical, private, current-UID-owned directory. Protect that directory
+and its ancestors; this is trusted fixture code, not same-UID credential isolation.
+
+Provide certificates and keys explicitly. The factory validates certificate
+validity, the `127.0.0.1` IP SAN, key compatibility and authentication inputs before
+provisioning or opening the ledger. It does not generate certificates, repair
+state, choose a fallback port, migrate an old origin, or support receipt-loss fault
+injection in this profile. Ordinary reopening retains the configured origin/port
+and original store; missing, partial or invalid TLS/configuration/store refuses.
+Listener certificate identity is not stored in ledger metadata: an operator-owned
+replacement valid certificate/key pair can serve. A mismatched key is refused;
+this is not enforcement of original-certificate continuity. Acquisition clients
+must independently retain and verify their original leaf pin.
+
+Offline tests use actual certificate-validated HTTPS and SQLite with a synthetic
+LND identity endpoint. They exercise wrong trust/hostname, malformed/mismatched
+or expired TLS, occupied-port refusal, retained inputs/history, and legacy HTTP
+compatibility. They issue no invoices or payments and do not establish real LND
+identity, source-credit provenance or funded conversion. Exact leaf pinning before
+sending a capability remains a separate acquisition-client requirement. Existing
+installations receive no automatic profile selection, listener or migration.
+
 ## Regtest merchant API and SDK
 
 `bun run merchant provision /absolute/private/config.json` is an explicit
