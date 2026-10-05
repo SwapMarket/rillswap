@@ -173,6 +173,7 @@ checkout or multichain conformance has passed. Offline `rill-payments` and
 | M39 | Completion process-death boundaries | Owned child SIGKILL before/after original SQL commit with actual funded proof, normal fresh reopen and explicit reconciliation; compares all persisted rows, original payment/HTLC and private inputs, no assumed hot-journal mechanism, machine power-loss, service restart or original-SDK crash coverage |
 | M40 | Source LND daemon restart (same container) | Explicit graceful stop, fresh pinned-TLS LOCKED, same-wallet unlock and ready/drained channel, original credentials/history/identity/journal continuity, fresh receipt and completion; bounded supervisor signal tests, no container restart, seed/recovery replay, older-wallet or power-loss claim |
 | M41 | Explicit operator reconciliation/status CLI | Private independent authority and strict versioned read-only evidence inputs for an existing regtest job, fresh guarded completion and historical terminal bypass; no receipt-file authority, provisioning, spending credential, new SDK invocation or production accounting claim |
+| M42 | Index-free known funding inclusion | Anchored UTXO depth, canonical derived block, bounded block-qualified bytes and native correspondence, two consistent samples/unchanged tips; historical observations only, no wallet/txindex fallback, Merkle proof, new SDK invocation or durable hint-retention claim |
 
 ## Test evidence and accounting
 

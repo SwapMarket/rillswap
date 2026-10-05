@@ -22,18 +22,17 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 from rill_core.errors import ValidationError
-from rill_core.networks import backend_names
+from rill_core.networks import backend_names, require_supported_network
 from rill_core.settlement import (
     FundingBindingTransactionMatch,
     check_funding_binding_transaction,
     inspect_transaction_outputs,
 )
-from rill_core.wire.messages import FundingBinding
+from rill_core.wire.messages import ContractTerms, FundingBinding
 from rill_core.wire.types import NetworkIdentity
 
 if TYPE_CHECKING:
     from rill_core.settlement import TaprootKeyOperations
-    from rill_core.wire.messages import ContractTerms
 
 RPC_VERIFY_ALREADY_IN_CHAIN = -27
 RPC_INVALID_ADDRESS_OR_KEY = -5  # getrawtransaction: not in mempool or txindex
@@ -506,6 +505,136 @@ class CoreTransactionReader:
             observation = None
         if observation is None:
             raise CoreUnavailableError("Core historical transaction acquisition unavailable")
+        _remaining_source(deadline)
+        return observation
+
+    def observe_funding_inclusion(  # noqa: PLR0912, PLR0915 - one bounded acquisition owns its sampling and cleanup invariants
+        self,
+        binding: FundingBinding,
+        terms: ContractTerms,
+        *,
+        keys: TaprootKeyOperations,
+        deadline_seconds: float = 10,
+    ) -> CoreHistoricalTransaction:
+        """Explicitly sample one known confirmed binding without wallet or txindex.
+
+        Chain-only UTXO depth must refer to the sampled best block. Derive its
+        inclusion height, acquire block-qualified bytes and check native contract
+        correspondence. Two matching UTXO samples and unchanged bracketing tips
+        are conservative admission rules, not atomic/continuous availability,
+        mempool-spend exclusion or ABA-reorg protection. Unlike historical lookup,
+        even ordinary tip advancement refuses this acquisition.
+
+        Caller owns authentication of the supplied binding/terms and trust in the
+        configured host/listener. Core lookup is not a Merkle inclusion proof;
+        configured namespace/profile are not daemon attestations. The returned
+        historical facts grant no custody, signing, payment, retry or release
+        authority. Missing state installs no caller, discovery or migration work.
+        Duration is checked admission through cleanup, not hard interruption.
+        """
+        inputs_valid = False
+        try:
+            if not isinstance(binding, FundingBinding) or not isinstance(terms, ContractTerms):
+                raise TypeError("parsed funding inputs required")  # noqa: TRY301 - fixed public input diagnostic
+            if (
+                type(binding.contract_vout) is not int
+                or type(terms.funding_confirmations) is not int
+            ):
+                raise TypeError("strict funding counters required")  # noqa: TRY301 - model serializers must not normalize bypassed booleans
+            # Reject bypassed model construction as well as unsupported identities
+            # before cookie access or transport. This does not authenticate events.
+            binding = FundingBinding.model_validate_json(
+                binding.model_dump_json(warnings="error"), strict=True
+            )
+            terms = ContractTerms.model_validate_json(
+                terms.model_dump_json(warnings="error"), strict=True
+            )
+            require_supported_network(terms.network_identity)
+            if terms.network_identity != self._network or (
+                type(deadline_seconds) not in (int, float)
+                or not math.isfinite(deadline_seconds)
+                or not 0 < deadline_seconds <= MAX_SOURCE_SECONDS
+            ):
+                raise ValueError("funding inclusion inputs differ")  # noqa: TRY301 - fixed public input diagnostic
+            inputs_valid = True
+        except Exception:  # noqa: BLE001 - caller-provided model validation details never escape
+            inputs_valid = False
+        if not inputs_valid:
+            raise CoreProtocolError("Core funding inclusion input invalid")
+        observation = None
+        try:
+            started_at = time.time()
+            deadline = time.monotonic() + deadline_seconds
+            if not math.isfinite(started_at):
+                raise CoreProtocolError("Core funding inclusion time unavailable")  # noqa: TRY301 - detach setup diagnostics
+            username, password = _cookie(self._cookie_path)
+            with httpx.Client(
+                base_url=self._url,
+                auth=httpx.BasicAuth(username, password),
+                trust_env=False,
+                follow_redirects=False,
+                timeout=httpx.Timeout(_remaining_source(deadline)),
+            ) as client:
+                request_id = 0
+
+                def read(method: str, params: list[object]) -> Any:  # noqa: ANN401 - checked RPC result narrowing below
+                    nonlocal request_id
+                    request_id += 1
+                    return self._rpc(client, method, params, request_id, deadline=deadline)
+
+                before = _chain_tip(read("getblockchaininfo", []), self._network)
+                if (
+                    not 0 < before[1] <= MAX_HISTORICAL_BLOCK_HEIGHT
+                    or read("getblockhash", [0]) != self._network.genesis_hash
+                    or read("getblockhash", [before[1]]) != before[0]
+                ):
+                    raise CoreProtocolError("Core funding inclusion backend differs")  # noqa: TRY301 - detach backend diagnostics
+                params: list[object] = [binding.funding_txid, binding.contract_vout, False]
+                output = read("gettxout", params)
+                depth = _checked_outpoint(output, binding, before[1])
+                if output["bestblock"] != before[0] or depth < terms.funding_confirmations:
+                    raise CoreProtocolError("Core funding inclusion depth differs")  # noqa: TRY301 - detach observation diagnostics
+                height = before[1] - depth + 1
+                block_hash = read("getblockhash", [height])
+                if not _hash(block_hash):
+                    raise CoreProtocolError("Core funding inclusion block unavailable")  # noqa: TRY301 - detach observation diagnostics
+                raw, inner_before, inner_after = self._block_transaction_on_client(
+                    client, binding.funding_txid, height, block_hash, deadline
+                )
+                if inner_before != before or inner_after != before:
+                    raise CoreProtocolError("Core funding inclusion tip changed")  # noqa: TRY301 - additive strict policy, old historical policy unchanged
+                check_funding_binding_transaction(raw, binding, terms, keys=keys)
+                ending_output = read("gettxout", params)
+                if (
+                    _checked_outpoint(ending_output, binding, before[1]) != depth
+                    or ending_output["bestblock"] != before[0]
+                    or _chain_tip(read("getblockchaininfo", []), self._network) != before
+                    or read("getblockhash", [height]) != block_hash
+                    or read("getblockhash", [before[1]]) != before[0]
+                ):
+                    raise CoreProtocolError("Core funding inclusion samples contradict")  # noqa: TRY301 - detach final diagnostics
+            _remaining_source(deadline)
+            completed_at = time.time()
+            if not math.isfinite(completed_at) or completed_at < started_at:
+                raise CoreProtocolError("Core funding inclusion interval unavailable")  # noqa: TRY301 - detach cleanup diagnostics
+            observation = CoreHistoricalTransaction(
+                self._network,
+                raw,
+                binding.funding_txid,
+                height,
+                block_hash,
+                before[1],
+                before[0],
+                before[1],
+                before[0],
+                depth,
+                started_at,
+                completed_at,
+            )
+        except Exception:  # noqa: BLE001 - detach private cookie, RPC, raw bytes and native failures
+            observation = None
+        if observation is None:
+            raise CoreUnavailableError("Core funding inclusion acquisition unavailable")
         _remaining_source(deadline)
         return observation
 

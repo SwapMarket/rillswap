@@ -1733,6 +1733,30 @@ removing the evidence/identity and supplying an unavailable native library. Actu
 funding/claim/source and original accounting/privacy assertions remain unchanged.
 The CLI is regtest-only and introduces no provisioning or fresh SDK invocation.
 
+`CoreTransactionReader.observe_funding_inclusion()` is a separate explicit,
+bounded observation of a **known** parsed funding binding and terms. It associates
+chain-only `gettxout` depth with that response's `bestblock` and the sampled tip,
+derives the inclusion height, then reads the exact block-qualified transaction.
+It checks native contract/output/anchor correspondence, requires two consistent
+UTXO samples and identical bracketing tips, and rechecks canonical block hashes.
+Even ordinary tip advancement refuses this new acquisition; older historical
+lookup and outpoint methods retain their existing policies.
+
+The result is existing `CoreHistoricalTransaction` history, not signing, payment,
+retry, ownership, custody or hold-release authority. Caller-authenticated binding
+and terms, the trusted local Core listener and configured namespace/profile remain
+operator premises. Block-qualified lookup relies on Core's membership claim, not
+a Merkle proof. Matching samples do not establish atomicity, prevent ABA reorgs,
+exclude mempool spends or guarantee continued availability. The second UTXO sample
+is conservative admission, not stronger cryptographic membership evidence. This
+method uses no unqualified transaction lookup, wallet fallback, txindex or scan;
+unknown data fails closed without retries or effects.
+
+This increment does not persist hints or install SDK callbacks. Existing
+installations perform no new acquisition, migration or startup work when hints
+are absent, partial or from an older version. Durable retention by the original
+SDK invocation remains a separate gate.
+
 An internal **treasury accounting observer** is available as
 `rill_provider.lnd_treasury_observation.LndTreasuryObserver`. Provision a protected
 credential with only `info:read` and `offchain:read`, numeric loopback endpoint,
