@@ -718,6 +718,34 @@ establish destination selection, not destination-key ownership or Core identity;
 unknown existing wallets require affirmative custody before any future completion.
 No marker migration, automatic wallet work or production conversion is enabled.
 
+### Original conversion receipt collection (read-only regtest only)
+
+`rill_cli.reverse_reconciliation.collect_conversion_receipt()` verifies the
+original encrypted journal checkpoint, an explicitly selected signed funded
+successor, actual block-qualified funding bytes and an independently observed
+native-authorized cooperative or unilateral claim. The claim must spend that
+exact selected contract outpoint, not an unrelated deposit to the same script.
+Its actual output index/value/script and depth must match wallet history and the
+original approval. Independently observed successful LND first-hop debit and
+settled routing fees must satisfy the original invoice and all fee/debit ceilings.
+
+An explicit `DestinationCustody` assertion requires independently established
+retained spending-key control for the exact network/script/named wallet. It is
+never learned from Core recognition, wallet flags or a journal's script pin.
+Funding block hints are explicit lookup inputs; missing hints cause no discovery
+or work. Final active hashes for funding, claim and both LND tips must match one
+common sampled Core tip. Tip movement, contradictions, changed journal generation,
+private-file faults and late acquisition refuse evidence conservatively. Sampling
+is not atomicity or protection against later reorgs or restored database/fence
+state. Expired approval/invoice timers do not prohibit historical reads.
+
+The result is a copyable, timestamp-free `ConversionReceipt`, **not a durable
+release capability**. The collector never completes a job, releases holds, signs,
+broadcasts, pays, writes recovery or starts a replacement session. Native tests
+use actual separately signed Taproot funding/recovery and both claim paths with
+synthetic read transports and custody assertions, not funded treasury conversion.
+Existing installations remain unchanged, with no startup work or migration.
+
 ### Merchant credit correspondence (internal, provenance only)
 
 `rill_cli.merchant_credit.verify_merchant_credit` verifies the existing merchant
