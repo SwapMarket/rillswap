@@ -171,6 +171,7 @@ checkout or multichain conformance has passed. Offline `rill-payments` and
 | M37 | Controlled funded merchant-to-BTC receipt | New isolated 200k-sat merchant receipt, known incoming-only accounting admission, original reserved SDK/provider operation, actual source debit and native confirmed claim to owned Core destination; receipt-only collection retains the entire hold and zero consumption, no production projection, release or crash-recovery proof |
 | M38 | Explicit fenced regtest completion | Fresh native acquisition followed immediately by atomic query identity/generation/age admission, actual debit consumption, full hold release and generation increment; preserves manual/idempotent and receipt-only contracts, no startup action, saved-receipt authority or production enablement |
 | M39 | Completion process-death boundaries | Owned child SIGKILL before/after original SQL commit with actual funded proof, normal fresh reopen and explicit reconciliation; compares all persisted rows, original payment/HTLC and private inputs, no assumed hot-journal mechanism, machine power-loss, service restart or original-SDK crash coverage |
+| M40 | Source LND daemon restart (same container) | Explicit graceful stop, fresh pinned-TLS LOCKED, same-wallet unlock and ready/drained channel, original credentials/history/identity/journal continuity, fresh receipt and completion; bounded supervisor signal tests, no container restart, seed/recovery replay, older-wallet or power-loss claim |
 
 ## Test evidence and accounting
 

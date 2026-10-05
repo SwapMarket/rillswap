@@ -964,16 +964,21 @@ def call(channel, secret, name, req, resp, value, *, timeout=5):
         value, metadata=metadata(secret), timeout=timeout)
 
 nodes = {}
+source_wallet_password = None
 print('PHASE: channel_wallets', file=sys.stderr)
 for label, port in (('a', 10009), ('b', 10010)):
     cert = Path('/work/public/' + label + '.cert').read_bytes()
     channel = dial(cert, port)
     seed = unary(channel, '/lnrpc.WalletUnlocker/GenSeed',
         unlock.GenSeedRequest, unlock.GenSeedResponse)(unlock.GenSeedRequest(), timeout=10)
+    wallet_password = secrets.token_bytes(24)
+    if label=='b' and os.environ.get('RILLSWAP_TEST_SOURCE_RESTART')=='1':
+        source_wallet_password=wallet_password
     initiated = unary(channel, '/lnrpc.WalletUnlocker/InitWallet',
         unlock.InitWalletRequest, unlock.InitWalletResponse)(unlock.InitWalletRequest(
-        wallet_password=secrets.token_bytes(24), cipher_seed_mnemonic=seed.cipher_seed_mnemonic,
+        wallet_password=wallet_password, cipher_seed_mnemonic=seed.cipher_seed_mnemonic,
         recovery_window=0, stateless_init=True), timeout=20)
+    del wallet_password
     assert initiated.admin_macaroon
     channel.close()
     channel = dial(cert, port)
@@ -1704,7 +1709,12 @@ def _copy_private_core_cookie(container: str, destination: Path) -> None:
 def _merchant_fixture_mounts(profile: str, bundle: Path | None) -> tuple[str, ...]:
     if bundle is None:
         return ()
-    if profile not in ("merchant_receipt", "merchant_proof", "merchant_conversion"):
+    if profile not in (
+        "merchant_receipt",
+        "merchant_proof",
+        "merchant_conversion",
+        "merchant_restart",
+    ):
         raise ValueError("Bun fixture requires the isolated merchant REST profile")
     binary = ROOT.parent / "tmp/toolchains/bun-v1.3.11/bun"
     for source in (binary, bundle):
@@ -1745,7 +1755,7 @@ def _assert_merchant_namespace(core: str, nodes: tuple[str, str]) -> None:
 def _merchant_proof_mounts(
     profile: str, bundle: Path | None, directory: Path | None
 ) -> tuple[str, ...]:
-    if profile not in ("merchant_proof", "merchant_conversion"):
+    if profile not in ("merchant_proof", "merchant_conversion", "merchant_restart"):
         if directory is not None:
             raise ValueError("proof TLS inputs require the isolated proof profile")
         return ()
@@ -1777,6 +1787,57 @@ def _merchant_proof_mounts(
     )
 
 
+SOURCE_SUPERVISOR = """
+child=
+terminate() {
+    trap '' TERM INT
+    if [ -n "$child" ]; then
+        kill -TERM "$child" 2>/dev/null || :
+        wait "$child" 2>/dev/null || :
+    fi
+    printf 'RILL_SUPERVISOR:terminating\\n'
+    exit 143
+}
+trap terminate TERM INT
+for launch in 1 2; do
+    printf 'RILL_SUPERVISOR:launch_%s\\n' "$launch"
+    /bin/lnd "$@" &
+    child=$!
+    wait "$child"
+    status=$?
+    child=
+    printf 'RILL_SUPERVISOR:reap_%s_%s\\n' "$launch" "$status"
+    [ "$status" -eq 0 ] || exit "$status"
+    if [ "$launch" -eq 1 ]; then
+        printf 'RILL_SUPERVISOR:between\\n'
+        sleep 0.2
+    fi
+done
+"""
+
+
+def _lnd_runtime(*, supervised: bool) -> tuple[str, ...]:
+    if supervised:
+        return (
+            "--entrypoint",
+            "/bin/sh",
+            LND_IMAGE,
+            "-c",
+            SOURCE_SUPERVISOR,
+            "rill-source-supervisor",
+        )
+    return (LND_IMAGE,)
+
+
+def _supervisor_identity(container: str) -> tuple[object, ...]:
+    value = json.loads(_docker("inspect", container))[0]
+    proc = _docker("exec", container, "/bin/sh", "-c", "cat /proc/1/stat")
+    start_ticks = proc.rsplit(")", 1)[1].split()[19]
+    assert value["RestartCount"] == 0
+    assert value["State"]["Running"] is True
+    return (value["Id"], value["State"]["Pid"], value["State"]["StartedAt"], start_ticks)
+
+
 def _run_two_node_sidecar(  # noqa: PLR0913, PLR0915 - isolated test infrastructure
     tmp_path: Path,
     program: str,
@@ -1784,16 +1845,27 @@ def _run_two_node_sidecar(  # noqa: PLR0913, PLR0915 - isolated test infrastruct
     prefix: str,
     deadline: int,
     profile: Literal[
-        "baseline", "native_reverse", "merchant_receipt", "merchant_proof", "merchant_conversion"
+        "baseline",
+        "native_reverse",
+        "merchant_receipt",
+        "merchant_proof",
+        "merchant_conversion",
+        "merchant_restart",
     ] = "baseline",
     merchant_bun_bundle: Path | None = None,
     merchant_proof_tls_directory: Path | None = None,
 ) -> dict[str, object]:
     """Use fresh owned Core/LND containers for one bounded sidecar scenario."""
-    native_preflight = profile in ("native_reverse", "merchant_conversion")
-    merchant_proof = profile in ("merchant_proof", "merchant_conversion")
+    native_preflight = profile in ("native_reverse", "merchant_conversion", "merchant_restart")
+    merchant_proof = profile in ("merchant_proof", "merchant_conversion", "merchant_restart")
     cookie_required = native_preflight or merchant_proof
-    merchant_rest = profile in ("merchant_receipt", "merchant_proof", "merchant_conversion")
+    merchant_rest = profile in (
+        "merchant_receipt",
+        "merchant_proof",
+        "merchant_conversion",
+        "merchant_restart",
+    )
+    source_restart = profile == "merchant_restart"
     merchant_mounts = _merchant_fixture_mounts(profile, merchant_bun_bundle)
     proof_mounts = _merchant_proof_mounts(
         profile, merchant_bun_bundle, merchant_proof_tls_directory
@@ -1922,7 +1994,7 @@ def _run_two_node_sidecar(  # noqa: PLR0913, PLR0915 - isolated test infrastruct
                 f"container:{core}",
                 "--tmpfs",
                 "/root/.lnd:rw,mode=0700",
-                LND_IMAGE,
+                *_lnd_runtime(supervised=source_restart and name == b),
                 "--bitcoin.active",
                 "--bitcoin.regtest",
                 "--bitcoin.node=bitcoind",
@@ -1937,6 +2009,7 @@ def _run_two_node_sidecar(  # noqa: PLR0913, PLR0915 - isolated test infrastruct
                 "--restlisten=127.0.0.1:8081" if merchant_rest and name == b else "--norest",
                 "--nobootstrap",
             )
+        supervisor_before = _supervisor_identity(b) if source_restart else None
         for container, path in (
             (core, "/home/bitcoin/.bitcoin"),
             (a, "/root/.lnd"),
@@ -1993,6 +2066,7 @@ def _run_two_node_sidecar(  # noqa: PLR0913, PLR0915 - isolated test infrastruct
             f"PYTHONPATH={python_path}",
             "--env",
             "PYTHONDONTWRITEBYTECODE=1",
+            *(("--env", "RILLSWAP_TEST_SOURCE_RESTART=1") if source_restart else ()),
             PYTHON_IMAGE,
             "python",
             "-c",
@@ -2000,6 +2074,19 @@ def _run_two_node_sidecar(  # noqa: PLR0913, PLR0915 - isolated test infrastruct
             timeout=deadline,
         )
         evidence = json.loads(result)
+        if source_restart:
+            assert _supervisor_identity(b) == supervisor_before
+            events = [
+                line
+                for line in _docker("logs", b).splitlines()
+                if line.startswith("RILL_SUPERVISOR:")
+            ]
+            assert events == [
+                "RILL_SUPERVISOR:launch_1",
+                "RILL_SUPERVISOR:reap_1_0",
+                "RILL_SUPERVISOR:between",
+                "RILL_SUPERVISOR:launch_2",
+            ]
         assert evidence["capacity_sat"] == 1_000_000
         assert len(evidence["funding_txid"]) == 64
         assert type(evidence["vout"]) is int

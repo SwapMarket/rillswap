@@ -81,7 +81,7 @@ except BaseException:
 """
 
 EXTRA = """
-    import asyncio, logging, signal
+    import asyncio, logging, signal, socket, ssl
     from pyrage import x25519
     from rill_core.wire.canonical import canonicalize
     from rill_crypto import Context
@@ -120,6 +120,117 @@ EXTRA = """
                 inventory.execute('SELECT * FROM jobs ORDER BY operation_id').fetchall(),
                 inventory.execute('SELECT * FROM credits ORDER BY payment_hash').fetchall(),
                 inventory.execute('SELECT * FROM holds ORDER BY kind,owner,payment_hash').fetchall())
+
+    def served_leaf():
+        context=ssl.create_default_context(cafile='/work/public/b.cert')
+        context.check_hostname=False
+        context.set_alpn_protocols(['h2'])
+        with socket.create_connection(('127.0.0.1',10010),timeout=2) as connection:
+            with context.wrap_socket(connection,server_hostname='localhost') as secure:
+                return hashlib.sha256(secure.getpeercert(binary_form=True)).digest()
+
+    def source_restart(journal,config,candidate,data):
+        global b
+        print('PHASE: source_restart_original_active',file=sys.stderr)
+        assert source_wallet_password is not None
+        cert=config.lnd_tls_root_path.read_bytes()
+        expected_leaf=hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert.decode())).digest()
+        assert served_leaf()==expected_leaf
+        status=unary(b,'/lnrpc.State/GetState',state.GetStateRequest,state.GetStateResponse)
+        assert status(state.GetStateRequest(),timeout=2).state==state.SERVER_ACTIVE
+        before=inventory_snapshot(journal)
+        private_paths=(journal.source_fence,journal.directory/'recovery'/'owned_treasury_reverse_01.age',
+            candidate,journal.directory.parent/'provider.age',config.core_cookie_path,
+            config.lnd_tls_root_path,config.lnd_read_macaroon_path,config.lnd_payment_macaroon_path,
+            data['cert_a'],data['mac_a'])
+        protected=immutable(private_paths)
+        paid_before=call(b,b_secret,'ListPayments',ln.ListPaymentsRequest,ln.ListPaymentsResponse,
+            ln.ListPaymentsRequest(include_incomplete=True)).SerializeToString(deterministic=True)
+        invoices_before=call(b,b_secret,'ListInvoices',ln.ListInvoiceRequest,ln.ListInvoiceResponse,
+            ln.ListInvoiceRequest()).SerializeToString(deterministic=True)
+        channels_before=call(b,b_secret,'ListChannels',ln.ListChannelsRequest,ln.ListChannelsResponse,
+            ln.ListChannelsRequest()).channels
+        assert len(channels_before)==1
+        old=channels_before[0]
+        assert old.active and old.chan_status_flags=='ChanStatusDefault'
+        assert not old.pending_htlcs and old.unsettled_balance==0
+        economic=(old.local_balance,old.remote_balance,old.total_satoshis_sent,old.total_satoshis_received,
+            old.local_constraints.SerializeToString(),old.remote_constraints.SerializeToString())
+        print('PHASE: source_restart_stop_original',file=sys.stderr)
+        call(b,b_secret,'StopDaemon',ln.StopRequest,ln.StopResponse,ln.StopRequest())
+        b.close()
+        deadline=time.monotonic()+30
+        fresh=dial(cert,10010)
+        try:
+            print('PHASE: source_restart_wait_locked',file=sys.stderr)
+            get_state=unary(fresh,'/lnrpc.State/GetState',state.GetStateRequest,state.GetStateResponse)
+            while True:
+                assert time.monotonic()<deadline,'source daemon did not reach existing-wallet LOCKED'
+                try: locked=get_state(state.GetStateRequest(),timeout=1).state==state.LOCKED
+                except grpc.RpcError: locked=False
+                if locked: break
+                time.sleep(.1)
+            assert served_leaf()==expected_leaf
+            print('PHASE: source_restart_unlock_original_wallet',file=sys.stderr)
+            unary(fresh,'/lnrpc.WalletUnlocker/UnlockWallet',unlock.UnlockWalletRequest,
+                unlock.UnlockWalletResponse)(unlock.UnlockWalletRequest(wallet_password=source_wallet_password,
+                    recovery_window=0,stateless_init=True),timeout=max(.1,deadline-time.monotonic()))
+            print('PHASE: source_restart_wait_active',file=sys.stderr)
+            while True:
+                assert time.monotonic()<deadline,'source daemon did not become SERVER_ACTIVE'
+                try: active=get_state(state.GetStateRequest(),timeout=1).state==state.SERVER_ACTIVE
+                except grpc.RpcError: active=False
+                if active: break
+                time.sleep(.1)
+            assert served_leaf()==expected_leaf
+            nodes['b']=(fresh,b_secret,b_key)
+            b=fresh
+            print('PHASE: source_restart_channel_inventory',file=sys.stderr)
+            while True:
+                assert time.monotonic()<deadline,'source channel did not return active with complete inventory'
+                info=call(b,b_secret,'GetInfo',ln.GetInfoRequest,ln.GetInfoResponse,ln.GetInfoRequest())
+                assert info.identity_pubkey==b_key and len(info.chains)==1
+                assert info.chains[0].chain=='bitcoin' and info.chains[0].network=='regtest'
+                channels=call(b,b_secret,'ListChannels',ln.ListChannelsRequest,ln.ListChannelsResponse,
+                    ln.ListChannelsRequest()).channels
+                assert len(channels)==1
+                current=channels[0]
+                assert current.channel_point==old.channel_point and current.remote_pubkey==a_key
+                assert current.capacity==old.capacity and current.private==old.private and not current.initiator
+                assert not current.pending_htlcs and current.unsettled_balance==0
+                pending=call(b,b_secret,'PendingChannels',ln.PendingChannelsRequest,ln.PendingChannelsResponse,
+                    ln.PendingChannelsRequest())
+                assert not any((pending.pending_open_channels,pending.pending_closing_channels,
+                    pending.pending_force_closing_channels,pending.waiting_close_channels))
+                peers=call(b,b_secret,'ListPeers',ln.ListPeersRequest,ln.ListPeersResponse,ln.ListPeersRequest())
+                assert len(peers.peers)<=1
+                if peers.peers: assert peers.peers[0].pub_key==a_key
+                if current.active and info.synced_to_chain and len(peers.peers)==1: break
+                time.sleep(.1)
+            assert current.chan_status_flags=='ChanStatusDefault'
+            print('PHASE: source_restart_economic_continuity',file=sys.stderr)
+            assert (current.local_balance,current.remote_balance,current.total_satoshis_sent,
+                current.total_satoshis_received,current.local_constraints.SerializeToString(),
+                current.remote_constraints.SerializeToString())==economic
+            print('PHASE: source_restart_payment_continuity',file=sys.stderr)
+            assert call(b,b_secret,'ListPayments',ln.ListPaymentsRequest,ln.ListPaymentsResponse,
+                ln.ListPaymentsRequest(include_incomplete=True)).SerializeToString(deterministic=True)==paid_before
+            print('PHASE: source_restart_invoice_continuity',file=sys.stderr)
+            after_invoices=call(b,b_secret,'ListInvoices',ln.ListInvoiceRequest,ln.ListInvoiceResponse,
+                ln.ListInvoiceRequest())
+            assert after_invoices.SerializeToString(deterministic=True)==invoices_before
+            print('PHASE: source_restart_credential_continuity',file=sys.stderr)
+            for path in (config.lnd_read_macaroon_path,config.lnd_payment_macaroon_path):
+                old_secret=path.read_bytes()
+                preserved=call(b,old_secret,'GetInfo',ln.GetInfoRequest,ln.GetInfoResponse,ln.GetInfoRequest())
+                assert preserved.identity_pubkey==b_key
+            synchronize()
+            print('PHASE: source_restart_journal_and_private_continuity',file=sys.stderr)
+            assert inventory_snapshot(journal)==before and immutable(private_paths)==protected
+            return paid_before,invoices_before,private_paths,protected
+        except BaseException:
+            fresh.close()
+            raise
 
     async def crash_completion(journal,config,credentials,crypto,candidate,binding,funding_info,claim_txid,custody,data):
         before = inventory_snapshot(journal)
@@ -394,6 +505,10 @@ EXTRA = """
                 funding_info = await asyncio.to_thread(rpc,'gettransaction',[outcome.funding_txid],wallet='provider')
                 custody = DestinationCustody(network=authority.network,script=authority.treasury_script,
                     core_wallet='merchant',destination_keys_controlled=True)
+                restart_snapshot = None
+                if SOURCE_RESTART:
+                    print('PHASE: original_source_daemon_restart',file=sys.stderr)
+                    restart_snapshot=await asyncio.to_thread(source_restart,journal,config,candidate_path,data)
                 targets = (
                     (reconciliation_module.CoreTransactionReader,'observe_block_transaction','block_bytes'),
                     (reconciliation_module,'check_funding_binding_transaction','funding_binding'),
@@ -526,12 +641,21 @@ EXTRA = """
                         original_payments,private_paths,private_before=crash_snapshot
                         assert final_paid.SerializeToString()==original_payments
                         assert immutable(private_paths)==private_before
+                    if restart_snapshot is not None:
+                        paid_before,invoices_before,private_paths,protected=restart_snapshot
+                        print('PHASE: source_restart_final_payment_history',file=sys.stderr)
+                        assert final_paid.SerializeToString(deterministic=True)==paid_before
+                        print('PHASE: source_restart_final_invoice_history',file=sys.stderr)
+                        assert call(b,b_secret,'ListInvoices',ln.ListInvoiceRequest,ln.ListInvoiceResponse,
+                            ln.ListInvoiceRequest()).SerializeToString(deterministic=True)==invoices_before
+                        print('PHASE: source_restart_final_private_inputs',file=sys.stderr)
+                        assert immutable(private_paths)==protected
                 assert store._connection.execute('SELECT state FROM swaps').fetchall()==[('SETTLED',)]
                 return dict(original_reverse_receipt=True,source_debit_msat=receipt.amount_msat+receipt.routing_fee_msat,
                     destination_value_sat=receipt.destination_value_sat,claim_depth=receipt.confirmation_blocks,
                     original_source_attempts=1,inventory_hold_retained=not COMPLETION_SCENARIO,
                     verified_completion=COMPLETION_SCENARIO,accounting_admission=True,
-                    process_death_boundary=CRASH_BOUNDARY)
+                    process_death_boundary=CRASH_BOUNDARY,source_daemon_restarted=SOURCE_RESTART)
             finally:
                 mining_stop.set()
                 try: await mining
@@ -551,7 +675,11 @@ EXTRA = """
 
 
 def _program(
-    original: str | None = None, *, completion: bool = False, crash_boundary: str | None = None
+    original: str | None = None,
+    *,
+    completion: bool = False,
+    crash_boundary: str | None = None,
+    restart: bool = False,
 ) -> str:
     fixture = import_module("test_merchant_source_pinned")
     setup = import_module("test_lnd_payment_pinned").CHANNEL_SETUP
@@ -619,10 +747,12 @@ def _program(
     )
     assert crash_boundary in (None, "before_commit", "after_commit")
     assert crash_boundary is None or completion
+    assert not restart or (completion and crash_boundary is None)
     child_program = CRASH_CHILD if crash_boundary is not None else ""
     controls = (
         f"\n    COMPLETION_SCENARIO = {completion!r}\n"
         f"    CRASH_BOUNDARY = {crash_boundary!r}\n    CRASH_CHILD = {child_program!r}\n"
+        f"    SOURCE_RESTART = {restart!r}\n"
     )
     return setup + controls + EXTRA + body
 
@@ -639,6 +769,7 @@ def test_combined_funded_program_compiles_and_preserves_original_template() -> N
     assert "COMPLETION_SCENARIO = True" in completed
     compile(completed, "<owned-merchant-completion>", "exec")
     compile(CRASH_CHILD, "<owned-completion-child>", "exec")
+    compile(_program(completion=True, restart=True), "<owned-source-daemon-restart>", "exec")
     for boundary in ("before_commit", "after_commit"):
         compile(
             _program(completion=True, crash_boundary=boundary),
@@ -763,8 +894,20 @@ def test_pinned_verified_completion_process_death(tmp_path: Path, boundary: str)
     assert evidence["process_death_boundary"] == boundary
 
 
+@pytest.mark.lnd
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_LND") != "1" or os.environ.get("RILLSWAP_RUN_BUN_MERCHANT") != "1",
+    reason="explicit same-wallet source daemon restart conformance opt-ins",
+)
+def test_pinned_source_daemon_restart_before_verified_completion(tmp_path: Path) -> None:
+    evidence = _funded_evidence(tmp_path, completion=True, restart=True)
+    assert evidence["verified_completion"] is True
+    assert evidence["source_daemon_restarted"] is True
+
+
 def _funded_evidence(
-    tmp_path: Path, *, completion: bool, crash_boundary: str | None = None
+    tmp_path: Path, *, completion: bool, crash_boundary: str | None = None, restart: bool = False
 ) -> dict[str, object]:
     fixture = import_module("test_merchant_source_pinned")
     helpers = import_module("test_lnd_payment_pinned")
@@ -806,14 +949,16 @@ def _funded_evidence(
         assert built.returncode == 0, "owned merchant compilation refused"
         evidence: dict[str, object] = helpers._run_two_node_sidecar(  # noqa: SLF001 - additive isolated fixture profile
             tmp_path,
-            _program(completion=completion, crash_boundary=crash_boundary),
-            prefix="merchant-crash"
+            _program(completion=completion, crash_boundary=crash_boundary, restart=restart),
+            prefix="merchant-restart"
+            if restart
+            else "merchant-crash"
             if crash_boundary is not None
             else "merchant-completion"
             if completion
             else "merchant-conversion",
             deadline=420,
-            profile="merchant_conversion",
+            profile="merchant_restart" if restart else "merchant_conversion",
             merchant_bun_bundle=bundle,
             merchant_proof_tls_directory=tls,
         )

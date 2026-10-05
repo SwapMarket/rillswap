@@ -1701,6 +1701,30 @@ settlement alone do not establish that depth. Fixed diagnostic tags distinguish
 SDK cooperation, actual observation/validation boundaries and receipt joins
 without revealing payloads or changing the cooperative-path expectation.
 
+The separate `merchant_restart` profile supervises only source B with exactly
+two possible foreground LND launches inside one surviving owned container. Its
+TERM/INT trap exits without relaunching, and a nonzero daemon exit never retries.
+Only this profile retains B's original wallet password in sidecar memory. The
+scenario explicitly stops the active daemon, requires LOCKED through a fresh
+pinned TLS connection, unlocks the existing wallet once with zero recovery window,
+then separately waits for server readiness, active channel and drained inventory.
+Original leaf fingerprint, node identity, macaroons, payment/invoice history,
+private inputs and dispatched journal state must remain unchanged. Host checks
+attest unchanged container/PID1 identity/start time, zero Docker restarts and the
+first child reaped successfully before its sole replacement launches.
+
+Restart history comparisons retain every protobuf field using deterministic
+serialization within the pinned runtime/schema. Default map wire ordering is not
+an invariant; this is not a cross-version canonical serialization format. Existing
+process-death snapshots and all financial/native checks remain unchanged.
+
+The fresh receipt/completion gates remain unchanged. No Docker restart, wallet
+initialization replay, reseeding, credential rotation, discovery or second SDK
+execution is permitted. This establishes same-version graceful daemon restart
+conformance only, not LND crash, older-wallet upgrade, machine power loss or
+production commitment coverage. Existing installations and profiles get no new
+startup behavior or stored format.
+
 An internal **treasury accounting observer** is available as
 `rill_provider.lnd_treasury_observation.LndTreasuryObserver`. Provision a protected
 credential with only `info:read` and `offchain:read`, numeric loopback endpoint,

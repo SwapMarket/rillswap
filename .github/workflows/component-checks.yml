@@ -287,6 +287,11 @@ jobs:
           RILLSWAP_RUN_BUN_MERCHANT=1 .venv/bin/python -m pytest -q \
             tests/test_merchant_conversion_pinned.py::test_pinned_verified_completion_process_death \
             --basetemp=tmp/pytest-ci-merchant-crash
+      - name: Check same-wallet source daemon restart before reconciliation
+        run: |
+          RILLSWAP_RUN_BUN_MERCHANT=1 .venv/bin/python -m pytest -q \
+            tests/test_merchant_conversion_pinned.py::test_pinned_source_daemon_restart_before_verified_completion \
+            --basetemp=tmp/pytest-ci-merchant-restart
 
   cli:
     runs-on: ubuntu-24.04
