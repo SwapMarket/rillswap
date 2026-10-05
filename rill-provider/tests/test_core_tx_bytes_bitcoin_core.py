@@ -111,6 +111,15 @@ assert candidate.chain_only_confirmations >= 1
 assert candidate.inclusion_height == candidate.tip_height - candidate.chain_only_confirmations + 1
 assert candidate.inclusion_block_hash == os.environ['RILL_TEST_INCLUSION_BLOCK']
 assert candidate.static_match.contract_vout == int(os.environ['RILL_TEST_SPEND_VOUT'])
+source = reader.observe_source(candidate.inclusion_height, deadline_seconds=10)
+assert source.configured_network == terms.network_identity
+assert source.observed_chain == 'regtest'
+assert source.genesis_hash == terms.network_identity.genesis_hash
+assert source.signet_challenge is None
+assert source.tip_height == candidate.tip_height
+assert source.source_height == candidate.inclusion_height
+assert source.source_block_hash == os.environ['RILL_TEST_INCLUSION_BLOCK']
+assert source.tip_hash == candidate.tip_hash
 print('Core v30 static rejection, UTXO response, and unknown lookup passed')
 """
 

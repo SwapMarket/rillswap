@@ -1575,6 +1575,28 @@ result. It does not exercise an initiated, failed, or settled real payment.
 Actual payment-flow interoperability, multi-instance fencing, persisted
 intent/backend correlation, and the L03/D01-D09 release gates remain open.
 
+`CoreTransactionReader.observe_source(source_height)` is a separate explicit
+read-only primitive for a known LND-reported height. It checks Core's chain label,
+IBD flag, genesis and configured signet challenge, reads the active hash at that
+height twice and refuses changed bracketing tips or hashes. Namespace and consensus
+profile remain operator pins; matching reads do not establish atomic state.
+Cookie Basic authentication authenticates the client, **not the server**. The
+operator must control the loopback listener and trusted host. A replaced listener
+can fabricate these claims; IBD false is not wider-network synchronization proof.
+
+The source call has a setup/cleanup-inclusive monotonic acceptance budget of at
+most ten seconds, with remaining per-RPC timeouts and late-result refusal. This is
+not a hard execution deadline: file work and HTTP parsing can block longer. It
+returns no usable absence, spending authority or wallet-capacity claim. Exceptions
+at this new boundary detach cookie/HTTP-bearing upstream details. Existing RPC
+methods retain their original inactivity timeouts. The extended digest-pinned
+Core v30 fixture verifies actual genesis, tip and active inclusion-height/hash
+correspondence without adding wallet actions to the existing case. CI reuses the
+sidecar-compatible environment to run that fixture. No installation upgrading
+from the previous release is observed, provisioned, migrated or otherwise changed
+automatically. The caller must still bind full acquisition intervals to real LND
+and merchant evidence before any future credit import.
+
 An internal **treasury accounting observer** is available as
 `rill_provider.lnd_treasury_observation.LndTreasuryObserver`. Provision a protected
 credential with only `info:read` and `offchain:read`, numeric loopback endpoint,

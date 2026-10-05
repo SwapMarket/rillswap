@@ -247,6 +247,10 @@ jobs:
         run: |
           RILL_CRYPTO_LIBRARY="$PWD/tmp/native/librill_crypto.so" \
             .venv/bin/python -m pytest -q -s -m lnd --basetemp=tmp/pytest-ci-lnd
+      - name: Check independent Core source observations
+        run: |
+          RILLSWAP_RUN_BITCOIN_CORE=1 .venv/bin/python -m pytest -q \
+            tests/test_core_tx_bytes_bitcoin_core.py --basetemp=tmp/pytest-ci-core-source
 
   cli:
     runs-on: ubuntu-24.04

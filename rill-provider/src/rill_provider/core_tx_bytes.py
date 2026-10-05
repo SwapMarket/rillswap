@@ -9,9 +9,11 @@ genesis, and signet challenge, NOT deployment namespace or consensus profile.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import stat
+import time
 from dataclasses import dataclass
 from decimal import Context as DecimalContext
 from decimal import Decimal, InvalidOperation, localcontext
@@ -33,6 +35,7 @@ RPC_VERIFY_ALREADY_IN_CHAIN = -27
 RPC_INVALID_ADDRESS_OR_KEY = -5  # getrawtransaction: not in mempool or txindex
 MAX_COOKIE_BYTES = 512
 MAX_RESPONSE_BYTES = 256 * 1024
+MAX_SOURCE_SECONDS = 10
 MAX_BLOCK_RESPONSE_BYTES = 32 * 1024 * 1024  # a decoded block (getblock verbosity 2)
 MAX_SPEND_SCAN_BLOCKS = 12  # blocks decoded per find_spender call
 FUNDING_ESTIMATE_TARGET = 6
@@ -162,6 +165,34 @@ class CoreProtocolError(CoreReadError):
 
 class CoreUnavailableError(CoreReadError):
     """The requested transaction or node was unavailable, not known absent."""
+
+
+@dataclass(frozen=True, slots=True)
+class CoreSourceSnapshot:
+    """Trusted loopback endpoint claims, not atomic state or financial authority.
+
+    Namespace and consensus profile remain operator configuration, not observed
+    daemon facts. Matching bracketing tips do not prove atomic acquisition.
+    Cookie authentication authenticates the client, not the server. A trusted
+    operator-controlled host/listener is required; this is not cryptographic
+    daemon identity. IBD false does not prove wider-network synchronization.
+    """
+
+    configured_network: NetworkIdentity
+    observed_chain: str
+    genesis_hash: str
+    signet_challenge: str | None
+    tip_height: int
+    tip_hash: str
+    source_height: int
+    source_block_hash: str
+
+
+def _remaining_source(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if not math.isfinite(remaining) or remaining <= 0:
+        raise CoreUnavailableError("Core source acquisition expired")
+    return remaining
 
 
 def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -305,6 +336,77 @@ class CoreTransactionReader:
         except httpx.HTTPError:
             raise CoreUnavailableError("Core RPC transport unavailable") from None
         return height
+
+    def observe_source(
+        self, source_height: int, *, deadline_seconds: float = 10
+    ) -> CoreSourceSnapshot:
+        """Read a known source height under a setup/cleanup-inclusive acceptance budget.
+
+        Read-only, with no wallet operation. This synchronous diagnostic refuses
+        late evidence; file work and HTTP parsing can still block beyond the
+        budget. It is not a hard execution deadline or suitable server-loop work.
+        The caller independently binds its complete acquisition interval and LND
+        observation. Neither matching tips nor active-hash reads are atomic proof.
+        """
+        if (
+            type(source_height) is not int
+            or source_height <= 0
+            or type(deadline_seconds) not in (int, float)
+            or not 0 < deadline_seconds <= MAX_SOURCE_SECONDS
+            or not math.isfinite(deadline_seconds)
+        ):
+            raise CoreProtocolError("Core source observation input invalid")
+        deadline = time.monotonic() + deadline_seconds
+        snapshot = None
+        try:
+            username, password = _cookie(self._cookie_path)
+            with httpx.Client(
+                base_url=self._url,
+                auth=httpx.BasicAuth(username, password),
+                trust_env=False,
+                follow_redirects=False,
+                timeout=httpx.Timeout(_remaining_source(deadline)),
+            ) as client:
+                snapshot = self._source_on_client(client, source_height, deadline)
+            _remaining_source(deadline)
+        except Exception:  # noqa: BLE001 - detach cookie/HTTP-bearing upstream errors
+            snapshot = None
+        if snapshot is None:
+            raise CoreUnavailableError("Core source acquisition unavailable")
+        _remaining_source(deadline)
+        return snapshot
+
+    def _source_on_client(
+        self, client: httpx.Client, source_height: int, deadline: float
+    ) -> CoreSourceSnapshot:
+        before = self._rpc(client, "getblockchaininfo", [], 1, deadline=deadline)
+        tip_hash, tip_height = _chain_tip(before, self._network)
+        if source_height > tip_height:
+            raise CoreProtocolError("Core source height exceeds observed tip")
+        genesis = self._rpc(client, "getblockhash", [0], 2, deadline=deadline)
+        if genesis != self._network.genesis_hash:
+            raise CoreProtocolError("Core source genesis differs")
+        source_hash = self._rpc(client, "getblockhash", [source_height], 3, deadline=deadline)
+        if not _hash(source_hash):
+            raise CoreProtocolError("Core source hash malformed")
+        after = self._rpc(client, "getblockchaininfo", [], 4, deadline=deadline)
+        if _chain_tip(after, self._network) != (tip_hash, tip_height):
+            raise CoreProtocolError("Core source tip changed during acquisition")
+        repeated = self._rpc(client, "getblockhash", [source_height], 5, deadline=deadline)
+        if repeated != source_hash:
+            raise CoreProtocolError("Core active source hash changed")
+        if source_height == tip_height and source_hash != tip_hash:
+            raise CoreProtocolError("Core source tip hash disagrees")
+        return CoreSourceSnapshot(
+            self._network,
+            self._chain,
+            genesis,
+            self._network.signet_challenge if self._network.name == "signet" else None,
+            tip_height,
+            tip_hash,
+            source_height,
+            source_hash,
+        )
 
     def fetch_binding_byte_match(
         self,
@@ -791,12 +893,14 @@ class CoreTransactionReader:
             raise CoreProtocolError("Core transaction status is inconsistent")
         return count
 
-    def _rpc(
+    def _rpc(  # noqa: PLR0912 - cohesive bounded JSON-RPC parser and optional acceptance checks
         self,
         client: httpx.Client,
         method: str,
         params: list[object],
         request_id: int,
+        *,
+        deadline: float | None = None,
     ) -> Any:  # noqa: ANN401
         if method not in (
             "getblockchaininfo",
@@ -826,8 +930,14 @@ class CoreTransactionReader:
                 path,
                 headers={"Accept-Encoding": "identity"},
                 json={"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
-                timeout=httpx.Timeout(READ_SECONDS, connect=CONNECT_SECONDS),
+                timeout=(
+                    httpx.Timeout(READ_SECONDS, connect=CONNECT_SECONDS)
+                    if deadline is None
+                    else httpx.Timeout(_remaining_source(deadline))
+                ),
             ) as response:
+                if deadline is not None:
+                    _remaining_source(deadline)
                 if response.status_code in (401, 403):
                     raise CoreAuthError("Core RPC authentication rejected")
                 if response.status_code != HTTP_OK:
@@ -838,9 +948,13 @@ class CoreTransactionReader:
                     raise CoreProtocolError("compressed Core RPC responses are unsupported")
                 chunks = bytearray()
                 for part in response.iter_raw():
+                    if deadline is not None:
+                        _remaining_source(deadline)
                     if len(chunks) + len(part) > max_bytes:
                         raise CoreProtocolError("Core RPC response exceeded resource limit")
                     chunks.extend(part)
+            if deadline is not None:
+                _remaining_source(deadline)
             envelope = json.loads(
                 chunks,
                 object_pairs_hook=_unique_pairs,
