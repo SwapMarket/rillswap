@@ -1407,6 +1407,62 @@ with tempfile.TemporaryDirectory(prefix='rill-hold-reads-', dir='/tmp') as crede
             one_attempt(succeeded, ln.HTLCAttempt.SUCCEEDED, b_key, channel_id, amount_msat)
             ordinary_evidence = {}
             if not reverse_preflight_scenario:
+                from rill_provider.lnd_treasury_observation import (
+                    LndTreasuryObserver, LndTreasuryObservationError)
+                treasury_scope = ln.BakeMacaroonRequest(permissions=[
+                    ln.MacaroonPermission(entity=entity, action='read')
+                    for entity in ('info', 'offchain')], root_key_id=0,
+                    allow_external_permissions=False)
+                treasury_encoded = call(a, a_secret, 'BakeMacaroon',
+                    ln.BakeMacaroonRequest, ln.BakeMacaroonResponse,
+                    treasury_scope).macaroon
+                treasury_file = private_file(credentials, 'treasury-read.macaroon',
+                    bytes.fromhex(treasury_encoded))
+                def treasury_observer(credential):
+                    return LndTreasuryObserver(host='127.0.0.1', port=10009,
+                        tls_certificate_path='/work/public/a.cert',
+                        read_macaroon_path=credential, network=network,
+                        expected_node_pubkey=a_key)
+                treasury = treasury_observer(treasury_file)
+                print('PHASE: treasury_accounting', file=sys.stderr)
+                accounting = treasury.observe_accounting(deadline_seconds=10)
+                assert accounting.coverage_complete and accounting.channel_count == 1
+                assert accounting.classified_channel_count == 1
+                assert accounting.classified_local_commitment_floor_msat > 0
+                assert accounting.classified_local_reserve_msat > 0
+                route = succeeded.htlcs[0].route
+                # Default v0.21.0 accountability metadata is not a custom asset.
+                # Never print record keys/values or use this allowlist alone as
+                # actual debit proof; first-hop amount is checked independently.
+                assert dict(succeeded.first_hop_custom_records) == {106823: bytes([0])}
+                assert route.first_hop_amount_msat == route.total_amt_msat == amount_msat
+                print('PHASE: treasury_payment_receipt', file=sys.stderr)
+                receipt = treasury.observe_completed_payment(selected_hash.hex(),
+                    amount_msat, deadline_seconds=10)
+                assert receipt.payment_hash == selected_hash.hex()
+                assert receipt.amount_msat == amount_msat and receipt.routing_fee_msat == 0
+                for context in (accounting.context, receipt.context):
+                    assert context.configured_network == network
+                    assert context.observed_node_pubkey == a_key
+                    assert context.observed_network_label == 'regtest'
+                    assert context.before_tip.height > 0
+                    assert context.after_tip.height >= context.before_tip.height
+                assert not hasattr(accounting, 'spendable_msat')
+                assert not hasattr(receipt, 'payment_preimage')
+                info_file = private_file(credentials, 'treasury-info-only.macaroon',
+                    bake_read(a, a_secret, 'info'))
+                print('PHASE: treasury_scope_negatives', file=sys.stderr)
+                for credential in (payment_file, info_file):
+                    restricted = treasury_observer(credential)
+                    for read in (lambda: restricted.observe_accounting(deadline_seconds=3),
+                                 lambda: restricted.observe_completed_payment(
+                                     selected_hash.hex(), amount_msat, deadline_seconds=3)):
+                        try:
+                            read()
+                        except LndTreasuryObservationError as error:
+                            assert error.__cause__ is None and error.__context__ is None
+                        else:
+                            raise AssertionError('insufficient treasury read scope accepted')
                 import base64, ssl, httpx
                 ordinary_preimage = secrets.token_bytes(32)
                 ordinary_hash = hashlib.sha256(ordinary_preimage).digest()
@@ -1450,7 +1506,10 @@ with tempfile.TemporaryDirectory(prefix='rill-hold-reads-', dir='/tmp') as crede
                     assert received['settle_date'].isdigit() and int(received['settle_date']) > 0
                     assert int(received['settle_date']) <= int(time.time())
                     ordinary_evidence = {'merchant_rest_settled': True,
-                        'merchant_received_msat': amount_msat, 'merchant_settlement_time': True}
+                        'merchant_received_msat': amount_msat, 'merchant_settlement_time': True,
+                        'treasury_scoped_accounting': True, 'treasury_source_debit_msat':
+                            receipt.amount_msat + receipt.routing_fee_msat,
+                        'treasury_insufficient_scope_denied': True}
             print(json.dumps({'funding_txid': txid, 'vout': point.output_index,
                 'capacity_sat': views[0][0].capacity, 'confirmations': output['confirmations'],
                 'bound_settled': True, 'settle_dispatches': counter.calls,
@@ -1867,6 +1926,9 @@ def test_pinned_single_part_hold_bound_settled(tmp_path: Path) -> None:
     assert evidence["merchant_rest_settled"] is True
     assert evidence["merchant_received_msat"] == 1_000_000
     assert evidence["merchant_settlement_time"] is True
+    assert evidence["treasury_scoped_accounting"] is True
+    assert evidence["treasury_source_debit_msat"] == 1_000_000
+    assert evidence["treasury_insufficient_scope_denied"] is True
 
 
 @pytest.mark.lnd

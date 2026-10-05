@@ -1558,6 +1558,65 @@ result. It does not exercise an initiated, failed, or settled real payment.
 Actual payment-flow interoperability, multi-instance fencing, persisted
 intent/backend correlation, and the L03/D01-D09 release gates remain open.
 
+An internal **treasury accounting observer** is available as
+`rill_provider.lnd_treasury_observation.LndTreasuryObserver`. Provision a protected
+credential with only `info:read` and `offchain:read`, numeric loopback endpoint,
+configured TLS trust roots and an independently pinned node key. Named read RPCs
+do not prove the supplied credential lacks write permissions. Each call uses one
+setup-inclusive monotonic deadline, disabled retries, bounded messages/channel
+and HTLC counts, and same-channel synchronized `GetInfo` before and after its
+reads. Payment tracking is bounded and canceled before the final identity read;
+owned channels are closed before accepting a result. Errors expose no upstream
+cause/context or private response material.
+
+Configuration, certificate files and their directories must remain under trusted
+operator control, protected against replacement. The observer refuses symlinks
+at the credential-file open and requires private macaroon permissions, but does
+not enforce certificate ownership or directory integrity. An attacker able to
+replace TLS trust roots and the local endpoint can receive the credential and
+fabricate matching node claims; the node-key comparison is not independent
+protection against that capability.
+
+`observe_accounting()` returns classified local commitment, reserve and pending
+HTLC subtotals only. Local balance fields are individually floored to satoshis
+and already exclude commitment fees, anchors and outgoing committed principal.
+Incoming pending value is separate, never added.
+Zero satoshi floors may represent positive sub-satoshi HTLCs, not zero-value
+payments. Missing constraint submessages,
+custom channels and unknown commitment types make coverage incomplete. An empty
+complete response is known zero channel accounting; an unclassified subtotal
+is not a zero-wallet assertion. There is **no available-budget field or adapter
+to the merchant journal's spendable-capacity input**. These RPCs cannot reveal
+all uncommitted updates or commitment-fee buffers, guarantee route bandwidth,
+or back immediately payable refund promises.
+
+`observe_completed_payment(hash, expected_amount_msat)` requires payment-level
+`SUCCEEDED` and reconciles successful shard recipient amounts and settled route
+fees with exact reported value/fees. Failed attempts contribute neither settled
+value nor fees; unknown or inflight attempts refuse completion. Every successful
+shard requires a positive actual first-hop BTC amount equal to its route total.
+Older history missing that field is unsupported, not evidence of failure or
+permission to retry. Creation records may be empty or exactly LND v0.21.0-beta's
+default unaccountable metadata (`106823: 00`); unknown records and custom-channel
+payment economics refuse projection. This allowlist does not attest actual wire
+records; numeric first-hop correspondence establishes the debit. Returned fields exclude raw protobufs,
+routes, attempts, channel identifiers, preimages and credentials. This reports
+source debit only, not destination receipt, order acceptance or retry permission.
+
+Results separate `configured_network` from observed node/network-label/tip
+claims. TLS roots are not necessarily exact leaf pins. Even identical bracket
+tips do not make channel accounting atomic or verify genesis, signet challenge,
+consensus profile or deployment namespace. Synthetic real-TLS/gRPC tests verify
+transport and projections, not actual LND permission enforcement. Separately,
+the opt-in digest-pinned two-node regtest `test_pinned_single_part_hold_bound_settled`
+reuses its existing settled 1,000-sat payment to verify this observer's combined
+`info:read`/`offchain:read` accounting and exact zero-fee debit. Either scope alone
+is rejected. The existing bound-settlement and ordinary merchant invoice checks
+remain in that scenario. It establishes neither positive spendability nor
+receipt-to-treasury conversion. No startup
+call, journal migration, automatic observation, provisioning or conversion is
+introduced for upgrading installations.
+
 To durably attach a bounded **diagnostic report** to an already recorded
 outgoing intent, run this only with an explicitly initialized v1 journal and an
 operator-owned `0700` evidence directory. The network file must contain the
