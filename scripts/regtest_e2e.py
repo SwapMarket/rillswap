@@ -375,8 +375,18 @@ class MerchantDiagnostic:
         self.checkout: dict[str, Any] | None = None
         self.status_token = ""
         self.restarted = False
+        self.crash_armed = False
+        self.receipt_recovered = False
+        self.receipt_loss_baseline: (
+            tuple[
+                dict[str, tuple[int, int, str]],
+                dict[str, list[tuple[Any, ...]]],
+                tuple[int, int],
+            ]
+            | None
+        ) = None
 
-    def start(self, stack: Stack) -> None:
+    def start(self, stack: Stack, *, crash_after_settled: bool = False) -> None:
         from Cryptodome.Signature import eddsa  # noqa: PLC0415 - diagnostic only
 
         if self.child is not None or any(self.work.iterdir()):
@@ -461,9 +471,14 @@ class MerchantDiagnostic:
             "provisioned": True
         }:
             raise RuntimeError("explicit merchant provisioning refused")
-        self._serve_existing()
+        self.crash_armed = crash_after_settled
+        self._launch_merchant(initial_fault=crash_after_settled)
 
     def _serve_existing(self) -> None:
+        # Reopening cannot arm a fault or infer permission from missing state.
+        self._launch_merchant()
+
+    def _launch_merchant(self, *, initial_fault: bool = False) -> None:
         if self.child is not None and self.child.poll() is None:
             raise RuntimeError("original merchant child remains live")
         self.port = 0
@@ -473,6 +488,7 @@ class MerchantDiagnostic:
                 str(self.work / "service.js"),
                 "serve",
                 str(self.work / "config.json"),
+                *(("crash-after-settled",) if initial_fault else ()),
             ],
             env={**os.environ, "RILLSWAP_REGTEST_MERCHANT": "1"},
             stdout=subprocess.PIPE,
@@ -539,6 +555,11 @@ class MerchantDiagnostic:
             or self.request(route + "/events", status=True) != []
         ):
             raise RuntimeError("merchant waiting checkout changed")
+        return self._unaccepted_state()
+
+    def _unaccepted_state(self) -> dict[str, list[tuple[Any, ...]]]:
+        if self.checkout is None:
+            raise RuntimeError("merchant checkout baseline missing")
         # Read the logical SQLite view, including WAL, with database creation disabled.
         with sqlite3.connect(
             (self.work / "merchant.sqlite").as_uri() + "?mode=ro", uri=True
@@ -575,6 +596,100 @@ class MerchantDiagnostic:
                 raise RuntimeError("merchant accepted before payer dispatch")
         return state
 
+    def _store_identity(self) -> tuple[int, int]:
+        store = self.work / "merchant.sqlite"
+        stat = store.lstat()
+        if (
+            not store.is_file()
+            or store.is_symlink()
+            or stat.st_nlink != 1
+            or stat.st_mode & 0o077
+        ):
+            raise RuntimeError("merchant store continuity refused")
+        return stat.st_dev, stat.st_ino
+
+    def prepare_receipt_loss(self) -> None:
+        if (
+            not self.crash_armed
+            or self.receipt_loss_baseline is not None
+            or self.child is None
+            or self.child.poll() is not None
+        ):
+            raise RuntimeError("merchant receipt fault baseline refused")
+        if os.path.lexists(self.work / "settled-receipt-fault.json"):
+            raise RuntimeError("merchant receipt fault evidence already exists")
+        self.receipt_loss_baseline = (
+            self._immutable_inputs(),
+            self._waiting_state(),
+            self._store_identity(),
+        )
+
+    def recover_receipt_loss(self, *, timeout: int = 30) -> None:
+        if (
+            not self.crash_armed
+            or self.receipt_recovered
+            or self.receipt_loss_baseline is None
+            or self.child is None
+            or self.checkout is None
+        ):
+            raise RuntimeError("merchant receipt recovery baseline refused")
+        if self.child.wait(timeout=timeout) != 74:
+            raise RuntimeError("merchant settled-observation exit refused")
+        if self.child.stdout:
+            self.child.stdout.close()
+        marker = self.work / "settled-receipt-fault.json"
+        stat = marker.lstat()
+        if (
+            not marker.is_file()
+            or marker.is_symlink()
+            or stat.st_nlink != 1
+            or stat.st_mode & 0o077
+            or stat.st_size > 4096
+        ):
+            raise RuntimeError("merchant receipt fault evidence refused")
+        evidence = json.loads(marker.read_text())
+        terms = self.checkout["attempt"]["terms"]
+        if (
+            not isinstance(evidence, dict)
+            or set(evidence)
+            != {
+                "version",
+                "receiver",
+                "network",
+                "paymentHash",
+                "invoiceAmountMsat",
+                "paidMsat",
+                "state",
+                "settledAt",
+            }
+            or evidence["version"] != "regtest-settled-receipt-loss/1"
+            or evidence["state"] != "SETTLED"
+            or any(
+                evidence[name] != terms[name]
+                for name in ("receiver", "network", "paymentHash")
+            )
+            or evidence["invoiceAmountMsat"] != terms["amountMsat"]
+            or not isinstance(evidence["paidMsat"], str)
+            or not re.fullmatch(r"[1-9][0-9]{0,18}", evidence["paidMsat"])
+            or int(evidence["paidMsat"]) < int(terms["amountMsat"])
+            or type(evidence["settledAt"]) is not int
+            or not 0 < evidence["settledAt"] <= int(time.time())
+        ):
+            raise RuntimeError("merchant receipt fault binding refused")
+        inputs, baseline, identity = self.receipt_loss_baseline
+        if (
+            self._immutable_inputs() != inputs
+            or self._store_identity() != identity
+            or self._unaccepted_state() != baseline
+        ):
+            raise RuntimeError("merchant preacceptance crash state changed")
+        self._serve_existing()
+        if self._immutable_inputs() != inputs or self._store_identity() != identity:
+            raise RuntimeError("merchant reopened inputs changed")
+        # The ordinary observer can accept immediately. Never feed it the marker
+        # or require that the intent is still waiting after readiness.
+        self.receipt_recovered = True
+
     def restart_after_issue(self) -> None:
         """Explicit graceful restart, never provision, rebuild, issue or fund again."""
         if (
@@ -585,21 +700,11 @@ class MerchantDiagnostic:
         ):
             raise RuntimeError("merchant restart baseline refused")
         inputs, baseline = self._immutable_inputs(), self._waiting_state()
-        store = self.work / "merchant.sqlite"
-        stat = store.lstat()
-        if (
-            not store.is_file()
-            or store.is_symlink()
-            or stat.st_nlink != 1
-            or stat.st_mode & 0o077
-        ):
-            raise RuntimeError("merchant store continuity refused")
-        identity = (stat.st_dev, stat.st_ino)
+        identity = self._store_identity()
         self.stop()
         if self.child.poll() != 0:
             raise RuntimeError("original merchant did not close cleanly")
-        stat = store.lstat()
-        if (stat.st_dev, stat.st_ino) != identity or self._immutable_inputs() != inputs:
+        if self._store_identity() != identity or self._immutable_inputs() != inputs:
             raise RuntimeError("merchant restart files changed")
         self._serve_existing()
         # Inode continuity alone says nothing about logical contents or WAL state.
@@ -1535,7 +1640,18 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
         action="store_true",
         help="explicit merchant-only graceful restart before payer dispatch",
     )
+    parser.add_argument(
+        "--merchant-crash-after-settled",
+        action="store_true",
+        help="explicit settled-observation loss before merchant receipt allocation",
+    )
     args = parser.parse_args()
+    if args.merchant_crash_after_settled and (
+        not args.merchant_checkout or not args.web or args.merchant_restart_after_issue
+    ):
+        parser.error(
+            "--merchant-crash-after-settled requires --web --merchant-checkout without prepayment restart"
+        )
     if args.merchant_restart_after_issue and (
         not args.merchant_checkout or not args.web
     ):
@@ -1712,8 +1828,13 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
             return 0 if ok else 1
         if args.merchant_checkout:
             merchant = MerchantDiagnostic(work, merchant_bun)
-            merchant.start(stack)
+            if args.merchant_crash_after_settled:
+                merchant.start(stack, crash_after_settled=True)
+            else:
+                merchant.start(stack)
             checkout = merchant.issue()
+            if args.merchant_crash_after_settled:
+                merchant.prepare_receipt_loss()
             if args.merchant_restart_after_issue:
                 merchant.restart_after_issue()
                 log(
@@ -1794,6 +1915,11 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
             log(
                 f"merchant client exit {swap.returncode}, public progress {'valid' if progress else 'refused'}"
             )
+            if progress is not None and args.merchant_crash_after_settled:
+                merchant.recover_receipt_loss()
+                log(
+                    "settled observation lost before allocation; original merchant state reopened"
+                )
         else:
             sys.stderr.write(swap.stderr)
             log(f"client exit {swap.returncode}: {swap.stdout.strip()}")
@@ -1838,8 +1964,25 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
             ok = inspect_web_recovery(args, work)
         if ok and merchant is not None:
             ok = progress is not None and merchant.observe_paid()
-            if ok and args.merchant_restart_after_issue:
+            if ok and (
+                args.merchant_restart_after_issue or args.merchant_crash_after_settled
+            ):
                 check_merchant_swap_identity(work, merchant.checkout, progress)
+            if ok and args.merchant_crash_after_settled:
+                (invoice,) = stack.lncli("user", "listinvoices")["invoices"]
+                original_hash = invoice["r_hash"]
+                if not re.fullmatch(r"[0-9a-f]{64}", original_hash):
+                    original_hash = base64.b64decode(original_hash, validate=True).hex()
+                assert (
+                    original_hash
+                    == merchant.checkout["attempt"]["terms"]["paymentHash"]
+                )
+                assert (
+                    invoice["payment_request"]
+                    == merchant.checkout["attempt"]["invoice"]
+                    and invoice["state"] == "SETTLED"
+                )
+                log("merchant LND inventory contains only the original settled invoice")
             log(f"independent merchant acceptance {'verified' if ok else 'refused'}")
         log("PASS" if ok else f"FAIL (logs in {work})")
         result = 0 if ok else 1

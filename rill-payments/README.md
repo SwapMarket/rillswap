@@ -114,6 +114,17 @@ original attempt/invoice/hash to one provider dispatch and funding reference.
 Missing, changed or partial state refuses without provisioning or replacement
 funding. This is not a postsettlement receipt-loss or machine-crash test.
 
+Alternatively append `--merchant-crash-after-settled` (not together with the
+prepayment restart flag). The initial test-owned observer persists a private
+marker and exits after real LND settlement lookup, before returning that
+observation to the receipt ledger. Persistence failures terminate without
+acceptance. The controller requires the expected owned-child exit, bound marker
+and unchanged unaccepted logical state before ordinary same-state reopening.
+Reopening cannot rearm or consume the marker as a receipt: the normal backend
+must observe settlement again, and the ledger must independently accept it.
+Payer dispatch remains one-shot. This isolates backend-observation loss before
+acceptance, not transport-level response loss or power-loss durability.
+
 The funded scripted happy path and graceful prepayment merchant restart passed
 locally. This is not browser-wallet,
 merchant/LND restart, machine-crash durability, production deployment or

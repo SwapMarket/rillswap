@@ -436,6 +436,8 @@ def seed_issued_merchant(merchant: Any) -> None:  # noqa: ANN401 - script loaded
         "attemptId": "attempt_fixture_001",
         "amountMsat": "50000000",
         "paymentHash": "a" * 64,
+        "receiver": "02" + "a" * 64,
+        "network": "regtest",
     }
     merchant.checkout = {
         "version": "checkout-view/1",
@@ -682,3 +684,197 @@ def test_funded_restart_continuity_binds_original_attempt_and_single_funding(
     else:
         with pytest.raises((AssertionError, ValueError)):
             verify(tmp_path, merchant.checkout, progress)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        [],
+        ["--web"],
+        ["--merchant-checkout"],
+        ["--web", "--merchant-checkout", "--merchant-restart-after-issue"],
+        ["--web", "--merchant-checkout", "--unpaid-refund"],
+        ["--web", "--merchant-checkout", "--ln-to-btc"],
+        ["--web", "--merchant-checkout", "--reconcile-after-settle"],
+    ],
+)
+def test_receipt_crash_flag_requires_explicit_compatible_mode_before_resources(
+    monkeypatch: pytest.MonkeyPatch, extra: list[str]
+) -> None:
+    main = RUNNER["main"]
+    constructor = Mock(side_effect=AssertionError("must not create resources"))
+    monkeypatch.setitem(main.__globals__, "Stack", constructor)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["regtest_e2e.py", "--crypto-library", "unused", "--merchant-crash-after-settled", *extra],
+    )
+    with pytest.raises(SystemExit) as failure:
+        main()
+    assert failure.value.code == 2
+    constructor.assert_not_called()
+
+
+def write_fault_marker(merchant: Any) -> dict[str, Any]:  # noqa: ANN401 - script loaded with runpy
+    terms = merchant.checkout["attempt"]["terms"]
+    marker = {
+        "version": "regtest-settled-receipt-loss/1",
+        "receiver": terms["receiver"],
+        "network": terms["network"],
+        "paymentHash": terms["paymentHash"],
+        "invoiceAmountMsat": terms["amountMsat"],
+        "paidMsat": terms["amountMsat"],
+        "state": "SETTLED",
+        "settledAt": 1234,
+    }
+    path = merchant.work / "settled-receipt-fault.json"
+    path.write_text(json.dumps(marker))
+    path.chmod(0o600)
+    return marker
+
+
+def test_receipt_loss_requires_fault_exit_and_reopens_once_without_marker_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    merchant = RUNNER["MerchantDiagnostic"](tmp_path, Path("unused-bun"))
+    seed_issued_merchant(merchant)
+    merchant.crash_armed = True
+    merchant.prepare_receipt_loss()
+    original = merchant.child
+    marker = write_fault_marker(merchant)
+
+    def wait(**_kwargs: object) -> int:
+        original.poll.return_value = 74
+        return 74
+
+    original.wait.side_effect = wait
+
+    def reopen() -> None:
+        assert original.poll() == 74
+        # Actual service may accept immediately, so no waiting-view read is valid.
+        merchant.child = Mock()
+        with sqlite3.connect(merchant.work / "merchant.sqlite") as db:
+            db.execute("UPDATE intents SET status='paid'")
+
+    merchant._serve_existing = Mock(side_effect=reopen)  # noqa: SLF001
+    merchant.request = Mock(
+        side_effect=AssertionError("must not request dead or reopened waiting status")
+    )
+    external = Mock(side_effect=AssertionError("never rebuild, provision or rerun payer"))
+    monkeypatch.setattr(merchant.start.__globals__["subprocess"], "run", external)
+    merchant.recover_receipt_loss(timeout=7)
+    original.wait.assert_called_once_with(timeout=7)
+    original.stdout.close.assert_called_once()
+    merchant._serve_existing.assert_called_once_with()  # noqa: SLF001
+    assert merchant.receipt_recovered
+    assert json.loads((merchant.work / "settled-receipt-fault.json").read_text()) == marker
+    external.assert_not_called()
+    with pytest.raises(RuntimeError, match="baseline refused"):
+        merchant.recover_receipt_loss()
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "no_baseline",
+        "not_armed",
+        "wrong_exit",
+        "wait_timeout",
+        "missing_marker",
+        "partial_marker",
+        "old_marker",
+        "extra_field",
+        "wrong_hash",
+        "wrong_receiver",
+        "wrong_amount",
+        "underpaid",
+        "bad_time",
+        "future_time",
+        "public_marker",
+        "changed_key",
+        "changed_store",
+        "accepted_before_exit",
+        "changed_operation",
+    ],
+)
+def test_receipt_loss_unknown_or_conflicting_evidence_never_reopens(
+    tmp_path: Path, fault: str
+) -> None:
+    merchant = RUNNER["MerchantDiagnostic"](tmp_path, Path("unused-bun"))
+    seed_issued_merchant(merchant)
+    merchant.crash_armed = True
+    merchant.prepare_receipt_loss()
+    marker = write_fault_marker(merchant)
+    path = merchant.work / "settled-receipt-fault.json"
+    merchant.child.wait.return_value = 74
+    merchant._serve_existing = Mock()  # noqa: SLF001
+    if fault == "no_baseline":
+        merchant.receipt_loss_baseline = None
+    elif fault == "not_armed":
+        merchant.crash_armed = False
+    elif fault == "wrong_exit":
+        merchant.child.wait.return_value = 75
+    elif fault == "wait_timeout":
+        merchant.child.wait.side_effect = subprocess.TimeoutExpired("owned-child", 1)
+    elif fault == "missing_marker":
+        path.unlink()
+    elif fault == "partial_marker":
+        path.write_text("{")
+    elif fault == "public_marker":
+        path.chmod(0o644)
+    elif fault == "changed_key":
+        (merchant.work / "event.key").write_bytes(b"changed")
+    elif fault == "changed_store":
+        store = merchant.work / "merchant.sqlite"
+        store.rename(store.with_suffix(".old"))
+        store.write_bytes(b"")
+    elif fault in ("accepted_before_exit", "changed_operation"):
+        with sqlite3.connect(merchant.work / "merchant.sqlite") as db:
+            db.execute(
+                "UPDATE intents SET status='paid'"
+                if fault == "accepted_before_exit"
+                else "UPDATE attempts SET operation_id='replacement'"
+            )
+    else:
+        changes = {
+            "old_marker": {"version": "older/0"},
+            "extra_field": {"preimage": "SECRET_CANARY"},
+            "wrong_hash": {"paymentHash": "b" * 64},
+            "wrong_receiver": {"receiver": "foreign"},
+            "wrong_amount": {"invoiceAmountMsat": "1"},
+            "underpaid": {"paidMsat": "1"},
+            "bad_time": {"settledAt": True},
+            "future_time": {"settledAt": 9_999_999_999},
+        }
+        path.write_text(json.dumps({**marker, **changes[fault]}))
+    with pytest.raises((RuntimeError, OSError, ValueError, subprocess.TimeoutExpired)):
+        merchant.recover_receipt_loss()
+    assert not merchant.receipt_recovered
+    merchant._serve_existing.assert_not_called()  # noqa: SLF001
+
+
+@pytest.mark.parametrize("fault", ["not_armed", "dead_child", "existing_marker", "no_checkout"])
+def test_receipt_loss_baseline_requires_explicit_live_unaccepted_state(
+    tmp_path: Path, fault: str
+) -> None:
+    merchant = RUNNER["MerchantDiagnostic"](tmp_path, Path("unused-bun"))
+    seed_issued_merchant(merchant)
+    merchant.crash_armed = True
+    if fault == "not_armed":
+        merchant.crash_armed = False
+    elif fault == "dead_child":
+        merchant.child.poll.return_value = 74
+    elif fault == "existing_marker":
+        write_fault_marker(merchant)
+    elif fault == "no_checkout":
+        merchant.checkout = None
+    with pytest.raises(RuntimeError):
+        merchant.prepare_receipt_loss()
+    assert merchant.receipt_loss_baseline is None
+
+
+def test_ordinary_reopening_cannot_arm_receipt_fault(tmp_path: Path) -> None:
+    merchant = RUNNER["MerchantDiagnostic"](tmp_path, Path("unused-bun"))
+    merchant._launch_merchant = Mock()  # noqa: SLF001
+    merchant._serve_existing()  # noqa: SLF001
+    merchant._launch_merchant.assert_called_once_with()  # noqa: SLF001

@@ -271,6 +271,10 @@ the scripted payer wallet, not a browser wallet integration.
 The optional `--merchant-restart-after-issue` variant gracefully restarts only
 the merchant before payer dispatch, preserving the original invoice, keys and
 store. It is not browser restart or postsettlement receipt-loss evidence.
+The alternative `--merchant-crash-after-settled` variant loses a real settled
+backend observation before merchant ledger acceptance, then recovers through
+ordinary serving of the same state without another payer dispatch. It is not
+transport-level response loss, browser restart or power-loss durability proof.
 
 `bun run test` checks the same built bytes at `/` and `/repository/` on
 loopback. All runtime assets are local. Browser tests need a supported
