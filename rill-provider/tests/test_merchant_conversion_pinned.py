@@ -114,6 +114,52 @@ EXTRA = """
         depth=transaction.get('confirmations')
         return states==[('SETTLED',)] and type(depth) is int and depth>=minimum_depth
 
+    async def cli_completion(journal,authority,config,credentials,candidate,binding,funding_info,claim_txid,custody):
+        # Independent operator pins originate in the fixture, never learned from
+        # the stored fence as fresh spending or custody authority.
+        root=journal.directory.parent
+        authority_path=root/'operator-authority.json'
+        identity_path=root/'operator.identity'
+        evidence_path=root/'operator-evidence.json'
+        document=dict(version='conversion-reconciliation/regtest/v1',
+            rpc=dict(lnd_port=config.lnd_port,lnd_tls_root_path=str(config.lnd_tls_root_path),
+                lnd_read_macaroon_path=str(config.lnd_read_macaroon_path),core_port=config.core_port,
+                core_cookie_path=str(config.core_cookie_path)),identity_path=str(identity_path),
+            funding_recovery_path=str(candidate),funding_attempt_id=binding['funding_attempt_id'],
+            binding_revision=binding['binding_revision'],funding_block=dict(height=funding_info['blockheight'],
+                block_hash=funding_info['blockhash']),claim_txid=claim_txid,claim_path='cooperative',
+            custody=custody.model_dump(mode='json'))
+        for path,content in ((authority_path,canonicalize(authority.model_dump(mode='json'))),
+            (identity_path,(credentials.identity+'\\n').encode()),(evidence_path,canonicalize(document))):
+            descriptor=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+            with os.fdopen(descriptor,'wb') as handle: handle.write(content)
+        base=['--journal-directory',str(journal.directory),'--source-fence',str(journal.source_fence),
+            '--authority',str(authority_path),'--operation-id','owned_treasury_reverse_01']
+        entry=[sys.executable,'-c','import sys; from rill_cli.main import main; sys.exit(main(sys.argv[1:]))']
+        expected=b'Recorded conversion state: complete (historical status, not fresh validation).\\n'
+        async def execute(arguments,output):
+            result=None
+            try:
+                result=await asyncio.to_thread(subprocess.run,entry+arguments,capture_output=True,timeout=45,check=False)
+            except Exception: pass
+            assert result is not None,'owned operator command unavailable'
+            assert result.returncode==0,'owned operator command refused'
+            assert result.stdout==output,'unexpected owned operator output'
+            assert result.stderr==b'','owned operator command emitted diagnostics'
+        await execute(['treasury','status',*base],
+            b'Recorded conversion state: dispatched (historical status, not fresh validation).\\n')
+        await execute(['treasury','reconcile',*base,'--evidence',str(evidence_path),
+            '--crypto-library','/work/provider/tmp/native/librill_crypto.so'],expected)
+        completed=journal.status('owned_treasury_reverse_01')
+        before=inventory_snapshot(journal)
+        evidence_path.unlink()
+        identity_path.unlink()
+        await execute(['treasury','reconcile',*base,'--evidence',str(evidence_path),
+            '--crypto-library','/does-not-exist/native-library.so'],expected)
+        await execute(['treasury','status',*base],expected)
+        assert inventory_snapshot(journal)==before
+        return completed
+
     def inventory_snapshot(journal):
         with sqlite3.connect((journal.directory/'inventory.sqlite').as_uri()+'?mode=ro',uri=True) as inventory:
             return (inventory.execute('SELECT * FROM metadata ORDER BY id').fetchall(),
@@ -600,12 +646,17 @@ EXTRA = """
                             'CoreTransactionReader','WalletRpc','LndTreasuryObserver','collect_conversion_receipt')}
                         for name in after_kill_factories: setattr(reconciliation_module,name,no_acquisition)
                     try:
-                        completed = await asyncio.to_thread(reconcile_conversion,journal,
-                            reservation.job.request.operation_id,config=config,credentials=credentials,crypto=crypto,
-                            funding_recovery_path=candidate_path,funding_attempt_id=binding['funding_attempt_id'],
-                            binding_revision=binding['binding_revision'],
-                            funding_block=BlockHint(height=funding_info['blockheight'],block_hash=funding_info['blockhash']),
-                            claim_txid=outcome.claim_txid,claim_path='cooperative',custody=custody)
+                        if CLI_COMPLETION:
+                            print('PHASE: explicit_operator_cli_completion',file=sys.stderr)
+                            completed=await cli_completion(journal,authority,config,credentials,candidate_path,binding,
+                                funding_info,outcome.claim_txid,custody)
+                        else:
+                            completed = await asyncio.to_thread(reconcile_conversion,journal,
+                                reservation.job.request.operation_id,config=config,credentials=credentials,crypto=crypto,
+                                funding_recovery_path=candidate_path,funding_attempt_id=binding['funding_attempt_id'],
+                                binding_revision=binding['binding_revision'],
+                                funding_block=BlockHint(height=funding_info['blockheight'],block_hash=funding_info['blockhash']),
+                                claim_txid=outcome.claim_txid,claim_path='cooperative',custody=custody)
                     finally:
                         for name,factory in after_kill_factories.items(): setattr(reconciliation_module,name,factory)
                     if CRASH_BOUNDARY=='after_commit': assert inventory_snapshot(journal)==reopened_before
@@ -655,7 +706,8 @@ EXTRA = """
                     destination_value_sat=receipt.destination_value_sat,claim_depth=receipt.confirmation_blocks,
                     original_source_attempts=1,inventory_hold_retained=not COMPLETION_SCENARIO,
                     verified_completion=COMPLETION_SCENARIO,accounting_admission=True,
-                    process_death_boundary=CRASH_BOUNDARY,source_daemon_restarted=SOURCE_RESTART)
+                    process_death_boundary=CRASH_BOUNDARY,source_daemon_restarted=SOURCE_RESTART,
+                    operator_cli_completion=CLI_COMPLETION)
             finally:
                 mining_stop.set()
                 try: await mining
@@ -680,6 +732,7 @@ def _program(
     completion: bool = False,
     crash_boundary: str | None = None,
     restart: bool = False,
+    cli_completion: bool = False,
 ) -> str:
     fixture = import_module("test_merchant_source_pinned")
     setup = import_module("test_lnd_payment_pinned").CHANNEL_SETUP
@@ -748,11 +801,13 @@ def _program(
     assert crash_boundary in (None, "before_commit", "after_commit")
     assert crash_boundary is None or completion
     assert not restart or (completion and crash_boundary is None)
+    assert not cli_completion or (completion and not restart and crash_boundary is None)
     child_program = CRASH_CHILD if crash_boundary is not None else ""
     controls = (
         f"\n    COMPLETION_SCENARIO = {completion!r}\n"
         f"    CRASH_BOUNDARY = {crash_boundary!r}\n    CRASH_CHILD = {child_program!r}\n"
         f"    SOURCE_RESTART = {restart!r}\n"
+        f"    CLI_COMPLETION = {cli_completion!r}\n"
     )
     return setup + controls + EXTRA + body
 
@@ -770,6 +825,9 @@ def test_combined_funded_program_compiles_and_preserves_original_template() -> N
     compile(completed, "<owned-merchant-completion>", "exec")
     compile(CRASH_CHILD, "<owned-completion-child>", "exec")
     compile(_program(completion=True, restart=True), "<owned-source-daemon-restart>", "exec")
+    compile(
+        _program(completion=True, cli_completion=True), "<owned-operator-reconciliation>", "exec"
+    )
     for boundary in ("before_commit", "after_commit"):
         compile(
             _program(completion=True, crash_boundary=boundary),
@@ -906,8 +964,25 @@ def test_pinned_source_daemon_restart_before_verified_completion(tmp_path: Path)
     assert evidence["source_daemon_restarted"] is True
 
 
+@pytest.mark.lnd
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_LND") != "1" or os.environ.get("RILLSWAP_RUN_BUN_MERCHANT") != "1",
+    reason="explicit owned public operator command conformance opt-ins",
+)
+def test_pinned_operator_cli_verified_completion(tmp_path: Path) -> None:
+    evidence = _funded_evidence(tmp_path, completion=True, cli_completion=True)
+    assert evidence["operator_cli_completion"] is True
+    assert evidence["verified_completion"] is True
+
+
 def _funded_evidence(
-    tmp_path: Path, *, completion: bool, crash_boundary: str | None = None, restart: bool = False
+    tmp_path: Path,
+    *,
+    completion: bool,
+    crash_boundary: str | None = None,
+    restart: bool = False,
+    cli_completion: bool = False,
 ) -> dict[str, object]:
     fixture = import_module("test_merchant_source_pinned")
     helpers = import_module("test_lnd_payment_pinned")
@@ -949,7 +1024,12 @@ def _funded_evidence(
         assert built.returncode == 0, "owned merchant compilation refused"
         evidence: dict[str, object] = helpers._run_two_node_sidecar(  # noqa: SLF001 - additive isolated fixture profile
             tmp_path,
-            _program(completion=completion, crash_boundary=crash_boundary, restart=restart),
+            _program(
+                completion=completion,
+                crash_boundary=crash_boundary,
+                restart=restart,
+                cli_completion=cli_completion,
+            ),
             prefix="merchant-restart"
             if restart
             else "merchant-crash"

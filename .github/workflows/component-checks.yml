@@ -292,6 +292,11 @@ jobs:
           RILLSWAP_RUN_BUN_MERCHANT=1 .venv/bin/python -m pytest -q \
             tests/test_merchant_conversion_pinned.py::test_pinned_source_daemon_restart_before_verified_completion \
             --basetemp=tmp/pytest-ci-merchant-restart
+      - name: Check explicit operator reconciliation and terminal status
+        run: |
+          RILLSWAP_RUN_BUN_MERCHANT=1 .venv/bin/python -m pytest -q \
+            tests/test_merchant_conversion_pinned.py::test_pinned_operator_cli_verified_completion \
+            --basetemp=tmp/pytest-ci-treasury-cli
 
   cli:
     runs-on: ubuntu-24.04

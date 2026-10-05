@@ -172,6 +172,7 @@ checkout or multichain conformance has passed. Offline `rill-payments` and
 | M38 | Explicit fenced regtest completion | Fresh native acquisition followed immediately by atomic query identity/generation/age admission, actual debit consumption, full hold release and generation increment; preserves manual/idempotent and receipt-only contracts, no startup action, saved-receipt authority or production enablement |
 | M39 | Completion process-death boundaries | Owned child SIGKILL before/after original SQL commit with actual funded proof, normal fresh reopen and explicit reconciliation; compares all persisted rows, original payment/HTLC and private inputs, no assumed hot-journal mechanism, machine power-loss, service restart or original-SDK crash coverage |
 | M40 | Source LND daemon restart (same container) | Explicit graceful stop, fresh pinned-TLS LOCKED, same-wallet unlock and ready/drained channel, original credentials/history/identity/journal continuity, fresh receipt and completion; bounded supervisor signal tests, no container restart, seed/recovery replay, older-wallet or power-loss claim |
+| M41 | Explicit operator reconciliation/status CLI | Private independent authority and strict versioned read-only evidence inputs for an existing regtest job, fresh guarded completion and historical terminal bypass; no receipt-file authority, provisioning, spending credential, new SDK invocation or production accounting claim |
 
 ## Test evidence and accounting
 

@@ -684,8 +684,9 @@ Interrupted or reopened jobs grant no new invocation capability. Native tests
 exercise actual SDK signed quote validation, fresh preimage, initial encrypted
 checkpoint and one failed payer attempt with synthetic transport backends,
 deterministic contract/recovery keys and a signed stubbed handshake; this
-is not funded Core/LND conversion or provider ingress conformance. No CLI command,
-positive LND accounting projector or production route is enabled. Compatible
+is not funded Core/LND conversion or provider ingress conformance. No execution CLI,
+positive LND accounting projector or production route is enabled. The separate
+regtest reconciliation/status commands below cannot start execution. Compatible
 existing installations undergo no migration, automatic provisioning or work.
 
 ### Historical Core wallet recognition (read-only, not custody authority)
@@ -765,6 +766,69 @@ or older metadata grants no completion authority and causes no repair. Existing
 dispatched holds remain until an explicit successful action. This does not enable
 production funding/accounting, guarantee later finality or cover restoring both
 the database and external fence.
+
+### Explicit regtest operator commands
+
+`rill treasury status` inspects one existing job. `rill treasury reconcile` is an
+explicit financial action: fresh original evidence can consume the actual debit
+and release its original hold once. Neither command provisions a journal, reserves
+inventory, starts an SDK session, pays, signs, scans, repairs state or enables
+production. Paid checkout remains independent of treasury conversion.
+
+```sh
+rill treasury status \
+  --journal-directory /private/inventory --source-fence /private/source-owner.json \
+  --authority /private/independent-authority.json --operation-id ORIGINAL_OPERATION_ID
+
+rill treasury reconcile \
+  --journal-directory /private/inventory --source-fence /private/source-owner.json \
+  --authority /private/independent-authority.json --operation-id ORIGINAL_OPERATION_ID \
+  --evidence /private/original-evidence.json --crypto-library /verified/librill_crypto.so
+```
+
+The independently supplied authority file is full `SourceAuthority` JSON. Its
+source/network/epoch/provider/script/reserve pins and literal custody/coverage
+assertions must come from independently established operator facts, **never**
+learned from the fence, wallet recognition or historical receipts. Private file
+permissions and agreement with the fence do not prove custody or liability coverage.
+This interface trusts the local operator's assertions; it is not a production LND
+accounting projector.
+
+The evidence file is strict JSON with every field required:
+
+| Field | Input |
+| --- | --- |
+| `version` | Exactly `conversion-reconciliation/regtest/v1` |
+| `rpc` | `lnd_port`, `lnd_tls_root_path`, `lnd_read_macaroon_path`, `core_port`, `core_cookie_path` |
+| `identity_path` | Original protected one-line AGE secret identity file, recipient derived locally |
+| `funding_recovery_path` | Explicit signed funded successor of the retained original checkpoint |
+| `funding_attempt_id`, `binding_revision` | Exact original selected attempt and revision |
+| `funding_block` | Explicit positive `height` and `block_hash`, not discovery permission |
+| `claim_txid`, `claim_path` | Exact claim and `cooperative` or `unilateral` validation path |
+| `custody` | Full `DestinationCustody`: network, script, named `core_wallet`, literal `destination_keys_controlled: true` |
+
+Manifest paths must be absolute; RPCs use numeric loopback ports. Custody must
+independently match the original authority. No payment macaroon or saved receipt
+is admitted. The supplied LND credential needs only observation permissions.
+The command does not inspect its actual capability scope, and a Core cookie may
+authorize writes. Only observation RPCs are used; this is not cryptographic proof
+that the supplied credentials lack spending authority.
+Authority/evidence/identity readers bound size and require owner-only permissions,
+regular single-link files and a nonsymlink final component, with descriptor checks.
+This does not reject every symlinked ancestor. Keep operator inputs private; never
+put secret identity contents in command arguments.
+
+Both new completion and terminal replay report **recorded historical state**, not
+fresh custody/finality. Terminal jobs bypass evidence, identity, native-library
+loading and RPCs, even if those files are unavailable. Other nondispatched states
+refuse reconciliation without acquisition. Exit 2 may mean completion already
+persisted; inspect `treasury status`, never start replacement execution. Acquisition
+and atomic journal fencing retain the preceding regtest limits, including possible
+late commit acknowledgment and later reorgs.
+
+Existing installations receive no startup behavior or stored-format change.
+Missing/partial/incompatible journals or fences refuse without repair; absent,
+unknown or unsupported older manifest versions cause no migration or automatic work.
 
 ### Merchant credit correspondence (internal, provenance only)
 

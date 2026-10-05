@@ -25,7 +25,7 @@ from rill_crypto import Context
 from rill_provider.lnd_invoice_observation import LndInvoiceObserver
 from rill_provider.relay_client import RelayError
 
-from rill_cli import provider_directory, refund_watcher, swap_command
+from rill_cli import provider_directory, refund_watcher, swap_command, treasury_cli
 from rill_cli.age_container import (
     MAX_CIPHERTEXT_BYTES,
     MAX_PLAINTEXT_BYTES,
@@ -86,6 +86,7 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - one flat command ta
     recover = parser.add_subparsers(dest="category", required=True)
     swap_command.add_parser(recover)
     provider_directory.add_parser(recover)
+    treasury_cli.add_parser(recover)
     recovery = recover.add_parser("recover", help="encrypted recovery files (no chain or payments)")
     commands = recovery.add_subparsers(dest="command", required=True)
     for name, help_text in (
@@ -812,6 +813,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911 - distinct fail
         return _swap(args)
     if args.category == "providers":
         return _providers(args)
+    if args.category == "treasury":
+        return treasury_cli.run(args)
     try:
         result = _run(args)
     except RecoveryPublicationUncertainError:

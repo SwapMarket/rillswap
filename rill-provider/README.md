@@ -1725,6 +1725,14 @@ conformance only, not LND crash, older-wallet upgrade, machine power loss or
 production commitment coverage. Existing installations and profiles get no new
 startup behavior or stored format.
 
+`test_pinned_operator_cli_verified_completion` adds a separate owned case that
+runs the public `rill_cli.main:main` entrypoint in a subprocess with private,
+independently supplied operator pins and only read credentials. It checks original
+dispatched status, verified one-time completion and terminal/status calls after
+removing the evidence/identity and supplying an unavailable native library. Actual
+funding/claim/source and original accounting/privacy assertions remain unchanged.
+The CLI is regtest-only and introduces no provisioning or fresh SDK invocation.
+
 An internal **treasury accounting observer** is available as
 `rill_provider.lnd_treasury_observation.LndTreasuryObserver`. Provision a protected
 credential with only `info:read` and `offchain:read`, numeric loopback endpoint,
