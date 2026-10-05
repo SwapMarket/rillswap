@@ -8,13 +8,14 @@ There is no startup caller, receipt-file admission or production enablement.
 from __future__ import annotations
 
 import sys
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
 from pydantic import AfterValidator, Field
 from pyrage import x25519
 from rill_core.networks import REGTEST_CONSENSUS_PROFILE, require_funding_release
-from rill_core.wire.canonical import parse_model_json
+from rill_core.wire.canonical import parse_json_strict, parse_model_json
 from rill_core.wire.types import Hex32, StrictModel
 from rill_crypto import Context
 
@@ -64,6 +65,37 @@ class ReconciliationEvidence(StrictModel):
     claim_txid: Hex32
     claim_path: Literal["cooperative", "unilateral"]
     custody: DestinationCustody
+
+
+class SavedReconciliationEvidence(StrictModel):
+    """Explicit saved coordinates; independent fresh evidence still admits effects.
+
+    Keep the immutable v1 schema untouched rather than inheriting or changing its
+    required fields. These versions may evolve independently.
+    """
+
+    version: Literal["conversion-reconciliation/regtest/v2"]
+    rpc: ReadOnlyRpcInputs
+    identity_path: OperatorPath
+    funding_recovery_path: OperatorPath
+    funding_attempt_id: Hex32
+    binding_revision: Annotated[int, Field(strict=True, ge=0)]
+    funding_inclusion_hint_path: OperatorPath
+    claim_txid: Hex32
+    claim_path: Literal["cooperative", "unilateral"]
+    custody: DestinationCustody
+
+
+def _evidence(path: Path) -> ReconciliationEvidence | SavedReconciliationEvidence:
+    document = _read_private(path, MAX_EVIDENCE_BYTES)
+    value = parse_json_strict(document)
+    if not isinstance(value, dict):
+        raise TypeError("explicit reconciliation evidence required")
+    if value.get("version") == "conversion-reconciliation/regtest/v1":
+        return parse_model_json(ReconciliationEvidence, document)
+    if value.get("version") == "conversion-reconciliation/regtest/v2":
+        return parse_model_json(SavedReconciliationEvidence, document)
+    raise ValueError("unsupported reconciliation evidence version")
 
 
 def add_parser(categories: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -120,9 +152,7 @@ def _run(args: argparse.Namespace) -> str:
         return f"Recorded conversion state: {job.state} (historical status, not fresh validation)."
     if job.state != "dispatched":
         raise ValueError("original conversion is not dispatched")
-    evidence = parse_model_json(
-        ReconciliationEvidence, _read_private(Path(args.evidence), MAX_EVIDENCE_BYTES)
-    )
+    evidence = _evidence(Path(args.evidence))
     if (
         evidence.custody.network != authority.network
         or evidence.custody.script != authority.treasury_script
@@ -142,7 +172,8 @@ def _run(args: argparse.Namespace) -> str:
         evidence.custody.core_wallet,
     )
     with Context(library_path=args.crypto_library) as crypto:
-        completed = reconcile_conversion(
+        reconcile = partial(
+            reconcile_conversion,
             journal,
             args.operation_id,
             config=config,
@@ -151,11 +182,17 @@ def _run(args: argparse.Namespace) -> str:
             funding_recovery_path=evidence.funding_recovery_path,
             funding_attempt_id=evidence.funding_attempt_id,
             binding_revision=evidence.binding_revision,
-            funding_block=evidence.funding_block,
+            funding_block=evidence.funding_block
+            if isinstance(evidence, ReconciliationEvidence)
+            else None,
             claim_txid=evidence.claim_txid,
             claim_path=evidence.claim_path,
             custody=evidence.custody,
         )
+        if isinstance(evidence, SavedReconciliationEvidence):
+            completed = reconcile(funding_inclusion_hint_path=evidence.funding_inclusion_hint_path)
+        else:
+            completed = reconcile()
     # A concurrent caller may have completed after our precheck. Never label this
     # result "fresh" or treat historical status as renewed finality/custody proof.
     return (

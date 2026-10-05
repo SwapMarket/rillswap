@@ -302,6 +302,7 @@ jobs:
           RILLSWAP_RUN_BUN_MERCHANT=1 .venv/bin/python -m pytest -q \
             tests/test_merchant_conversion_pinned.py::test_pinned_operator_cli_verified_completion \
             tests/test_merchant_conversion_pinned.py::test_pinned_original_sdk_retains_encrypted_funding_inclusion_before_claim \
+            tests/test_merchant_conversion_pinned.py::test_pinned_operator_cli_reconciles_original_saved_funding_hint \
             --basetemp=tmp/pytest-ci-treasury-cli
 
   cli:

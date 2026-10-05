@@ -1770,6 +1770,15 @@ native receipt validator. Earlier cooperative-only cases keep their requirements
 Cooperative signature-timeout observations remain an unresolved operational risk,
 not evidence of production stability.
 
+The saved-hint public operator case additionally supplies a strict v2 evidence
+manifest with only an explicit encrypted hint path, not plaintext funding-block
+coordinates. The public command correlates it to native original lineage and
+acquires the unchanged fresh financial proof before completion. Terminal replay
+passes after removing this case's newly created hint, manifest and identity file
+and selecting a missing native library. Original recovery artifacts remain
+untouched; no runtime command deletes them. This is explicit regtest admission,
+not producer authentication, automatic recovery or production accounting.
+
 An internal **treasury accounting observer** is available as
 `rill_provider.lnd_treasury_observation.LndTreasuryObserver`. Provision a protected
 credential with only `info:read` and `offchain:read`, numeric loopback endpoint,

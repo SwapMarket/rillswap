@@ -14,6 +14,8 @@ from __future__ import annotations
 import hashlib
 import math
 import time
+from functools import partial
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
 from pydantic import Field, StringConstraints, field_validator
@@ -38,11 +40,10 @@ from rill_provider.lnd_treasury_observation import LndTreasuryObserver
 
 from rill_cli.age_container import MAX_CIPHERTEXT_BYTES, decrypt_verified_plaintext
 from rill_cli.conversion_journal import ConversionReceipt, _read_private
+from rill_cli.funding_inclusion import read_funding_inclusion_hint
 from rill_cli.wallet_rpc import WalletRpc
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from rill_crypto import Context
 
     from rill_cli.age_container import X25519Credentials
@@ -109,10 +110,11 @@ def reconcile_conversion(  # noqa: PLR0913 - explicit operator-selected original
     funding_recovery_path: Path,
     funding_attempt_id: str,
     binding_revision: int,
-    funding_block: BlockHint,
+    funding_block: BlockHint | None,
     claim_txid: str,
     claim_path: Literal["cooperative", "unilateral"],
     custody: DestinationCustody,
+    funding_inclusion_hint_path: Path | None = None,
 ) -> ConversionJob:
     """Explicitly acquire regtest evidence and atomically complete its original job.
 
@@ -130,6 +132,11 @@ def reconcile_conversion(  # noqa: PLR0913 - explicit operator-selected original
     Unknown state retains holds. A lost commit acknowledgment requires status
     inspection, never replacement execution. Later reorgs and restored database
     plus fence remain outside this bounded operational regtest acceptance.
+    Exactly one lookup input is required: an explicit ``funding_block``, or
+    ``funding_block=None`` with an absolute ``funding_inclusion_hint_path``.
+    Saved hints are correlated after independent native lineage/approval checks,
+    within the same acquisition budget. Only their block coordinates enter fresh
+    evidence collection; saved depth/tip and producer provenance grant no rights.
     """
     result = None
     try:
@@ -142,7 +149,8 @@ def reconcile_conversion(  # noqa: PLR0913 - explicit operator-selected original
             remaining = deadline - time.monotonic()
             if not math.isfinite(remaining) or not 0 < remaining <= COMPLETION_ACQUISITION_SECONDS:
                 raise ReverseReconciliationError("conversion acquisition expired")  # noqa: TRY301 - detach boundary details
-            receipt = collect_conversion_receipt(
+            collect = partial(
+                collect_conversion_receipt,
                 journal,
                 operation_id,
                 config=config,
@@ -156,6 +164,11 @@ def reconcile_conversion(  # noqa: PLR0913 - explicit operator-selected original
                 claim_path=claim_path,
                 custody=custody,
                 deadline_seconds=remaining,
+            )
+            receipt = (
+                collect()
+                if funding_inclusion_hint_path is None
+                else collect(funding_inclusion_hint_path=funding_inclusion_hint_path)
             )
             finished = time.monotonic()
             if not math.isfinite(finished) or finished >= deadline:
@@ -178,11 +191,12 @@ def collect_conversion_receipt(  # noqa: PLR0913 - explicit original evidence in
     funding_recovery_path: Path,
     funding_attempt_id: str,
     binding_revision: int,
-    funding_block: BlockHint,
+    funding_block: BlockHint | None,
     claim_txid: str,
     claim_path: Literal["cooperative", "unilateral"],
     custody: DestinationCustody,
     deadline_seconds: float = 30,
+    funding_inclusion_hint_path: Path | None = None,
 ) -> ConversionReceipt:
     """Collect one original dispatched job's historical receipt without writes.
 
@@ -193,10 +207,13 @@ def collect_conversion_receipt(  # noqa: PLR0913 - explicit original evidence in
     conservatively refuses tip movement, not an atomic or reorg-proof snapshot.
     Generation detects observed concurrency, not restoring database and fence.
     The returned timestamp-free receipt must NOT be saved as release authority.
+    An explicit saved hint may replace a plain block input, never supplement it.
+    Missing or incompatible hints refuse without fallback, discovery or repair.
     """
     receipt = None
     try:
-        receipt = _collect(
+        collect = partial(
+            _collect,
             journal,
             operation_id,
             config=config,
@@ -211,6 +228,11 @@ def collect_conversion_receipt(  # noqa: PLR0913 - explicit original evidence in
             custody=custody,
             deadline_seconds=deadline_seconds,
         )
+        receipt = (
+            collect()
+            if funding_inclusion_hint_path is None
+            else collect(funding_inclusion_hint_path=funding_inclusion_hint_path)
+        )
     except Exception:  # noqa: BLE001 - detach credentials/recovery/transport/crypto diagnostics
         receipt = None
     if receipt is None:
@@ -218,7 +240,7 @@ def collect_conversion_receipt(  # noqa: PLR0913 - explicit original evidence in
     return receipt
 
 
-def _collect(  # noqa: PLR0913, PLR0915 - cohesive evidence join, no effects or generic adapters
+def _collect(  # noqa: PLR0912, PLR0913, PLR0915 - cohesive evidence join, no effects or generic adapters
     journal: ConversionJournal,
     operation_id: str,
     *,
@@ -228,11 +250,12 @@ def _collect(  # noqa: PLR0913, PLR0915 - cohesive evidence join, no effects or 
     funding_recovery_path: Path,
     funding_attempt_id: str,
     binding_revision: int,
-    funding_block: BlockHint,
+    funding_block: BlockHint | None,
     claim_txid: str,
     claim_path: Literal["cooperative", "unilateral"],
     custody: DestinationCustody,
     deadline_seconds: float,
+    funding_inclusion_hint_path: Path | None = None,
 ) -> ConversionReceipt:
     if (
         type(deadline_seconds) not in (int, float)
@@ -245,7 +268,15 @@ def _collect(  # noqa: PLR0913, PLR0915 - cohesive evidence join, no effects or 
         or type(binding_revision) is not int
         or binding_revision < 0
         or not isinstance(custody, DestinationCustody)
-        or not isinstance(funding_block, BlockHint)
+        or (funding_inclusion_hint_path is None and not isinstance(funding_block, BlockHint))
+        or (
+            funding_inclusion_hint_path is not None
+            and (
+                funding_block is not None
+                or not isinstance(funding_inclusion_hint_path, Path)
+                or not funding_inclusion_hint_path.is_absolute()
+            )
+        )
     ):
         raise ReverseReconciliationError("explicit historical conversion inputs required")
     started_at, deadline = time.time(), time.monotonic() + deadline_seconds
@@ -317,6 +348,25 @@ def _collect(  # noqa: PLR0913, PLR0915 - cohesive evidence join, no effects or 
     ):
         raise ReverseReconciliationError("funded recovery differs from original approval")
     remaining()
+    if funding_inclusion_hint_path is not None:
+        # Authenticate original lineage/approval above, not from the hint. Public
+        # recipient encryption proves no authorship. Only historical coordinates
+        # reach fresh observation; saved tip/depth never become release evidence.
+        hint = read_funding_inclusion_hint(
+            funding_inclusion_hint_path,
+            credentials=credentials,
+            operation_id=job.request.operation_id,
+            network=authority.network,
+            original_recovery_sha256=job.recovery_sha256,
+            binding=binding,
+        )
+        funding_block = BlockHint(
+            height=hint.funding_block.height, block_hash=hint.funding_block.block_hash
+        )
+        remaining()
+    if funding_block is None:
+        raise ReverseReconciliationError("explicit funding lookup source required")
+
     core = CoreTransactionReader(
         port=config.core_port, cookie_path=config.core_cookie_path, network=authority.network
     )

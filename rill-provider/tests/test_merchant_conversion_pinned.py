@@ -118,7 +118,8 @@ EXTRA = """
         depth=transaction.get('confirmations')
         return states==[('SETTLED',)] and type(depth) is int and depth>=minimum_depth
 
-    async def cli_completion(journal,authority,config,credentials,candidate,binding,funding_info,claim_txid,custody):
+    async def cli_completion(journal,authority,config,credentials,candidate,binding,funding_info,claim_txid,custody,
+        saved_hint_path=None,claim_path='cooperative'):
         # Independent operator pins originate in the fixture, never learned from
         # the stored fence as fresh spending or custody authority.
         root=journal.directory.parent
@@ -133,6 +134,12 @@ EXTRA = """
             binding_revision=binding['binding_revision'],funding_block=dict(height=funding_info['blockheight'],
                 block_hash=funding_info['blockhash']),claim_txid=claim_txid,claim_path='cooperative',
             custody=custody.model_dump(mode='json'))
+        if saved_hint_path is not None:
+            document['version']='conversion-reconciliation/regtest/v2'
+            del document['funding_block']
+            document['funding_inclusion_hint_path']=str(saved_hint_path)
+            document['claim_path']=claim_path
+            assert 'funding_block' not in document
         for path,content in ((authority_path,canonicalize(authority.model_dump(mode='json'))),
             (identity_path,(credentials.identity+'\\n').encode()),(evidence_path,canonicalize(document))):
             descriptor=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
@@ -158,6 +165,7 @@ EXTRA = """
         before=inventory_snapshot(journal)
         evidence_path.unlink()
         identity_path.unlink()
+        if saved_hint_path is not None: saved_hint_path.unlink()
         await execute(['treasury','reconcile',*base,'--evidence',str(evidence_path),
             '--crypto-library','/does-not-exist/native-library.so'],expected)
         await execute(['treasury','status',*base],expected)
@@ -712,8 +720,11 @@ EXTRA = """
                     try:
                         if CLI_COMPLETION:
                             print('PHASE: explicit_operator_cli_completion',file=sys.stderr)
+                            saved_options=({'saved_hint_path':journal.directory/'recovery'/
+                                (reservation.job.request.operation_id+'.funding-inclusion.age'),'claim_path':claim_path}
+                                if SAVED_CLI_COMPLETION else {})
                             completed=await cli_completion(journal,authority,config,credentials,candidate_path,binding,
-                                funding_info,outcome.claim_txid,custody)
+                                funding_info,outcome.claim_txid,custody,**saved_options)
                         else:
                             completed = await asyncio.to_thread(reconcile_conversion,journal,
                                 reservation.job.request.operation_id,config=config,credentials=credentials,crypto=crypto,
@@ -773,6 +784,7 @@ EXTRA = """
                     process_death_boundary=CRASH_BOUNDARY,source_daemon_restarted=SOURCE_RESTART,
                     operator_cli_completion=CLI_COMPLETION,
                     original_funding_hint_retained=RETAIN_FUNDING_INCLUSION,
+                    saved_operator_cli_completion=SAVED_CLI_COMPLETION,
                     original_claim_path=claim_path)
             finally:
                 mining_stop.set()
@@ -800,6 +812,7 @@ def _program(  # noqa: PLR0913 - distinct opt-in conformance scenarios, combinat
     restart: bool = False,
     cli_completion: bool = False,
     retain_funding_inclusion: bool = False,
+    saved_cli_completion: bool = False,
 ) -> str:
     fixture = import_module("test_merchant_source_pinned")
     setup = import_module("test_lnd_payment_pinned").CHANNEL_SETUP
@@ -870,8 +883,19 @@ def _program(  # noqa: PLR0913 - distinct opt-in conformance scenarios, combinat
     assert not restart or (completion and crash_boundary is None)
     assert not cli_completion or (completion and not restart and crash_boundary is None)
     assert type(retain_funding_inclusion) is bool
+    assert type(saved_cli_completion) is bool
+    assert not saved_cli_completion or (
+        completion
+        and cli_completion
+        and retain_funding_inclusion
+        and not restart
+        and crash_boundary is None
+    )
     assert not retain_funding_inclusion or (
-        completion and not restart and not cli_completion and crash_boundary is None
+        completion
+        and not restart
+        and (not cli_completion or saved_cli_completion)
+        and crash_boundary is None
     )
     child_program = CRASH_CHILD if crash_boundary is not None else ""
     controls = (
@@ -880,6 +904,7 @@ def _program(  # noqa: PLR0913 - distinct opt-in conformance scenarios, combinat
         f"    SOURCE_RESTART = {restart!r}\n"
         f"    CLI_COMPLETION = {cli_completion!r}\n"
         f"    RETAIN_FUNDING_INCLUSION = {retain_funding_inclusion!r}\n"
+        f"    SAVED_CLI_COMPLETION = {saved_cli_completion!r}\n"
     )
     return setup + controls + EXTRA + body
 
@@ -1074,6 +1099,40 @@ def test_original_funding_hint_program_compiles_and_requires_explicit_profile() 
         _program(completion=True, retain_funding_inclusion=cast("bool", 1))
 
 
+@pytest.mark.lnd
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_LND") != "1" or os.environ.get("RILLSWAP_RUN_BUN_MERCHANT") != "1",
+    reason="explicit saved-hint public operator command conformance opt-ins",
+)
+def test_pinned_operator_cli_reconciles_original_saved_funding_hint(tmp_path: Path) -> None:
+    evidence = _funded_evidence(
+        tmp_path,
+        completion=True,
+        cli_completion=True,
+        retain_funding_inclusion=True,
+        saved_cli_completion=True,
+    )
+    assert evidence["original_funding_hint_retained"] is True
+    assert evidence["saved_operator_cli_completion"] is True
+    assert evidence["operator_cli_completion"] is True
+    assert evidence["verified_completion"] is True
+
+
+def test_saved_operator_profile_compiles_without_changing_older_combinations() -> None:
+    program = _program(
+        completion=True,
+        cli_completion=True,
+        retain_funding_inclusion=True,
+        saved_cli_completion=True,
+    )
+    compile(program, "<owned-saved-operator-reconciliation>", "exec")
+    with pytest.raises(AssertionError):
+        _program(completion=True, cli_completion=True, retain_funding_inclusion=True)
+    with pytest.raises(AssertionError):
+        _program(completion=True, saved_cli_completion=True)
+
+
 def _funded_evidence(  # noqa: PLR0913 - forward the explicit isolated scenario controls
     tmp_path: Path,
     *,
@@ -1082,6 +1141,7 @@ def _funded_evidence(  # noqa: PLR0913 - forward the explicit isolated scenario 
     restart: bool = False,
     cli_completion: bool = False,
     retain_funding_inclusion: bool = False,
+    saved_cli_completion: bool = False,
 ) -> dict[str, object]:
     fixture = import_module("test_merchant_source_pinned")
     helpers = import_module("test_lnd_payment_pinned")
@@ -1129,6 +1189,7 @@ def _funded_evidence(  # noqa: PLR0913 - forward the explicit isolated scenario 
                 restart=restart,
                 cli_completion=cli_completion,
                 retain_funding_inclusion=retain_funding_inclusion,
+                saved_cli_completion=saved_cli_completion,
             ),
             prefix="merchant-restart"
             if restart

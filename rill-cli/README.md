@@ -723,7 +723,8 @@ credentials plus independently supplied operation, network, initial digest and
 selected binding. A compatible hint supplies historical coordinates only for
 fresh independent evidence collection. It is not a receipt, freshness assertion,
 inventory balance, signing permission or SDK retry/resumption capability. The
-operator reconciliation manifest is unchanged and is not automatically populated.
+v1 operator reconciliation manifest is unchanged. Explicit v2 consumption below
+does not automatically populate or discover manifests or hints.
 
 Missing hints prove nothing. Only explicit opt-in with the surviving original
 invocation permits capture. Existing, partial, old-version, mismatched, symlinked,
@@ -850,7 +851,7 @@ permissions and agreement with the fence do not prove custody or liability cover
 This interface trusts the local operator's assertions; it is not a production LND
 accounting projector.
 
-The evidence file is strict JSON with every field required:
+The v1 evidence file is strict JSON with every field required:
 
 | Field | Input |
 | --- | --- |
@@ -862,6 +863,30 @@ The evidence file is strict JSON with every field required:
 | `funding_block` | Explicit positive `height` and `block_hash`, not discovery permission |
 | `claim_txid`, `claim_path` | Exact claim and `cooperative` or `unilateral` validation path |
 | `custody` | Full `DestinationCustody`: network, script, named `core_wallet`, literal `destination_keys_controlled: true` |
+
+To consume a saved original funding hint, explicitly select
+`conversion-reconciliation/regtest/v2`. Keep the other fields above, **remove**
+`funding_block`, and supply required `funding_inclusion_hint_path` as the absolute
+path to the encrypted hint. The versions are separately strict: v2 rejects plain
+block inputs, v1 rejects saved-hint inputs, and neither guesses a filename or
+falls back to the other format. All v1 fields and behavior remain unchanged.
+
+The collector verifies the initial ciphertext digest, native signed funded
+successor, selected binding and original approval **before** reading the hint.
+It correlates the hint to the independently established operation, full network,
+initial digest and binding, then uses **only block height/hash** for existing fresh
+observations. Invalid hints or expired admission prevent observation-client
+construction. Private authority pins, original AGE identity and native offline
+verification are still needed first; the hint does not bypass them. Hint work
+remains inside the original acquisition budget, not before query accounting.
+
+Matching encryption does not prove authorship or that the SDK producer ran.
+Invented historical confirmations and sampled tips cannot replace fresh claim
+depth, actual source debit, destination custody or completion generation checks.
+Library callers likewise choose exactly one source: the existing required
+`funding_block` keyword, or `funding_block=None` plus an explicit absolute
+`funding_inclusion_hint_path`. Omitting `funding_block` remains an argument error.
+No receipt, new SDK right or spending capability is admitted from the hint.
 
 Manifest paths must be absolute; RPCs use numeric loopback ports. Custody must
 independently match the original authority. No payment macaroon or saved receipt
@@ -876,7 +901,7 @@ put secret identity contents in command arguments.
 
 Both new completion and terminal replay report **recorded historical state**, not
 fresh custody/finality. Terminal jobs bypass evidence, identity, native-library
-loading and RPCs, even if those files are unavailable. Other nondispatched states
+loading, saved-hint access and RPCs, even if those files are unavailable. Other nondispatched states
 refuse reconciliation without acquisition. Exit 2 may mean completion already
 persisted; inspect `treasury status`, never start replacement execution. Acquisition
 and atomic journal fencing retain the preceding regtest limits, including possible
@@ -885,6 +910,11 @@ late commit acknowledgment and later reorgs.
 Existing installations receive no startup behavior or stored-format change.
 Missing/partial/incompatible journals or fences refuse without repair; absent,
 unknown or unsupported older manifest versions cause no migration or automatic work.
+An explicit v2 request with an absent, partial, unsafe, incompatible or mismatched
+hint refuses without scanning, fallback, repair or overwrite and retains holds.
+A compatible hint is historical input subject to fresh proof. Older binaries
+reject v2. There is no startup read, backfill or migration, and no claim that
+original-SDK process death or restored database/fence authority is solved.
 
 ### Merchant credit correspondence (internal, provenance only)
 
