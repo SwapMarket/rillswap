@@ -145,6 +145,33 @@ class WalletAvailability(StrictModel):
         return value
 
 
+class InventoryAccountingEligibility(StrictModel):
+    """Accounting inventory threshold, NEVER payment bandwidth or refund payability.
+
+    A trusted runtime must establish complete supported accounting and all known
+    commitments under its operational custody restrictions. Exclusive custody
+    alone does not freeze forwarding, uncommitted updates or channel lifecycle.
+    No automatic observation/projector grants these assertions. Inactive-channel
+    accounting can strand holds indefinitely after a failed one-shot attempt.
+    """
+
+    source_node: CompressedKey
+    network: NetworkIdentity
+    query: CapacityQuery
+    observed_at: Timestamp
+    accounting_net_msat: NonnegativeAmount
+    coverage_complete: Literal[True]
+    commitments_known: Literal[True]
+
+    @field_validator("coverage_complete", "commitments_known", mode="before")
+    @classmethod
+    def affirmative_accounting(cls, value: object) -> object:
+        """Absent, partial or coerced accounting assertions establish no eligibility."""
+        if value is not True:
+            raise ValueError("affirmatively complete accounting and known commitments required")
+        return value
+
+
 class PreparedConversion(StrictModel):
     """Verified firm terms, supplied by the trusted reverse-swap worker."""
 
@@ -490,7 +517,7 @@ class ConversionJournal:
         owner: str,
         allocations: tuple[Allocation, ...],
         credits: tuple[SourceCredit, ...],  # noqa: A002 - canonical inventory credits
-        availability: WalletAvailability,
+        availability: WalletAvailability | InventoryAccountingEligibility,
     ) -> None:
         now = int(time.time())
         (generation,) = db.execute("SELECT capacity_generation FROM metadata").fetchone()
@@ -518,10 +545,13 @@ class ConversionJournal:
                 )
         outstanding = sum(row[0] for row in db.execute("SELECT amount_msat FROM holds"))
         total = sum(item.amount_msat for item in allocations)
-        if (
-            outstanding + total + self._fence.authority.fixed_reserve_msat
-            > availability.spendable_msat
-        ):
+        if isinstance(availability, InventoryAccountingEligibility):
+            if kind != "conversion":
+                raise ConversionJournalError("accounting eligibility cannot authorize refunds")
+            budget = availability.accounting_net_msat
+        else:
+            budget = availability.spendable_msat
+        if outstanding + total + self._fence.authority.fixed_reserve_msat > budget:
             raise ConversionJournalError("wallet commitments exceed available capacity")
         for item in allocations:
             row = db.execute(
@@ -552,6 +582,37 @@ class ConversionJournal:
         availability: WalletAvailability,
     ) -> ConversionReservation:
         """Atomically approve credits and budgets; replays are observation-only."""
+        if not isinstance(availability, WalletAvailability):
+            raise ConversionJournalError("spendable wallet availability required")
+        return self._reserve(request, credits, availability)
+
+    def reserve_accounting_conversion(
+        self,
+        request: ConversionRequest,
+        *,
+        credits: tuple[SourceCredit, ...],  # noqa: A002 - canonical inventory credits
+        eligibility: InventoryAccountingEligibility,
+    ) -> ConversionReservation:
+        """Hold accounting inventory for ONE original attempt, never promise payability.
+
+        Existing jobs, refunds, recovery, dispatch and completion retain exactly
+        the same liabilities and one-shot rights. No admission observation is
+        persisted, no new schema or automatic upgrade action is introduced.
+        Replays through either conversion entry point grant no fresh rights.
+        """
+        if not isinstance(eligibility, InventoryAccountingEligibility):
+            raise ConversionJournalError("explicit inventory accounting eligibility required")
+        eligibility = InventoryAccountingEligibility.model_validate(
+            eligibility.model_dump(), strict=True
+        )
+        return self._reserve(request, credits, eligibility)
+
+    def _reserve(
+        self,
+        request: ConversionRequest,
+        credits: tuple[SourceCredit, ...],  # noqa: A002 - canonical inventory credits
+        availability: WalletAvailability | InventoryAccountingEligibility,
+    ) -> ConversionReservation:
         with self._transaction() as db:
             if db.execute(
                 "SELECT 1 FROM jobs WHERE operation_id=?", (request.operation_id,)
@@ -583,6 +644,8 @@ class ConversionJournal:
         availability: WalletAvailability,
     ) -> None:
         """Hold an explicit refund promise in the SAME source authorization domain."""
+        if not isinstance(availability, WalletAvailability):
+            raise ConversionJournalError("spendable wallet availability required for refunds")
         _OPERATION_ID.validate_python(owner, strict=True)
         with self._transaction() as db:
             rows = db.execute(

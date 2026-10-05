@@ -612,6 +612,29 @@ begun before dispatch or completed hold release, even if they return afterward.
 Timestamp freshness alone is insufficient. Pending holds and a fixed wallet
 reserve remain unavailable; completed actual debits remain consumed.
 
+`reserve()` and `reserve_refund()` retain their affirmative fresh
+`WalletAvailability.spendable_msat` contract. The separate explicit
+`reserve_accounting_conversion()` accepts only `InventoryAccountingEligibility`:
+an accounting threshold with strictly affirmative complete coverage and known
+commitments, never payment bandwidth or refund payability. It cannot be passed
+to either existing admission method, even for replays. Both conversion entry
+points share all credit-consumption, fixed-reserve, refund/conversion-hold and
+durable-generation invariants, and replays through either grant no new right.
+
+A future controlled LND projector may use fully classified local commitment
+floors minus reported local reserves (no incoming addition or second committed
+outgoing subtraction). **No positive runtime projector is implemented or enabled.**
+Exclusive custody does not freeze forwarding, uncommitted updates or channel
+lifecycle; the runtime must establish how all such commitments are covered.
+Inactive-channel accounting can qualify inventory without allowing payment,
+stranding a failed one-shot attempt's full hold indefinitely. This is an explicit
+availability cost, not permission to retry or release an ambiguous liability.
+The new input is discarded after admission; persisted jobs remain liabilities
+and execution history, not retained spendability claims. Compatible old journals
+open unchanged, incomplete jobs retain holds and no rights are restored. Missing,
+partial or incompatible state remains refused; no migration or automatic import
+is introduced.
+
 Only a fresh reservation owner can consume an invocation right. Replays and
 reopened jobs are observation-only. Verified firm terms must fit total source,
 routing, fee and output limits, with create-only encrypted recovery verified
