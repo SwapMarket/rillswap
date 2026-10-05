@@ -590,8 +590,40 @@ contact, payment, funding, migration, or broadcasts are implemented by these
 offline commands. The separate `sign-refund` command signs only after its
 explicitly requested regtest checks.
 
+## Merchant inventory journal (internal, not an executable conversion service)
+
+`rill_cli.conversion_journal` provides an operator-only allocation boundary for
+merchant-held Lightning to an owned Taproot BTC treasury destination. It does
+not verify merchant proofs, query a wallet, run a swap, or expose a CLI command.
+Those runtime integrations and funded conversion evidence remain required.
+
+Explicit provisioning requires a dedicated source epoch, exclusive control of
+all source-wallet spending and known refund/reserve commitments. One retained
+source-owner fence must live outside the journal directory at the operator's
+authoritative location for that wallet. Ordinary opening never creates state;
+missing, partial, incompatible or lost state requires reconciliation, not empty
+reprovisioning. A signature, historical invoice settlement or replenished wallet
+balance cannot authorize spending or recreate consumed source credit.
+
+Conversion allocations and refund holds share an atomic private SQLite ledger.
+The worker must call `begin_capacity_query()` **before** its authenticated wallet
+RPC and bind the response to that challenge. Durable generations reject queries
+begun before dispatch or completed hold release, even if they return afterward.
+Timestamp freshness alone is insufficient. Pending holds and a fixed wallet
+reserve remain unavailable; completed actual debits remain consumed.
+
+Only a fresh reservation owner can consume an invocation right. Replays and
+reopened jobs are observation-only. Verified firm terms must fit total source,
+routing, fee and output limits, with create-only encrypted recovery verified
+from disk before a one-shot dispatch marker. Ambiguous state retains allocations
+and never authorizes a replacement swap or payment. Completion requires actual
+source debit/fees and an independently verified owned BTC output/depth, not a
+nominal swap payout. This module never changes customer paid status or receipts.
+Existing installations receive no automatic provisioning, migration or conversion.
+Production conversion remains disabled and unproved.
+
 The package declares dependencies on `rill-core`, `rill-crypto`,
-`pyrage==1.4.0`, and `httpx==0.28.1`, but release wheels do **not** bundle the
+`pyrage==1.4.0`, `httpx==0.28.1`, and `pydantic==2.13.5`, but release wheels do **not** bundle the
 native cryptographic library; a missing or wrong library fails closed. Test-only keys and fixtures
 in `tests/fixtures` are public. To develop alongside the sibling repositories:
 

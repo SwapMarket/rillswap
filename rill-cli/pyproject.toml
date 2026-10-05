@@ -15,6 +15,7 @@ dependencies = [
   "rill-provider==0.1.0.dev0",
   "pyrage==1.4.0",
   "httpx==0.28.1",
+  "pydantic==2.13.5",
 ]
 
 [project.scripts]
