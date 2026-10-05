@@ -269,7 +269,9 @@ class LndHoldInvoices:
         ordinary observation of the same type. Successful return requires a
         bound SETTLED invoice with paid amount at least the original amount.
         As with observe_bound_invoice, the caller supplies authenticated original
-        terms and the credential needs info:read on synchronized original LND.
+        terms and synchronized original LND. A dedicated observer can use exact
+        URI permissions for GetInfo and LookupInvoiceV2. Pinned LND maps the
+        latter to invoices:write, so info:read plus invoices:read is insufficient.
         Three reads use one channel and a fixed setup-inclusive transport budget;
         no settlement, fallback, retry, or nonce allocation occurs.
 

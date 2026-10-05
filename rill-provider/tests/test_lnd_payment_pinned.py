@@ -935,7 +935,8 @@ from rill_provider._lnd_proto import lightning_pb2 as ln
 from rill_provider._lnd_proto.invoicesrpc import invoices_pb2 as inv
 from rill_provider._lnd_proto.routerrpc import router_pb2 as router
 from rill_provider.lnd_invoice_observation import LndInvoiceObserver
-from rill_provider.lnd_payment_observation import LndProtocolError, LndPaymentObserver
+from rill_provider.lnd_payment_observation import (
+    LndProtocolError, LndPaymentObserver, LndUnavailableError)
 import walletunlocker_pb2 as unlock
 import stateservice_pb2 as state
 
@@ -1483,6 +1484,36 @@ with tempfile.TemporaryDirectory(prefix='rill-hold-reads-', dir='/tmp') as crede
                     assert opened['state'] == 'OPEN' and opened['amt_paid_msat'] == '0'
                     assert opened['settle_date'] == '0'
                     assert opened['payment_request'] == ordinary['payment_request']
+                    print('PHASE: ordinary_invoice_binding', file=sys.stderr)
+                    ordinary_binding = decoder.decode(ordinary['payment_request'],
+                        deadline_seconds=5)
+                    print('PHASE: ordinary_binding_verified', file=sys.stderr)
+                    assert ordinary_binding.payment_hash == ordinary_hash.hex()
+                    assert ordinary_binding.amount_msat == str(amount_msat)
+                    assert ordinary_binding.payee_compressed_pubkey == b_key
+                    assert ordinary_binding.bolt11_sha256 == hashlib.sha256(
+                        ordinary['payment_request'].encode('ascii')).hexdigest()
+                    receiver_read_scope = ln.BakeMacaroonRequest(permissions=[
+                        ln.MacaroonPermission(entity='uri', action=method)
+                        for method in ('/lnrpc.Lightning/GetInfo',
+                            '/invoicesrpc.Invoices/LookupInvoiceV2')], root_key_id=0,
+                        allow_external_permissions=False)
+                    receiver_read_encoded = call(b, b_secret, 'BakeMacaroon',
+                        ln.BakeMacaroonRequest, ln.BakeMacaroonResponse,
+                        receiver_read_scope).macaroon
+                    receiver_read_file = private_file(credentials, 'ordinary-bound-read.macaroon',
+                        bytes.fromhex(receiver_read_encoded))
+                    ordinary_reader = LndHoldInvoices(host='127.0.0.1', port=10010,
+                        tls_certificate_path='/work/public/b.cert',
+                        macaroon_path=receiver_read_file, network=network)
+                    print('PHASE: ordinary_open_refusal', file=sys.stderr)
+                    try:
+                        ordinary_reader.observe_bound_settled_invoice(ordinary_binding,
+                            deadline=time.monotonic() + 5)
+                    except LndProtocolError:
+                        pass
+                    else:
+                        raise AssertionError('ordinary OPEN invoice accepted as settled')
                     paying = send(router.SendPaymentRequest(
                         payment_request=ordinary['payment_request'], max_parts=1,
                         outgoing_chan_ids=[channel_id], no_inflight_updates=False,
@@ -1505,8 +1536,80 @@ with tempfile.TemporaryDirectory(prefix='rill-hold-reads-', dir='/tmp') as crede
                     assert received['value_msat'] == received['amt_paid_msat'] == str(amount_msat)
                     assert received['settle_date'].isdigit() and int(received['settle_date']) > 0
                     assert int(received['settle_date']) <= int(time.time())
+                    print('PHASE: ordinary_bound_settled', file=sys.stderr)
+                    ordinary_bound = ordinary_reader.observe_bound_settled_invoice(
+                        ordinary_binding, deadline=time.monotonic() + 5)
+                    assert ordinary_bound.status.state == 'SETTLED'
+                    assert ordinary_bound.payment_hash == ordinary_hash.hex()
+                    assert ordinary_bound.bolt11_sha256 == ordinary_binding.bolt11_sha256
+                    assert ordinary_bound.node_pubkey == b_key and ordinary_bound.network == network
+                    assert ordinary_bound.last_lnd_height == info.block_height
+                    assert ordinary_bound.last_lnd_block_hash == info.block_hash
+                    def require_permission_denial(rpc, request, credential):
+                        try:
+                            rpc(request, metadata=metadata(credential), timeout=5)
+                        except grpc.RpcError as error:
+                            if 'permission denied' not in (error.details() or '').lower():
+                                raise AssertionError('expected exact RPC authorization denial')
+                        else:
+                            raise AssertionError('method-only credential authorized another RPC')
+                    entity_read = call(b, b_secret, 'BakeMacaroon',
+                        ln.BakeMacaroonRequest, ln.BakeMacaroonResponse,
+                        ln.BakeMacaroonRequest(permissions=[
+                            ln.MacaroonPermission(entity=entity, action='read')
+                            for entity in ('info', 'invoices')], root_key_id=0,
+                            allow_external_permissions=False)).macaroon
+                    raw_bound_lookup = unary(b, '/invoicesrpc.Invoices/LookupInvoiceV2',
+                        inv.LookupInvoiceMsg, ln.Invoice)
+                    require_permission_denial(raw_bound_lookup,
+                        inv.LookupInvoiceMsg(payment_hash=ordinary_hash),
+                        bytes.fromhex(entity_read))
+                    omitted_files = []
+                    for index, method in enumerate(('/lnrpc.Lightning/GetInfo',
+                        '/invoicesrpc.Invoices/LookupInvoiceV2')):
+                        encoded = call(b, b_secret, 'BakeMacaroon',
+                            ln.BakeMacaroonRequest, ln.BakeMacaroonResponse,
+                            ln.BakeMacaroonRequest(permissions=[
+                                ln.MacaroonPermission(entity='uri', action=method)], root_key_id=0,
+                                allow_external_permissions=False)).macaroon
+                        omitted_files.append(private_file(credentials,
+                            'ordinary-uri-only-' + str(index), bytes.fromhex(encoded)))
+                        if index == 0:
+                            require_permission_denial(raw_bound_lookup,
+                                inv.LookupInvoiceMsg(payment_hash=ordinary_hash),
+                                bytes.fromhex(encoded))
+                        else:
+                            require_permission_denial(unary(b, '/lnrpc.Lightning/GetInfo',
+                                ln.GetInfoRequest, ln.GetInfoResponse), ln.GetInfoRequest(),
+                                bytes.fromhex(encoded))
+                    for credential in omitted_files:
+                        insufficient = LndHoldInvoices(host='127.0.0.1', port=10010,
+                            tls_certificate_path='/work/public/b.cert', macaroon_path=credential,
+                            network=network)
+                        try:
+                            insufficient.observe_bound_settled_invoice(ordinary_binding,
+                                deadline=time.monotonic() + 5)
+                        except (LndProtocolError, LndUnavailableError):
+                            pass
+                        else:
+                            raise AssertionError('insufficient ordinary bound-read scope accepted')
+                    for method, request_type, response_type, request in (
+                        ('/invoicesrpc.Invoices/SettleInvoice', inv.SettleInvoiceMsg,
+                            inv.SettleInvoiceResp,
+                            inv.SettleInvoiceMsg(preimage=ordinary_preimage)),
+                        ('/invoicesrpc.Invoices/CancelInvoice', inv.CancelInvoiceMsg,
+                            inv.CancelInvoiceResp,
+                            inv.CancelInvoiceMsg(payment_hash=ordinary_hash)),
+                        ('/invoicesrpc.Invoices/AddHoldInvoice', inv.AddHoldInvoiceRequest,
+                            inv.AddHoldInvoiceResp, inv.AddHoldInvoiceRequest(
+                                hash=ordinary_hash, value_msat=amount_msat)),
+                    ):
+                        require_permission_denial(unary(b, method, request_type, response_type),
+                            request, bytes.fromhex(receiver_read_encoded))
                     ordinary_evidence = {'merchant_rest_settled': True,
                         'merchant_received_msat': amount_msat, 'merchant_settlement_time': True,
+                        'ordinary_bound_settled': True, 'ordinary_bound_read_scope_denied': True,
+                        'ordinary_bound_mutation_denied': True,
                         'treasury_scoped_accounting': True, 'treasury_source_debit_msat':
                             receipt.amount_msat + receipt.routing_fee_msat,
                         'treasury_insufficient_scope_denied': True}
@@ -1926,6 +2029,9 @@ def test_pinned_single_part_hold_bound_settled(tmp_path: Path) -> None:
     assert evidence["merchant_rest_settled"] is True
     assert evidence["merchant_received_msat"] == 1_000_000
     assert evidence["merchant_settlement_time"] is True
+    assert evidence["ordinary_bound_settled"] is True
+    assert evidence["ordinary_bound_read_scope_denied"] is True
+    assert evidence["ordinary_bound_mutation_denied"] is True
     assert evidence["treasury_scoped_accounting"] is True
     assert evidence["treasury_source_debit_msat"] == 1_000_000
     assert evidence["treasury_insufficient_scope_denied"] is True

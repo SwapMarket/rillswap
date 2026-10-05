@@ -788,13 +788,30 @@ the original-bound, identity-bracketed three-read batch must report SETTLED with
 paid amount at least the original invoice amount. Exact payment and overpayment
 qualify; other states and insufficient payment refuse. It performs no financial
 dispatch, retry, or fallback. Like ordinary bound observation, it requires
-authenticated original terms, `info:read`, and synchronized original LND.
+authenticated original terms and synchronized original LND. At pinned LND
+v0.21.0-beta, `GetInfo` maps to `info:read`, but `LookupInvoiceV2` maps to
+`invoices:write`, not `invoices:read`. A dedicated observation credential should
+grant only the exact URI permissions `/lnrpc.Lightning/GetInfo` and
+`/invoicesrpc.Invoices/LookupInvoiceV2`, with external permissions disabled,
+instead of broad invoice-write authority. These are method permissions, not
+invoice ownership or single-use restrictions. Settlement credentials retain
+their separate mutation authority; no automatic credential rotation is added.
 Late final knowledge retains its meaning, not freshness or signing authority.
 The returned general observation type alone does not prove this stronger query
 ran; trusted runtime must collect the actual invocation and independently check
 its original window, full evidence interval, chain, fees, and custody. No signing
 consumer uses this query yet. Upgrading installations perform no new startup
 work, and absent or older stored state supplies no payment evidence.
+
+The pinned ordinary-invoice scenario decodes its existing 1,000-sat REST invoice
+and successfully invokes this strict method through the two URI-only permissions.
+It refuses OPEN state, characterizes entity-read-only V2 lookup denial, checks
+each omitted URI, and requires exact authorization denial for settlement,
+cancellation and hold-invoice creation probes. Duplicate/terminal-state errors
+are not accepted as permission proof. These probes reuse existing terminal
+invoice inputs within owned disposable fixtures, adding no invoice or payment.
+This establishes ordinary-invoice correspondence, not merchant proof acquisition,
+independent Core correspondence, inventory spending authority or conversion.
 
 The store-owned `_reverse_repayment_binding` getter classifies
 archived context, not whether settlement debt exists. Explicit empty contract
