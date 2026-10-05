@@ -1704,7 +1704,7 @@ def _copy_private_core_cookie(container: str, destination: Path) -> None:
 def _merchant_fixture_mounts(profile: str, bundle: Path | None) -> tuple[str, ...]:
     if bundle is None:
         return ()
-    if profile not in ("merchant_receipt", "merchant_proof"):
+    if profile not in ("merchant_receipt", "merchant_proof", "merchant_conversion"):
         raise ValueError("Bun fixture requires the isolated merchant REST profile")
     binary = ROOT.parent / "tmp/toolchains/bun-v1.3.11/bun"
     for source in (binary, bundle):
@@ -1745,7 +1745,7 @@ def _assert_merchant_namespace(core: str, nodes: tuple[str, str]) -> None:
 def _merchant_proof_mounts(
     profile: str, bundle: Path | None, directory: Path | None
 ) -> tuple[str, ...]:
-    if profile != "merchant_proof":
+    if profile not in ("merchant_proof", "merchant_conversion"):
         if directory is not None:
             raise ValueError("proof TLS inputs require the isolated proof profile")
         return ()
@@ -1784,16 +1784,16 @@ def _run_two_node_sidecar(  # noqa: PLR0913, PLR0915 - isolated test infrastruct
     prefix: str,
     deadline: int,
     profile: Literal[
-        "baseline", "native_reverse", "merchant_receipt", "merchant_proof"
+        "baseline", "native_reverse", "merchant_receipt", "merchant_proof", "merchant_conversion"
     ] = "baseline",
     merchant_bun_bundle: Path | None = None,
     merchant_proof_tls_directory: Path | None = None,
 ) -> dict[str, object]:
     """Use fresh owned Core/LND containers for one bounded sidecar scenario."""
-    native_preflight = profile == "native_reverse"
-    merchant_proof = profile == "merchant_proof"
+    native_preflight = profile in ("native_reverse", "merchant_conversion")
+    merchant_proof = profile in ("merchant_proof", "merchant_conversion")
     cookie_required = native_preflight or merchant_proof
-    merchant_rest = profile in ("merchant_receipt", "merchant_proof")
+    merchant_rest = profile in ("merchant_receipt", "merchant_proof", "merchant_conversion")
     merchant_mounts = _merchant_fixture_mounts(profile, merchant_bun_bundle)
     proof_mounts = _merchant_proof_mounts(
         profile, merchant_bun_bundle, merchant_proof_tls_directory

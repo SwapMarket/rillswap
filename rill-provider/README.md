@@ -1644,6 +1644,31 @@ remains opt-in. Fixture-owned children are reaped before namespace teardown and
 private TLS/bundle staging is deleted. This is diagnostic conformance, not
 production deployment approval; upgrading installs causes no automatic work.
 
+The separate `merchant_conversion` profile in
+`tests/test_merchant_conversion_pinned.py` combines those protected mounts with
+native crypto and the real provider/SDK lifecycle. One ordinary 200,000-sat
+merchant payment supplies source B, then one original reserved reverse operation
+pays B to provider A and claims BTC to a separate controlled Core wallet. Real
+encrypted recovery, native funding/claim validation, source debit, wallet history
+and final common-tip checks produce a historical receipt. The job remains
+dispatched, its full 105,000-sat allocation stays held and no credit is consumed.
+The old 1,000-sat proof scenario remains unchanged.
+
+Accounting admission is **test-only**: fresh zero-push private sole-channel
+construction, B's known incoming-only history, terminal receipt settlement,
+drained complete topology, supported constraints, no peer discontinuity and
+matching chain/observer reads establish its explicit premises. Empty HTLC lists,
+stable reads or exclusive custody alone do not establish production commitment
+coverage. The private generated destination independently establishes this
+fixture's retained-key premise, never inferred from wallet recognition. The
+WebSocket relay is fixture infrastructure without production relay-policy checks.
+
+Run the new test with `RILLSWAP_RUN_LND=1 RILLSWAP_RUN_BUN_MERCHANT=1`, the
+checksum-pinned Bun toolchain and built `tmp/native/librill_crypto.so`. CI runs it
+separately. This establishes controlled funded receipt conformance, **not** hold
+release, production accounting projection, crash recovery or deployment readiness.
+Existing installations receive no automatic work or new authority.
+
 An internal **treasury accounting observer** is available as
 `rill_provider.lnd_treasury_observation.LndTreasuryObserver`. Provision a protected
 credential with only `info:read` and `offchain:read`, numeric loopback endpoint,
