@@ -1597,6 +1597,33 @@ from the previous release is observed, provisioned, migrated or otherwise change
 automatically. The caller must still bind full acquisition intervals to real LND
 and merchant evidence before any future credit import.
 
+`CoreTransactionReader.observe_block_transaction(txid, block_height=...,
+block_hash=...)` independently acquires historical transaction bytes from an
+explicit active-block hint. It needs neither wallet membership, txindex nor a
+present UTXO. Strict root RPC, configured chain/genesis/signet checks, sampled
+tip/block correspondence and independently computed witness-stripped txid bracket
+the result. Advancing tips must preserve the earlier sampled tip's active hash.
+The returned depth is a **minimum across sampled tips**, not a continuous floor,
+atomic inclusion proof or guarantee against a subsequent reorg. Bounded
+non-coinbase parsing supports the core inspector's explicit limits only;
+unsupported/pruned/unknown/late observations remain unknown, never absence proof.
+
+The complete explicit hint is lookup input, not authority. Missing or invalid
+hints cause no discovery, scan, fallback or RPC. Namespace/profile and trusted
+Core host remain operator premises; cookie authentication authenticates only the
+client. Setup, streamed response limits and cleanup are enclosed by acceptance
+checks, not a hard execution cutoff. The method validates no funding declaration,
+claim signature, ownership or completion policy and never releases journal holds.
+Confirmation thresholds remain caller-owned. Old records without retained hints
+remain unchanged: no migration, wallet work or automatic payment retry is added.
+
+The new `test_core_block_transaction_pinned.py` case disables txindex explicitly,
+spends a confirmed regular wallet transfer and retrieves both historical transfer
+transactions by explicit block hints through a wallet-independent reader. A wrong
+active-block hint refuses without a global lookup fallback. This is actual Core
+byte-acquisition conformance, not HTLC claim validation or funded treasury
+conversion. CI runs this separate opt-in case alongside existing Core checks.
+
 The explicit `merchant_proof` sidecar profile combines receiver REST with Core
 cookie observation inside the existing owned network namespace. Its separate
 `tests/test_merchant_source_pinned.py` scenario runs the verified Bun HTTPS factory

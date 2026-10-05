@@ -23,7 +23,11 @@ from typing import TYPE_CHECKING, Any
 import httpx
 from rill_core.errors import ValidationError
 from rill_core.networks import backend_names
-from rill_core.settlement import FundingBindingTransactionMatch, check_funding_binding_transaction
+from rill_core.settlement import (
+    FundingBindingTransactionMatch,
+    check_funding_binding_transaction,
+    inspect_transaction_outputs,
+)
 from rill_core.wire.messages import FundingBinding
 from rill_core.wire.types import NetworkIdentity
 
@@ -36,6 +40,7 @@ RPC_INVALID_ADDRESS_OR_KEY = -5  # getrawtransaction: not in mempool or txindex
 MAX_COOKIE_BYTES = 512
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_SOURCE_SECONDS = 10
+MAX_HISTORICAL_BLOCK_HEIGHT = 499_999_999
 MAX_BLOCK_RESPONSE_BYTES = 32 * 1024 * 1024  # a decoded block (getblock verbosity 2)
 MAX_SPEND_SCAN_BLOCKS = 12  # blocks decoded per find_spender call
 FUNDING_ESTIMATE_TARGET = 6
@@ -186,6 +191,30 @@ class CoreSourceSnapshot:
     tip_hash: str
     source_height: int
     source_block_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class CoreHistoricalTransaction:
+    """Trusted Core historical byte observations, never financial authority.
+
+    Explicit block coordinates are lookup hints, not proof. Configured profile,
+    namespace and trusted loopback host remain operator premises. Tip/block reads
+    are sampled, not atomic or continuous confirmation guarantees. No ownership,
+    unspent state, funding authorization or claim validity is established here.
+    """
+
+    configured_network: NetworkIdentity
+    raw_transaction: bytes
+    txid: str
+    block_height: int
+    block_hash: str
+    tip_before_height: int
+    tip_before_hash: str
+    tip_after_height: int
+    tip_after_hash: str
+    minimum_sampled_confirmations: int
+    started_at: float
+    completed_at: float
 
 
 def _remaining_source(deadline: float) -> float:
@@ -407,6 +436,127 @@ class CoreTransactionReader:
             source_height,
             source_hash,
         )
+
+    def observe_block_transaction(
+        self,
+        txid: str,
+        *,
+        block_height: int,
+        block_hash: str,
+        deadline_seconds: float = 10,
+    ) -> CoreHistoricalTransaction:
+        """Explicitly read bounded historical bytes from a known active block.
+
+        Requires a complete explicit hint; missing/invalid hints trigger no RPC,
+        discovery, scan or fallback. Works independently of wallet membership,
+        txindex or whether outputs remain unspent. Bounded non-coinbase parsing
+        verifies the actual txid only, not signatures or contract authorization.
+        Acceptance includes cookie/client setup and cleanup, not a hard wall-time
+        guarantee. Old records without hints grant no observation, payment retry,
+        automatic provisioning or migration. Confirmation policy is caller-owned.
+        """
+        if (
+            type(txid) is not str
+            or not _hash(txid)
+            or type(block_hash) is not str
+            or not _hash(block_hash)
+            or type(block_height) is not int
+            or not 0 < block_height <= MAX_HISTORICAL_BLOCK_HEIGHT
+            or type(deadline_seconds) not in (int, float)
+            or not 0 < deadline_seconds <= MAX_SOURCE_SECONDS
+            or not math.isfinite(deadline_seconds)
+        ):
+            raise CoreProtocolError("Core historical transaction input invalid")
+        observation = None
+        try:
+            started_at = time.time()
+            deadline = time.monotonic() + deadline_seconds
+            if not math.isfinite(started_at):
+                raise CoreProtocolError("Core historical transaction time unavailable")  # noqa: TRY301 - detach all setup diagnostics at public boundary
+            username, password = _cookie(self._cookie_path)
+            with httpx.Client(
+                base_url=self._url,
+                auth=httpx.BasicAuth(username, password),
+                trust_env=False,
+                follow_redirects=False,
+                timeout=httpx.Timeout(_remaining_source(deadline)),
+            ) as client:
+                raw, before, after = self._block_transaction_on_client(
+                    client, txid, block_height, block_hash, deadline
+                )
+            _remaining_source(deadline)
+            completed_at = time.time()
+            if not math.isfinite(completed_at) or completed_at < started_at:
+                raise CoreProtocolError("Core historical transaction interval unavailable")  # noqa: TRY301 - detach cleanup diagnostics at public boundary
+            observation = CoreHistoricalTransaction(
+                self._network,
+                raw,
+                txid,
+                block_height,
+                block_hash,
+                before[1],
+                before[0],
+                after[1],
+                after[0],
+                min(before[1], after[1]) - block_height + 1,
+                started_at,
+                completed_at,
+            )
+        except Exception:  # noqa: BLE001 - detach cookie/HTTP/raw-transaction upstream errors
+            observation = None
+        if observation is None:
+            raise CoreUnavailableError("Core historical transaction acquisition unavailable")
+        _remaining_source(deadline)
+        return observation
+
+    def _block_transaction_on_client(
+        self,
+        client: httpx.Client,
+        txid: str,
+        height: int,
+        block_hash: str,
+        deadline: float,
+    ) -> tuple[bytes, tuple[str, int], tuple[str, int]]:
+        request_id = 0
+
+        def read(method: str, params: list[object]) -> Any:  # noqa: ANN401 - strict RPC results narrowed below
+            nonlocal request_id
+            request_id += 1
+            return self._rpc(client, method, params, request_id, deadline=deadline)
+
+        def tip() -> tuple[str, int]:
+            value = _chain_tip(read("getblockchaininfo", []), self._network)
+            if (
+                not 0 < value[1] <= MAX_HISTORICAL_BLOCK_HEIGHT
+                or read("getblockhash", [0]) != self._network.genesis_hash
+                or read("getblockhash", [value[1]]) != value[0]
+            ):
+                raise CoreProtocolError("Core historical transaction backend differs")
+            return value
+
+        before = tip()
+        if height > before[1] or read("getblockhash", [height]) != block_hash:
+            raise CoreProtocolError("Core historical transaction block differs")
+        value = read("getrawtransaction", [txid, False, block_hash])
+        if (
+            type(value) is not str
+            or not value
+            or len(value) > MAX_TRANSACTION_HEX_BYTES
+            or re.fullmatch(r"(?:[0-9a-f]{2})+", value) is None
+        ):
+            raise CoreProtocolError("Core historical transaction bytes unavailable")
+        raw = bytes.fromhex(value)
+        if inspect_transaction_outputs(raw).txid != txid:
+            raise CoreProtocolError("Core historical transaction identifier differs")
+        after = tip()
+        if (
+            after[1] < before[1]
+            or (after[1] == before[1] and after[0] != before[0])
+            or read("getblockhash", [height]) != block_hash
+            or read("getblockhash", [before[1]]) != before[0]
+        ):
+            raise CoreProtocolError("Core historical transaction samples contradict")
+        return raw, before, after
 
     def fetch_binding_byte_match(
         self,
