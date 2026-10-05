@@ -1597,6 +1597,26 @@ from the previous release is observed, provisioned, migrated or otherwise change
 automatically. The caller must still bind full acquisition intervals to real LND
 and merchant evidence before any future credit import.
 
+The explicit `merchant_proof` sidecar profile combines receiver REST with Core
+cookie observation inside the existing owned network namespace. Its separate
+`tests/test_merchant_source_pinned.py` scenario runs the verified Bun HTTPS factory
+and concrete CLI collector against real pinned LND/Core after one ordinary
+1,000-sat zero-fee payment. The signer and leaf pins come from fixture-controlled
+inputs before serving. Issuance and three-URI collection credentials are separate.
+Canonical quantity/hash/invoice digest agree, exactly one invoice and payer
+attempt exist, and collection leaves logical merchant history and protected
+inputs unchanged. No journal import, liquidity/refund-payability claim or treasury
+conversion follows. Existing baseline, native-reverse and merchant-receipt
+profiles retain their gates and assertions.
+
+Run with both `RILLSWAP_RUN_LND=1 RILLSWAP_RUN_BUN_MERCHANT=1` and
+`.venv/bin/python -m pytest tests/test_merchant_source_pinned.py -q`, after preparing
+the checksum-verified Bun toolchain and payments dependencies. CI runs the same
+funded proof case in its sidecar-compatible environment; ordinary collection
+remains opt-in. Fixture-owned children are reaped before namespace teardown and
+private TLS/bundle staging is deleted. This is diagnostic conformance, not
+production deployment approval; upgrading installs causes no automatic work.
+
 An internal **treasury accounting observer** is available as
 `rill_provider.lnd_treasury_observation.LndTreasuryObserver`. Provision a protected
 credential with only `info:read` and `offchain:read`, numeric loopback endpoint,

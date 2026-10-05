@@ -720,9 +720,13 @@ timeout. The synchronous diagnostic is unsuitable for a shared server event loop
 Structural extraction does not authenticate signatures. It requires one current
 acceptance, duplicate-safe bounded JSON and a lowercase ASCII invoice within the
 decoder's initial 2,048-character profile; final verification remains mandatory.
-Unit tests use genuine separately signed loopback statements with synthetic RPCs,
-not funded source conformance. Real merchant HTTPS/LND/Core collector interoperability
-is still required before runtime integration. No previous installation acquires,
+Unit tests use genuine separately signed loopback statements with synthetic RPCs.
+The separate opt-in `test_merchant_source_pinned.py` scenario also acquires actual
+paid Bun HTTPS statements, ordinary-invoice LND settlement and independent Core
+correspondence after one owned 1,000-sat payment. It verifies unchanged merchant
+history and protected inputs, one invoice and one payment attempt. This is funded
+provenance conformance, not inventory conversion or production clearance.
+No previous installation acquires,
 imports, provisions, migrates or spends anything automatically.
 
 The package declares dependencies on `rill-core`, `rill-crypto`,

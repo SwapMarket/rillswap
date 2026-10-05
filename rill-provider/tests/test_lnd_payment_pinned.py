@@ -1704,7 +1704,7 @@ def _copy_private_core_cookie(container: str, destination: Path) -> None:
 def _merchant_fixture_mounts(profile: str, bundle: Path | None) -> tuple[str, ...]:
     if bundle is None:
         return ()
-    if profile != "merchant_receipt":
+    if profile not in ("merchant_receipt", "merchant_proof"):
         raise ValueError("Bun fixture requires the isolated merchant REST profile")
     binary = ROOT.parent / "tmp/toolchains/bun-v1.3.11/bun"
     for source in (binary, bundle):
@@ -1742,19 +1742,62 @@ def _assert_merchant_namespace(core: str, nodes: tuple[str, str]) -> None:
         assert not config["PortBindings"]
 
 
+def _merchant_proof_mounts(
+    profile: str, bundle: Path | None, directory: Path | None
+) -> tuple[str, ...]:
+    if profile != "merchant_proof":
+        if directory is not None:
+            raise ValueError("proof TLS inputs require the isolated proof profile")
+        return ()
+    if bundle is None or directory is None or directory.is_symlink() or not directory.is_dir():
+        raise ValueError("proof profile requires explicit bundle and TLS inputs")
+    local_tmp = (ROOT.parent / "tmp").resolve(strict=True)
+    if not directory.resolve(strict=True).is_relative_to(local_tmp):
+        raise ValueError("proof TLS inputs must be repository-local")
+    info = directory.stat()
+    if info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise ValueError("proof TLS inputs require a private owned directory")
+    for name in ("merchant.cert", "merchant.key"):
+        path = directory / name
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("proof TLS input missing or not a regular file")
+        item = path.stat()
+        if (
+            item.st_uid != os.getuid()
+            or item.st_nlink != 1
+            or item.st_mode & 0o077
+            or not 0 < item.st_size <= 8192
+        ):
+            raise ValueError("proof TLS inputs require private bounded regular files")
+    return (
+        "--mount",
+        f"type=bind,src={ROOT.parent / 'rill-cli/src'},dst=/work/cli/src,readonly",
+        "--mount",
+        f"type=bind,src={directory.resolve(strict=True)},dst=/work/proof-tls,readonly",
+    )
+
+
 def _run_two_node_sidecar(  # noqa: PLR0913, PLR0915 - isolated test infrastructure
     tmp_path: Path,
     program: str,
     *,
     prefix: str,
     deadline: int,
-    profile: Literal["baseline", "native_reverse", "merchant_receipt"] = "baseline",
+    profile: Literal[
+        "baseline", "native_reverse", "merchant_receipt", "merchant_proof"
+    ] = "baseline",
     merchant_bun_bundle: Path | None = None,
+    merchant_proof_tls_directory: Path | None = None,
 ) -> dict[str, object]:
     """Use fresh owned Core/LND containers for one bounded sidecar scenario."""
     native_preflight = profile == "native_reverse"
-    merchant_rest = profile == "merchant_receipt"
+    merchant_proof = profile == "merchant_proof"
+    cookie_required = native_preflight or merchant_proof
+    merchant_rest = profile in ("merchant_receipt", "merchant_proof")
     merchant_mounts = _merchant_fixture_mounts(profile, merchant_bun_bundle)
+    proof_mounts = _merchant_proof_mounts(
+        profile, merchant_bun_bundle, merchant_proof_tls_directory
+    )
     assert DOCKER is not None
     public = tmp_path / "public"
     public.mkdir(mode=0o700)
@@ -1772,7 +1815,7 @@ def _run_two_node_sidecar(  # noqa: PLR0913, PLR0915 - isolated test infrastruct
     try:
         auth = ("-rpcuser=rill-disposable", "-rpcpassword=disposable-regtest-only")
         extra_core: tuple[str, ...] = ()
-        if native_preflight:
+        if cookie_required:
             # This fresh, explicitly isolated scenario needs an actual cookie
             # for the production reader, while existing LND setup uses rpcauth.
             import hashlib  # noqa: PLC0415 - scenario-local credential construction
@@ -1815,7 +1858,7 @@ def _run_two_node_sidecar(  # noqa: PLR0913, PLR0915 - isolated test infrastruct
             "-printtoconsole=1",
         )
         _wait_for_core(core)
-        if native_preflight:
+        if cookie_required:
             cookie = public / "core.cookie"
             metadata = _docker(
                 "exec",
@@ -1920,6 +1963,8 @@ def _run_two_node_sidecar(  # noqa: PLR0913, PLR0915 - isolated test infrastruct
                 f"type=bind,src={ROOT.parent / 'rill-crypto'},dst=/work/crypto,readonly",
             )
             python_path += ":/work/crypto/python/src:/work/provider/tests"
+        if merchant_proof:
+            python_path += ":/work/cli/src"
         result = _docker(
             "run",
             "--rm",
@@ -1943,6 +1988,7 @@ def _run_two_node_sidecar(  # noqa: PLR0913, PLR0915 - isolated test infrastruct
             f"type=bind,src={generated},dst=/work/generated,readonly",
             *native_mounts,
             *merchant_mounts,
+            *proof_mounts,
             "--env",
             f"PYTHONPATH={python_path}",
             "--env",
