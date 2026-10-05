@@ -2,7 +2,7 @@
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, X509Certificate } from "node:crypto";
 import { request } from "node:https";
 import { join, resolve } from "node:path";
 import { receiver } from "./helpers";
@@ -10,7 +10,7 @@ import { receiver } from "./helpers";
 const root = resolve("../tmp");
 const fixtureCredential = Buffer.from("synthetic-lnd-read-credential");
 const admin = "synthetic_https_admin_credential_0001";
-type Child = Bun.Subprocess<"ignore", "pipe", "pipe">;
+type Child = Bun.Subprocess<"ignore" | "pipe", "pipe", "pipe">;
 
 async function bounded<T>(promise: Promise<T>, milliseconds = 5000): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
@@ -65,6 +65,7 @@ async function fixture() {
   const path = join(directory, "config.json");
   const save = () => writeFileSync(path, JSON.stringify(config), { mode: 0o600 }); save();
   const children = new Set<Child>();
+  const track = <T extends Child>(child: T): T => { children.add(child); return child; };
   const launch = (command: string, fault?: string) => {
     const child = Bun.spawn([process.execPath, "scripts/regtest-merchant.ts", command, path, ...(fault ? [fault] : [])], {
       env: { ...process.env, RILLSWAP_REGTEST_MERCHANT: "1" }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
@@ -92,7 +93,7 @@ async function fixture() {
     try { for (const child of children) await end(child); }
     finally { lnd.stop(true); rmSync(directory, { recursive: true, force: true }); }
   };
-  return { directory, config, path, listener, lndTls, port, save, launch, end, command, start, cleanup, forbidden: () => forbiddenRequests };
+  return { directory, config, path, listener, lndTls, port, save, launch, end, command, start, cleanup, track, forbidden: () => forbiddenRequests };
   } catch {
     portReservation?.stop(true); setupListener?.stop(true); rmSync(directory, { recursive: true, force: true });
     throw new Error("Synthetic HTTPS fixture setup refused");
@@ -192,3 +193,46 @@ test("legacy HTTP commands retain their original configuration and serving behav
     await f.end(running.child); expect(await running.errors).toBe(""); expect(f.forbidden()).toBe(0);
   } finally { await f.cleanup(); }
 }, 10000);
+
+const readerPython = process.env.RILLSWAP_MERCHANT_READER_PYTHON;
+test.skipIf(!readerPython)("leaf-pinned Python reader acquires actual Bun HTTPS view and events without issuing invoices", async () => {
+  const f = await fixture();
+  try {
+    expect((await f.command("provision-https"))[2]).toBe(0); const serving = await f.start();
+    const created = await http(`${f.config.origin}/v1/intents`, readFileSync(f.listener.cert), { method: "POST",
+      headers: { Authorization: `Bearer ${admin}`, Origin: f.config.origin!, "Content-Type": "application/json", "Idempotency-Key": "synthetic_python_intent_01" },
+      body: JSON.stringify({ orderRef: "synthetic-python-reader", amountMsat: "1000000", expiresAt: Math.floor(Date.now() / 1000) + 3600 }) });
+    expect(created.status).toBe(201); const intent = JSON.parse(created.body);
+    const leaf = createHash("sha256").update(new X509Certificate(readFileSync(f.listener.cert)).raw).digest("hex");
+    // Capabilities travel through a private pipe, not process arguments, files,
+    // environment variables or public diagnostic output.
+    const program = `
+import json, sys
+from rill_cli.merchant_https import MerchantHttpsReader
+from rill_cli.merchant_credit import MerchantSourcePin
+from rill_core.wire.types import NetworkIdentity
+from rill_core.networks import REGTEST_CONSENSUS_PROFILE
+from pathlib import Path
+source = json.load(sys.stdin)
+network = NetworkIdentity(family="bitcoin", name="regtest",
+    genesis_hash="0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206",
+    signet_challenge=None, consensus_profile=REGTEST_CONSENSUS_PROFILE,
+    deployment_namespace="merchant-https-test")
+pin = MerchantSourcePin(merchant_origin=source["origin"], event_public_key=source["key"],
+    source_node=source["node"], network=network)
+batch = MerchantHttpsReader(pin, source["leaf"], Path(source["ca"])).read(source["id"], source["token"])
+view = json.loads(batch.view.document)
+assert view == {"version":"checkout-view/1", "id":source["id"], "status":"waiting", "attempt":None}
+assert json.loads(batch.events_document) == []
+assert batch.view.acquisition == batch.events_acquisition
+print("Authenticated unsigned view and unverified events acquired")
+`;
+    const child = f.track(Bun.spawn([readerPython!, "-c", program], { stdin: "pipe", stdout: "pipe", stderr: "pipe",
+      env: { ...process.env, PYTHONPATH: ["../rill-cli/src", "../rill-core/packages/core/src", "../rill-crypto/python/src", "../rill-provider/src"].map((p) => resolve(p)).join(":") } }));
+    child.stdin.write(JSON.stringify({ origin: f.config.origin, key: serving.ready.publicKey, node: receiver, leaf,
+      ca: f.listener.cert, id: intent.id, token: intent.statusToken })); child.stdin.end();
+    const [output, errors, code] = await bounded(Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]), 15000);
+    expect(code).toBe(0); expect(errors).toBe(""); expect(output).toBe("Authenticated unsigned view and unverified events acquired\n");
+    await f.end(serving.child); expect(await serving.errors).toBe(""); expect(f.forbidden()).toBe(0);
+  } finally { await f.cleanup(); }
+}, 20000);

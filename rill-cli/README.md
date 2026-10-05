@@ -649,6 +649,44 @@ invoice interoperability, safe outgoing capacity/economic projections, encrypted
 swap recovery, runner wiring and funded receipt-to-treasury conversion remain
 required. This verifier performs no import, migration, provisioning or payment.
 
+### Leaf-pinned merchant acquisition (internal diagnostic)
+
+`rill_cli.merchant_https.MerchantHttpsReader` reads the current view and events
+from M24's explicit numeric-loopback regtest HTTPS profile. Configure a validated
+`MerchantSourcePin`, an independently retained SHA-256 digest of the leaf's DER
+certificate, and a protected operator CA file. The constructor is inert; missing
+trust configuration refuses acquisition, never learns trust from the server.
+
+Each exact GET uses a fresh connection with normal TLS trust/hostname verification
+and compares its leaf **before sending the status capability**. Implicit reconnect,
+redirects, retries and environment proxy settings are not used. Credentials are
+passed per call, not stored in the reader. Keep trust files and their ancestors
+under operator control; private-file checks do not isolate same-UID code.
+
+Both documents must be HTTP 200 JSON with `no-store`, no Age or content encoding,
+and an explicit positive ASCII-decimal Content-Length of at most 16 KiB. Duplicate
+framing headers, contradictory cache directives and every Transfer-Encoding
+response refuse. This intentionally rejects chunked responses because stdlib's
+chunk parser does not enforce complete final framing. Actual Bun current-view
+and events endpoints pass this stricter profile.
+
+One monotonic acceptance budget (at most ten seconds) includes trust-file work,
+TLS, both reads and cleanup. Both returned acquisition intervals conservatively
+cover the full batch. This is **not a hard execution deadline**: filesystem work
+and protocol parsing can block longer, but late evidence is discarded. Do not use
+this synchronous diagnostic on a shared server event loop or claim production-grade
+availability. A batch does not establish atomic view/events or underlying state
+freshness. Returned statements remain unsigned/unverified; they are not credits,
+spending authority, independent LND/Core correspondence or paid-order acceptance.
+
+Actual-TLS tests cover pre-capability refusal, trusted certificate rotation,
+framing/truncation, deadlines and private failures. The cross-runtime Bun test
+uses a real waiting intent with synthetic LND identity and issues no invoices or
+payments. Run it from `rill-payments` with
+`RILLSWAP_MERCHANT_READER_PYTHON="$PWD/../rill-cli/.venv/bin/python" bun test tests/regtestMerchantHttpsDiagnostic.test.ts`.
+CI runs this against the CLI's pinned Python environment. Existing installations
+receive no automatic acquisition, provisioning, import or persisted-format change.
+
 The package declares dependencies on `rill-core`, `rill-crypto`,
 `pyrage==1.4.0`, `httpx==0.28.1`, `pydantic==2.13.5`, and `pycryptodomex==3.23.0`,
 but release wheels do **not** bundle the
