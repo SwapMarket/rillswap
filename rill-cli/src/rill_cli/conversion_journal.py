@@ -491,6 +491,11 @@ class ConversionJournal:
         with self._transaction() as db:
             return self._get(db, operation_id)
 
+    @property
+    def authority(self) -> SourceAuthority:
+        """Return the immutable provisioned source/destination authority, not new rights."""
+        return self._fence.authority
+
     def begin_capacity_query(self) -> CapacityQuery:
         """Snapshot allocation generation BEFORE starting authenticated wallet RPC."""
         with self._transaction() as db:

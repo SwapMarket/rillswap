@@ -658,6 +658,36 @@ owner must supply the affirmative journal source pin, never learn it from a read
 Existing CLI callers omitting the pin retain their original behavior and call
 contracts; no automatic learning, configuration migration or payment is added.
 
+### Original reserved reverse execution (internal regtest only)
+
+`rill_cli.reverse_conversion.run_reserved_conversion()` binds one original
+instance-local journal reservation to the existing reverse SDK. It validates
+local recovery credentials and explicit transport configuration, consumes the
+invocation right durably before creating a session, fixes the provisioned
+treasury destination and pins the actual source payer. Initial signed terms,
+provider handshake, nominal payout, complete invoice binding and conservative
+net-output floor must match the same approval. The first SDK wallet tip binds
+the recovery birthday and exact maximum payment expiry, even if later tips move.
+
+Native static inspection, encrypted create-only publication and readback precede
+payment. Dispatch is committed before the payer is delegated once, with the
+original SDK deadline/predicate tightened by the approval deadline, never renewed.
+Successor snapshots accept only the last acknowledged exact plaintext and use
+the existing verified create-only monotonic encrypted publisher. Lost publication
+acknowledgment cannot overwrite a sibling or advance acknowledged knowledge.
+SDK exceptions are detached from private diagnostics at the outer boundary.
+
+The function returns SDK history only. It **never completes the journal, releases
+holds or starts a replacement session**. Independently verified actual source
+debit, owned destination outpoint/value/script and required depth remain necessary.
+Interrupted or reopened jobs grant no new invocation capability. Native tests
+exercise actual SDK signed quote validation, fresh preimage, initial encrypted
+checkpoint and one failed payer attempt with synthetic transport backends,
+deterministic contract/recovery keys and a signed stubbed handshake; this
+is not funded Core/LND conversion or provider ingress conformance. No CLI command,
+positive LND accounting projector or production route is enabled. Compatible
+existing installations undergo no migration, automatic provisioning or work.
+
 ### Merchant credit correspondence (internal, provenance only)
 
 `rill_cli.merchant_credit.verify_merchant_credit` verifies the existing merchant
