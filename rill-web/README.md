@@ -268,6 +268,9 @@ This happy-path-only mode rejects unpaid-refund, reconciliation-crash and
 LN-to-BTC combinations. See [payments diagnostic setup](../rill-payments/README.md#disposable-web-to-merchant-swap-diagnostic)
 for the required verified Bun path and scoped cleanup behavior. Core is still
 the scripted payer wallet, not a browser wallet integration.
+The optional `--merchant-restart-after-issue` variant gracefully restarts only
+the merchant before payer dispatch, preserving the original invoice, keys and
+store. It is not browser restart or postsettlement receipt-loss evidence.
 
 `bun run test` checks the same built bytes at `/` and `/repository/` on
 loopback. All runtime assets are local. Browser tests need a supported

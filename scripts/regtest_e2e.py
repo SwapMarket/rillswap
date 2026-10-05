@@ -374,10 +374,13 @@ class MerchantDiagnostic:
         self.public_key = ""
         self.checkout: dict[str, Any] | None = None
         self.status_token = ""
+        self.restarted = False
 
     def start(self, stack: Stack) -> None:
         from Cryptodome.Signature import eddsa  # noqa: PLC0415 - diagnostic only
 
+        if self.child is not None or any(self.work.iterdir()):
+            raise RuntimeError("merchant initialization already attempted")
         config: dict[str, str] = {
             "origin": "https://merchant.invalid",
             "receiver": stack.lncli("user", "getinfo")["identity_pubkey"],
@@ -458,9 +461,20 @@ class MerchantDiagnostic:
             "provisioned": True
         }:
             raise RuntimeError("explicit merchant provisioning refused")
+        self._serve_existing()
+
+    def _serve_existing(self) -> None:
+        if self.child is not None and self.child.poll() is None:
+            raise RuntimeError("original merchant child remains live")
+        self.port = 0
         self.child = subprocess.Popen(
-            [str(self.bun), str(bundle), "serve", str(config_path)],
-            env=env,
+            [
+                str(self.bun),
+                str(self.work / "service.js"),
+                "serve",
+                str(self.work / "config.json"),
+            ],
+            env={**os.environ, "RILLSWAP_REGTEST_MERCHANT": "1"},
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )  # noqa: S603
@@ -487,6 +501,111 @@ class MerchantDiagnostic:
         ):
             raise RuntimeError("merchant readiness identity mismatch")
         self.port = ready["port"]
+
+    def _immutable_inputs(self) -> dict[str, tuple[int, int, str]]:
+        snapshots = {}
+        for name in (
+            "config.json",
+            "issuance.key",
+            "status.key",
+            "event.key",
+            "admin.token",
+            "invoice.macaroon",
+            "tls.cert",
+            "service.js",
+        ):
+            path = self.work / name
+            stat = path.lstat()
+            if (
+                not path.is_file()
+                or path.is_symlink()
+                or stat.st_nlink != 1
+                or (name != "service.js" and stat.st_mode & 0o077)
+            ):
+                raise RuntimeError("merchant restart input refused")
+            snapshots[name] = (
+                stat.st_dev,
+                stat.st_ino,
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+            )
+        return snapshots
+
+    def _waiting_state(self) -> dict[str, list[tuple[Any, ...]]]:
+        if self.checkout is None or not self.status_token:
+            raise RuntimeError("merchant checkout baseline missing")
+        route = "/v1/intents/" + self.checkout["id"]
+        if (
+            self.request(route, status=True) != self.checkout
+            or self.request(route + "/events", status=True) != []
+        ):
+            raise RuntimeError("merchant waiting checkout changed")
+        # Read the logical SQLite view, including WAL, with database creation disabled.
+        with sqlite3.connect(
+            (self.work / "merchant.sqlite").as_uri() + "?mode=ro", uri=True
+        ) as db:
+            state = {
+                table: db.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+                for table in (
+                    "metadata",
+                    "intents",
+                    "idempotency",
+                    "attempts",
+                    "receipts",
+                    "outbox",
+                )
+            }  # noqa: S608 - fixed table names only
+            terms = self.checkout["attempt"]["terms"]
+            if db.execute("SELECT id, amount_msat, status FROM intents").fetchall() != [
+                (terms["intentId"], terms["amountMsat"], "waiting")
+            ]:
+                raise RuntimeError("merchant intent continuity refused")
+            if db.execute(
+                "SELECT id, intent_id, state, invoice, payment_hash FROM attempts"
+            ).fetchall() != [
+                (
+                    terms["attemptId"],
+                    terms["intentId"],
+                    "ready",
+                    self.checkout["attempt"]["invoice"],
+                    terms["paymentHash"],
+                )
+            ]:
+                raise RuntimeError("merchant attempt continuity refused")
+            if state["receipts"] or state["outbox"]:
+                raise RuntimeError("merchant accepted before payer dispatch")
+        return state
+
+    def restart_after_issue(self) -> None:
+        """Explicit graceful restart, never provision, rebuild, issue or fund again."""
+        if (
+            self.restarted
+            or self.child is None
+            or self.child.poll() is not None
+            or self.checkout is None
+        ):
+            raise RuntimeError("merchant restart baseline refused")
+        inputs, baseline = self._immutable_inputs(), self._waiting_state()
+        store = self.work / "merchant.sqlite"
+        stat = store.lstat()
+        if (
+            not store.is_file()
+            or store.is_symlink()
+            or stat.st_nlink != 1
+            or stat.st_mode & 0o077
+        ):
+            raise RuntimeError("merchant store continuity refused")
+        identity = (stat.st_dev, stat.st_ino)
+        self.stop()
+        if self.child.poll() != 0:
+            raise RuntimeError("original merchant did not close cleanly")
+        stat = store.lstat()
+        if (stat.st_dev, stat.st_ino) != identity or self._immutable_inputs() != inputs:
+            raise RuntimeError("merchant restart files changed")
+        self._serve_existing()
+        # Inode continuity alone says nothing about logical contents or WAL state.
+        if self._immutable_inputs() != inputs or self._waiting_state() != baseline:
+            raise RuntimeError("merchant reopened state changed")
+        self.restarted = True
 
     def request(
         self,
@@ -1279,6 +1398,54 @@ def merchant_progress(
     return value
 
 
+def check_merchant_swap_identity(
+    work: Path, checkout: dict[str, Any], progress: dict[str, str]
+) -> None:
+    terms = checkout["attempt"]["terms"]
+    checkpoint = json.loads((work / "merchant-checkpoint.json").read_text())
+    assert checkpoint["stage"] == "observing" and checkpoint["terms"] == terms
+    assert checkpoint["invoice"] == checkout["attempt"]["invoice"]
+    assert checkpoint["route"]["swapId"] == progress["swapId"]
+    assert checkpoint["route"]["fundingTxid"] == progress["fundingTxid"]
+    with sqlite3.connect(
+        (work / "provider-store/live.sqlite").as_uri() + "?mode=ro", uri=True
+    ) as db:
+        ((session, binding),) = db.execute(
+            "SELECT session_id, funding_binding FROM swaps"
+        ).fetchall()
+        assert session == progress["swapId"]
+        assert (
+            json.loads(binding)["payload"]["binding"]["funding_txid"]
+            == progress["fundingTxid"]
+        )
+        assert db.execute(
+            "SELECT session_id, payment_hash FROM payment_dispatch"
+        ).fetchall() == [(session, terms["paymentHash"])]
+    with sqlite3.connect(
+        (work / "merchant/merchant.sqlite").as_uri() + "?mode=ro", uri=True
+    ) as db:
+        assert db.execute("SELECT id, status FROM intents").fetchall() == [
+            (terms["intentId"], "paid")
+        ]
+        assert db.execute(
+            "SELECT id, intent_id, state, invoice, payment_hash FROM attempts"
+        ).fetchall() == [
+            (
+                terms["attemptId"],
+                terms["intentId"],
+                "ready",
+                checkout["attempt"]["invoice"],
+                terms["paymentHash"],
+            )
+        ]
+        assert db.execute(
+            "SELECT payment_hash, attempt_id FROM receipts"
+        ).fetchall() == [(terms["paymentHash"], terms["attemptId"])]
+    log(
+        "original merchant attempt, single swap dispatch and funding reference verified"
+    )
+
+
 def stop_diagnostic_child(child: subprocess.Popen[bytes] | None) -> None:
     if child is None or child.poll() is not None:
         return
@@ -1363,7 +1530,18 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
         action="store_true",
         help="explicit disposable web-to-merchant happy-path diagnostic",
     )
+    parser.add_argument(
+        "--merchant-restart-after-issue",
+        action="store_true",
+        help="explicit merchant-only graceful restart before payer dispatch",
+    )
     args = parser.parse_args()
+    if args.merchant_restart_after_issue and (
+        not args.merchant_checkout or not args.web
+    ):
+        parser.error(
+            "--merchant-restart-after-issue requires --web --merchant-checkout"
+        )
     if args.merchant_checkout and (
         not args.web
         or args.ln_to_btc
@@ -1536,6 +1714,11 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
             merchant = MerchantDiagnostic(work, merchant_bun)
             merchant.start(stack)
             checkout = merchant.issue()
+            if args.merchant_restart_after_issue:
+                merchant.restart_after_issue()
+                log(
+                    "original waiting merchant checkout reopened after graceful restart"
+                )
             bolt11 = checkout["attempt"]["invoice"]
             payment_hash = checkout["attempt"]["terms"]["paymentHash"]
             private(work / "merchant/checkout.json", json.dumps(checkout))
@@ -1655,6 +1838,8 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
             ok = inspect_web_recovery(args, work)
         if ok and merchant is not None:
             ok = progress is not None and merchant.observe_paid()
+            if ok and args.merchant_restart_after_issue:
+                check_merchant_swap_identity(work, merchant.checkout, progress)
             log(f"independent merchant acceptance {'verified' if ok else 'refused'}")
         log("PASS" if ok else f"FAIL (logs in {work})")
         result = 0 if ok else 1

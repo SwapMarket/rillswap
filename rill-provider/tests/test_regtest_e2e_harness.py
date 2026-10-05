@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import runpy
+import sqlite3
 import subprocess
 import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -71,6 +73,34 @@ def test_merchant_mode_rejects_incompatible_flags_before_resource_creation(
     monkeypatch.setitem(main.__globals__, "Stack", constructor)
     monkeypatch.setattr(
         sys, "argv", ["regtest_e2e.py", "--crypto-library", "unused", "--merchant-checkout", *extra]
+    )
+    with pytest.raises(SystemExit) as failure:
+        main()
+    assert failure.value.code == 2
+    constructor.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        [],
+        ["--web"],
+        ["--merchant-checkout"],
+        ["--web", "--merchant-checkout", "--unpaid-refund"],
+        ["--web", "--merchant-checkout", "--reconcile-after-settle"],
+        ["--web", "--merchant-checkout", "--ln-to-btc"],
+    ],
+)
+def test_merchant_restart_flag_requires_explicit_compatible_mode_before_resources(
+    monkeypatch: pytest.MonkeyPatch, extra: list[str]
+) -> None:
+    main = RUNNER["main"]
+    constructor = Mock(side_effect=AssertionError("must not create resources"))
+    monkeypatch.setitem(main.__globals__, "Stack", constructor)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["regtest_e2e.py", "--crypto-library", "unused", "--merchant-restart-after-issue", *extra],
     )
     with pytest.raises(SystemExit) as failure:
         main()
@@ -385,3 +415,270 @@ def test_independent_merchant_acceptance_requires_bound_stable_signed_receipt(
         side_effect=[status, events, [] if fault == "changed_delivery" else events]
     )
     assert merchant.observe_paid() is (fault is None)
+
+
+def seed_issued_merchant(merchant: Any) -> None:  # noqa: ANN401 - script loaded with runpy
+    for name in (
+        "config.json",
+        "issuance.key",
+        "status.key",
+        "event.key",
+        "admin.token",
+        "invoice.macaroon",
+        "tls.cert",
+        "service.js",
+    ):
+        path = merchant.work / name
+        path.write_bytes(b"private-fixture")
+        path.chmod(0o600)
+    terms = {
+        "intentId": "intent_fixture_001",
+        "attemptId": "attempt_fixture_001",
+        "amountMsat": "50000000",
+        "paymentHash": "a" * 64,
+    }
+    merchant.checkout = {
+        "version": "checkout-view/1",
+        "id": terms["intentId"],
+        "status": "waiting",
+        "attempt": {"terms": terms, "invoice": "original-invoice"},
+    }
+    merchant.status_token = "original-status-capability"  # noqa: S105 - public fixture only
+    merchant.public_key = "c" * 64
+    path = merchant.work / "merchant.sqlite"
+    with sqlite3.connect(path) as db:
+        db.executescript("""
+            CREATE TABLE metadata (key TEXT, value TEXT);
+            INSERT INTO metadata VALUES ('version','1');
+            CREATE TABLE intents (id TEXT, amount_msat TEXT, status TEXT);
+            CREATE TABLE attempts (id TEXT, intent_id TEXT, operation_id TEXT,
+                state TEXT, invoice TEXT, payment_hash TEXT);
+            CREATE TABLE idempotency (key TEXT);
+            CREATE TABLE receipts (payment_hash TEXT, attempt_id TEXT);
+            CREATE TABLE outbox (id TEXT);
+        """)
+        db.execute(
+            "INSERT INTO intents VALUES (?,?,'waiting')", (terms["intentId"], terms["amountMsat"])
+        )
+        db.execute(
+            "INSERT INTO attempts VALUES (?,?,?,'ready',?,?)",
+            (
+                terms["attemptId"],
+                terms["intentId"],
+                "original_operation",
+                "original-invoice",
+                terms["paymentHash"],
+            ),
+        )
+    path.chmod(0o600)
+    merchant.request = Mock(
+        side_effect=lambda route, **_kwargs: [] if route.endswith("/events") else merchant.checkout
+    )
+    merchant.child = Mock()
+    merchant.child.poll.return_value = None
+
+
+def test_merchant_restart_reopens_same_inputs_and_logical_checkout_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    merchant = RUNNER["MerchantDiagnostic"](tmp_path, Path("unused-bun"))
+    seed_issued_merchant(merchant)
+    original = merchant.child
+    events: list[str] = []
+
+    def stop() -> None:
+        events.append("stop")
+        original.poll.return_value = 0
+
+    def serve() -> None:
+        assert original.poll() == 0
+        events.append("serve")
+        merchant.child = Mock()
+        merchant.child.poll.return_value = None
+
+    merchant.stop = stop
+    merchant._serve_existing = serve  # noqa: SLF001 - isolated launch seam
+    external = Mock(side_effect=AssertionError("restart must not build or provision"))
+    monkeypatch.setattr(merchant.start.__globals__["subprocess"], "run", external)
+    old_checkout = json.dumps(merchant.checkout, sort_keys=True)
+    merchant.restart_after_issue()
+    assert events == ["stop", "serve"]
+    assert merchant.restarted
+    assert merchant.status_token == "original-status-capability"  # noqa: S105 - public fixture only
+    assert json.dumps(merchant.checkout, sort_keys=True) == old_checkout
+    assert merchant.public_key == "c" * 64
+    assert all(call.kwargs == {"status": True} for call in merchant.request.call_args_list)
+    external.assert_not_called()
+    with pytest.raises(RuntimeError, match="baseline refused"):
+        merchant.restart_after_issue()
+    assert events == ["stop", "serve"]
+    with pytest.raises(RuntimeError, match="initialization already attempted"):
+        merchant.start(Mock())
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "changed_key",
+        "missing_key",
+        "replaced_store",
+        "changed_state",
+        "failed_stop",
+        "failed_readiness",
+    ],
+)
+def test_merchant_restart_refuses_unknown_or_changed_state_without_reprovisioning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    merchant = RUNNER["MerchantDiagnostic"](tmp_path, Path("unused-bun"))
+    seed_issued_merchant(merchant)
+    original = merchant.child
+    replacement = Mock()
+
+    def stop() -> None:
+        if fault == "failed_stop":
+            raise subprocess.TimeoutExpired("owned-child", 1)
+        original.poll.return_value = 0
+        if fault == "changed_key":
+            (merchant.work / "event.key").write_bytes(b"changed-fixture")
+        elif fault == "missing_key":
+            (merchant.work / "event.key").unlink()
+        elif fault == "replaced_store":
+            path = merchant.work / "merchant.sqlite"
+            path.rename(path.with_suffix(".old"))
+            path.write_bytes(b"")
+        elif fault == "changed_state":
+            with sqlite3.connect(merchant.work / "merchant.sqlite") as db:
+                db.execute("UPDATE metadata SET value='changed'")
+
+    def serve() -> None:
+        replacement()
+        merchant.child = Mock()
+        if fault == "failed_readiness":
+            raise RuntimeError("merchant readiness identity mismatch")
+
+    merchant.stop = stop
+    merchant._serve_existing = serve  # noqa: SLF001
+    external = Mock(side_effect=AssertionError("must not reconstruct unknown state"))
+    monkeypatch.setattr(merchant.start.__globals__["subprocess"], "run", external)
+    with pytest.raises((RuntimeError, OSError, subprocess.TimeoutExpired)):
+        merchant.restart_after_issue()
+    assert not merchant.restarted
+    external.assert_not_called()
+    if fault in ("changed_key", "missing_key", "replaced_store", "failed_stop"):
+        replacement.assert_not_called()
+        assert merchant.child is original
+    else:
+        replacement.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "no_child",
+        "dead_child",
+        "no_checkout",
+        "no_capability",
+        "missing_config",
+        "missing_store",
+        "paid_view",
+        "pending_event",
+        "duplicate_attempt",
+    ],
+)
+def test_merchant_restart_requires_complete_live_issued_baseline_before_stopping(
+    tmp_path: Path, fault: str
+) -> None:
+    merchant = RUNNER["MerchantDiagnostic"](tmp_path, Path("unused-bun"))
+    seed_issued_merchant(merchant)
+    merchant.stop = Mock()
+    if fault == "no_child":
+        merchant.child = None
+    elif fault == "dead_child":
+        merchant.child.poll.return_value = 0
+    elif fault == "no_checkout":
+        merchant.checkout = None
+    elif fault == "no_capability":
+        merchant.status_token = ""
+    elif fault == "missing_config":
+        (merchant.work / "config.json").unlink()
+    elif fault == "missing_store":
+        (merchant.work / "merchant.sqlite").unlink()
+    elif fault == "paid_view":
+        merchant.request = Mock(return_value={**merchant.checkout, "status": "paid"})
+    elif fault == "pending_event":
+        merchant.request = Mock(side_effect=[merchant.checkout, [{"id": "unexpected"}]])
+    elif fault == "duplicate_attempt":
+        with sqlite3.connect(merchant.work / "merchant.sqlite") as db:
+            db.execute("INSERT INTO attempts SELECT * FROM attempts")
+    with pytest.raises((RuntimeError, OSError, sqlite3.OperationalError)):
+        merchant.restart_after_issue()
+    merchant.stop.assert_not_called()
+    if fault == "missing_store":
+        assert not (merchant.work / "merchant.sqlite").exists()
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        None,
+        "changed_ref",
+        "changed_checkpoint",
+        "duplicate_dispatch",
+        "duplicate_swap",
+        "replacement_invoice",
+        "foreign_receipt",
+        "duplicate_intent",
+    ],
+)
+def test_funded_restart_continuity_binds_original_attempt_and_single_funding(
+    tmp_path: Path,
+    fault: str | None,
+) -> None:
+    merchant = RUNNER["MerchantDiagnostic"](tmp_path, Path("unused-bun"))
+    seed_issued_merchant(merchant)
+    terms = merchant.checkout["attempt"]["terms"]
+    progress = {"swapId": "a" * 64, "fundingTxid": "b" * 64}
+    checkpoint = {
+        "stage": "observing",
+        "terms": terms,
+        "invoice": "original-invoice",
+        "route": progress,
+    }
+    (tmp_path / "merchant-checkpoint.json").write_text(json.dumps(checkpoint))
+    provider = tmp_path / "provider-store"
+    provider.mkdir()
+    with sqlite3.connect(provider / "live.sqlite") as db:
+        db.executescript(
+            "CREATE TABLE swaps (session_id TEXT, funding_binding TEXT);"
+            "CREATE TABLE payment_dispatch (session_id TEXT, payment_hash TEXT);"
+        )
+        binding = {"payload": {"binding": {"funding_txid": progress["fundingTxid"]}}}
+        db.execute("INSERT INTO swaps VALUES (?,?)", (progress["swapId"], json.dumps(binding)))
+        db.execute(
+            "INSERT INTO payment_dispatch VALUES (?,?)", (progress["swapId"], terms["paymentHash"])
+        )
+        if fault == "duplicate_dispatch":
+            db.execute("INSERT INTO payment_dispatch SELECT * FROM payment_dispatch")
+        if fault == "duplicate_swap":
+            db.execute("INSERT INTO swaps SELECT * FROM swaps")
+    with sqlite3.connect(merchant.work / "merchant.sqlite") as db:
+        db.execute("UPDATE intents SET status='paid'")
+        db.execute("INSERT INTO receipts VALUES (?,?)", (terms["paymentHash"], terms["attemptId"]))
+        if fault == "replacement_invoice":
+            db.execute("UPDATE attempts SET invoice='replacement'")
+        if fault == "foreign_receipt":
+            db.execute("UPDATE receipts SET payment_hash='foreign'")
+        if fault == "duplicate_intent":
+            db.execute("INSERT INTO intents SELECT * FROM intents")
+    if fault == "changed_ref":
+        progress = {**progress, "fundingTxid": "c" * 64}
+    if fault == "changed_checkpoint":
+        checkpoint["stage"] = "ambiguous"
+        (tmp_path / "merchant-checkpoint.json").write_text(json.dumps(checkpoint))
+    verify = RUNNER["check_merchant_swap_identity"]
+    if fault is None:
+        verify(tmp_path, merchant.checkout, progress)
+    else:
+        with pytest.raises((AssertionError, ValueError)):
+            verify(tmp_path, merchant.checkout, progress)

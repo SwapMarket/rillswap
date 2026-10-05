@@ -105,7 +105,17 @@ produce a nonzero result and require inspection. The existing default cleanup
 behavior is unchanged. Private artifacts under `tmp/e2e-*` retain recovery and
 credentials, so do not publish them.
 
-The funded scripted happy path passed locally. This is not browser-wallet,
+Append `--merchant-restart-after-issue` for a graceful merchant-only restart
+after issuing the invoice and before payer dispatch. This reuses the original
+bundle/config, signing keys, scoped credentials and database through ordinary
+open-only startup. Original authenticated waiting checkout/history and logical
+SQLite state must survive before funding is allowed. Final assertions bind the
+original attempt/invoice/hash to one provider dispatch and funding reference.
+Missing, changed or partial state refuses without provisioning or replacement
+funding. This is not a postsettlement receipt-loss or machine-crash test.
+
+The funded scripted happy path and graceful prepayment merchant restart passed
+locally. This is not browser-wallet,
 merchant/LND restart, machine-crash durability, production deployment or
 stablecoin route conformance. Ordinary installations have no startup or storage
 migration changes. Existing checkpoints never authorize replacement funding.
