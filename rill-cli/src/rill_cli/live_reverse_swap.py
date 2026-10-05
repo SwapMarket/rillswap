@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import hashlib
+import inspect
 import math
 import secrets
 import threading
@@ -795,7 +796,7 @@ async def _cooperative_claim(  # noqa: PLR0913, PLR0915 - one original-session k
     return ClaimAttempt(claim.txid, claim.raw_transaction, claim.fee_sat, claim.vsize, tip)
 
 
-async def run_reverse_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
+async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swap story
     connection: RelayConnection,
     *,
     identity: str,
@@ -810,10 +811,25 @@ async def run_reverse_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
     timeout: float = 60.0,  # noqa: ASYNC109
     settle_timeout: float = 1800.0,
     report: Callable[[str], None] = lambda _line: None,
+    funding_inclusion_observer: Callable[[FundingBinding, ContractTerms, float], None]
+    | None = None,
 ) -> ReverseSwapOutcome:
-    """Run one LN to BTC swap; see the module docstring for the order."""
+    """Run one LN to BTC swap; see the module docstring for the order.
+
+    Optional ``funding_inclusion_observer`` is synchronous and awaited after
+    funded recovery acknowledgment/required depth, before first claim signing.
+    It receives the original absolute monotonic settlement deadline, not a new
+    budget. Failure stops progression; cancellation drains its worker before
+    return. Work/publication may finish late, but late results authorize no claim.
+    """
     if not math.isfinite(settle_timeout) or settle_timeout <= 0:
         raise SwapError("settlement timeout must be finite and positive")
+    if funding_inclusion_observer is not None and (
+        not callable(funding_inclusion_observer)
+        or inspect.iscoroutinefunction(funding_inclusion_observer)
+        or inspect.iscoroutinefunction(getattr(funding_inclusion_observer, "__call__", None))  # noqa: B004 - inspect async callable method, not a callability test
+    ):
+        raise SwapError("funding inclusion observer must be synchronous")
     now = int(time.time())
     preimage = secrets.token_bytes(32)
     payment_hash = hashlib.sha256(preimage).hexdigest()
@@ -971,6 +987,25 @@ async def run_reverse_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
                 lifetime=lifetime,
                 report=report,
             )
+            if funding_inclusion_observer is not None:
+                # Widen the return only at this runtime validation boundary;
+                # the public contract remains a synchronous None acknowledgment.
+                observer: Callable[[FundingBinding, ContractTerms, float], object] = (
+                    funding_inclusion_observer
+                )
+
+                def capture() -> None:
+                    observed = observer(binding, terms, lifetime.deadline)
+                    if observed is not None:
+                        # Validate within the owned worker, including late
+                        # results. A coroutine must never bypass capture or leak
+                        # unawaited when lifetime admission rejects its result.
+                        if inspect.iscoroutine(observed):
+                            observed.close()
+                        raise SwapError("funding inclusion observer must return None")
+
+                await lifetime.worker(capture)
+                lifetime.check()
             sign, ceiling = _claim_signer(
                 terms,
                 binding,

@@ -1755,7 +1755,20 @@ unknown data fails closed without retries or effects.
 This increment does not persist hints or install SDK callbacks. Existing
 installations perform no new acquisition, migration or startup work when hints
 are absent, partial or from an older version. Durable retention by the original
-SDK invocation remains a separate gate.
+SDK invocation is a separate explicit opt-in, described below; it is not enabled
+by this reader or on installation startup.
+
+The separate original-invocation retention conformance case explicitly opts into
+the CLI SDK's encrypted funding hint. It freezes only its disposable fixture miner
+during capture, then checks that the real saved coordinates precede native claim
+signing and correspond to the actual funded block. Subsequent fresh collection
+and guarded completion use those saved coordinates. This stable-chain case does
+not establish reliability during normal tip advancement or SDK process death.
+The new retention case validates the actual original claim witness path, including
+the SDK's already-supported unilateral fallback, with the corresponding unchanged
+native receipt validator. Earlier cooperative-only cases keep their requirements.
+Cooperative signature-timeout observations remain an unresolved operational risk,
+not evidence of production stability.
 
 An internal **treasury accounting observer** is available as
 `rill_provider.lnd_treasury_observation.LndTreasuryObserver`. Provision a protected

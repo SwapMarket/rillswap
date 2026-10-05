@@ -12,24 +12,33 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import threading
 import time
 from dataclasses import dataclass, fields
+from functools import partial
 from typing import TYPE_CHECKING
 
 from rill_core.networks import require_supported_network
 from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_model_json
-from rill_core.wire.messages import ContractTerms, LnToBtcEconomics, LnToBtcTiming
+from rill_core.wire.messages import ContractTerms, FundingBinding, LnToBtcEconomics, LnToBtcTiming
+from rill_provider.core_tx_bytes import CoreTransactionReader
 from rill_provider.lnd_invoice_decode import LndInvoiceDecoder
 from rill_provider.payment_dispatch_record import PaymentAuthority
 
 from rill_cli.age_container import (
+    MAX_CIPHERTEXT_BYTES,
     X25519Credentials,
     _identity,
     encrypt_verified_plaintext,
     verify_export_ciphertext,
 )
-from rill_cli.conversion_journal import PreparedConversion
+from rill_cli.conversion_journal import PreparedConversion, _read_private
+from rill_cli.funding_inclusion import (
+    FundingInclusionHint,
+    LookupBlock,
+    publish_funding_inclusion_hint,
+)
 from rill_cli.hold_payment import LndHoldPayer
 from rill_cli.live_reverse_swap import ReverseSwapLimits, ReverseSwapOutcome, run_reverse_swap
 from rill_cli.swap_command import _write_recovery_snapshot
@@ -114,6 +123,7 @@ class _Invocation:
         credentials: X25519Credentials,
         crypto: Context,
         approval_deadline: float,
+        capture_reader: CoreTransactionReader | None = None,
     ) -> None:
         self.journal, self.right, self.request = journal, right, request.job.request
         self.wallet, self.payer, self.limits = wallet, payer, limits
@@ -126,6 +136,8 @@ class _Invocation:
         self.max_expiry: int | None = None
         self.payment_attempted = False
         self.initial_attempted = False
+        self.capture_reader = capture_reader
+        self.capture_attempted = False
 
     def allowed(self) -> bool:
         return (
@@ -250,6 +262,89 @@ class _Invocation:
             self.previous = document
             return document
 
+    def capture_funding_inclusion(
+        self, binding: FundingBinding, terms: ContractTerms, sdk_deadline: float
+    ) -> None:
+        """One original-owner capture, not a stored or generation-based capability."""
+        with self.lock, self.right.lock:
+            if self.capture_attempted:
+                raise ReverseConversionError("original funding capture already attempted")
+            self.capture_attempted = True
+            if (
+                self.capture_reader is None
+                or self.path is None
+                or self.previous is None
+                or not self.payment_attempted
+                or terms != self.terms
+                or self.right.journal is not self.journal
+                or self.right.operation_id != self.request.operation_id
+                or self.right.stage != "dispatched"
+                or type(sdk_deadline) not in (int, float)
+                or not math.isfinite(sdk_deadline)
+            ):
+                raise ReverseConversionError("original dispatched funding owner required")
+            original_path = self.path
+            path = original_path.with_suffix(".funding-inclusion.age")
+            if os.path.lexists(path):
+                raise ReverseConversionError("existing funding hint cannot be replaced")
+            previous = parse_json_strict(self.previous)
+            if not isinstance(previous, dict):
+                raise ReverseConversionError("acknowledged funded recovery required")
+            records = previous.get("funding_history")
+            if not isinstance(records, list) or not records or not isinstance(records[-1], dict):
+                raise ReverseConversionError("acknowledged funded recovery required")
+            if records[-1].get("binding") != binding.model_dump(mode="json", warnings="error"):
+                raise ReverseConversionError("original acknowledged funding binding required")
+
+            def allowed() -> None:
+                self.require_approval()
+                if time.monotonic() >= sdk_deadline:
+                    raise ReverseConversionError("original funding capture lifetime expired")
+                job = self.journal.status(self.request.operation_id)
+                if (
+                    job.state != "dispatched"
+                    or job.prepared is None
+                    or (
+                        job.prepared.contract_hash != binding.contract_hash
+                        or hashlib.sha256(
+                            _read_private(original_path, MAX_CIPHERTEXT_BYTES)
+                        ).hexdigest()
+                        != job.recovery_sha256
+                    )
+                ):
+                    raise ReverseConversionError("original dispatched checkpoint unavailable")
+
+            allowed()
+            budget = min(
+                10.0, sdk_deadline - time.monotonic(), self.approval_deadline - time.monotonic()
+            )
+            observed = self.capture_reader.observe_funding_inclusion(
+                binding, terms, keys=self.crypto, deadline_seconds=budget
+            )
+            allowed()
+            job = self.journal.status(self.request.operation_id)
+            if job.recovery_sha256 is None:
+                raise ReverseConversionError("original checkpoint identity unavailable")
+            hint = FundingInclusionHint(
+                version="conversion-funding-inclusion/regtest/v1",
+                operation_id=self.request.operation_id,
+                network=self.journal.authority.network,
+                original_recovery_sha256=job.recovery_sha256,
+                funding_binding=binding,
+                funding_block=LookupBlock(
+                    height=observed.block_height, block_hash=observed.block_hash
+                ),
+                sampled_tip=LookupBlock(
+                    height=observed.tip_after_height, block_hash=observed.tip_after_hash
+                ),
+                confirmations=observed.minimum_sampled_confirmations,
+            )
+            # Completion may race final checks/link. No SQL lock covers data-only
+            # publication; this artifact is historical, never execution authority.
+            publish_funding_inclusion_hint(
+                path, hint, credentials=self.credentials, publication_allowed=allowed
+            )
+
     def pay(  # noqa: PLR0913 - exact existing HoldPayer callback contract
         self,
         bolt11: str,
@@ -312,8 +407,16 @@ async def run_reserved_conversion(  # noqa: PLR0913 - one explicit original exec
     crypto: Context,
     timeout: float = 60,  # noqa: ASYNC109 - existing SDK response timeout, no new protocol
     settle_timeout: float = 1800,
+    retain_funding_inclusion: bool = False,
 ) -> ReverseSwapOutcome:
-    """Invoke once with durable bindings; leave all completion/release evidence pending."""
+    """Invoke once with durable bindings; leave completion/release evidence pending.
+
+    Explicit ``retain_funding_inclusion=True`` captures encrypted historical
+    coordinates before claiming. Default behavior and SDK keywords are unchanged.
+    Capture failure after payment stops progression with the liability retained;
+    inspection, never replacement execution, is required. Old/missing hints
+    trigger no acquisition, provisioning, migration or restored invocation rights.
+    """
     outcome = None
     try:
         authority, request = journal.authority, reservation.job.request
@@ -325,6 +428,7 @@ async def run_reserved_conversion(  # noqa: PLR0913 - one explicit original exec
             raise ReverseConversionError("explicit original regtest reservation required")  # noqa: TRY301 - sanitize private boundary
         if (
             not isinstance(limits, ReverseSwapLimits)
+            or type(retain_funding_inclusion) is not bool
             or not isinstance(credentials, X25519Credentials)
             or any(
                 type(getattr(limits, field.name)) is not int or getattr(limits, field.name) < 0
@@ -378,8 +482,16 @@ async def run_reserved_conversion(  # noqa: PLR0913 - one explicit original exec
             credentials,
             crypto,
             approval_deadline,
+            CoreTransactionReader(
+                port=config.core_port,
+                cookie_path=config.core_cookie_path,
+                network=authority.network,
+            )
+            if retain_funding_inclusion
+            else None,
         )
-        outcome = await run_reverse_swap(
+        swap = partial(
+            run_reverse_swap,
             connection,
             identity=authority.provider_identity,
             network=authority.network,
@@ -393,6 +505,12 @@ async def run_reserved_conversion(  # noqa: PLR0913 - one explicit original exec
             timeout=timeout,
             settle_timeout=settle_timeout,
         )
+        # Default callers receive exactly the original keywords, even when the
+        # concrete SDK has been replaced by a closed-signature implementation.
+        if retain_funding_inclusion:
+            outcome = await swap(funding_inclusion_observer=owner.capture_funding_inclusion)
+        else:
+            outcome = await swap()
     except Exception:  # noqa: BLE001, S110 - detach private protocol/RPC/recovery diagnostics
         pass
     if outcome is None:

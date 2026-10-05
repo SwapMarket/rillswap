@@ -33,11 +33,13 @@ def publish_new_ciphertext[Report](
     *,
     verify_from_disk: Callable[[bytes], Report],
 ) -> Report:
-    """Publish only a verified encrypted file, never overwrite an existing path.
+    """Publish verified encrypted recovery or historical metadata, never overwrite.
 
     `verify_from_disk` MUST decrypt, compare the selected original plaintext,
     and revalidate its format and cryptographic commitments. It cannot
     substitute for restored-client state or fresh chain/backend evidence.
+    Historical lookup metadata must correlate to the selected original job and
+    binding; it never carries recovery, signing, payment or release authority.
     """
     if not isinstance(ciphertext, bytes) or not 0 < len(ciphertext) <= MAX_CIPHERTEXT_BYTES:
         raise RecoveryPublicationError("recovery ciphertext exceeds size limit")

@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 from importlib import import_module
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -81,9 +82,10 @@ except BaseException:
 """
 
 EXTRA = """
-    import asyncio, logging, signal, socket, ssl
+    import asyncio, logging, signal, socket, ssl, threading
     from pyrage import x25519
     from rill_core.wire.canonical import canonicalize
+    from rill_core.wire.messages import FundingBinding
     from rill_crypto import Context
     from fake_relay import FakeRelay
     from rill_provider.core_tx_bytes import CoreTransactionReader
@@ -104,6 +106,8 @@ EXTRA = """
     from rill_cli.live_reverse_swap import ReverseSwapLimits
     from rill_cli.reverse_conversion import ReverseExecutionConfig, run_reserved_conversion
     from rill_cli import reverse_conversion as original_reverse
+    from rill_cli import live_reverse_swap as original_sdk
+    from rill_cli.funding_inclusion import read_funding_inclusion_hint
     from rill_cli.reverse_reconciliation import (
         BlockHint, DestinationCustody, collect_conversion_receipt, reconcile_conversion)
     from rill_cli import reverse_reconciliation as reconciliation_module
@@ -454,6 +458,8 @@ EXTRA = """
         relay = FakeRelay()
         url = await relay.start()
         stop, mining_stop = asyncio.Event(),asyncio.Event()
+        capture_pause,capture_paused=threading.Event(),threading.Event()
+        captures=[]
         def mine():
             rpc('generatetoaddress',[1,mining_address],wallet='fund')
             synchronize()
@@ -461,6 +467,9 @@ EXTRA = """
             for _ in range(180):
                 await asyncio.sleep(0.5)
                 if mining_stop.is_set(): return
+                if capture_pause.is_set():
+                    capture_paused.set()
+                    continue
                 await asyncio.to_thread(mine)
             raise AssertionError('owned mining window exhausted')
         with LiveSessionStore.acquire(directory/'provider.sqlite',authority.network,data['identity'],
@@ -487,6 +496,12 @@ EXTRA = """
             try:
                 print('PHASE: original_reserved_reverse',file=sys.stderr)
                 native_runner = original_reverse.run_reverse_swap
+                native_signer = original_sdk._claim_signer
+                if RETAIN_FUNDING_INCLUSION:
+                    def signer(*args,**kwargs):
+                        assert len(captures)==1
+                        return native_signer(*args,**kwargs)
+                    original_sdk._claim_signer=signer
                 stage = ['starting']
                 cooperative_events = []
                 def trace(message):
@@ -516,6 +531,26 @@ EXTRA = """
                             return
                 async def traced_runner(*args,**kwargs):
                     kwargs['report']=trace
+                    if RETAIN_FUNDING_INCLUSION:
+                        owner_callback=kwargs['funding_inclusion_observer']
+                        def capture(binding,terms,deadline):
+                            # Test-only coordination freezes the miner after its
+                            # current RPC, not Core evidence or any SDK policy.
+                            capture_pause.set()
+                            try:
+                                assert capture_paused.wait(5)
+                                assert len(captures)==0
+                                owner_callback(binding,terms,deadline)
+                                job=journal.status(reservation.job.request.operation_id)
+                                path=journal.directory/'recovery'/(job.request.operation_id+'.funding-inclusion.age')
+                                hint=read_funding_inclusion_hint(path,credentials=credentials,
+                                    operation_id=job.request.operation_id,network=authority.network,
+                                    original_recovery_sha256=job.recovery_sha256,binding=binding)
+                                assert hint.confirmations>=terms.funding_confirmations
+                                assert job.state=='dispatched' and job.receipt is None
+                                captures.append(hint)
+                            finally: capture_pause.clear()
+                        kwargs['funding_inclusion_observer']=capture
                     try: return await native_runner(*args,**kwargs)
                     except Exception:
                         current=journal.status(reservation.job.request.operation_id).state
@@ -524,12 +559,15 @@ EXTRA = """
                 original_reverse.run_reverse_swap=traced_runner
                 async with RelayConnection(url) as connection:
                     try:
+                        capture_options={'retain_funding_inclusion':True} if RETAIN_FUNDING_INCLUSION else {}
                         outcome = await run_reserved_conversion(journal,reservation,connection,config=config,
                             limits=ReverseSwapLimits(max_success_fee_sat=1000,min_claim_fee_reserve_sat=500,
                                 max_claim_fee_sat=5000,min_refund_delay_blocks=72,
                                 max_incoming_htlc_delay_blocks=432,max_routing_fee_sat=100,claim_fee_rate_sat_vb=2),
-                            credentials=credentials,crypto=crypto,timeout=30,settle_timeout=150)
-                    finally: original_reverse.run_reverse_swap=native_runner
+                            credentials=credentials,crypto=crypto,timeout=30,settle_timeout=150,**capture_options)
+                    finally:
+                        original_reverse.run_reverse_swap=native_runner
+                        original_sdk._claim_signer=native_signer
                 async with asyncio.timeout(30):
                     while True:
                         states=store._connection.execute('SELECT state FROM swaps').fetchall()
@@ -549,6 +587,32 @@ EXTRA = """
                 assert binding['funding_txid'] == outcome.funding_txid
                 before_receipt = journal.begin_capacity_query()
                 funding_info = await asyncio.to_thread(rpc,'gettransaction',[outcome.funding_txid],wallet='provider')
+                claim_path='cooperative'
+                if RETAIN_FUNDING_INCLUSION:
+                    assert len(captures)==1
+                    retained=captures[0]
+                    assert retained.funding_binding==FundingBinding.model_validate(binding)
+                    assert retained.funding_block.height==funding_info['blockheight']
+                    assert retained.funding_block.block_hash==funding_info['blockhash']
+                    # All later fresh collection uses the original saved hint's
+                    # coordinates, after independent actual-chain comparison.
+                    funding_info=dict(blockheight=retained.funding_block.height,
+                        blockhash=retained.funding_block.block_hash)
+                    # The SDK already permits native unilateral fallback and
+                    # key-path replacement. This new retention case is path-
+                    # independent; older cases still require cooperation.
+                    claim_info=await asyncio.to_thread(rpc,'gettransaction',[outcome.claim_txid],wallet='merchant')
+                    claim_bytes=await asyncio.to_thread(rpc,'decoderawtransaction',[claim_info['hex']])
+                    selected_inputs=[item for item in claim_bytes['vin']
+                        if item.get('txid')==binding['funding_txid'] and item.get('vout')==binding['contract_vout']]
+                    assert len(selected_inputs)==1
+                    witness=selected_inputs[0]['txinwitness']
+                    if len(witness)!=1:
+                        recovery=json.loads(plaintext)
+                        assert len(witness)==4
+                        assert witness[-2]==recovery['taproot_contract']['claim_script']
+                        assert witness[-1]==recovery['taproot_contract']['claim_control_block']
+                        claim_path='unilateral'
                 custody = DestinationCustody(network=authority.network,script=authority.treasury_script,
                     core_wallet='merchant',destination_keys_controlled=True)
                 restart_snapshot = None
@@ -599,7 +663,7 @@ EXTRA = """
                         funding_recovery_path=candidate_path,funding_attempt_id=binding['funding_attempt_id'],
                         binding_revision=binding['binding_revision'],
                         funding_block=BlockHint(height=funding_info['blockheight'],block_hash=funding_info['blockhash']),
-                        claim_txid=outcome.claim_txid,claim_path='cooperative',custody=custody)
+                        claim_txid=outcome.claim_txid,claim_path=claim_path,custody=custody)
                 finally:
                     for owner,name,original in originals: setattr(owner,name,original)
                 job = journal.status(reservation.job.request.operation_id)
@@ -656,7 +720,7 @@ EXTRA = """
                                 funding_recovery_path=candidate_path,funding_attempt_id=binding['funding_attempt_id'],
                                 binding_revision=binding['binding_revision'],
                                 funding_block=BlockHint(height=funding_info['blockheight'],block_hash=funding_info['blockhash']),
-                                claim_txid=outcome.claim_txid,claim_path='cooperative',custody=custody)
+                                claim_txid=outcome.claim_txid,claim_path=claim_path,custody=custody)
                     finally:
                         for name,factory in after_kill_factories.items(): setattr(reconciliation_module,name,factory)
                     if CRASH_BOUNDARY=='after_commit': assert inventory_snapshot(journal)==reopened_before
@@ -679,7 +743,7 @@ EXTRA = """
                             config=config,credentials=credentials,crypto=crypto,funding_recovery_path=candidate_path,
                             funding_attempt_id=binding['funding_attempt_id'],binding_revision=binding['binding_revision'],
                             funding_block=BlockHint(height=funding_info['blockheight'],block_hash=funding_info['blockhash']),
-                            claim_txid=outcome.claim_txid,claim_path='cooperative',custody=custody)
+                                claim_txid=outcome.claim_txid,claim_path=claim_path,custody=custody)
                         assert terminal==completed
                     finally:
                         for name,factory in factories.items(): setattr(reconciliation_module,name,factory)
@@ -707,7 +771,9 @@ EXTRA = """
                     original_source_attempts=1,inventory_hold_retained=not COMPLETION_SCENARIO,
                     verified_completion=COMPLETION_SCENARIO,accounting_admission=True,
                     process_death_boundary=CRASH_BOUNDARY,source_daemon_restarted=SOURCE_RESTART,
-                    operator_cli_completion=CLI_COMPLETION)
+                    operator_cli_completion=CLI_COMPLETION,
+                    original_funding_hint_retained=RETAIN_FUNDING_INCLUSION,
+                    original_claim_path=claim_path)
             finally:
                 mining_stop.set()
                 try: await mining
@@ -726,13 +792,14 @@ EXTRA = """
 """
 
 
-def _program(
+def _program(  # noqa: PLR0913 - distinct opt-in conformance scenarios, combinations checked before effects
     original: str | None = None,
     *,
     completion: bool = False,
     crash_boundary: str | None = None,
     restart: bool = False,
     cli_completion: bool = False,
+    retain_funding_inclusion: bool = False,
 ) -> str:
     fixture = import_module("test_merchant_source_pinned")
     setup = import_module("test_lnd_payment_pinned").CHANNEL_SETUP
@@ -802,12 +869,17 @@ def _program(
     assert crash_boundary is None or completion
     assert not restart or (completion and crash_boundary is None)
     assert not cli_completion or (completion and not restart and crash_boundary is None)
+    assert type(retain_funding_inclusion) is bool
+    assert not retain_funding_inclusion or (
+        completion and not restart and not cli_completion and crash_boundary is None
+    )
     child_program = CRASH_CHILD if crash_boundary is not None else ""
     controls = (
         f"\n    COMPLETION_SCENARIO = {completion!r}\n"
         f"    CRASH_BOUNDARY = {crash_boundary!r}\n    CRASH_CHILD = {child_program!r}\n"
         f"    SOURCE_RESTART = {restart!r}\n"
         f"    CLI_COMPLETION = {cli_completion!r}\n"
+        f"    RETAIN_FUNDING_INCLUSION = {retain_funding_inclusion!r}\n"
     )
     return setup + controls + EXTRA + body
 
@@ -976,13 +1048,40 @@ def test_pinned_operator_cli_verified_completion(tmp_path: Path) -> None:
     assert evidence["verified_completion"] is True
 
 
-def _funded_evidence(
+@pytest.mark.lnd
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_LND") != "1" or os.environ.get("RILLSWAP_RUN_BUN_MERCHANT") != "1",
+    reason="explicit original funding hint retention conformance opt-ins",
+)
+def test_pinned_original_sdk_retains_encrypted_funding_inclusion_before_claim(
+    tmp_path: Path,
+) -> None:
+    evidence = _funded_evidence(tmp_path, completion=True, retain_funding_inclusion=True)
+    assert evidence["original_funding_hint_retained"] is True
+    assert evidence["verified_completion"] is True
+    assert evidence["original_claim_path"] in ("cooperative", "unilateral")
+
+
+def test_original_funding_hint_program_compiles_and_requires_explicit_profile() -> None:
+    program = _program(completion=True, retain_funding_inclusion=True)
+    assert "RETAIN_FUNDING_INCLUSION = True" in program
+    assert "RETAIN_FUNDING_INCLUSION = False" in _program(completion=True)
+    compile(program, "<owned-original-funding-hint>", "exec")
+    with pytest.raises(AssertionError):
+        _program(retain_funding_inclusion=True)
+    with pytest.raises(AssertionError):
+        _program(completion=True, retain_funding_inclusion=cast("bool", 1))
+
+
+def _funded_evidence(  # noqa: PLR0913 - forward the explicit isolated scenario controls
     tmp_path: Path,
     *,
     completion: bool,
     crash_boundary: str | None = None,
     restart: bool = False,
     cli_completion: bool = False,
+    retain_funding_inclusion: bool = False,
 ) -> dict[str, object]:
     fixture = import_module("test_merchant_source_pinned")
     helpers = import_module("test_lnd_payment_pinned")
@@ -1029,6 +1128,7 @@ def _funded_evidence(
                 crash_boundary=crash_boundary,
                 restart=restart,
                 cli_completion=cli_completion,
+                retain_funding_inclusion=retain_funding_inclusion,
             ),
             prefix="merchant-restart"
             if restart

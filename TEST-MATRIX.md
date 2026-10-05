@@ -174,6 +174,7 @@ checkout or multichain conformance has passed. Offline `rill-payments` and
 | M40 | Source LND daemon restart (same container) | Explicit graceful stop, fresh pinned-TLS LOCKED, same-wallet unlock and ready/drained channel, original credentials/history/identity/journal continuity, fresh receipt and completion; bounded supervisor signal tests, no container restart, seed/recovery replay, older-wallet or power-loss claim |
 | M41 | Explicit operator reconciliation/status CLI | Private independent authority and strict versioned read-only evidence inputs for an existing regtest job, fresh guarded completion and historical terminal bypass; no receipt-file authority, provisioning, spending credential, new SDK invocation or production accounting claim |
 | M42 | Index-free known funding inclusion | Anchored UTXO depth, canonical derived block, bounded block-qualified bytes and native correspondence, two consistent samples/unchanged tips; historical observations only, no wallet/txindex fallback, Merkle proof, new SDK invocation or durable hint-retention claim |
+| M43 | Original encrypted funding hint | Explicit original-invocation opt-in captures historical coordinates after funded acknowledgment/depth and before claim signing; create-only encryption, independent correlation, original deadline and worker drainage, no automatic acquisition/migration/retry or SDK interruption-recovery claim |
 
 ## Test evidence and accounting
 

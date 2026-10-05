@@ -689,6 +689,62 @@ positive LND accounting projector or production route is enabled. The separate
 regtest reconciliation/status commands below cannot start execution. Compatible
 existing installations undergo no migration, automatic provisioning or work.
 
+### Original-invocation funding inclusion hints (explicit regtest opt-in)
+
+`run_reserved_conversion(..., retain_funding_inclusion=True)` additionally retains
+an encrypted historical lookup hint during the **original** invocation. The
+default is false: existing SDK keywords, RPC usage, files and installation startup
+remain unchanged. No CLI command or automatic migration enables this option.
+
+After the funded recovery successor is acknowledged and signed funding depth is
+met, the SDK awaits a synchronous observer **before first claim signing**. The
+observer receives the original absolute monotonic settlement deadline. The SDK
+requires a synchronous `None` acknowledgment: async/noncallable observers refuse
+before payment, and wrapped coroutine or other return values stop before signing.
+Unawaited coroutine returns are closed rather than treated as successful capture.
+The owner checks its live process-local dispatched right, approval, value-equal terms,
+acknowledged binding and initial recovery ciphertext digest. It performs one
+bounded index-free Core observation, then publishes using the original AGE
+recipient and create-only encrypted readback/fsync rules. Native operations and
+close share the crypto context's existing lock. There is no new signer or session.
+
+For `recovery/<operation>.age`, the sibling is
+`recovery/<operation>.funding-inclusion.age`. Its required format version is
+`conversion-funding-inclusion/regtest/v1`; fields correlate the operation, full
+network, **initial** ciphertext digest, selected funding binding, inclusion block,
+sampled tip and depth. The acknowledged funded successor is verified separately,
+not confused with that initial digest. The file contains no preimage, session key
+or credential. Encryption does not authenticate its author: anyone with the
+public recipient can encrypt data. Private permissions and correlation to
+independently authenticated original facts do not prove custody or liabilities.
+
+`read_funding_inclusion_hint()` is an explicit local read requiring the original
+credentials plus independently supplied operation, network, initial digest and
+selected binding. A compatible hint supplies historical coordinates only for
+fresh independent evidence collection. It is not a receipt, freshness assertion,
+inventory balance, signing permission or SDK retry/resumption capability. The
+operator reconciliation manifest is unchanged and is not automatically populated.
+
+Missing hints prove nothing. Only explicit opt-in with the surviving original
+invocation permits capture. Existing, partial, old-version, mismatched, symlinked,
+hardlinked or otherwise unsafe files refuse without overwrite, repair, scanning
+or migration. Post-link uncertainty can leave encrypted temporary links, which
+the strict reader refuses; inspect them manually rather than retrying. Copying a
+hint or restoring application files does not restore process-local execution
+rights. Rollback-resistant restored database/fence authority remains unproved.
+
+The new observation deliberately refuses even ordinary tip advancement. For
+opted-in operations only, a refusal or publication error **after the one hold
+payment** stops automatic claim progression and retains the dispatched liability.
+Preserve the journal and original recovery files, inspect source payment status,
+and use existing recovery procedures. Do not start a replacement execution.
+Deadline checks govern admission and subsequent signing, not hard interruption:
+filesystem work and worker cleanup can finish after expiry/cancellation. A hint
+may become historical immediately, including completion racing final publication.
+No SQL transaction covers the file publication, and no current-state atomicity is
+claimed. This gate does not establish original-SDK interruption recovery or enable
+production funding.
+
 ### Historical Core wallet recognition (read-only, not custody authority)
 
 `WalletRpc.observe_historical_wallet_output(txid, treasury_script)` reads the
