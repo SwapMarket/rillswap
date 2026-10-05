@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Literal, Self
 
 from Cryptodome.Signature import eddsa
 from pydantic import Field, HttpUrl, StringConstraints, field_validator, model_validator
 from rill_core.domain.amounts import MAX_MILLISATS
-from rill_core.wire.canonical import parse_model_json
+from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_model_json
 from rill_core.wire.types import (
     CompressedKey,
     Hex32,
@@ -42,6 +43,7 @@ type PositiveMsat = Annotated[str, StringConstraints(pattern=r"^[1-9][0-9]{0,18}
 type NonnegativeMsat = Annotated[str, StringConstraints(pattern=r"^(0|[1-9][0-9]{0,18})$")]
 _MAX_ACQUISITION_SECONDS = 10
 _MAX_DOCUMENT_BYTES = 16384
+_MAX_ACQUIRED_INVOICE_CHARS = 2048
 
 
 def _origin(value: str) -> str:
@@ -139,9 +141,10 @@ class SourceReceiptObservation(StrictModel):
 class CoreSourceObservation(StrictModel):
     """Independent authenticated Core reads, not atomic LND/Core attestation.
 
-    The runtime must first call CoreTransactionReader.tip_height(), which checks
-    configured chain/genesis/challenge. Namespace/profile remain operator pins.
-    Then read genesis and the active hash at the exact reported LND height.
+    The runtime must acquire chain/genesis/challenge and the active hash at the
+    exact reported LND height, e.g. CoreTransactionReader.observe_source().
+    Namespace/profile remain operator pins. Cookie RPC trusts an operator-owned
+    loopback host/listener, not an independently authenticated server identity.
     """
 
     acquisition: AcquisitionInterval
@@ -212,6 +215,48 @@ class _PaidView(StrictModel):
     id: CheckoutId
     status: Literal["paid"]
     attempt: _Attempt
+
+
+@dataclass(frozen=True, slots=True)
+class MerchantInvoiceCandidate:
+    """Structurally matched documents, not signature or settlement proof."""
+
+    invoice: str
+    acceptance: bytes
+
+
+def extract_merchant_invoice_candidate(
+    view: MerchantViewObservation, events_document: bytes
+) -> MerchantInvoiceCandidate:
+    """Select one current acceptance without duplicating provenance verification."""
+    candidate = None
+    try:
+        if len(view.document) > _MAX_DOCUMENT_BYTES:
+            raise ValueError  # noqa: TRY301 - refuse before unverified document parsing
+        paid = parse_model_json(_PaidView, view.document)
+        events = parse_json_strict(events_document, max_bytes=_MAX_DOCUMENT_BYTES)
+        if not isinstance(events, list) or len(events) != 1:
+            raise ValueError  # noqa: TRY301 - sanitize unverified document failures
+        acceptance = canonicalize(events[0])
+        envelope = parse_model_json(_SignedAcceptance, acceptance)
+        terms, event, invoice = paid.attempt.terms, envelope.event, paid.attempt.invoice
+        if (
+            view.intent_id != paid.id
+            or terms.intent_id != paid.id
+            or event.intent_id != paid.id
+            or event.attempt_id != terms.attempt_id
+            or event.payment_hash != terms.payment_hash
+            or not invoice.isascii()
+            or invoice.lower() != invoice
+            or len(invoice) > _MAX_ACQUIRED_INVOICE_CHARS
+        ):
+            raise ValueError  # noqa: TRY301 - structural correspondence only, not proof
+        candidate = MerchantInvoiceCandidate(invoice, acceptance)
+    except Exception:  # noqa: BLE001, S110 - detach private merchant documents and validation inputs
+        pass
+    if candidate is None:
+        raise MerchantCreditError("merchant invoice candidate unavailable")
+    return candidate
 
 
 def _signature_bytes(event: _AcceptanceEvent) -> bytes:

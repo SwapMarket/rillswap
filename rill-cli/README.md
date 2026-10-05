@@ -687,6 +687,44 @@ payments. Run it from `rill-payments` with
 CI runs this against the CLI's pinned Python environment. Existing installations
 receive no automatic acquisition, provisioning, import or persisted-format change.
 
+### Composed merchant/source provenance acquisition (internal diagnostic)
+
+`rill_cli.merchant_source.MerchantCreditCollector` owns the concrete read sequence:
+leaf-pinned merchant HTTPS, strict structural paid-view/single-event extraction,
+LND invoice decoding, successful `observe_bound_settled_invoice`, independent
+Core source-height observation, and unchanged final Ed25519/correspondence
+verification. Its constructor validates the affirmative `SourceAuthority` and
+`MerchantSourcePin` relationship without reading credentials or contacting nodes.
+`MerchantSourceConfig` supplies protected merchant CA/leaf, one source LND
+port/TLS-root/macaroon, and Core port/cookie. Use only the three exact LND URI
+permissions for GetInfo, LookupInvoiceV2 and DecodePayReq. The two LND clients
+share that explicitly configured endpoint and network; no broad invoice-write
+permission or automatic credential provisioning is introduced.
+
+`acquire(intent_id, status_token)` returns only canonical `SourceCredit` provenance
+(agreed quantity, payment hash and literal-invoice digest). It does **not** import
+into a journal, reserve inventory, guarantee liquidity, fund a swap or establish
+refund payability. Earlier spending and custody remain separate responsibilities.
+Typed observation substitution is not the runtime API, but concrete construction
+does not isolate malicious same-process Python code or a replaced loopback Core
+listener. Source namespace/profile/custody remain operator assertions.
+
+One ten-second maximum acceptance budget covers the whole sequence and final
+verification. All returned proof intervals conservatively cover the operation;
+earlier/future HTTPS observations and a final clock rollback behind either batch
+completion refuse rather than refresh timestamps. Late results never release
+computed credit. This is not a hard execution or no-late-dispatch deadline: existing
+decoder credential/setup work can delay an RPC before applying its relative
+timeout. The synchronous diagnostic is unsuitable for a shared server event loop.
+
+Structural extraction does not authenticate signatures. It requires one current
+acceptance, duplicate-safe bounded JSON and a lowercase ASCII invoice within the
+decoder's initial 2,048-character profile; final verification remains mandatory.
+Unit tests use genuine separately signed loopback statements with synthetic RPCs,
+not funded source conformance. Real merchant HTTPS/LND/Core collector interoperability
+is still required before runtime integration. No previous installation acquires,
+imports, provisions, migrates or spends anything automatically.
+
 The package declares dependencies on `rill-core`, `rill-crypto`,
 `pyrage==1.4.0`, `httpx==0.28.1`, `pydantic==2.13.5`, and `pycryptodomex==3.23.0`,
 but release wheels do **not** bundle the
