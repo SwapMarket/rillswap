@@ -71,6 +71,45 @@ issuance refusal, invalid-signature and foreign-CA refusal, and denial of an
 empty `SendPaymentV2` call. This is not formal minimum privilege, comprehensive
 spending isolation or production key custody. No raw secrets leave the sidecar.
 
+### Disposable web-to-merchant swap diagnostic
+
+The explicit fresh-regtest happy-path diagnostic exercises the actual
+`executeMerchantSwap` SDK adapter with Core standing in for the payer wallet.
+It requires a settled merchant invoice, confirmed provider claim, all three
+CLI-inspectable encrypted recovery files and independently verified, stable
+signed merchant acceptance. Provider completion alone never marks the order paid.
+
+From the repository root, with Docker, the CLI environment/native library and
+frozen payments/web dependencies installed, run:
+
+```sh
+rill-cli/.venv/bin/python scripts/regtest_e2e.py \
+  --web --merchant-checkout \
+  --crypto-library rill-provider/tmp/native/librill_crypto.so
+```
+
+Install the standard Linux x64 Bun 1.3.11 release at
+`tmp/toolchains/bun-v1.3.11/bun`. Preflight requires executable SHA256
+`6d5bb405b1d037a2a466b92757de7e47e4369930fa94bd42f8ff44ba49de6c57`;
+the merchant also checks full revision `af24e281ebacd6ac77c0f14b4206599cf4ae1c9f`.
+The standard binary requires AVX2. Both owned Bun processes use this exact path.
+The merchant is a test-owned loopback service, explicitly provisioned in the
+private run directory, with invoice-scoped LND credentials and pinned TLS/node
+identity. Host children are trusted test code, not credential-isolated processes.
+
+This mode refuses reverse, unpaid-refund and reconciliation-crash scenarios.
+It validates newly created container mounts before funding and removes only
+recorded owned containers and their reviewed anonymous volumes; `--keep`
+preserves those resources, but still stops the merchant child. Cleanup failures
+produce a nonzero result and require inspection. The existing default cleanup
+behavior is unchanged. Private artifacts under `tmp/e2e-*` retain recovery and
+credentials, so do not publish them.
+
+The funded scripted happy path passed locally. This is not browser-wallet,
+merchant/LND restart, machine-crash durability, production deployment or
+stablecoin route conformance. Ordinary installations have no startup or storage
+migration changes. Existing checkpoints never authorize replacement funding.
+
 ## Regtest merchant API and SDK
 
 `bun run merchant provision /absolute/private/config.json` is an explicit

@@ -24,7 +24,9 @@ transaction to the provider. Once that transaction has been shared, retain
 recovery and monitor it even if the customer's broadcast callback fails.
 Existing payer recovery works through the CLI; a closed tab cannot autonomously
 sign refunds. This adapter is not yet advertised by the native-only merchant
-HTTP service and has no end-to-end funded checkout conformance evidence.
+HTTP service. An explicit disposable scripted BTC-to-LN merchant checkout now
+has funded happy-path conformance evidence, not browser-wallet, restart or
+production conformance.
 
 The site has two pages. `index.html` is a **local-only development preview**
 that makes no connection: chain-mode selection does not contact or verify a
@@ -257,6 +259,15 @@ for the user's wallet) and then requires `rill recover inspect` to accept both
 browser-written recovery files. Adding `--unpaid-refund` makes the provider
 fail after dispatch and refunds with `rill recover watch-refund` from the
 browser-written funded recovery file alone.
+
+Adding `--merchant-checkout` to `--web` instead drives the actual
+`executeMerchantSwap` adapter using a separately owned merchant's invoice and
+terms. Acceptance requires independently verified merchant paid status and its
+stable signed event, in addition to the existing swap and recovery assertions.
+This happy-path-only mode rejects unpaid-refund, reconciliation-crash and
+LN-to-BTC combinations. See [payments diagnostic setup](../rill-payments/README.md#disposable-web-to-merchant-swap-diagnostic)
+for the required verified Bun path and scoped cleanup behavior. Core is still
+the scripted payer wallet, not a browser wallet integration.
 
 `bun run test` checks the same built bytes at `/` and `/repository/` on
 loopback. All runtime assets are local. Browser tests need a supported

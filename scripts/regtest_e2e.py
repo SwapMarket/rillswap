@@ -27,10 +27,12 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import http.client
 import json
 import os
 import re
 import secrets
+import selectors
 import shutil
 import sqlite3
 import subprocess
@@ -51,6 +53,7 @@ NETWORK_FIXTURE = (
 )
 RPC_USER, RPC_PASSWORD = "lnd", "disposable-regtest-only"
 CLI = ROOT / "rill-cli" / ".venv" / "bin"
+MERCHANT_BUN = ROOT / "tmp/toolchains/bun-v1.3.11/bun"
 
 # Subprocess-only fault injection. Exit after the real external success but
 # before the engine can persist PAID. No recovery hook enters production code.
@@ -112,6 +115,10 @@ class Stack:
             role: f"rill-e2e-lnd-{role}-{self.run_id}" for role in ("provider", "user")
         }
         self.label = f"org.rillswap.e2e={self.run_id}"
+        self.merchant_mode = False
+        self.created_containers: list[str] = []
+        self.created_network: str | None = None
+        self.anonymous_volumes: set[str] = set()
 
     def cli(self, *args: str, wallet: str | None = None) -> str:
         extra = [f"-rpcwallet={wallet}"] if wallet else []
@@ -144,13 +151,18 @@ class Stack:
         target.chmod(0o600 if private else 0o644)
         return target
 
-    def start(self) -> None:
-        docker("network", "create", "--label", self.label, self.net)
+    def start(self, *, merchant_mode: bool = False) -> None:
+        self.merchant_mode = merchant_mode
+        network_id = docker("network", "create", "--label", self.label, self.net)
+        if merchant_mode:
+            if not re.fullmatch(r"[0-9a-f]{64}", network_id):
+                raise RuntimeError("new network ownership unresolved")
+            self.created_network = network_id
         salt = secrets.token_hex(16)
         digest = hmac.new(
             salt.encode(), RPC_PASSWORD.encode(), hashlib.sha256
         ).hexdigest()
-        docker(
+        core_id = docker(
             "run",
             "--detach",
             "--name",
@@ -173,6 +185,8 @@ class Stack:
             "-fallbackfee=0.0002",
             "-printtoconsole=1",
         )
+        if merchant_mode:
+            self._record_container(core_id, "/home/bitcoin/.bitcoin")
         for _ in range(100):
             if docker(
                 "exec",
@@ -189,7 +203,12 @@ class Stack:
                 break
             time.sleep(0.3)
         for role, name in self.lnd.items():
-            docker(
+            rest_args = (
+                ("--publish", "127.0.0.1::8080")
+                if merchant_mode and role == "user"
+                else ()
+            )
+            lnd_id = docker(
                 "run",
                 "--detach",
                 "--name",
@@ -200,6 +219,7 @@ class Stack:
                 self.net,
                 "--publish",
                 "127.0.0.1::10009",
+                *rest_args,
                 LND_IMAGE,
                 "--bitcoin.active",
                 "--bitcoin.regtest",
@@ -216,7 +236,51 @@ class Stack:
                 "--nobootstrap",
                 f"--alias={role}",
                 "--trickledelay=50",
+                *(("--restlisten=0.0.0.0:8080",) if rest_args else ()),
             )
+            if merchant_mode:
+                self._record_container(lnd_id, "/root/.lnd")
+
+    def _record_container(self, container_id: str, destination: str) -> None:
+        if not re.fullmatch(r"[0-9a-f]{64}", container_id):
+            raise RuntimeError("new container ownership unresolved")
+        self.created_containers.append(container_id)
+        actual = json.loads(docker("inspect", container_id))[0]
+        if actual["Config"]["Labels"].get("org.rillswap.e2e") != self.run_id:
+            raise RuntimeError("new container label mismatch")
+        expected_image = (
+            CORE_IMAGE if destination == "/home/bitcoin/.bitcoin" else LND_IMAGE
+        )
+        host = actual["HostConfig"]
+        if (
+            actual["Image"] != expected_image
+            or host["NetworkMode"] != self.net
+            or host.get("Binds")
+            or host.get("VolumesFrom")
+        ):
+            raise RuntimeError("new container configuration mismatch")
+        if any(
+            binding["HostIp"] != "127.0.0.1"
+            for bindings in host["PortBindings"].values()
+            for binding in bindings
+        ):
+            raise RuntimeError("non-loopback diagnostic publication refused")
+        mounts = actual["Mounts"]
+        if (
+            len(mounts) != 1
+            or mounts[0]["Type"] != "volume"
+            or mounts[0]["Destination"] != destination
+        ):
+            raise RuntimeError("unexpected disposable container mount")
+        volume = mounts[0]["Name"]
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", volume)
+            or volume in self.anonymous_volumes
+        ):
+            raise RuntimeError("anonymous volume ownership unresolved")
+        # Fixed docker run has no volume/bind/inheritance arguments; this mount
+        # was created from the reviewed pinned image's sole VOLUME declaration.
+        self.anonymous_volumes.add(volume)
 
     def wait_active(self) -> None:
         for name in self.lnd.values():
@@ -232,12 +296,343 @@ class Stack:
                 raise RuntimeError(f"{name} did not become active: {tail}")
 
     def stop(self) -> None:
+        if self.merchant_mode:
+            unresolved = False
+            for container_id in reversed(self.created_containers):
+                try:
+                    if not docker_resource_present("container", container_id):
+                        continue
+                    record = json.loads(docker("inspect", container_id))[0]
+                    if (
+                        record["Config"]["Labels"].get("org.rillswap.e2e")
+                        != self.run_id
+                    ):
+                        raise RuntimeError("owned container identity unresolved")
+                    if any(
+                        mount["Type"] != "volume"
+                        or mount["Name"] not in self.anonymous_volumes
+                        for mount in record["Mounts"]
+                    ):
+                        # A rejected/unrecorded mount never authorizes volume deletion.
+                        docker("rm", "-f", container_id)
+                    else:
+                        docker("rm", "-f", "--volumes", container_id)
+                except Exception:  # noqa: BLE001 - attempt every owned cleanup, never publish private errors
+                    unresolved = True
+            if self.created_network:
+                try:
+                    if docker_resource_present("network", self.created_network):
+                        label = docker(
+                            "network",
+                            "inspect",
+                            self.created_network,
+                            "--format",
+                            '{{index .Labels "org.rillswap.e2e"}}',
+                        )
+                        if label != self.run_id:
+                            raise RuntimeError("owned network identity unresolved")
+                        docker("network", "rm", self.created_network)
+                except Exception:  # noqa: BLE001
+                    unresolved = True
+            if unresolved:
+                raise RuntimeError("owned diagnostic cleanup identity unresolved")
+            return
         names = docker(
             "ps", "-aq", "--filter", f"label={self.label}", check=False
         ).split()
         if names:
             docker("rm", "-f", *names, check=False)
         docker("network", "rm", self.net, check=False)
+
+
+def docker_resource_present(kind: str, resource_id: str) -> bool:
+    """Only a successful daemon query can prove a captured resource absent."""
+    ids = docker(
+        kind,
+        "ls",
+        *(("--all",) if kind == "container" else ()),
+        "--quiet",
+        "--no-trunc",
+        "--filter",
+        f"id={resource_id}",
+    ).split()
+    if ids and ids != [resource_id]:
+        raise RuntimeError("owned resource query unresolved")
+    return bool(ids)
+
+
+class MerchantDiagnostic:
+    """Trusted happy-path test process, independently observed merchant receipt."""
+
+    def __init__(self, work: Path, bun: Path) -> None:
+        self.work = work / "merchant"
+        self.work.mkdir(mode=0o700)
+        self.bun = bun
+        self.child: subprocess.Popen[bytes] | None = None
+        self.port = 0
+        self.admin = secrets.token_urlsafe(32)
+        self.public_key = ""
+        self.checkout: dict[str, Any] | None = None
+        self.status_token = ""
+
+    def start(self, stack: Stack) -> None:
+        from Cryptodome.Signature import eddsa  # noqa: PLC0415 - diagnostic only
+
+        config: dict[str, str] = {
+            "origin": "https://merchant.invalid",
+            "receiver": stack.lncli("user", "getinfo")["identity_pubkey"],
+            "endpoint": f"https://127.0.0.1:{stack.host_port(stack.lnd['user'], 8080)}/",
+            "ledgerPath": str(self.work / "merchant.sqlite"),
+        }
+        for field, name in (
+            ("issuanceKeyPath", "issuance.key"),
+            ("statusKeyPath", "status.key"),
+            ("eventKeyPath", "event.key"),
+        ):
+            key = secrets.token_bytes(32)
+            target = self.work / name
+            target.write_bytes(key)
+            target.chmod(0o600)
+            config[field] = str(target)
+            if field == "eventKeyPath":
+                self.public_key = (
+                    eddsa.import_private_key(key)
+                    .public_key()
+                    .export_key(format="raw")
+                    .hex()
+                )
+        config["adminTokenPath"] = str(private(self.work / "admin.token", self.admin))
+        stack.lncli(
+            "user",
+            "bakemacaroon",
+            "--save_to",
+            "/root/merchant.macaroon",
+            "info:read",
+            "invoices:read",
+            "invoices:write",
+        )
+        config["macaroonPath"] = str(
+            stack.copy_out(
+                stack.lnd["user"],
+                "/root/merchant.macaroon",
+                "merchant/invoice.macaroon",
+                private=True,
+            )
+        )
+        config["certificatePath"] = str(
+            stack.copy_out(
+                stack.lnd["user"],
+                "/root/.lnd/tls.cert",
+                "merchant/tls.cert",
+                private=True,
+            )
+        )
+        config_path = private(self.work / "config.json", json.dumps(config))
+        bundle = self.work / "service.js"
+        built = subprocess.run(
+            [
+                str(self.bun),
+                "build",
+                "scripts/regtest-merchant.ts",
+                "--target",
+                "bun",
+                "--outfile",
+                str(bundle),
+            ],
+            cwd=ROOT / "rill-payments",
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )  # noqa: S603
+        if built.returncode:
+            raise RuntimeError("merchant diagnostic build refused")
+        env = {**os.environ, "RILLSWAP_REGTEST_MERCHANT": "1"}
+        provisioned = subprocess.run(
+            [str(self.bun), str(bundle), "provision", str(config_path)],
+            env=env,
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )  # noqa: S603
+        if provisioned.returncode or json.loads(provisioned.stdout) != {
+            "provisioned": True
+        }:
+            raise RuntimeError("explicit merchant provisioning refused")
+        self.child = subprocess.Popen(
+            [str(self.bun), str(bundle), "serve", str(config_path)],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )  # noqa: S603
+        assert self.child.stdout is not None
+        with selectors.DefaultSelector() as selector:
+            selector.register(self.child.stdout, selectors.EVENT_READ)
+            buffer = bytearray()
+            deadline = time.monotonic() + 20
+            while b"\n" not in buffer:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(timeout=remaining):
+                    raise RuntimeError("merchant readiness timed out")
+                chunk = os.read(self.child.stdout.fileno(), 4096)
+                if not chunk or len(buffer) + len(chunk) > 8192:
+                    raise RuntimeError("merchant readiness refused")
+                buffer.extend(chunk)
+        ready = json.loads(buffer.split(b"\n", 1)[0])
+        if (
+            set(ready) != {"ready", "port", "publicKey"}
+            or ready["ready"] is not True
+            or type(ready["port"]) is not int
+            or not 0 < ready["port"] < 65536
+            or ready["publicKey"] != self.public_key
+        ):
+            raise RuntimeError("merchant readiness identity mismatch")
+        self.port = ready["port"]
+
+    def request(
+        self,
+        path: str,
+        *,
+        body: dict[str, Any] | None = None,
+        key: str | None = None,
+        status: bool = False,
+    ) -> dict[str, Any] | list[Any]:
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        headers = {
+            "Authorization": "Bearer " + (self.status_token if status else self.admin)
+        }
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        if key:
+            headers["Idempotency-Key"] = key
+        try:
+            connection.request(
+                "POST" if body is not None else "GET",
+                path,
+                body=None if body is None else json.dumps(body),
+                headers=headers,
+            )
+            response = connection.getresponse()
+            data = response.read(32769)
+            if response.status not in (200, 201, 202) or len(data) > 32768:
+                raise RuntimeError("merchant diagnostic request refused")
+            return json.loads(data)
+        finally:
+            connection.close()
+
+    def issue(self) -> dict[str, Any]:
+        created = self.request(
+            "/v1/intents",
+            body={
+                "orderRef": "regtest-rillswap-order",
+                "amountMsat": "50000000",
+                "expiresAt": int(time.time()) + 7200,
+            },
+            key="regtest_merchant_intent_01",
+        )
+        assert isinstance(created, dict)
+        self.status_token = created["statusToken"]
+        checkout = self.request(
+            "/v1/intents/" + created["id"] + "/attempts",
+            body={},
+            key="regtest_merchant_attempt_01",
+        )
+        if (
+            not isinstance(checkout, dict)
+            or checkout["status"] != "waiting"
+            or not checkout.get("attempt")
+        ):
+            raise RuntimeError("merchant invoice unresolved")
+        self.checkout = checkout
+        return checkout
+
+    def observe_paid(self, timeout: int = 60) -> bool:
+        from Cryptodome.Signature import eddsa  # noqa: PLC0415 - diagnostic only
+
+        assert self.checkout is not None
+        route = "/v1/intents/" + self.checkout["id"]
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            status = self.request(route, status=True)
+            if isinstance(status, dict) and status["status"] == "paid":
+                break
+            time.sleep(0.2)
+        else:
+            return False
+        if status["attempt"] != self.checkout["attempt"]:
+            return False
+        events = self.request(route + "/events", status=True)
+        if not isinstance(events, list) or len(events) != 1:
+            return False
+        envelope = events[0]
+        if (
+            set(envelope) != {"algorithm", "publicKey", "event", "signature"}
+            or envelope["algorithm"] != "Ed25519"
+            or envelope["publicKey"] != self.public_key
+        ):
+            return False
+        event, terms = envelope["event"], self.checkout["attempt"]["terms"]
+        if (
+            set(event)
+            != {
+                "version",
+                "id",
+                "merchantOrigin",
+                "type",
+                "intentId",
+                "attemptId",
+                "paymentHash",
+                "amountMsat",
+                "acceptedAt",
+            }
+            or event["version"] != "checkout-event/1"
+            or event["type"] != "payment.accepted"
+            or any(
+                event[name] != terms[name]
+                for name in (
+                    "merchantOrigin",
+                    "intentId",
+                    "attemptId",
+                    "paymentHash",
+                    "amountMsat",
+                )
+            )
+        ):
+            return False
+        message = [
+            "rillswap-payment-event/1",
+            event["version"],
+            event["id"],
+            event["merchantOrigin"],
+            event["type"],
+            event["intentId"],
+            event["attemptId"],
+            event["paymentHash"],
+            event["amountMsat"],
+            event["acceptedAt"],
+        ]
+        try:
+            eddsa.new(
+                eddsa.import_public_key(bytes.fromhex(self.public_key)), "rfc8032"
+            ).verify(
+                json.dumps(message, separators=(",", ":")).encode(),
+                bytes.fromhex(envelope["signature"]),
+            )
+        except (ValueError, TypeError):
+            return False
+        return self.request(route + "/events", status=True) == events
+
+    def stop(self) -> None:
+        if self.child is None:
+            return
+        if self.child.poll() is None:
+            self.child.terminate()
+            try:
+                self.child.wait(timeout=12)
+            except subprocess.TimeoutExpired:
+                self.child.kill()
+                self.child.wait(timeout=5)
+        if self.child.stdout:
+            self.child.stdout.close()
 
 
 def mine(stack: Stack, blocks: int, address: str) -> None:
@@ -599,7 +994,9 @@ def refund_after_unpaid(  # noqa: PLR0913 - explicit scenario inputs
     outcome = json.loads(stdout)
     expected_check = "skipped-chain-only" if args.web else "lnd"
     if outcome.get("invoice_check") != expected_check:
-        log(f"watch-refund invoice check {outcome.get('invoice_check')} != {expected_check}")
+        log(
+            f"watch-refund invoice check {outcome.get('invoice_check')} != {expected_check}"
+        )
         return False
     if outcome["outcome"] != "refund_confirmed" or not outcome["attempts"]:
         return False
@@ -792,10 +1189,14 @@ def web_client_command(  # noqa: PLR0913 - one explicit command line
     user_age: x25519.Identity,
 ) -> list[str]:
     """The rill-web runSwap driver with Core's user wallet as the user's wallet."""
-    bun = shutil.which("bun")
+    bun = (
+        str(MERCHANT_BUN)
+        if getattr(args, "merchant_checkout", False)
+        else shutil.which("bun")
+    )
     if bun is None:
         raise RuntimeError("--web needs bun on PATH")
-    return [
+    command = [
         bun,
         "run",
         str(ROOT / "rill-web" / "scripts" / "web-swap-e2e.ts"),
@@ -820,6 +1221,9 @@ def web_client_command(  # noqa: PLR0913 - one explicit command line
         "--settle-timeout",
         str(args.timeout),
     ]
+    if getattr(args, "merchant_checkout", False):
+        command.extend(["--merchant-checkout", str(work / "merchant/checkout.json")])
+    return command
 
 
 def inspect_web_recovery(args: argparse.Namespace, work: Path) -> bool:
@@ -844,9 +1248,82 @@ def inspect_web_recovery(args: argparse.Namespace, work: Path) -> bool:
         )
         log(f"rill recover inspect ({stage}) exit {inspected.returncode}")
         if inspected.returncode != 0:
-            sys.stderr.write(inspected.stderr)
+            if not getattr(args, "merchant_checkout", False):
+                sys.stderr.write(inspected.stderr)
             return False
     return True
+
+
+def merchant_progress(
+    result: subprocess.CompletedProcess[str],
+) -> dict[str, str] | None:
+    """Validate the entire new-mode public output before the parent reports it."""
+    if result.returncode != 0 or result.stderr.strip() or len(result.stdout) > 8192:
+        return None
+    try:
+        value = json.loads(result.stdout)
+        if set(value) != {"state", "swapId", "fundingTxid", "recoveryRef"}:
+            return None
+        if (
+            value["state"] != "awaiting_merchant_receipt"
+            or value["recoveryRef"] != "web-recovery-paid.age"
+        ):
+            return None
+        if not all(
+            isinstance(value[name], str) and re.fullmatch(r"[0-9a-f]{64}", value[name])
+            for name in ("swapId", "fundingTxid")
+        ):
+            return None
+    except (ValueError, TypeError, KeyError):
+        return None
+    return value
+
+
+def stop_diagnostic_child(child: subprocess.Popen[bytes] | None) -> None:
+    if child is None or child.poll() is not None:
+        return
+    child.terminate()
+    try:
+        child.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait(timeout=5)
+
+
+def cleanup_merchant_run(  # noqa: PLR0913 - owns the disposable diagnostic's entire teardown
+    *,
+    stack: Stack,
+    stop_mining: threading.Event,
+    client: subprocess.Popen[bytes] | None,
+    provider: subprocess.Popen[bytes] | None,
+    merchant: MerchantDiagnostic | None,
+    files: ExitStack,
+    relay_stop: threading.Event | None,
+    keep: bool,
+) -> bool:
+    failed = False
+    actions = [
+        stop_mining.set,
+        lambda: stop_diagnostic_child(client),
+        lambda: stop_diagnostic_child(provider),
+    ]
+    if merchant is not None:
+        actions.append(merchant.stop)
+    actions.append(files.close)
+    if relay_stop is not None:
+        actions.append(relay_stop.set)
+    if not keep:
+        actions.append(stack.stop)
+    for action in actions:
+        try:
+            action()
+        except Exception:  # noqa: BLE001 - one failure must not skip the other owned resources
+            failed = True
+    if keep:
+        log(f"kept containers labeled {stack.label}")
+    if failed:
+        log("merchant diagnostic cleanup refused")
+    return not failed
 
 
 def main() -> int:  # noqa: PLR0915 - one ordered scenario
@@ -881,22 +1358,49 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
         action="store_true",
         help="run the BTC to LN swap with the rill-web browser client (bun)",
     )
+    parser.add_argument(
+        "--merchant-checkout",
+        action="store_true",
+        help="explicit disposable web-to-merchant happy-path diagnostic",
+    )
     args = parser.parse_args()
+    if args.merchant_checkout and (
+        not args.web
+        or args.ln_to_btc
+        or args.unpaid_refund
+        or args.reconcile_after_settle
+    ):
+        parser.error("--merchant-checkout requires --web and the happy-path scenario")
     if args.ln_to_btc and (args.unpaid_refund or args.reconcile_after_settle):
         parser.error("--ln-to-btc runs its own scenario")
     if args.web and (args.ln_to_btc or args.reconcile_after_settle):
         parser.error("--web runs the BTC to LN scenario, optionally --unpaid-refund")
+    merchant_bun = MERCHANT_BUN
+    if args.merchant_checkout:
+        try:
+            verified = (
+                hashlib.sha256(merchant_bun.read_bytes()).hexdigest()
+                == "6d5bb405b1d037a2a466b92757de7e47e4369930fa94bd42f8ff44ba49de6c57"
+            )
+        except OSError:
+            verified = False
+        if not verified:
+            parser.error("verified Bun merchant toolchain required")
     work = ROOT / "tmp" / f"e2e-{time.strftime('%Y%m%dT%H%M%S')}"
     work.mkdir(parents=True, mode=0o700)
     stack = Stack(work)
     stop_mining = threading.Event()
     provider: subprocess.Popen[bytes] | None = None
     client: subprocess.Popen[bytes] | None = None
+    merchant: MerchantDiagnostic | None = None
     files = ExitStack()
     relay_stop: threading.Event | None = None
     try:
         log(f"starting containers (run {stack.run_id}, work {work})")
-        stack.start()
+        if args.merchant_checkout:
+            stack.start(merchant_mode=True)
+        else:
+            stack.start()
         stack.cli("createwallet", "miner")
         stack.cli("createwallet", "user")
         if args.ln_to_btc:
@@ -1001,12 +1505,13 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
         stack.copy_out(
             stack.lnd["user"], "/root/.lnd/tls.cert", "user-tls.cert", private=False
         )
-        stack.copy_out(
-            stack.lnd["user"],
-            "/root/.lnd/data/chain/bitcoin/regtest/admin.macaroon",
-            "user-admin.macaroon",
-            private=True,
-        )
+        if not args.merchant_checkout:
+            stack.copy_out(
+                stack.lnd["user"],
+                "/root/.lnd/data/chain/bitcoin/regtest/admin.macaroon",
+                "user-admin.macaroon",
+                private=True,
+            )
         user_age = x25519.Identity.generate()
         private(work / "user-age.key", str(user_age) + "\n")
 
@@ -1027,10 +1532,18 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
             ok = ln_to_btc(stack, args, work, relay, xonly, user_age, files)
             log("PASS" if ok else f"FAIL (logs in {work})")
             return 0 if ok else 1
-        invoice = stack.lncli(
-            "user", "addinvoice", "--amt", "50000", "--memo", "rill-e2e"
-        )
-        bolt11, payment_hash = invoice["payment_request"], invoice["r_hash"]
+        if args.merchant_checkout:
+            merchant = MerchantDiagnostic(work, merchant_bun)
+            merchant.start(stack)
+            checkout = merchant.issue()
+            bolt11 = checkout["attempt"]["invoice"]
+            payment_hash = checkout["attempt"]["terms"]["paymentHash"]
+            private(work / "merchant/checkout.json", json.dumps(checkout))
+        else:
+            invoice = stack.lncli(
+                "user", "addinvoice", "--amt", "50000", "--memo", "rill-e2e"
+            )
+            bolt11, payment_hash = invoice["payment_request"], invoice["r_hash"]
         log("running " + ("the rill-web client" if args.web else "rill swap btc-to-ln"))
         client_stdout = files.enter_context((work / "client.stdout").open("wb"))
         client_stderr = files.enter_context((work / "client.stderr").open("wb"))
@@ -1093,8 +1606,14 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
             (work / "client.stdout").read_text(),
             (work / "client.stderr").read_text(),
         )
-        sys.stderr.write(swap.stderr)
-        log(f"client exit {swap.returncode}: {swap.stdout.strip()}")
+        if args.merchant_checkout:
+            progress = merchant_progress(swap)
+            log(
+                f"merchant client exit {swap.returncode}, public progress {'valid' if progress else 'refused'}"
+            )
+        else:
+            sys.stderr.write(swap.stderr)
+            log(f"client exit {swap.returncode}: {swap.stdout.strip()}")
         state = stack.lncli("user", "lookupinvoice", payment_hash)["state"]
         log(f"user invoice {state}")
         if args.unpaid_refund:
@@ -1134,27 +1653,51 @@ def main() -> int:  # noqa: PLR0915 - one ordered scenario
             )
         if ok and args.web:
             ok = inspect_web_recovery(args, work)
+        if ok and merchant is not None:
+            ok = progress is not None and merchant.observe_paid()
+            log(f"independent merchant acceptance {'verified' if ok else 'refused'}")
         log("PASS" if ok else f"FAIL (logs in {work})")
-        return 0 if ok else 1
+        result = 0 if ok else 1
+        if not args.merchant_checkout:
+            return result
+    except Exception:  # noqa: BLE001 - new diagnostic never republishes secret-bearing failures
+        if not args.merchant_checkout:
+            raise
+        log("merchant checkout diagnostic refused")
+        result = 1
     finally:
-        stop_mining.set()
-        if client is not None and client.poll() is None:
-            client.kill()
-            client.wait(10)
-        if provider is not None:
-            provider.terminate()
-            try:
-                provider.wait(10)
-            except subprocess.TimeoutExpired:
-                provider.kill()
-                provider.wait(10)
-        files.close()
-        if relay_stop is not None:
-            relay_stop.set()
-        if args.keep:
-            log(f"kept containers labeled {stack.label}")
+        if args.merchant_checkout:
+            if not cleanup_merchant_run(
+                stack=stack,
+                stop_mining=stop_mining,
+                client=client,
+                provider=provider,
+                merchant=merchant,
+                files=files,
+                relay_stop=relay_stop,
+                keep=args.keep,
+            ):
+                result = 1
         else:
-            stack.stop()
+            stop_mining.set()
+            if client is not None and client.poll() is None:
+                client.kill()
+                client.wait(10)
+            if provider is not None:
+                provider.terminate()
+                try:
+                    provider.wait(10)
+                except subprocess.TimeoutExpired:
+                    provider.kill()
+                    provider.wait(10)
+            files.close()
+            if relay_stop is not None:
+                relay_stop.set()
+            if args.keep:
+                log(f"kept containers labeled {stack.label}")
+            else:
+                stack.stop()
+    return result
 
 
 if __name__ == "__main__":
