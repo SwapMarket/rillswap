@@ -45,7 +45,8 @@ EXTRA = """
     from rill_cli.reverse_conversion import ReverseExecutionConfig, run_reserved_conversion
     from rill_cli import reverse_conversion as original_reverse
     from rill_cli.reverse_reconciliation import (
-        BlockHint, DestinationCustody, collect_conversion_receipt)
+        BlockHint, DestinationCustody, collect_conversion_receipt, reconcile_conversion)
+    from rill_cli import reverse_reconciliation as reconciliation_module
     logging.basicConfig(level=logging.CRITICAL)
     provider_data = None
 
@@ -289,9 +290,46 @@ EXTRA = """
                 assert len(payment.htlcs)==1 and payment.htlcs[0].status==ln.HTLCAttempt.SUCCEEDED
                 assert payment.value_msat==receipt.amount_msat and payment.fee_msat==receipt.routing_fee_msat
                 assert payment.htlcs[0].route.first_hop_amount_msat==receipt.amount_msat+receipt.routing_fee_msat
+                if COMPLETION_SCENARIO:
+                    print('PHASE: explicit_verified_completion',file=sys.stderr)
+                    completed = await asyncio.to_thread(reconcile_conversion,journal,
+                        reservation.job.request.operation_id,config=config,credentials=credentials,crypto=crypto,
+                        funding_recovery_path=candidate_path,funding_attempt_id=binding['funding_attempt_id'],
+                        binding_revision=binding['binding_revision'],
+                        funding_block=BlockHint(height=funding_info['blockheight'],block_hash=funding_info['blockhash']),
+                        claim_txid=outcome.claim_txid,claim_path='cooperative',custody=custody)
+                    assert completed.state=='complete' and completed.receipt==receipt
+                    assert journal.begin_capacity_query().generation==after_receipt.generation+1
+                    with sqlite3.connect((journal.directory/'inventory.sqlite').as_uri()+'?mode=ro',uri=True) as inventory:
+                        assert inventory.execute('SELECT * FROM holds').fetchall()==[]
+                        stored_document,consumed=inventory.execute('SELECT credit,consumed_msat FROM credits').fetchone()
+                        stored_credit=json.loads(stored_document)
+                        assert stored_credit==credit.model_dump(mode='json')
+                        assert consumed==receipt.amount_msat+receipt.routing_fee_msat
+                        assert stored_credit['amount_msat']-consumed==200000000-receipt.amount_msat-receipt.routing_fee_msat
+                    before_terminal=journal.begin_capacity_query()
+                    factories={name:getattr(reconciliation_module,name) for name in (
+                        'CoreTransactionReader','WalletRpc','LndTreasuryObserver','collect_conversion_receipt')}
+                    def no_acquisition(*args,**kwargs):
+                        raise AssertionError('terminal status must not acquire or execute')
+                    for name in factories: setattr(reconciliation_module,name,no_acquisition)
+                    try:
+                        terminal = reconcile_conversion(journal,reservation.job.request.operation_id,
+                            config=config,credentials=credentials,crypto=crypto,funding_recovery_path=candidate_path,
+                            funding_attempt_id=binding['funding_attempt_id'],binding_revision=binding['binding_revision'],
+                            funding_block=BlockHint(height=funding_info['blockheight'],block_hash=funding_info['blockhash']),
+                            claim_txid=outcome.claim_txid,claim_path='cooperative',custody=custody)
+                        assert terminal==completed
+                    finally:
+                        for name,factory in factories.items(): setattr(reconciliation_module,name,factory)
+                    assert journal.begin_capacity_query().generation==before_terminal.generation
+                    final_paid=call(b,b_secret,'ListPayments',ln.ListPaymentsRequest,ln.ListPaymentsResponse,
+                        ln.ListPaymentsRequest(include_incomplete=True))
+                    assert len(final_paid.payments)==1 and len(final_paid.payments[0].htlcs)==1
                 return dict(original_reverse_receipt=True,source_debit_msat=receipt.amount_msat+receipt.routing_fee_msat,
                     destination_value_sat=receipt.destination_value_sat,claim_depth=receipt.confirmation_blocks,
-                    original_source_attempts=1,inventory_hold_retained=True,accounting_admission=True)
+                    original_source_attempts=1,inventory_hold_retained=not COMPLETION_SCENARIO,
+                    verified_completion=COMPLETION_SCENARIO,accounting_admission=True)
             finally:
                 mining_stop.set()
                 try: await mining
@@ -310,7 +348,7 @@ EXTRA = """
 """
 
 
-def _program(original: str | None = None) -> str:
+def _program(original: str | None = None, *, completion: bool = False) -> str:
     fixture = import_module("test_merchant_source_pinned")
     setup = import_module("test_lnd_payment_pinned").CHANNEL_SETUP
     if original is None:
@@ -375,7 +413,7 @@ def _program(original: str | None = None) -> str:
         marker,
         "            finally:\n                try: child.stdout.close(); child.stderr.close()\n                finally:\n                    if provider_data is not None: provider_data['crypto'].close()",
     )
-    return setup + EXTRA + body
+    return setup + f"\n    COMPLETION_SCENARIO = {completion!r}\n" + EXTRA + body
 
 
 def test_combined_funded_program_compiles_and_preserves_original_template() -> None:
@@ -386,6 +424,9 @@ def test_combined_funded_program_compiles_and_preserves_original_template() -> N
     assert "collect_conversion_receipt" in program
     assert "journal.complete" not in program
     compile(program, "<owned-merchant-conversion>", "exec")
+    completed = _program(completion=True)
+    assert "COMPLETION_SCENARIO = True" in completed
+    compile(completed, "<owned-merchant-completion>", "exec")
 
 
 @pytest.mark.parametrize("fault", ["inserted_statement", "same_count_wrong_context"])
@@ -437,6 +478,24 @@ def test_combined_profile_preserves_proof_mounts_and_refuses_missing_inputs() ->
     reason="explicit owned merchant/native treasury conformance opt-ins",
 )
 def test_pinned_merchant_source_to_original_owned_btc_receipt(tmp_path: Path) -> None:
+    evidence = _funded_evidence(tmp_path, completion=False)
+    assert evidence["inventory_hold_retained"] is True
+    assert evidence["verified_completion"] is False
+
+
+@pytest.mark.lnd
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_LND") != "1" or os.environ.get("RILLSWAP_RUN_BUN_MERCHANT") != "1",
+    reason="explicit owned merchant/native completion conformance opt-ins",
+)
+def test_pinned_explicit_verified_merchant_conversion_completion(tmp_path: Path) -> None:
+    evidence = _funded_evidence(tmp_path, completion=True)
+    assert evidence["inventory_hold_retained"] is False
+    assert evidence["verified_completion"] is True
+
+
+def _funded_evidence(tmp_path: Path, *, completion: bool) -> dict[str, object]:
     fixture = import_module("test_merchant_source_pinned")
     helpers = import_module("test_lnd_payment_pinned")
     tls_helpers = import_module("test_lnd_payment_tls")
@@ -475,10 +534,10 @@ def test_pinned_merchant_source_to_original_owned_btc_receipt(tmp_path: Path) ->
             check=False,
         )
         assert built.returncode == 0, "owned merchant compilation refused"
-        evidence = helpers._run_two_node_sidecar(  # noqa: SLF001 - additive isolated fixture profile
+        evidence: dict[str, object] = helpers._run_two_node_sidecar(  # noqa: SLF001 - additive isolated fixture profile
             tmp_path,
-            _program(),
-            prefix="merchant-conversion",
+            _program(completion=completion),
+            prefix="merchant-completion" if completion else "merchant-conversion",
             deadline=420,
             profile="merchant_conversion",
             merchant_bun_bundle=bundle,
@@ -486,13 +545,15 @@ def test_pinned_merchant_source_to_original_owned_btc_receipt(tmp_path: Path) ->
         )
     assert evidence["agreed_amount_msat"] == 200000000
     assert evidence["original_source_attempts"] == 1
-    assert evidence["claim_depth"] >= 3
+    depth = evidence["claim_depth"]
+    assert isinstance(depth, int)
+    assert depth >= 3
     for name in (
         "original_reverse_receipt",
         "merchant_source_provenance",
         "merchant_history_unchanged",
         "private_inputs_unchanged",
-        "inventory_hold_retained",
         "accounting_admission",
     ):
         assert evidence[name] is True
+    return evidence

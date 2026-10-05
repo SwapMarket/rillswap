@@ -746,6 +746,26 @@ use actual separately signed Taproot funding/recovery and both claim paths with
 synthetic read transports and custody assertions, not funded treasury conversion.
 Existing installations remain unchanged, with no startup work or migration.
 
+`reconcile_conversion()` is the separate **explicit regtest financial action**.
+It captures a journal query before fresh native receipt acquisition, then checks
+that query's identity, generation and ten-second wall-clock age inside the same
+transaction that consumes the actual source debit, releases the original hold,
+records the receipt and increments generation. It accepts no saved receipt.
+Acquisition has a fixed ten-second monotonic budget; SQLite lock wait and commit
+are not covered by a strict elapsed-time deadline. Late admission refuses before
+financial mutation, but a lost commit acknowledgment may mean completion already
+persisted. Inspect status, never start another payment or SDK session.
+
+Repeated calls for completed jobs return **historical status without new evidence
+validation or RPCs**. Manual `ConversionJournal.complete()` remains a trusted
+internal caller boundary; its optional `expected_query` fences acquisition races,
+not independent custody or financial verification. Copyable receipts/queries are
+not capabilities. Valid existing journals need no format change; missing, partial
+or older metadata grants no completion authority and causes no repair. Existing
+dispatched holds remain until an explicit successful action. This does not enable
+production funding/accounting, guarantee later finality or cover restoring both
+the database and external fence.
+
 ### Merchant credit correspondence (internal, provenance only)
 
 `rill_cli.merchant_credit.verify_merchant_credit` verifies the existing merchant

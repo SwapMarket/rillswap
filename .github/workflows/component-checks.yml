@@ -277,6 +277,11 @@ jobs:
           RILLSWAP_RUN_BUN_MERCHANT=1 .venv/bin/python -m pytest -q \
             tests/test_merchant_conversion_pinned.py::test_pinned_merchant_source_to_original_owned_btc_receipt \
             --basetemp=tmp/pytest-ci-merchant-conversion
+      - name: Check explicit verified regtest conversion completion
+        run: |
+          RILLSWAP_RUN_BUN_MERCHANT=1 .venv/bin/python -m pytest -q \
+            tests/test_merchant_conversion_pinned.py::test_pinned_explicit_verified_merchant_conversion_completion \
+            --basetemp=tmp/pytest-ci-merchant-completion
 
   cli:
     runs-on: ubuntu-24.04

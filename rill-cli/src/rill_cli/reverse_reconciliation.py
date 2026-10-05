@@ -1,10 +1,12 @@
-"""Explicit regtest historical receipt acquisition, NEVER completion authority.
+"""Regtest historical acquisition and separately explicit fenced completion.
 
 No receipt, checkpoint, marker, wallet recognition or missing state establishes
-destination spending-key custody. This read-only operation requires an explicit
+destination spending-key custody. Receipt acquisition requires an explicit
 independently established operator assertion, original encrypted journal anchor,
 signed funding continuity, actual authorized claim bytes and successful source
 debit. Returned receipts are copyable history, not durable release capabilities.
+Only explicit reconciliation immediately joins fresh acquisition to the journal's
+atomic completion fence. Neither operation runs automatically or pays/signs.
 """
 
 from __future__ import annotations
@@ -44,11 +46,12 @@ if TYPE_CHECKING:
     from rill_crypto import Context
 
     from rill_cli.age_container import X25519Credentials
-    from rill_cli.conversion_journal import ConversionJournal
+    from rill_cli.conversion_journal import ConversionJob, ConversionJournal
     from rill_cli.reverse_conversion import ReverseExecutionConfig
 
 MAX_ACQUISITION_SECONDS = 30
 MAX_COMPONENT_SECONDS = 10
+COMPLETION_ACQUISITION_SECONDS = 10
 TAPROOT_SCRIPT_HEX_LENGTH = 68
 HASH_HEX_LENGTH = 64
 
@@ -94,6 +97,75 @@ class BlockHint(StrictModel):
 
     height: Annotated[int, Field(strict=True, ge=1, le=499_999_999)]
     block_hash: Hex32
+
+
+def reconcile_conversion(  # noqa: PLR0913 - explicit operator-selected original evidence, never a stored receipt
+    journal: ConversionJournal,
+    operation_id: str,
+    *,
+    config: ReverseExecutionConfig,
+    credentials: X25519Credentials,
+    crypto: Context,
+    funding_recovery_path: Path,
+    funding_attempt_id: str,
+    binding_revision: int,
+    funding_block: BlockHint,
+    claim_txid: str,
+    claim_path: Literal["cooperative", "unilateral"],
+    custody: DestinationCustody,
+) -> ConversionJob:
+    """Explicitly acquire regtest evidence and atomically complete its original job.
+
+    No receipt is admitted as input or saved for later release. The query is
+    captured BEFORE evidence acquisition, then checked in the completion write
+    transaction. Acquisition has a fixed ten-second monotonic budget; financial
+    effect admission separately requires a current generation and ten-second
+    wall-clock query age after SQLite lock acquisition. Lock wait/fsync may extend
+    total elapsed time, so this is NOT a ten-second transaction deadline.
+
+    Existing completed jobs return historical status without wallet/network/key
+    work or renewed validation. Dispatched jobs need explicit original recovery,
+    hints and independently established destination custody. There is no startup
+    call, migration, scan, retry, signing, payment or fresh invocation capability.
+    Unknown state retains holds. A lost commit acknowledgment requires status
+    inspection, never replacement execution. Later reorgs and restored database
+    plus fence remain outside this bounded operational regtest acceptance.
+    """
+    result = None
+    try:
+        job = journal.status(operation_id)
+        if job.state == "complete":
+            result = job
+        else:
+            deadline = time.monotonic() + COMPLETION_ACQUISITION_SECONDS
+            query = journal.begin_capacity_query()
+            remaining = deadline - time.monotonic()
+            if not math.isfinite(remaining) or not 0 < remaining <= COMPLETION_ACQUISITION_SECONDS:
+                raise ReverseReconciliationError("conversion acquisition expired")  # noqa: TRY301 - detach boundary details
+            receipt = collect_conversion_receipt(
+                journal,
+                operation_id,
+                config=config,
+                credentials=credentials,
+                crypto=crypto,
+                funding_recovery_path=funding_recovery_path,
+                funding_attempt_id=funding_attempt_id,
+                binding_revision=binding_revision,
+                funding_block=funding_block,
+                claim_txid=claim_txid,
+                claim_path=claim_path,
+                custody=custody,
+                deadline_seconds=remaining,
+            )
+            finished = time.monotonic()
+            if not math.isfinite(finished) or finished >= deadline:
+                raise ReverseReconciliationError("conversion acquisition expired")  # noqa: TRY301 - refuse before write, never expire after commit
+            result = journal.complete(operation_id, receipt, expected_query=query)
+    except Exception:  # noqa: BLE001 - detach financial/private/transport details, status resolves lost acknowledgment
+        result = None
+    if result is None:
+        raise ReverseReconciliationError("original conversion reconciliation unavailable")
+    return result
 
 
 def collect_conversion_receipt(  # noqa: PLR0913 - explicit original evidence inputs, no defaults learning authority

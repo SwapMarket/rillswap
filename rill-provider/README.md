@@ -1669,6 +1669,14 @@ separately. This establishes controlled funded receipt conformance, **not** hold
 release, production accounting projection, crash recovery or deployment readiness.
 Existing installations receive no automatic work or new authority.
 
+The additive `test_pinned_explicit_verified_merchant_conversion_completion` case
+uses the same isolated profile, then explicitly acquires fresh evidence through
+`reconcile_conversion()`. It verifies actual debit consumption, full hold release,
+retained canonical credit, exactly one generation increment, and repeated
+terminal status without RPCs or another payer attempt. The original receipt-only
+case still retains its entire allocation. This is controlled regtest financial
+conformance, not automatic production completion, crash recovery or reorg safety.
+
 An internal **treasury accounting observer** is available as
 `rill_provider.lnd_treasury_observation.LndTreasuryObserver`. Provision a protected
 credential with only `info:read` and `offchain:read`, numeric loopback endpoint,

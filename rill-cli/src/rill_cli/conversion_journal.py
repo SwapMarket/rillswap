@@ -11,6 +11,7 @@ not another provision call. No method dispatches payments or restores live right
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import secrets
 import sqlite3
@@ -35,7 +36,8 @@ if TYPE_CHECKING:
 type Amount = Annotated[int, Field(strict=True, ge=1, le=MAX_MILLISATS)]
 type NonnegativeAmount = Annotated[int, Field(strict=True, ge=0, le=MAX_MILLISATS)]
 type Sats = Annotated[int, Field(strict=True, ge=1, le=MAX_SATS)]
-type Timestamp = Annotated[int, Field(strict=True, ge=1, le=9_007_199_254_740_991)]
+_MAX_TIMESTAMP = 9_007_199_254_740_991
+type Timestamp = Annotated[int, Field(strict=True, ge=1, le=_MAX_TIMESTAMP)]
 type OperationId = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{16,128}$")]
 _OPERATION_ID: TypeAdapter[str] = TypeAdapter(OperationId)
 _TAPROOT_SCRIPT_HEX_LENGTH = 68
@@ -763,8 +765,22 @@ class ConversionJournal:
                 )
             right.stage = "dispatched"
 
-    def complete(self, operation_id: str, receipt: ConversionReceipt) -> ConversionJob:
-        """Reconcile real debits/output, independently of original order status."""
+    def complete(
+        self,
+        operation_id: str,
+        receipt: ConversionReceipt,
+        *,
+        expected_query: CapacityQuery | None = None,
+    ) -> ConversionJob:
+        """Apply trusted debit/custody evidence independently of order status.
+
+        Manual callers still own evidence verification. An optional query captured
+        BEFORE acquisition fences concurrent financial effects inside this same
+        transaction. It provides wall-clock-age admission, not a monotonic deadline
+        through SQLite lock wait/commit, atomic chain state or rollback protection.
+        An identical completed receipt remains historical idempotency, even with
+        an expired query. No receipt/query is independently a release capability.
+        """
         with self._transaction() as db:
             job = self._get(db, operation_id)
             if job.state == "complete":
@@ -796,6 +812,23 @@ class ConversionJournal:
                     previous.destination_vout,
                 ) == (receipt.destination_txid, receipt.destination_vout):
                     raise ConversionJournalError("conversion destination counted twice")
+            if expected_query is not None:
+                now = time.time()
+                (generation,) = db.execute("SELECT capacity_generation FROM metadata").fetchone()
+                if (
+                    not isinstance(expected_query, CapacityQuery)
+                    or type(expected_query.generation) is not int
+                    or type(expected_query.started_at) is not int
+                    or expected_query.journal_id != self._fence.journal_id
+                    or expected_query.generation != generation
+                    or type(now) not in (int, float)
+                    or not 0 < now <= _MAX_TIMESTAMP
+                    or not math.isfinite(now)
+                    or not 0 <= now - expected_query.started_at <= _MAX_CAPACITY_AGE_SECONDS
+                ):
+                    raise ConversionJournalError(
+                        "conversion receipt observation changed or expired"
+                    )
             remaining = debit
             for item in job.request.allocations:
                 consumed = min(remaining, item.amount_msat)
