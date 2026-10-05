@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -18,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 from rill_core.errors import ValidationError
 from rill_core.networks import backend_names, require_funding_release
-from rill_core.settlement import FundingPrevout, PlannedFundingOutput
+from rill_core.settlement import FundingPrevout, PlannedFundingOutput, inspect_transaction_outputs
 from rill_provider.core_tx_bytes import (
     CooperativeClaimOutpoint,
     CooperativeFeePolicy,
@@ -37,6 +38,11 @@ if TYPE_CHECKING:
 SATS_PER_BTC = Decimal(100_000_000)
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_PORT = 65535
+MAX_HISTORICAL_DEADLINE_SECONDS = 30
+MAX_HISTORICAL_HEX_BYTES = 200_000
+MAX_BLOCK_HEIGHT = 499_999_999
+TAPROOT_SCRIPT_BYTES = 34
+MAX_ADDRESS_BYTES = 128
 HTTP_OK = 200
 METHODS = frozenset(
     {
@@ -88,6 +94,41 @@ class ConfirmedOutput:
     value_sat: int
     script_pubkey: bytes
     confirmations: int
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalWalletOutput:
+    """Confirmed historical script recognition, NEVER spending-key custody.
+
+    ismine in Core v30 is script-map membership, even for public-only imports.
+    Spent historical outputs establish receipt, not current inventory. The
+    configured profile/namespace and trusted Core host are operator premises;
+    sampled chain consistency is not an atomic snapshot or finality guarantee.
+    """
+
+    network: NetworkIdentity
+    txid: str
+    vout: int
+    value_sat: int
+    script_pubkey: bytes
+    confirmations: int
+    block_height: int
+    block_hash: str
+    started_at: float
+    completed_at: float
+
+
+def _strict_rpc_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate Core response field")
+        result[key] = value
+    return result
+
+
+def _reject_rpc_constant(_value: str) -> object:
+    raise ValueError("Core response must contain JSON values")
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,13 +209,14 @@ class WalletRpc:
             raise WalletRpcError("cooperative Core evidence unavailable") from None
         return CooperativeClaimEvidence(outpoint, policy)
 
-    def _call(
+    def _call(  # noqa: PLR0912 - opt-in strict observation preserves legacy RPC responses
         self,
         method: str,
         *params: object,
         wallet: bool = True,
         deadline: float | None = None,
         effect_allowed: Callable[[], bool] | None = None,
+        strict_response: bool = False,
     ) -> Any:  # noqa: ANN401 - exact Core JSON response
         if method not in METHODS:
             raise WalletRpcError("unsupported Core wallet method")
@@ -224,11 +266,26 @@ class WalletRpc:
         if response.status_code != HTTP_OK or len(response.content) > MAX_RESPONSE_BYTES:
             raise WalletRpcError(f"Core {method} failed")
         try:
-            body = json.loads(response.content, parse_float=Decimal)
+            if strict_response:
+                body = json.loads(
+                    response.content,
+                    parse_float=Decimal,
+                    object_pairs_hook=_strict_rpc_object,
+                    parse_constant=_reject_rpc_constant,
+                )
+            else:
+                body = json.loads(response.content, parse_float=Decimal)
         except (ValueError, InvalidOperation):
             raise WalletRpcError("Core RPC response is not JSON") from None
         if not isinstance(body, dict) or body.get("error") is not None:
             raise WalletRpcError(f"Core {method} failed")
+        if strict_response and (
+            body.get("jsonrpc") != "2.0"
+            or type(body.get("id")) is not int
+            or body["id"] != 1
+            or "result" not in body
+        ):
+            raise WalletRpcError("Core response envelope differs")
         return body.get("result")
 
     def tip_height(self) -> int:
@@ -401,6 +458,158 @@ class WalletRpc:
             return None
         depth = result.get("confirmations") if isinstance(result, dict) else None
         return depth if type(depth) is int and result.get("txid") == txid else None
+
+    def observe_historical_wallet_output(
+        self,
+        txid: str,
+        treasury_script: bytes,
+        *,
+        deadline_seconds: float = 10,
+    ) -> HistoricalWalletOutput:
+        """Read one uniquely matching confirmed historical Taproot wallet output.
+
+        Strict response envelopes, network and active-block correspondence
+        bracket two identical historical transaction byte records. Depth is the
+        minimum sampled wallet/chain depth. Core ismine proves recognition only.
+        Unknown/spent-record loss never grants permission to repeat a swap.
+        Acceptance includes client cleanup, not a hard execution bound or
+        protection against later reorgs. No custody or completion is authorized.
+        Existing unspent/depth methods and their behavior are unchanged.
+        """
+        result = None
+        try:  # noqa: SIM105 - explicit private-error detachment boundary
+            result = self._historical_wallet_output(txid, treasury_script, deadline_seconds)
+        except Exception:  # noqa: BLE001, S110 - detach private cookie/RPC/transaction diagnostics
+            pass
+        if result is None:
+            raise WalletRpcError("historical Core wallet output unavailable")
+        return result
+
+    def _historical_wallet_output(
+        self,
+        txid: str,
+        script: bytes,
+        deadline_seconds: float,
+    ) -> HistoricalWalletOutput:
+        if (
+            type(txid) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", txid) is None
+            or type(script) is not bytes
+            or len(script) != TAPROOT_SCRIPT_BYTES
+            or script[:2] != b"\x51\x20"
+            or type(deadline_seconds) not in (int, float)
+            or not math.isfinite(deadline_seconds)
+            or not 0 < deadline_seconds <= MAX_HISTORICAL_DEADLINE_SECONDS
+        ):
+            raise WalletRpcError("historical output observation configuration differs")
+        started_at = time.time()
+        if not math.isfinite(started_at):
+            raise WalletRpcError("historical output acquisition time unavailable")
+        deadline = time.monotonic() + deadline_seconds
+
+        def read(method: str, *params: object, wallet: bool = True) -> Any:  # noqa: ANN401 - strict result narrowed below
+            return self._call(
+                method, *params, wallet=wallet, deadline=deadline, strict_response=True
+            )
+
+        def snapshot() -> tuple[int, str]:
+            info = read("getblockchaininfo", wallet=False)
+            if (
+                not isinstance(info, dict)
+                or info.get("chain") != self._chain
+                or info.get("initialblockdownload") is not False
+                or not _matches_signet_challenge(info, self._network)
+                or type(info.get("blocks")) is not int
+                or not 0 < info["blocks"] <= MAX_BLOCK_HEIGHT
+                or not isinstance(info.get("bestblockhash"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", info["bestblockhash"]) is None
+                or read("getblockhash", 0, wallet=False) != self._network.genesis_hash
+                or read("getblockhash", info["blocks"], wallet=False) != info["bestblockhash"]
+            ):
+                raise WalletRpcError("historical output Core chain unavailable")
+            return info["blocks"], info["bestblockhash"]
+
+        def record() -> tuple[bytes, int, str, int]:
+            value = read("gettransaction", txid)
+            if (
+                not isinstance(value, dict)
+                or value.get("txid") != txid
+                or type(value.get("confirmations")) is not int
+                or not 0 < value["confirmations"] <= MAX_BLOCK_HEIGHT
+                or type(value.get("blockheight")) is not int
+                or not 0 < value["blockheight"] <= MAX_BLOCK_HEIGHT
+                or not isinstance(value.get("blockhash"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", value["blockhash"]) is None
+                or not isinstance(value.get("hex"), str)
+                or len(value["hex"]) > MAX_HISTORICAL_HEX_BYTES
+                or re.fullmatch(r"(?:[0-9a-f]{2})+", value["hex"]) is None
+            ):
+                raise WalletRpcError("historical wallet transaction unavailable")
+            return (
+                bytes.fromhex(value["hex"]),
+                value["blockheight"],
+                value["blockhash"],
+                value["confirmations"],
+            )
+
+        before_height, before_hash = snapshot()
+        raw, height, block_hash, first_depth = record()
+        inspected = inspect_transaction_outputs(raw)
+        matches = [
+            (index, output)
+            for index, output in enumerate(inspected.outputs)
+            if output.script_pubkey == script
+        ]
+        if inspected.txid != txid or len(matches) != 1 or matches[0][1].value_sat <= 0:
+            raise WalletRpcError("historical transaction output bytes differ")
+        if read("getblockhash", height, wallet=False) != block_hash:
+            raise WalletRpcError("historical transaction block is not active")
+        decoded = read("decodescript", script.hex(), wallet=False)
+        if (
+            not isinstance(decoded, dict)
+            or decoded.get("type") != "witness_v1_taproot"
+            or not isinstance(decoded.get("address"), str)
+            or not 0 < len(decoded["address"]) <= MAX_ADDRESS_BYTES
+        ):
+            raise WalletRpcError("historical script address unavailable")
+        recognized = read("getaddressinfo", decoded["address"])
+        if (
+            not isinstance(recognized, dict)
+            or recognized.get("ismine") is not True
+            or recognized.get("scriptPubKey") != script.hex()
+        ):
+            raise WalletRpcError("historical script not recognized by configured wallet")
+        repeated, second_height, second_hash, second_depth = record()
+        after_height, after_hash = snapshot()
+        if (
+            repeated != raw
+            or (second_height, second_hash) != (height, block_hash)
+            or after_height < before_height
+            or (after_height == before_height and after_hash != before_hash)
+            or read("getblockhash", before_height, wallet=False) != before_hash
+            or read("getblockhash", height, wallet=False) != block_hash
+        ):
+            raise WalletRpcError("historical output observations contradict")
+        depth = min(
+            first_depth, second_depth, before_height - height + 1, after_height - height + 1
+        )
+        completed_at = time.time()
+        if depth <= 0 or not math.isfinite(completed_at) or completed_at < started_at:
+            raise WalletRpcError("historical output completion interval unavailable")
+        _request_budget(deadline, None)
+        vout, output = matches[0]
+        return HistoricalWalletOutput(
+            self._network,
+            txid,
+            vout,
+            output.value_sat,
+            script,
+            depth,
+            height,
+            block_hash,
+            started_at,
+            completed_at,
+        )
 
     def broadcast(
         self,

@@ -688,6 +688,36 @@ is not funded Core/LND conversion or provider ingress conformance. No CLI comman
 positive LND accounting projector or production route is enabled. Compatible
 existing installations undergo no migration, automatic provisioning or work.
 
+### Historical Core wallet recognition (read-only, not custody authority)
+
+`WalletRpc.observe_historical_wallet_output(txid, treasury_script)` reads the
+configured named wallet's historical transaction bytes twice, independently
+computes the witness-stripped txid and selects exactly one matching Taproot output.
+It derives the real vout/value, checks strict RPC envelopes, configured chain and
+genesis, active inclusion block and sampled branch consistency, and reports the
+minimum sampled wallet/chain depth. Unknown, conflicted, unconfirmed, ambiguous,
+late or contradictory observations refuse evidence with detached private errors.
+The acceptance budget includes setup and client cleanup, not a hard execution
+deadline or atomic snapshot. Subsequent reorgs remain possible. Existing
+`confirmed_output` and `wallet_confirmations` behavior is unchanged.
+
+Core v30 `getaddressinfo.ismine=true` is script-map recognition, **not private-key
+custody**. Public-only `rawtr` imports can report it with `iswatchonly=false`;
+solvability and wallet-wide key flags do not repair this distinction. The returned
+`HistoricalWalletOutput` is recognition evidence only. Retained wallet records
+can establish historical receipt even after the output is spent, never current
+inventory or refund payability. The observer creates no address, imports no keys,
+spends nothing and performs no journal completion or hold release.
+
+The opt-in `test_wallet_history_pinned.py` uses actual pinned Core v30 private and
+public-only wallets. Both refuse an unconfirmed payment, recognize the confirmed
+same output and retain its historical evidence after spending. Only explicit
+private-wallet construction, generated destination and retained keys establish
+the controlled fixture's separate custody premise. Existing journal script pins
+establish destination selection, not destination-key ownership or Core identity;
+unknown existing wallets require affirmative custody before any future completion.
+No marker migration, automatic wallet work or production conversion is enabled.
+
 ### Merchant credit correspondence (internal, provenance only)
 
 `rill_cli.merchant_credit.verify_merchant_credit` verifies the existing merchant

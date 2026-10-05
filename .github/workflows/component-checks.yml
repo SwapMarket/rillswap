@@ -322,3 +322,11 @@ jobs:
         run: |
           RILL_CRYPTO_LIBRARY="$PWD/tmp/native/librill_crypto.so" \
             tmp/ci-venv/bin/python -m pytest -q -m native_crypto --basetemp=tmp/pytest-ci-native
+      - name: Check historical wallet recognition against pinned Core
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONPATH: src:../rill-core/packages/core/src:../rill-crypto/python/src:../rill-provider/src
+          RILLSWAP_RUN_BITCOIN_CORE: '1'
+        run: |
+          tmp/ci-venv/bin/python -m pytest -q tests/test_wallet_history_pinned.py \
+            --basetemp=tmp/pytest-ci-wallet-history
