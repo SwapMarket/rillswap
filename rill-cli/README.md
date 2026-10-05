@@ -645,6 +645,19 @@ nominal swap payout. This module never changes customer paid status or receipts.
 Existing installations receive no automatic provisioning, migration or conversion.
 Production conversion remains disabled and unproved.
 
+`LndHoldPayer` separately supports an explicit `expected_payer: PaymentAuthority`.
+When configured, it checks the prepared route's source node/full network before
+submission and binds both polling and final status reconciliation to that same
+authority. The existing sender reattests the immutable prepared payer on every
+submission channel; source drift cannot supply another node's terminal status.
+Read-only planning may occur before a source mismatch is detected. GetInfo is an
+assertion by the TLS-authenticated service, not proof of node-key possession; a
+malicious endpoint trusted by the operator can lie. This protects truthful-node
+configuration mistakes, not arbitrary endpoint compromise. A future treasury
+owner must supply the affirmative journal source pin, never learn it from a read.
+Existing CLI callers omitting the pin retain their original behavior and call
+contracts; no automatic learning, configuration migration or payment is added.
+
 ### Merchant credit correspondence (internal, provenance only)
 
 `rill_cli.merchant_credit.verify_merchant_credit` verifies the existing merchant

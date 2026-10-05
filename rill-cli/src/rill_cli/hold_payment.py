@@ -20,6 +20,7 @@ from rill_provider.lnd_payment_observation import (
     LndUnavailableError,
 )
 from rill_provider.lnd_payment_send import LndPaymentSender
+from rill_provider.payment_dispatch_record import PaymentAuthority
 
 from rill_cli.live_swap import SwapError
 
@@ -58,6 +59,8 @@ class HoldPaymentError(SwapError):
 class LndHoldPayer:
     """Explicit-route submission of one hold invoice with a checked final expiry."""
 
+    _expected_payer: PaymentAuthority | None = None
+
     def __init__(
         self,
         *,
@@ -65,8 +68,16 @@ class LndHoldPayer:
         tls_certificate_path: str | os.PathLike[str],
         macaroon_path: str | os.PathLike[str],
         network: NetworkIdentity,
+        expected_payer: PaymentAuthority | None = None,
     ) -> None:
         """Configure only; no credential read or network dial."""
+        if expected_payer is not None:
+            if not isinstance(expected_payer, PaymentAuthority):
+                raise HoldPaymentError("explicit source payer authority required")
+            expected_payer = PaymentAuthority(expected_payer.node_pubkey, expected_payer.network)
+            if expected_payer.network != network:
+                raise HoldPaymentError("source payer network differs from configuration")
+        self._expected_payer = expected_payer
         self._sender = LndPaymentSender(
             host="127.0.0.1",
             port=port,
@@ -118,6 +129,8 @@ class LndHoldPayer:
                     raise
                 time.sleep(min(POLL_SECONDS, max(0, planning_deadline - time.monotonic())))
         _require_submission(planning_deadline, submission_allowed)
+        if self._expected_payer is not None and payment.payer != self._expected_payer:
+            raise HoldPaymentError("planned payment source differs from pinned payer")
         request = router_pb2.SendToRouteRequest.FromString(payment.request)
         if not request.route.hops or request.route.hops[-1].expiry < min_final_expiry_height:
             raise HoldPaymentError("planned route expires before the provider's minimum")
@@ -182,12 +195,18 @@ class LndHoldPayer:
 
     def _polled(self, payment_hash: str) -> HoldStatus | None:
         try:  # an accepted hold never reaches a final state before our claim
+            if self._expected_payer is not None:
+                return self._sender.track(
+                    payment_hash, current=True, payer=self._expected_payer
+                ).status
             return self._sender.track(payment_hash, current=True).status
         except LndObservationError:
             return None  # not yet known; the send is still running
 
     def status(self, payment_hash: str) -> HoldStatus:
         """Return the tracked status of the payment (``UNKNOWN`` when LND has none)."""
+        if self._expected_payer is not None:
+            return self._sender.track(payment_hash, payer=self._expected_payer).status
         return self._sender.track(payment_hash).status
 
 
