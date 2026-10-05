@@ -26,6 +26,16 @@ historical transcript passes this static test again: a host still needs its
 own durable pending challenge, locally owned provider key, receipt ordering,
 and replay policy before any session is established or any effect is allowed.
 
+`settlement.inspect_transaction_outputs(raw)` reports an independently computed,
+witness-stripped display-order txid and ordered immutable output value/script
+byte facts. It reuses bounded non-coinbase legacy/SegWit parsing (100,000 bytes,
+100 inputs/outputs, 10,000-byte scripts and 100 witness items) and caps aggregate
+output value. It does not validate inputs, signatures, consensus, chain inclusion,
+ownership, confirmations, unspent state or financial authority. Duplicate inputs,
+arbitrary script bytes and non-funding versions remain literal facts. Unsupported
+bytes raise `ValidationError`, never establish absent funds. Existing funding
+authorization APIs and installed persisted state remain unchanged.
+
 The settlement package reconstructs RS-002 Taproot contracts and builds,
 finalizes, parses, and authorizes unilateral claim/refund transactions. BIP340
 signing stays outside core behind explicit key-operation and verifier protocols.

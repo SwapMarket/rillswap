@@ -2,19 +2,23 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, replace
+from dataclasses import FrozenInstanceError, dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from rill_core.domain.amounts import MAX_SATS
 from rill_core.errors import ValidationError
 from rill_core.settlement import (
     FundingPlan,
     FundingPrevout,
     PlannedFundingOutput,
+    TransactionOutputBytes,
+    TransactionOutputInspection,
     authorize_funding_transaction,
     check_funding_binding_transaction,
+    inspect_transaction_outputs,
 )
 from rill_core.wire.hashes import contract_hash
 from rill_core.wire.messages import ContractTerms, FundingBinding
@@ -462,3 +466,109 @@ def test_aggregate_input_money_range_is_not_only_a_per_input_check() -> None:
 def test_rejects_non_native_or_future_witness_input(script: bytes) -> None:
     with pytest.raises(ValidationError, match="native P2WPKH, P2WSH, or P2TR"):
         FundingPrevout(b"\x01" * 32, 0, 1_000, script)
+
+
+def test_inspection_reports_ordered_literal_output_bytes_without_funding_restrictions() -> None:
+    inputs = ((b"\x01" * 32, 0, b"arbitrary scriptSig", 0),)
+    outputs = ((0, b""), (7, b"\x6a\x01\x01"), (7, b"\x6a\x01\x01"), (11, P2TR))
+    raw = _raw(inputs, outputs, version=1, lock_time=42)
+    result = inspect_transaction_outputs(raw)
+    assert isinstance(result, TransactionOutputInspection)
+    assert result.txid == hashlib.sha256(hashlib.sha256(raw).digest()).digest()[::-1].hex()
+    assert result.outputs == tuple(
+        TransactionOutputBytes(value, script) for value, script in outputs
+    )
+    with pytest.raises(FrozenInstanceError):
+        result.txid = "a" * 64  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        result.outputs[0].value_sat = 1  # type: ignore[misc]
+
+
+def test_inspection_txid_excludes_witness_and_preserves_duplicate_input_byte_facts() -> None:
+    prevout = (b"\x02" * 32, 3, b"", 0xFFFFFFFD)
+    inputs, outputs = (prevout, prevout), ((42, P2TR),)
+    legacy = _raw(inputs, outputs)
+    first = _raw(inputs, outputs, witness=((b"a",), (b"b",)))
+    second = _raw(inputs, outputs, witness=((b"different",), (b"witness",)))
+    expected_txid = hashlib.sha256(hashlib.sha256(legacy).digest()).digest()[::-1].hex()
+    assert first != second != legacy
+    assert (
+        inspect_transaction_outputs(first)
+        == inspect_transaction_outputs(second)
+        == inspect_transaction_outputs(legacy)
+    )
+    assert inspect_transaction_outputs(first).txid == expected_txid
+    assert hashlib.sha256(hashlib.sha256(first).digest()).digest()[::-1].hex() != expected_txid
+    # Duplicate prevouts remain literal facts, NOT evidence of consensus validity.
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "empty",
+        "type",
+        "oversize",
+        "truncated",
+        "trailing",
+        "nonminimal",
+        "coinbase",
+        "empty_outputs",
+        "inputs_limit",
+        "outputs_limit",
+        "witness_flag",
+        "superfluous_witness",
+        "money",
+        "aggregate_money",
+        "witness_items",
+    ],
+)
+def test_inspection_reuses_bounded_wire_guards_and_rejects_aggregate_overflow(fault: str) -> None:  # noqa: PLR0912 - explicit malformed-wire matrix
+    inputs, outputs = ((b"\x03" * 32, 1, b"", 0),), ((1, b""),)
+    raw = _raw(inputs, outputs)
+    candidate: object
+    if fault == "empty":
+        candidate = b""
+    elif fault == "type":
+        candidate = bytearray(raw)
+    elif fault == "oversize":
+        candidate = b"\x00" * 100_001
+    elif fault == "truncated":
+        candidate = raw[:-1]
+    elif fault == "trailing":
+        candidate = raw + b"\x00"
+    elif fault == "nonminimal":
+        candidate = raw[:4] + b"\xfd\x01\x00" + raw[5:]
+    elif fault == "coinbase":
+        candidate = _raw(((b"\x00" * 32, 0xFFFFFFFF, b"", 0),), outputs)
+    elif fault == "empty_outputs":
+        candidate = _raw(inputs, ())
+    elif fault == "inputs_limit":
+        candidate = _raw(inputs * 101, outputs)
+    elif fault == "outputs_limit":
+        candidate = _raw(inputs, outputs * 101)
+    elif fault == "witness_flag":
+        candidate = raw[:4] + b"\x00\x02" + raw[4:]
+    elif fault == "superfluous_witness":
+        candidate = _raw(inputs, outputs, witness=((),))
+    elif fault == "money":
+        candidate = _raw(inputs, ((MAX_SATS + 1, b""),))
+    elif fault == "aggregate_money":
+        candidate = _raw(inputs, ((MAX_SATS, b""), (1, b"")))
+    else:
+        candidate = _raw(inputs, outputs, witness=((b"",) * 101,))
+    with pytest.raises(ValidationError):
+        inspect_transaction_outputs(candidate)  # type: ignore[arg-type]
+
+
+def test_inspection_supports_declared_input_output_and_script_boundary() -> None:
+    # CompactSize is encoded independently, because _raw intentionally supports
+    # only small test scripts. No private parser helper supplies expected facts.
+    script = b"\x6a" * 10_000
+    prefix = _raw(((b"\x01" * 32, 0, b"", 0),), ((0, b""),))[:-5]
+    raw = prefix + b"\xfd\x10\x27" + script + b"\x00" * 4
+    assert inspect_transaction_outputs(raw).outputs == (TransactionOutputBytes(0, script),)
+    raw = prefix + b"\xfd\x11\x27" + script + b"\x6a" + b"\x00" * 4
+    with pytest.raises(ValidationError):
+        inspect_transaction_outputs(raw)
+    limited = _raw(((b"\x01" * 32, 0, b"", 0),) * 100, ((1, b""),) * 100)
+    assert len(inspect_transaction_outputs(limited).outputs) == 100

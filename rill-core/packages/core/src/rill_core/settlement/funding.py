@@ -137,6 +137,47 @@ class FundingBindingTransactionMatch:
 
 
 @dataclass(frozen=True, slots=True)
+class TransactionOutputBytes:
+    """Literal output bytes/value, NOT ownership or a validated Bitcoin output."""
+
+    value_sat: int
+    script_pubkey: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class TransactionOutputInspection:
+    """Bounded serialization facts only; tuple position is the output's vout.
+
+    txid is 64-character, display-order hexadecimal. No consensus/input/signature
+    validity, chain inclusion, confirmations,
+    ownership, unspent state or financial authorization is established here.
+    """
+
+    txid: str
+    outputs: tuple[TransactionOutputBytes, ...]
+
+
+def inspect_transaction_outputs(raw_transaction: bytes) -> TransactionOutputInspection:
+    """Inspect bounded non-coinbase legacy/SegWit bytes, never grant authority.
+
+    Reuses the local parser's 100,000-byte, 100-input/output, 10,000-byte script
+    and 100-witness-item limits and canonical CompactSize/witness checks. Version,
+    input validity (including duplicates), script validity and signatures are
+    NOT checked. Aggregate outputs must stay within Bitcoin's money range.
+    Unsupported bytes raise ValidationError: callers must treat them as UNKNOWN,
+    never evidence that funds are absent; no unknown sentinel is returned.
+    Existing funding-plan and binding authorizations are separate and unchanged.
+    """
+    parsed = _parse(raw_transaction)
+    if sum(value for value, _ in parsed.outputs) > MAX_SATS:
+        raise ValidationError("inspected aggregate output value exceeds Bitcoin money range")
+    return TransactionOutputInspection(
+        txid=_hash256(parsed.base_bytes)[::-1].hex(),
+        outputs=tuple(TransactionOutputBytes(value, script) for value, script in parsed.outputs),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class _ParsedInput:
     txid: bytes
     output_index: int

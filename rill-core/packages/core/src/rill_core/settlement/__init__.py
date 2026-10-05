@@ -6,8 +6,11 @@ from rill_core.settlement.funding import (
     FundingPlanAuthorization,
     FundingPrevout,
     PlannedFundingOutput,
+    TransactionOutputBytes,
+    TransactionOutputInspection,
     authorize_funding_transaction,
     check_funding_binding_transaction,
+    inspect_transaction_outputs,
 )
 from rill_core.settlement.funding_authentication import (
     FundingDeclarationCrypto,
@@ -51,6 +54,8 @@ __all__ = [
     "SignedFundingBinding",
     "TaprootContract",
     "TaprootKeyOperations",
+    "TransactionOutputBytes",
+    "TransactionOutputInspection",
     "UnilateralAuthorization",
     "UnilateralPath",
     "UnilateralSpendPlan",
@@ -62,6 +67,7 @@ __all__ = [
     "check_funding_binding_transaction",
     "finalize_cooperative_claim",
     "finalize_unilateral_spend",
+    "inspect_transaction_outputs",
     "max_spendable_fee",
     "reconstruct_taproot_contract",
     "validate_cooperative_claim",
