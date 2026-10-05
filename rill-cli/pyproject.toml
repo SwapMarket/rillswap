@@ -16,6 +16,7 @@ dependencies = [
   "pyrage==1.4.0",
   "httpx==0.28.1",
   "pydantic==2.13.5",
+  "pycryptodomex==3.23.0",
 ]
 
 [project.scripts]

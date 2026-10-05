@@ -1,0 +1,38 @@
+{
+  "fixtureOnly": true,
+  "publicTestSeed": "0303030303030303030303030303030303030303030303030303030303030303",
+  "messageHex": "5b2272696c6c737761702d7061796d656e742d6576656e742f31222c22636865636b6f75742d6576656e742f31222c22616363657074616e63655f6576656e745f3031222c2268747470733a2f2f6d65726368616e742e696e76616c6964222c227061796d656e742e6163636570746564222c226d65726368616e745f696e74656e745f3031222c226d65726368616e745f617474656d70745f3031222c2263636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363222c223530303030303030222c313736303030303030305d",
+  "envelope": {
+    "algorithm": "Ed25519",
+    "publicKey": "ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1",
+    "event": {
+      "version": "checkout-event/1",
+      "id": "acceptance_event_01",
+      "merchantOrigin": "https://merchant.invalid",
+      "type": "payment.accepted",
+      "intentId": "merchant_intent_01",
+      "attemptId": "merchant_attempt_01",
+      "paymentHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "amountMsat": "50000000",
+      "acceptedAt": 1760000000
+    },
+    "signature": "b9b5d90420b55a47e6e4325cb888511d8baf083b70be93de48e4f5b92a657732d77e5c90b41294d9e91ba3c881d32efb4273d12e0038636010d32de3e0c8e701"
+  },
+  "origins": [
+    {"value": "https://merchant.invalid", "valid": true},
+    {"value": "https://merchant.invalid:8443", "valid": true},
+    {"value": "https://[::1]:8443", "valid": true},
+    {"value": "https://xn--bcher-kva.example", "valid": true},
+    {"value": "https://merchant.invalid:443", "valid": false},
+    {"value": "https://Merchant.invalid", "valid": false},
+    {"value": "https://bücher.example", "valid": false},
+    {"value": "https://merchant.invalid/", "valid": false},
+    {"value": "https://merchant.invalid/path", "valid": false},
+    {"value": "https://merchant.invalid?query=1", "valid": false},
+    {"value": "https://merchant.invalid#fragment", "valid": false},
+    {"value": "https://user:pass@merchant.invalid", "valid": false},
+    {"value": "https://@merchant.invalid", "valid": false},
+    {"value": "https://:pass@merchant.invalid", "valid": false},
+    {"value": "http://merchant.invalid", "valid": false}
+  ]
+}

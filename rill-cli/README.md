@@ -622,8 +622,36 @@ nominal swap payout. This module never changes customer paid status or receipts.
 Existing installations receive no automatic provisioning, migration or conversion.
 Production conversion remains disabled and unproved.
 
+### Merchant credit correspondence (internal, provenance only)
+
+`rill_cli.merchant_credit.verify_merchant_credit` verifies the existing merchant
+PureEd25519 acceptance format against an independently pinned key, matching paid
+view, decoded invoice, and configured LND/Core source identity. It returns only
+the agreed quantity, payment hash and invoice digest. Historical acceptance and
+expired-but-settled invoices remain eligible **provenance**, not spendable credit.
+Pinned alias origins can yield the same canonical credit; preventing repeated
+consumption remains the journal's responsibility.
+
+The trusted runtime must authenticate the pinned HTTPS server, reject redirects
+and caches, and obtain the source projection **only after successful
+`observe_bound_settled_invoice(expected)`**. `from_bound()` checks the projected
+state, not whether that RPC or its sufficiently-paid checks actually ran. Typed
+wrappers do not prove transport authentication. Record full start/completion
+intervals for view, LND and Core reads, enforce monotonic elapsed-time bounds,
+and import only into the journal whose source authority was supplied. Complete
+network pins include declared namespace/profile; separate LND/Core reads do not
+constitute atomic chain attestation.
+
+The frozen public test fixture checks actual TypeScript signing and Python
+verification, including canonical-origin edge cases. Invoice decoding, HTTP/RPC
+acquisition and backend observations in these tests are mocked. Actual ordinary
+invoice interoperability, safe outgoing capacity/economic projections, encrypted
+swap recovery, runner wiring and funded receipt-to-treasury conversion remain
+required. This verifier performs no import, migration, provisioning or payment.
+
 The package declares dependencies on `rill-core`, `rill-crypto`,
-`pyrage==1.4.0`, `httpx==0.28.1`, and `pydantic==2.13.5`, but release wheels do **not** bundle the
+`pyrage==1.4.0`, `httpx==0.28.1`, `pydantic==2.13.5`, and `pycryptodomex==3.23.0`,
+but release wheels do **not** bundle the
 native cryptographic library; a missing or wrong library fails closed. Test-only keys and fixtures
 in `tests/fixtures` are public. To develop alongside the sibling repositories:
 

@@ -125,6 +125,13 @@ must observe settlement again, and the ledger must independently accept it.
 Payer dispatch remains one-shot. This isolates backend-observation loss before
 acceptance, not transport-level response loss or power-loss durability.
 
+The internal CLI merchant-credit verifier has a frozen public fixture exercising
+this service's actual PureEd25519 acceptance signature in Python and TypeScript,
+including exact canonical-origin edge cases. It establishes provenance only:
+typed acquisition wrappers do not authenticate HTTP/RPC reads, and historical
+acceptance does not authorize treasury spending. Real acquisition, invoice
+decoding and receipt-to-treasury conversion remain separate runtime gates.
+
 The funded scripted happy path and graceful prepayment merchant restart passed
 locally. This is not browser-wallet,
 merchant/LND restart, machine-crash durability, production deployment or

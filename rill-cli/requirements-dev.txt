@@ -86,7 +86,9 @@ protobuf==7.36.2
 pycparser==3.0
     # via cffi
 pycryptodomex==3.23.0
-    # via rill-provider
+    # via
+    #   rill-cli
+    #   rill-provider
 pydantic==2.13.5
     # via
     #   rill-cli
