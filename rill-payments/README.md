@@ -709,6 +709,35 @@ Public references: [REST API v3 order retrieval](https://woocommerce.github.io/w
 [WooCommerce 11.1.2 BTC currencies](https://github.com/woocommerce/woocommerce/blob/11.1.2/plugins/woocommerce/i18n/currencies.php),
 and [decimal formatting](https://github.com/woocommerce/woocommerce/blob/11.1.2/plugins/woocommerce/includes/wc-formatting-functions.php).
 
+### Disposable real-store diagnostic
+
+`bun run test:woocommerce` explicitly starts isolated WordPress, MariaDB and
+WP-CLI containers with pinned official-image digests, verifies the SHA-256 of
+the public WooCommerce 11.1.2 plugin, and creates a synthetic pending BTC order
+with 8-decimal precision and a disposable read-only REST key. Requires Docker,
+OpenSSL and public artifact download access. The ordinary test suite skips this
+fixture; the `woocommerce-conformance` CI job runs on manual workflow dispatch.
+
+Only the TLS proxy exposes a loopback listener; the store and database have no
+published ports and run on an invocation-owned internal Docker bridge. For
+rootless Docker compatibility, the host-local proxy forwards through a bounded
+PHP HTTP client executed inside the owned store container to its real Apache
+REST endpoint (it does not mock the order response). Child-process
+`NODE_EXTRA_CA_CERTS` trust admits the disposable store; ordinary trust, a wrong
+CA and a wrong hostname must refuse. The production default fetch reads the
+actual store total and rejects a wrong order key and invalid REST credentials;
+negative TLS cases also assert the underlying certificate/hostname error code.
+TLS terminates at Bun; the HTTP hop inside the store container is plaintext.
+Checkout replays one synthetic
+invoice and never marks the order paid. No TLS validation is disabled and no
+system trust store is modified. Cleanup removes only invocation-labeled objects;
+it never prunes unrelated containers, networks, volumes or images.
+
+This proves local REST compatibility and CA/hostname checks, not a deployed
+store's hosting configuration, checkout plugin, rate limits, settlement, signer
+custody, mainnet authority or production readiness. The synthetic invoice issuer
+does not contact a Lightning node and the fixture never spends funds.
+
 ## External provider readiness
 
 `bun run probe:providers` performs bounded read-only GET requests to the official

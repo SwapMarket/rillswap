@@ -35,6 +35,7 @@
     "generate:sandbox-fixture": "bun scripts/generate-sandbox-fixture.ts",
     "check:sandbox-fixture": "bun scripts/generate-sandbox-fixture.ts --check",
     "test:native-sandbox": "RILLSWAP_RUN_NATIVE_SANDBOX=1 bun test tests/nativeSandbox.test.ts",
+    "test:woocommerce": "RILLSWAP_RUN_WOOCOMMERCE=1 bun test tests/regtestWooCommerceDiagnostic.test.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test tests",
     "test:browser": "playwright test"
