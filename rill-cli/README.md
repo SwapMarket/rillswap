@@ -160,6 +160,25 @@ Positive depth one remains supported; this correction does not resolve the
 separate signed settlement-depth policy or authorize merchant liability release.
 Existing installations receive only corrected live-observation classification,
 with no migration, automatic recovery or renewed signing/submission rights.
+
+SDK callers can explicitly request `run_reverse_swap(..., await_settlement=True)`.
+The default still returns claim progress at positive depth, not signed-depth
+terminal chain completion. The opt-in requires a synchronous trusted wallet
+`observe_historical_wallet_output(txid, script, deadline_seconds=...)` capability
+before any new session or payment. `WalletRpc` supplies this for a uniquely
+matching wallet-recognized P2TR output, including public-only recognition.
+After the selected claim confirms, only read-only observation continues within
+the original settlement lifetime, checking its exact output, selected fee, signed
+confirmation depth and fresh active-block revalidation. No generic integer-depth
+fallback is accepted. The existing five-field outcome stays unchanged.
+
+Unknown, conflicted, orphaned, contradictory or late evidence leaves completion
+unresolved, never grants permission to repeat payment or signing. Cancellation
+drains running observations. Historical observation timestamps use epoch time;
+execution authority remains monotonic. This is sampled terminal chain completion
+for that claim, not irreversible finality, merchant fulfillment, remaining
+inventory or restored execution rights. Existing installations keep the default;
+missing or older metadata never enables the stronger mode automatically.
 The reverse dispatcher supplies this authority to sizing signatures, claim
 signing, and watching. Startup recovery publication and settlement workers are
 shielded and owned until their actual completion. Cancellation stops new work;

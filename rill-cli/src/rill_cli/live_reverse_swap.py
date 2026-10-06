@@ -24,11 +24,12 @@ import contextvars
 import hashlib
 import inspect
 import math
+import re
 import secrets
 import threading
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, Protocol, TypeVar
+from typing import TYPE_CHECKING, Literal, Protocol, TypeVar, cast
 
 from rill_core.recovery import (
     REVERSE_DISCLOSURE_EXTENSION,
@@ -66,6 +67,7 @@ from rill_core.wire.reverse_quotes import (
     check_reverse_terms_offer,
 )
 from rill_core.wire.settlement_messages import FundingBindingPayload, parse_observation
+from rill_core.wire.types import NetworkIdentity
 from rill_provider.lnd_payment_observation import LndObservationError
 
 from rill_cli.claim_watcher import ClaimAttempt, ClaimWatcher
@@ -78,6 +80,7 @@ from rill_cli.live_swap import (
     discover,
 )
 from rill_cli.refund_watcher import ChainView
+from rill_cli.wallet_rpc import HistoricalWalletOutput
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -92,7 +95,6 @@ if TYPE_CHECKING:
         HandshakeInit,
         InvoiceBinding,
     )
-    from rill_core.wire.types import NetworkIdentity
     from rill_crypto import Context
     from rill_provider.relay_client import RelayConnection
 
@@ -796,6 +798,123 @@ async def _cooperative_claim(  # noqa: PLR0913, PLR0915 - one original-session k
     return ClaimAttempt(claim.txid, claim.raw_transaction, claim.fee_sat, claim.vsize, tip)
 
 
+def _settlement_capability(
+    wallet: ClaimWallet,
+    *,
+    await_settlement: bool,
+) -> Callable[..., HistoricalWalletOutput] | None:
+    """Admit the explicit stronger mode before secrets or remote effects.
+
+    This capability is an operator-trusted wallet dependency, not provenance
+    conferred by a returned record's type. Legacy wallets are never inspected.
+    """
+    if type(await_settlement) is not bool:
+        raise SwapError("await_settlement must be a boolean")
+    if not await_settlement:
+        return None
+    try:
+        observer = getattr(wallet, "observe_historical_wallet_output", None)
+        supported = (
+            callable(observer)
+            and not inspect.iscoroutinefunction(observer)
+            and not inspect.iscoroutinefunction(getattr(observer, "__call__", None))  # noqa: B004 - inspect async callable methods after the separate callability check
+        )
+        # Check the named budget contract without calling the backend. This
+        # prevents a structurally unsupported capability from failing after pay.
+        if supported:
+            inspect.signature(cast("Callable[..., HistoricalWalletOutput]", observer)).bind(
+                "00" * 32, b"\x51\x20" + bytes(32), deadline_seconds=1.0
+            )
+    except Exception:  # noqa: BLE001 - operator callback details may contain secrets
+        supported = False
+    if not supported:
+        raise SwapError(
+            "terminal settlement requires a synchronous historical wallet observer"
+        ) from None
+    return cast("Callable[..., HistoricalWalletOutput]", observer)
+
+
+async def _await_claim_settlement(  # noqa: PLR0913 - original operation and exact selected spend
+    lifetime: _ReverseLifetime,
+    observer: Callable[..., HistoricalWalletOutput],
+    selected: ClaimAttempt,
+    *,
+    network: NetworkIdentity,
+    destination: bytes,
+    value_sat: int,
+    depth: int,
+    report: Callable[[str], None],
+) -> None:
+    """Observe signed-depth completion; never resume the effectful watcher.
+
+    Historical output timestamps are epoch times, not execution clocks. Live
+    admission/result acceptance uses the original monotonic owner instead.
+    Both native claim constructors/validators require one destination output,
+    therefore its index is zero, not the funding contract's output index.
+    """
+    while True:
+        lifetime.check()
+
+        def acquire() -> HistoricalWalletOutput:
+            # Compute remaining time inside the admitted executor callback.
+            lifetime.check()
+            remaining = lifetime.deadline - time.monotonic()
+            observed = observer(selected.txid, destination, deadline_seconds=min(10.0, remaining))
+            # Dispose only native coroutines, without executing arbitrary
+            # awaitables. Do this here even if ownership expires during the call
+            # and the worker's result will never be admitted by its caller.
+            if inspect.iscoroutine(observed):
+                observed.close()
+            return observed
+
+        failed = False
+        expired = False
+        try:
+            observed = await lifetime.worker(acquire)
+            valid = (
+                type(observed) is HistoricalWalletOutput
+                and type(observed.network) is NetworkIdentity
+                and observed.network == network
+                and type(observed.txid) is str
+                and observed.txid == selected.txid
+                and type(observed.vout) is int
+                and observed.vout == 0
+                and type(observed.value_sat) is int
+                and observed.value_sat == value_sat - selected.fee_sat > 0
+                and type(observed.script_pubkey) is bytes
+                and observed.script_pubkey == destination
+                and type(observed.confirmations) is int
+                and observed.confirmations > 0
+                and type(observed.block_height) is int
+                and observed.block_height > 0
+                and type(observed.block_hash) is str
+                and re.fullmatch(r"[0-9a-f]{64}", observed.block_hash) is not None
+                and type(observed.started_at) in (int, float)
+                and math.isfinite(observed.started_at)
+                and type(observed.completed_at) in (int, float)
+                and math.isfinite(observed.completed_at)
+                and observed.started_at <= observed.completed_at
+            )
+        except TimeoutError:
+            expired = True
+        except Exception:  # noqa: BLE001 - upstream errors may carry private transaction material
+            failed = True
+        # Raise outside upstream handlers so public errors retain neither private
+        # callback arguments nor their exception context.
+        if expired:
+            raise TimeoutError
+        if failed:
+            raise SwapError("claim settlement observation is unresolved; " + _UNRESOLVED)
+        if not valid:
+            raise SwapError("claim settlement observation differs; " + _UNRESOLVED)
+        lifetime.check()
+        if observed.confirmations >= depth:
+            report(f"claim {selected.txid} observed at signed settlement depth {depth}")
+            lifetime.check()
+            return
+        await asyncio.sleep(min(POLL_SECONDS, max(0, lifetime.deadline - time.monotonic())))
+
+
 async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swap story
     connection: RelayConnection,
     *,
@@ -810,6 +929,7 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
     crypto: Context,
     timeout: float = 60.0,  # noqa: ASYNC109
     settle_timeout: float = 1800.0,
+    await_settlement: bool = False,
     report: Callable[[str], None] = lambda _line: None,
     funding_inclusion_observer: Callable[[FundingBinding, ContractTerms, float], None]
     | None = None,
@@ -821,9 +941,20 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
     It receives the original absolute monotonic settlement deadline, not a new
     budget. Failure stops progression; cancellation drains its worker before
     return. Work/publication may finish late, but late results authorize no claim.
+
+    Default completion is claim progress, not signed-depth terminal completion.
+    Explicit ``await_settlement=True`` requires the trusted wallet's synchronous
+    ``observe_historical_wallet_output`` capability before creating a session.
+    After the selected claim confirms, only read-only observation continues under
+    the original lifetime, enforcing the signed depth and active-block evidence.
+    The backend must perform fresh block-hash revalidation; its record's type
+    alone supplies no provenance. Success observes chain completion for that
+    claim, not irreversible finality, merchant payment or available inventory.
+    The outcome's existing five-field shape is unchanged in either mode.
     """
     if not math.isfinite(settle_timeout) or settle_timeout <= 0:
         raise SwapError("settlement timeout must be finite and positive")
+    settlement_observer = _settlement_capability(wallet, await_settlement=await_settlement)
     if funding_inclusion_observer is not None and (
         not callable(funding_inclusion_observer)
         or inspect.iscoroutinefunction(funding_inclusion_observer)
@@ -1074,6 +1205,21 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
             if outcome != "claim_confirmed" or claim_txid is None:
                 raise SwapError("the contract was spent by another transaction; " + _UNRESOLVED)
             report(f"claim {claim_txid} confirmed")
+            if settlement_observer is not None:
+                selected = [attempt for attempt in watcher.attempts if attempt.txid == claim_txid]
+                if len(selected) != 1:
+                    raise SwapError("selected claim settlement is unresolved; " + _UNRESOLVED)
+                await _await_claim_settlement(
+                    lifetime,
+                    settlement_observer,
+                    selected[0],
+                    network=network,
+                    destination=destination,
+                    value_sat=value,
+                    depth=terms.settlement_confirmations,
+                    report=report,
+                )
+                lifetime.check()
             return ReverseSwapOutcome(
                 session.session_id, contract, binding.funding_txid, claim_txid, value
             )

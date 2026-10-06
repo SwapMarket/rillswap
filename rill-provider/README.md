@@ -1827,6 +1827,16 @@ admission rule. All three custody snapshots stay immutable. No SDK restart, new
 payment, runtime adapter, startup/migration change or general recovery claim is
 added. The separate unidentified cooperative refusal remains a production blocker.
 
+A separate signed-depth SDK case explicitly exposes the original wallet's actual
+historical observation capability to a test-owned conversion adapter. It requests
+`await_settlement=True`, observes the selected claim with Core block-hash
+revalidation, and requires at least its signed depth three before SDK return.
+The original miner, send, deadline, retained funding hint and subsequent fresh
+merchant receipt/completion checks remain unchanged. Broadcast counts cannot grow
+while the SDK's read-only settlement phase runs. This proves the explicitly
+equipped SDK path, not automatic terminal support in the legacy merchant adapter,
+irreversible finality, remaining inventory or general production readiness.
+
 An internal **treasury accounting observer** is available as
 `rill_provider.lnd_treasury_observation.LndTreasuryObserver`. Provision a protected
 credential with only `info:read` and `offchain:read`, numeric loopback endpoint,
