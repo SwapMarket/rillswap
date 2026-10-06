@@ -412,6 +412,83 @@ test("manifest publication cannot downgrade configured missing consumer state or
   } finally { await f.cleanup(); }
 }, 15000);
 
+test.skipIf(process.env.RILLSWAP_RUN_MERCHANT_BROWSER !== "1")("default browser reads actual merchant HTTPS with an explicit leaf exception and original invoice gate", async () => {
+  const { chromium } = await import("@playwright/test");
+  const f = await fixture();
+  const contexts: Awaited<ReturnType<typeof chromium.launchPersistentContext>>[] = [];
+  try {
+    expect((await f.command("provision-https"))[2]).toBe(0); const consumerPath = configureConsumer(f);
+    expect((await f.command("provision-acceptance-https"))[2]).toBe(0); const serving = await f.start();
+    const expectedOrigin = f.config.origin!, now = Math.floor(Date.now() / 1000);
+    const parentHeaders = { Authorization: `Bearer ${admin}`, Origin: expectedOrigin, "Content-Type": "application/json" };
+    const created = await http(expectedOrigin + "/v1/intents", readFileSync(f.listener.cert), { method: "POST", headers: { ...parentHeaders, "Idempotency-Key": "browser_https_original_order_001" },
+      body: JSON.stringify({ orderRef: "browser-original-order", amountMsat: "1000000", expiresAt: now + 600 }) });
+    expect(created.status).toBe(201); const intent = JSON.parse(created.body), intentUrl = expectedOrigin + "/v1/intents/" + intent.id;
+    expect(intent.attempt).toBeNull(); expect(typeof intent.statusToken === "string").toBe(true); expect(intent.statusToken === admin).toBe(false);
+    const backend = new LndInvoiceBackend(lndRestTransport(f.config.endpoint!, readFileSync(f.lndTls.cert), fixtureCredential),
+      { origin: expectedOrigin, receiver, network: "regtest" }, readFileSync(f.config.issuanceKeyPath!));
+    const identity = await backend.identity(), ledger = MerchantLedger.open(f.config.ledgerPath!, identity);
+    const invoice = testInvoice("actual-browser-https", "1000000", now, now + 600);
+    try {
+      const attempt = ledger.createAttempt(intent.id, "browser_https_original_attempt_001", now);
+      await ledger.issue(attempt.id, { identity: async () => identity, create: async () => invoice }, () => now);
+    } finally { ledger.close(); }
+    const original = history(f.config.ledgerPath!), unbound = consumerHistory(consumerPath);
+    const compiled = await Bun.build({ entrypoints: ["src/sdk.ts"], target: "browser", format: "esm" });
+    expect(compiled.success).toBe(true); expect(compiled.outputs.length).toBe(1); const sdk = await compiled.outputs[0]!.text();
+    const spki = (certificate: string) => createHash("sha256").update(new X509Certificate(readFileSync(certificate)).publicKey.export({ type: "spki", format: "der" })).digest("base64");
+    async function browserFor(name: string, exception: string) {
+      const profile = join(f.directory, name), flag = "--ignore-certificate-errors-spki-list=" + exception;
+      const context = await chromium.launchPersistentContext(profile, { headless: true, ignoreHTTPSErrors: false, serviceWorkers: "block", args: [flag] }); contexts.push(context);
+      // Inspect only this runner's owned main browser, without dumping argv.
+      const listed = Bun.spawnSync(["ps", "-ww", "-o", "args=", "--ppid", String(process.pid)], { stdout: "pipe", stderr: "pipe" }); expect(listed.exitCode).toBe(0);
+      const matches = listed.stdout.toString("utf8").split("\n").map((line) => line.trim().split(/\s+/)).filter((args) => args.includes("--user-data-dir=" + profile));
+      expect(matches.length).toBe(1); const actual = matches[0]!;
+      expect(actual.includes(flag)).toBe(true); expect(actual.includes("--ignore-certificate-errors")).toBe(false); expect(actual.includes("--allow-insecure-localhost")).toBe(false);
+      const assets = new Map([
+        [expectedOrigin + "/owned-checkout", { type: "text/html", body: '<!doctype html><html lang="en"><meta charset="utf-8"><script type="module" src="/owned-boot.js"></script></html>' }],
+        [expectedOrigin + "/owned-boot.js", { type: "text/javascript", body: 'import {createCheckout} from "/owned-sdk.js"; window.createCheckout=createCheckout;' }],
+        [expectedOrigin + "/owned-sdk.js", { type: "text/javascript", body: sdk }],
+      ]);
+      expect(assets.has(intentUrl)).toBe(false);
+      await context.route((url) => assets.has(url.href), async (route) => {
+        expect(route.request().method()).toBe("GET");
+        const asset = assets.get(route.request().url())!;
+        await route.fulfill({ status: 200, contentType: asset.type, headers: { "Content-Security-Policy": "default-src 'none'; script-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'" }, body: asset.body });
+      });
+      const page = context.pages()[0] ?? await context.newPage(), failures: string[] = [], requests: number[] = [];
+      page.on("requestfailed", (request) => { if (request.url() === intentUrl && failures.length < 8) failures.push(request.failure()?.errorText ?? "unknown"); });
+      page.on("request", (request) => { if (request.url() === intentUrl) requests.push(1); });
+      await page.goto(expectedOrigin + "/owned-checkout"); await page.waitForFunction(() => typeof window.createCheckout === "function");
+      return { context, page, failures, requests };
+    }
+    const inputs = { intentUrl, token: intent.statusToken as string, origin: expectedOrigin, receiver, invoice };
+    const open = (page: Awaited<ReturnType<typeof browserFor>>["page"]) => page.evaluate(async (input) => {
+      const counters = { wallet: 0, begin: 0, update: 0, load: 0 }, progress: string[] = [];
+      const options = { intentUrl: input.intentUrl, statusToken: input.token,
+        policy: { version: "native-lightning/1" as const, merchantOrigin: input.origin, receiver: input.receiver, network: "regtest" as const, maxBuyerExtraMsat: "0", maxBuyerExtraBps: 0 },
+        wallet: { canLimitFees: true as const, payInvoice: async () => { counters.wallet++; } },
+        recoveryStore: { load: async () => { counters.load++; return null; }, begin: async () => { counters.begin++; return true; }, update: async () => { counters.update++; } } };
+      if (Object.hasOwn(options, "fetch") || !Function.prototype.toString.call(window.fetch).includes("[native code]")) throw new Error("Owned browser transport must remain native");
+      const checkout = window.createCheckout(options); checkout.on("progress", (event) => progress.push(event.state));
+      try { const view = await checkout.open(); return { refused: false, withheld: view.attempt === null, originalInvoice: view.attempt?.invoice === input.invoice, status: view.status, counters, progress }; }
+      catch { return { refused: true, withheld: true, originalInvoice: false, status: "unknown", counters, progress }; }
+    }, inputs);
+    const correct = await browserFor("browser-correct", spki(f.listener.cert));
+    expect(await open(correct.page)).toEqual({ refused: false, withheld: true, originalInvoice: false, status: "waiting", counters: { wallet: 0, begin: 0, update: 0, load: 0 }, progress: ["action_required"] });
+    expect(correct.requests.length).toBe(1); expect(correct.failures).toEqual([]); expect(consumerHistory(consumerPath)).toEqual(unbound);
+    const registered = await http(intentUrl + "/order-binding", readFileSync(f.listener.cert), { method: "PUT", headers: parentHeaders, body: JSON.stringify({ orderRef: "browser-original-order", amountMsat: "1000000" }) });
+    expect(registered.status).toBe(200); const bound = consumerHistory(consumerPath);
+    expect(await open(correct.page)).toEqual({ refused: false, withheld: false, originalInvoice: true, status: "waiting", counters: { wallet: 0, begin: 0, update: 0, load: 1 }, progress: ["ready"] });
+    expect(correct.requests.length).toBe(2); expect(correct.failures).toEqual([]); await correct.context.close();
+    const wrong = await browserFor("browser-wrong", spki(f.lndTls.cert));
+    expect(await open(wrong.page)).toEqual({ refused: true, withheld: true, originalInvoice: false, status: "unknown", counters: { wallet: 0, begin: 0, update: 0, load: 0 }, progress: [] });
+    expect(wrong.requests.length).toBe(1); expect(wrong.failures).toEqual(["net::ERR_CERT_AUTHORITY_INVALID"]); await wrong.context.close();
+    expect(consumerHistory(consumerPath)).toEqual(bound); expect(history(f.config.ledgerPath!)).toEqual(original);
+    await f.end(serving.child); expect(await serving.errors).toBe("");
+  } finally { try { for (const context of contexts) await context.close(); } finally { await f.cleanup(); } }
+}, 45000);
+
 const readerPython = process.env.RILLSWAP_MERCHANT_READER_PYTHON;
 test.skipIf(!readerPython)("leaf-pinned Python reader acquires actual Bun HTTPS view and events without issuing invoices", async () => {
   const f = await fixture();

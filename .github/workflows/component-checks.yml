@@ -34,6 +34,10 @@ jobs:
         run: bunx playwright install --with-deps chromium
       - name: Check native checkout cross-tab and reopen behavior
         run: bun run test:browser
+      - name: Check actual HTTPS merchant admission with default browser transport
+        run: |
+          RILLSWAP_RUN_MERCHANT_BROWSER=1 bun test tests/regtestMerchantHttpsDiagnostic.test.ts \
+            -t 'default browser reads actual merchant HTTPS'
 
   core:
     runs-on: ubuntu-24.04

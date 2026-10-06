@@ -199,6 +199,7 @@ checkout or multichain conformance has passed. Offline `rill-payments` and
 | M65 | Weak acceptance-key rejection | Zero-signature/small-order forgery regression, refusal before consumer file creation/open, byte-preserved older weak-key stores, normal generated-key replay and legacy mixed-order/ZIP-215 encoding compatibility; no history blessing, automatic rotation or migration |
 | M66 | Actual offline paid-context refusal classification | Native-crypto/local mock-repayment fixture executes the real missing-original-memory guard under the bounded probe, retaining the sanitized exception, durable rows/outbox and absent signing handles; no historical incident classification, new authority, deadline change or funded capture |
 | M67 | Bounded SDK merchant status reads | Setup-inclusive timeout and streamed byte cap, private fixed-origin GET policy, JSON/URL/redirect validation, late-completion isolation and older checkpoint protection; trusted URL-less injection preserved, no wallet deadline, automatic retry or new execution rights |
+| M68 | Actual default-browser HTTPS merchant reads | Unintercepted SDK status GET with an explicit owned leaf exception, certificate-specific wrong-leaf rejection, real invoice exposure gate and zero wallet/dispatch effects; no ordinary CA/hostname proof, payment, production bootstrap or runtime change |
 
 ## Test evidence and accounting
 

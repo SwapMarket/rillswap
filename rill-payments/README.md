@@ -494,6 +494,33 @@ single-store responsibilities and do not start a publisher. Normal startup still
 checks live LND identity. Manifest construction and retrieval add no probe or
 order-state change; publication snapshots the configured identity/key.
 
+An independent opt-in browser test now reads this actual Bun HTTPS service using
+the SDK's default fetch (not an injected adapter or intercepted status response).
+The owned synthetic LND endpoint supplies identity only; a signed fixture invoice
+is withheld until parent-only admin registration binds the original order price.
+The browser receives only a scoped status capability, retains independent
+origin/receiver/network pins, and never invokes a wallet or dispatch checkpoint.
+After binding it observes the same original invoice. No settlement or fulfillment
+is inferred. With pinned Chromium installed, run from `rill-payments`:
+
+```sh
+RILLSWAP_RUN_MERCHANT_BROWSER=1 bun test tests/regtestMerchantHttpsDiagnostic.test.ts \
+  -t 'default browser reads actual merchant HTTPS'
+```
+
+Two fresh private browser profiles use a selective exception for one independently
+known fixture leaf's SPKI. Actual main-browser arguments are checked for absence
+of broad TLS-ignore flags. The correct exception permits the real status GET;
+the wrong fixture leaf produces `ERR_CERT_AUTHORITY_INVALID` on that exact GET
+with no wallet/store effects. Only the owned app document and external modules
+are routed, on the same merchant origin under self-only CSP; status requests are
+never routed and service workers are blocked. Profiles and browser processes close
+before fixture cleanup. This exception is not restrictive certificate pinning
+(ordinary trusted CAs still apply), ordinary CA trust or hostname-enforcement
+proof. No system trust changes, production TLS bootstrap, remote invoice issuance,
+payment, funded capture, runtime or upgrade changes are introduced. The normal
+unit suite skips this case; CI explicitly runs it after installing Chromium.
+
 Publication alone does not enable order-binding enforcement. Configuring a
 consumer still requires its matching existing store; missing state refuses the
 whole listener rather than publishing with a downgraded gate. Previous configs
