@@ -533,13 +533,39 @@ spend budgets, not inventory balances. No signer/observer deployment, native
 inventory synchronization, batching, conversion output or automatic job runner
 is enabled. Payout failure cannot reopen a paid native or Lightning order.
 
-## LayerZero receive/retry artifacts
+## LayerZero quote/receive/retry artifacts
 
 `@rillswap/payments/layerzero` implements an inactive, source-pinned PacketV1
 observer and unsigned direct-delivery retry builder, not an enabled bridge rail.
 Protocol source pin is `9c741e7f9790639537b1710a203bcdfd73b0b9ac`; OFT source
 pin is `4973ba8bef7b0fdf7268469abea3ea50dbd4bbd8`. Package metadata alone does
 not establish that a deployed USDT0 contract matches either source.
+
+`quoteOftSend(path, request, sourceReader, destinationReader, clock)` reads
+`quoteOFT` and `quoteSend` for an explicit source wallet/recipient, amount,
+minimum, original extra options, native transport fee cap and receive gas cap.
+It checks both pinned deployments and libraries at block-bound snapshots, then
+revalidates both anchors. This supports only equal-sent/received default-debit
+quotes with no fee details, native fee payment, no compose/command, and one
+merged type3 positive-gas, zero-native-value receive option. Other semantics
+are unsupported, including zero-valued fee detail entries and custom options.
+
+Amounts round down to shared-unit precision. Reported nominal limits apply to
+the actual rounded debit, not unspent dust; they do not establish available
+liquidity or sendability. Shared amount fits uint64, while each chain's local
+amount uses its own decimals. Original extras are quoted, not the combined
+options (which would double-apply enforcement). The frozen JSON-safe quote
+includes dust, exact units, transport fee, public pins and block coordinates.
+`amountSentLD` and `amountReceivedLD` use source local units;
+`destinationAmountLD` independently converts the received shared units.
+Source gas/approvals and other downstream costs are not included. Sufficient
+delivery gas and actual deployed behavior still require independent conformance.
+
+The 60-second construction/use expiry is advisory, not a firm quote or freshness
+guarantee enforced by the chain. Requoting is required before any separately
+authorized execution. This API neither signs nor sends, grants spending or
+recovery rights, proves payer balances, nor establishes delivery/merchant receipt.
+Matching read responses do not discover conformance or enable production routes.
 
 Trusted configuration must independently validate both directional EIDs,
 endpoint/OFT/token/library code, peers, units and standard zero-value credit.

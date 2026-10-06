@@ -184,6 +184,7 @@ checkout or multichain conformance has passed. Offline `rill-payments` and
 | M50 | Explicit SDK signed-depth chain completion | Opt-in block-revalidated observation of the selected original claim within its original lifetime, no renewed financial effects; native cooperative/unilateral/older-selected tests and actual wallet backend conformance remain distinct from legacy claim progress, merchant completion and irreversible finality |
 | M51 | Explicit original conversion settlement | Strict boolean opt-in before consuming original invocation rights, same-wallet signed-depth SDK observation and unchanged default keywords; dispatched liabilities remain retained until independent fresh receipt reconciliation, with no persisted mode or restored execution rights |
 | M52 | Scoped paid-refusal diagnostic hygiene | Exact raise offsets and type identities, opaque private values, paid-context and late-worker attribution, bounded output, original trace/exception preservation; unknown branches or a passing run cannot classify historical incidents or relax production gates |
+| M53 | Read-only pinned OFT send quotes | Pinned IOFT ABI quote reads, rounded nominal limits/shared units, native fee and zero-value receive options, both deployment/library/anchor checks and advisory expiry; mocked protocol evidence is not live deployment conformance, spending authority or merchant receipt |
 
 ## Test evidence and accounting
 

@@ -5,6 +5,7 @@ export const LAYERZERO_SOURCE_PINS = Object.freeze({ protocol: "9c741e7f97906395
 const endpointAbi = new Interface([
   "function eid() view returns(uint32)", "function inboundPayloadHash(address,uint32,bytes32,uint64) view returns(bytes32)",
   "function lazyInboundNonce(address,uint32,bytes32) view returns(uint64)", "function getReceiveLibrary(address,uint32) view returns(address,bool)",
+  "function getSendLibrary(address,uint32) view returns(address)",
   "function lzReceive((uint32 srcEid,bytes32 sender,uint64 nonce),address,bytes32,bytes,bytes) payable",
   "event PacketSent(bytes encodedPayload,bytes options,address sendLibrary)",
   "event PacketDelivered((uint32 srcEid,bytes32 sender,uint64 nonce) origin,address receiver)",
@@ -12,6 +13,12 @@ const endpointAbi = new Interface([
 const oftAbi = new Interface(["function endpoint() view returns(address)", "function peers(uint32) view returns(bytes32)", "function token() view returns(address)",
   "function sharedDecimals() view returns(uint8)", "function decimalConversionRate() view returns(uint256)",
   "function oftVersion() pure returns(bytes4,uint64)", "event OFTReceived(bytes32 indexed guid,uint32 srcEid,address indexed toAddress,uint256 amountReceivedLD)"]);
+const sendParam = "(uint32 dstEid,bytes32 to,uint256 amountLD,uint256 minAmountLD,bytes extraOptions,bytes composeMsg,bytes oftCmd)";
+const quoteAbi = new Interface([
+  `function quoteOFT(${sendParam}) view returns((uint256 minAmountLD,uint256 maxAmountLD),(int256 feeAmountLD,string description)[],(uint256 amountSentLD,uint256 amountReceivedLD))`,
+  `function quoteSend(${sendParam},bool) view returns((uint256 nativeFee,uint256 lzTokenFee))`,
+  "function combineOptions(uint32,uint16,bytes) view returns(bytes)",
+]);
 const tokenAbi = new Interface(["function decimals() view returns(uint8)", "event Transfer(address indexed from,address indexed to,uint256 value)"]);
 const genesis: Readonly<Record<string, string>> = { "1": "0xd4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3", "11155111": "0x25a5cc106eea7138acab33231d7160d69cb777ee0c2c553fcddf5138993e6dd9" };
 const address = (value: string): boolean => /^0x[0-9a-f]{40}$/.test(value) && BigInt(value) !== 0n;
@@ -50,7 +57,7 @@ export function decodeOftPacket(encoded: string): OftPacket {
   if (nonce === 0n || srcEid === 0 || dstEid === 0 || amountShared === 0n || guid !== solidityPackedKeccak256(["uint64", "uint32", "bytes32", "uint32", "bytes32"], [nonce, srcEid, sender, dstEid, receiver])) throw new Error("Invalid OFT packet identity");
   return Object.freeze({ encoded: hexlify(bytes), nonce: nonce.toString(), srcEid, dstEid, sender, receiver, recipient, guid, message, amountShared: amountShared.toString(), payloadHash: keccak256(concat([guid, message])) });
 }
-function validatePath(path: OftPathway, packet: OftPacket): void {
+function validatePathway(path: OftPathway): void {
   if (path.version !== "oft-pathway/1" || path.sourcePin.protocol !== LAYERZERO_SOURCE_PINS.protocol || path.sourcePin.oft !== LAYERZERO_SOURCE_PINS.oft ||
       path.deploymentConformanceVerified !== true || path.zeroValueDirectCreditVerified !== true || path.nonUpgradeableVerified !== true) throw new Error("OFT pathway lacks conformance evidence");
   for (const side of [path.source, path.destination]) {
@@ -58,8 +65,11 @@ function validatePath(path: OftPathway, packet: OftPacket): void {
         ![side.endpoint, side.oft, side.token, side.messageLibrary].every(address) || ![side.endpointCodeHash, side.oftCodeHash, side.tokenCodeHash, side.messageLibraryCodeHash].every(bytes32) ||
         !Number.isInteger(side.tokenDecimals) || !Number.isInteger(side.sharedDecimals) || side.sharedDecimals < 0 || side.sharedDecimals > side.tokenDecimals || side.tokenDecimals > 36) throw new Error("Unpinned OFT deployment");
   }
-  if (path.source.eid === path.destination.eid || packet.srcEid !== path.source.eid || packet.dstEid !== path.destination.eid || packet.sender !== padded(path.source.oft) || packet.receiver !== padded(path.destination.oft) ||
-      path.source.sharedDecimals !== path.destination.sharedDecimals) throw new Error("OFT packet differs from approved direction");
+  if (path.source.eid === path.destination.eid || path.source.sharedDecimals !== path.destination.sharedDecimals) throw new Error("OFT packet differs from approved direction");
+}
+function validatePath(path: OftPathway, packet: OftPacket): void {
+  validatePathway(path);
+  if (packet.srcEid !== path.source.eid || packet.dstEid !== path.destination.eid || packet.sender !== padded(path.source.oft) || packet.receiver !== padded(path.destination.oft)) throw new Error("OFT packet differs from approved direction");
 }
 async function read(provider: EvmReader, target: string, abi: Interface, name: string, args: readonly unknown[], block: number) {
   return abi.decodeFunctionResult(name, await provider.call({ to: target, data: abi.encodeFunctionData(name, args), blockTag: block }));
@@ -135,6 +145,97 @@ export async function observeOftReceive(path: OftPathway, encodedPacket: string,
   if (snapshot?.number !== block.number || snapshot.hash?.toLowerCase() !== block.hash.toLowerCase()) throw new Error("OFT snapshot reorged");
   return Object.freeze({ state, packet, destinationQuantityBaseUnits: amount });
 }
+export interface OftQuoteReader extends EvmReader {
+  call(transaction: { to: string; data: string; blockTag?: number; from?: string }): Promise<string>;
+}
+export interface OftSendQuoteRequest {
+  readonly sourceWallet: string; readonly recipient: string;
+  readonly amountLD: string; readonly minAmountLD: string;
+  readonly extraOptions: string; readonly nativeFeeCapWei: string; readonly maxReceiveGas: string;
+}
+function quoteUint(value: string, bits = 256): bigint {
+  if (typeof value !== "string" || !/^(0|[1-9][0-9]{0,77})$/.test(value) || BigInt(value) >= 1n << BigInt(bits)) throw new Error("Invalid OFT quote quantity");
+  return BigInt(value);
+}
+function quoteBlock(block: Awaited<ReturnType<EvmReader["getBlock"]>>) {
+  if (!block?.hash || !bytes32(block.hash.toLowerCase()) || !Number.isSafeInteger(block.number) || block.number < 0 || !Number.isSafeInteger(block.timestamp) || block.timestamp < 0) throw new Error("Missing OFT quote snapshot");
+  return Object.freeze({ number: block.number, hash: block.hash.toLowerCase(), timestamp: block.timestamp });
+}
+function quoteDeployment(side: OftDeployment, block: ReturnType<typeof quoteBlock>) {
+  // Do not serialize unexpected caller-owned metadata alongside public pins.
+  return Object.freeze({ chainId: side.chainId, genesisHash: side.genesisHash, eid: side.eid,
+    endpoint: side.endpoint, endpointCodeHash: side.endpointCodeHash, oft: side.oft, oftCodeHash: side.oftCodeHash,
+    token: side.token, tokenCodeHash: side.tokenCodeHash, tokenDecimals: side.tokenDecimals, sharedDecimals: side.sharedDecimals,
+    messageLibrary: side.messageLibrary, messageLibraryCodeHash: side.messageLibraryCodeHash,
+    blockNumber: block.number, blockHash: block.hash, blockTimestamp: block.timestamp });
+}
+async function quoteRead(provider: OftQuoteReader, target: string, abi: Interface, name: string, args: readonly unknown[], block: number, from: string) {
+  const raw = await provider.call({ to: target, data: abi.encodeFunctionData(name, args), blockTag: block, from });
+  if (typeof raw !== "string" || !/^0x([0-9a-fA-F]{2})*$/.test(raw) || raw.length > 32770) throw new Error("Malformed OFT quote response");
+  const result = abi.decodeFunctionResult(name, raw);
+  if (abi.encodeFunctionResult(name, result).toLowerCase() !== raw.toLowerCase()) throw new Error("Noncanonical OFT quote response");
+  return result;
+}
+function receiveGas(options: string, cap: bigint): bigint {
+  const data = getBytes(options);
+  if (![22, 38].includes(data.length) || data[0] !== 0 || data[1] !== 3 || data[2] !== 1 || data[3] !== 0 || data[4] !== data.length - 5 || data[5] !== 1) throw new Error("Unsupported merged OFT receive options");
+  const gas = BigInt(hexlify(data.slice(6, 22)));
+  if (gas === 0n || gas > cap || (data.length === 38 && BigInt(hexlify(data.slice(22))) !== 0n)) throw new Error("OFT receive gas or native value exceeds policy");
+  return gas;
+}
+/** Read-only, advisory default-debit quote. Never spendability, delivery or receipt authority. */
+export async function quoteOftSend(path: OftPathway, request: OftSendQuoteRequest, sourceProvider: OftQuoteReader, destinationProvider: EvmReader, clock: () => number) {
+  // Capture all caller-owned configuration before asynchronous reads. Conformance
+  // flags are trusted prerequisites, not conformance discovered by quoting.
+  const approved = { ...path, sourcePin: { protocol: path.sourcePin.protocol, oft: path.sourcePin.oft }, source: { ...path.source }, destination: { ...path.destination } };
+  const input = { ...request }; validatePathway(approved);
+  const amount = quoteUint(input.amountLD), minimum = quoteUint(input.minAmountLD), feeCap = quoteUint(input.nativeFeeCapWei), gasCap = quoteUint(input.maxReceiveGas, 128);
+  if (!address(input.sourceWallet) || !address(input.recipient) || amount === 0n || minimum === 0n || minimum > amount || gasCap === 0n ||
+      typeof input.extraOptions !== "string" || !/^0x([0-9a-f]{2})*$/.test(input.extraOptions) || input.extraOptions.length > 8194 || (input.extraOptions !== "0x" && !input.extraOptions.startsWith("0x0003"))) throw new Error("Invalid OFT send quote request");
+  const createdAt = clock(), expiresAt = createdAt + 60;
+  if (!Number.isSafeInteger(createdAt) || createdAt < 0 || !Number.isSafeInteger(expiresAt)) throw new Error("Invalid OFT quote clock");
+  const { source, destination } = approved;
+  const rate = 10n ** BigInt(source.tokenDecimals - source.sharedDecimals), sent = amount / rate * rate, shared = sent / rate;
+  const destinationAmount = shared * 10n ** BigInt(destination.tokenDecimals - destination.sharedDecimals);
+  if (sent === 0n || sent < minimum || shared >= 1n << 64n || destinationAmount >= 1n << 256n) throw new Error("OFT quote amount cannot meet minimum or shared units");
+  try {
+    const sourceBlock = quoteBlock(await sourceProvider.getBlock("latest")), destinationBlock = quoteBlock(await destinationProvider.getBlock("latest"));
+    await verifyDeployment(source, destination, sourceProvider, sourceBlock.number);
+    await verifyDeployment(destination, source, destinationProvider, destinationBlock.number);
+    const from = input.sourceWallet;
+    const library = String((await quoteRead(sourceProvider, source.endpoint, endpointAbi, "getSendLibrary", [source.oft, destination.eid], sourceBlock.number, from))[0]).toLowerCase();
+    const receiveLibrary = String((await read(destinationProvider, destination.endpoint, endpointAbi, "getReceiveLibrary", [destination.oft, source.eid], destinationBlock.number))[0]).toLowerCase();
+    if (library !== source.messageLibrary || receiveLibrary !== destination.messageLibrary) throw new Error("OFT quote messaging library changed");
+    const mergedOptions = String((await quoteRead(sourceProvider, source.oft, quoteAbi, "combineOptions", [destination.eid, 1, input.extraOptions], sourceBlock.number, from))[0]).toLowerCase();
+    const gas = receiveGas(mergedOptions, gasCap);
+    // Quote the ORIGINAL extras, never the merged options (which would apply
+    // enforced options twice). Compose and command cannot be supplied here.
+    const params = [destination.eid, padded(input.recipient), amount, minimum, input.extraOptions, "0x", "0x"];
+    const [limits, fees, receipt] = await quoteRead(sourceProvider, source.oft, quoteAbi, "quoteOFT", [params], sourceBlock.number, from);
+    const [messaging] = await quoteRead(sourceProvider, source.oft, quoteAbi, "quoteSend", [params, false], sourceBlock.number, from);
+    if (fees.length !== 0 || BigInt(receipt[0]) !== sent || BigInt(receipt[1]) !== sent || BigInt(limits[0]) > BigInt(limits[1]) || sent < BigInt(limits[0]) || sent > BigInt(limits[1])) throw new Error("Unsupported OFT debit or nominal limits");
+    if (BigInt(messaging[1]) !== 0n || BigInt(messaging[0]) > feeCap) throw new Error("OFT messaging fees exceed native-only budget");
+    for (const [provider, block] of [[sourceProvider, sourceBlock], [destinationProvider, destinationBlock]] as const) {
+      const after = quoteBlock(await provider.getBlock(block.number));
+      if (after.number !== block.number || after.hash !== block.hash || after.timestamp !== block.timestamp) throw new Error("OFT quote snapshot changed");
+    }
+    const completedAt = clock();
+    if (!Number.isSafeInteger(completedAt) || completedAt < createdAt || completedAt >= expiresAt) throw new Error("OFT quote construction expired");
+    return Object.freeze({ version: "oft-send-quote/1" as const,
+      sourcePin: Object.freeze({ protocol: approved.sourcePin.protocol, oft: approved.sourcePin.oft }),
+      source: quoteDeployment(source, sourceBlock), destination: quoteDeployment(destination, destinationBlock),
+      sourceWallet: input.sourceWallet, recipient: input.recipient, amountLD: input.amountLD, minAmountLD: input.minAmountLD,
+      amountSentLD: sent.toString(), amountReceivedLD: sent.toString(), destinationAmountLD: destinationAmount.toString(), dustLD: (amount - sent).toString(),
+      limits: Object.freeze({ minAmountLD: BigInt(limits[0]).toString(), maxAmountLD: BigInt(limits[1]).toString() }),
+      nativeFeeWei: BigInt(messaging[0]).toString(), lzTokenFeeWei: "0" as const, nativeFeeCapWei: input.nativeFeeCapWei,
+      extraOptions: input.extraOptions, mergedOptions, receiveGas: gas.toString(), maxReceiveGas: input.maxReceiveGas,
+      sourceGasCostIncluded: false as const, createdAt, completedAt, expiresAt });
+  } catch {
+    // RPC exceptions may retain provider credentials or private upstream data.
+    throw new Error("OFT send quote observation is unresolved");
+  }
+}
+
 export interface OftRetryReader extends EvmReader {
   call(transaction: { to: string; data: string; blockTag?: number; from?: string; value?: bigint; gasLimit?: bigint }): Promise<string>;
   estimateGas(transaction: { from: string; to: string; data: string; value: bigint }): Promise<bigint>;
