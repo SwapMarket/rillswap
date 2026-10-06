@@ -277,6 +277,11 @@ jobs:
           RILLSWAP_RUN_BUN_MERCHANT=1 .venv/bin/python -m pytest -q \
             tests/test_merchant_source_pinned.py::test_pinned_https_merchant_source_credit_provenance \
             --basetemp=tmp/pytest-ci-merchant-proof
+      - name: Check bound merchant HTTPS admission and durable acceptance
+        run: |
+          RILLSWAP_RUN_BUN_MERCHANT=1 .venv/bin/python -m pytest -q \
+            tests/test_merchant_https_admission_pinned.py::test_pinned_https_native_admission_and_bound_acceptance \
+            --basetemp=tmp/pytest-ci-merchant-admission
       - name: Check owned merchant accounting and original reverse receipt
         run: |
           RILLSWAP_RUN_BUN_MERCHANT=1 .venv/bin/python -m pytest -q \

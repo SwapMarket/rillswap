@@ -195,6 +195,16 @@ exposure. Consumer files are never initialized or migrated by the service.
 Signed event delivery remains caller-controlled; this mode neither consumes
 events automatically nor executes fulfillment or renews SDK dispatch rights.
 
+The opt-in provider test `test_merchant_https_admission_pinned.py` bundles the
+owned `tests/regtestMerchantHttpsAdmission.ts` runner for actual isolated
+regtest Core/LND/HTTPS conformance. Parent-owned order/price and authenticated
+HTTPS retrieval pin the invoice before one original SDK native-wallet dispatch.
+The fixture checks receiver settlement separately, then acceptance commit,
+acknowledgment loss, application reopen and stable-ID redelivery. It neither
+uses the provider cooperative paid collector nor proves its historical failures
+resolved. This is not production fulfillment or process-crash/power-loss proof.
+Execution requires both existing LND/Bun opt-ins and pinned disposable fixtures.
+
 ## Merchant ledger
 
 Import `MerchantLedger` from `@rillswap/payments/merchant` in Bun. Provision

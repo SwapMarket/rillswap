@@ -1670,6 +1670,22 @@ remains opt-in. Fixture-owned children are reaped before namespace teardown and
 private TLS/bundle staging is deleted. This is diagnostic conformance, not
 production deployment approval; upgrading installs causes no automatic work.
 
+`tests/test_merchant_https_admission_pinned.py` separately proves the opt-in
+merchant order-binding gate with actual HTTPS/Core/LND and the original payments
+SDK. While the invoice is withheld, wallet dispatch and SDK checkpoints remain
+absent. Explicit admin registration and independent parent HTTPS retrieval pin
+the known order's exact invoice before one native LND payment through the owned
+private channel. Receiver observation establishes acceptance, not wallet success.
+Signed consumer acceptance survives acknowledgment loss and application reopen;
+the parent independently checks one stored binding/event and its signature.
+
+Run `RILLSWAP_RUN_LND=1 RILLSWAP_RUN_BUN_MERCHANT=1 .venv/bin/python -m pytest -q
+tests/test_merchant_https_admission_pinned.py` with the same pinned prerequisites.
+The existing fixture owns private TLS/bundle staging, child reaping and
+label-verified cleanup. This native-payer case does not rerun or classify the
+historical cooperative paid-refusal diagnostic. No external fulfillment,
+production funding or process-crash/power-loss durability is established.
+
 The separate `merchant_conversion` profile in
 `tests/test_merchant_conversion_pinned.py` combines those protected mounts with
 native crypto and the real provider/SDK lifecycle. One ordinary 200,000-sat
