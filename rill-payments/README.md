@@ -125,6 +125,42 @@ an independent settlement observer. A local marker alone cannot recover an
 unknown remote invoice. Existing installations gain no startup, migration or
 automatic network behavior; production integration remains disabled.
 
+## Durable bound Lightning acceptance consumer
+
+`@rillswap/payments/acceptance-consumer` exports the Bun-only
+`LightningAcceptanceConsumer`. Explicit `provision(path, identity)` creates a
+fresh private store; `open` never initializes, migrates or repairs a missing,
+partial, unsupported, foreign or altered store. Independently pin the merchant
+origin, signing public key, Lightning receiver and network. Mainnet stays disabled.
+Existing merchant version-1 stores and their startup behavior are unchanged.
+
+Call `bindOrder(orderRef, authoritativeOrderAmountMsat, terms)` from the trusted
+ecommerce backend after invoice issuance, but before buyer exposure/payment.
+The independent order price must equal the merchant terms; their origin,
+receiver and network must match the configured identity. Registration is
+immutable and allocates each intent, attempt and payment hash to one order.
+An event without an existing binding is refused, never historical auto-binding.
+Exact registration replay is harmless; unknown orders cannot be reconstructed
+from browser status, discovery metadata or signed event history.
+
+`consume(envelope, now)` verifies the existing signed Lightning acceptance
+contract and matches the bound identifiers, hash, amount and origin. Event
+storage and deduplication are transactional; repeated stable IDs return the same
+result, while changed content, cross-order IDs or replacement events are refused.
+`getOrder` derives `waiting`/`accepted` from stored evidence. Accepted reads and
+replays reverify the stored signed envelope and its binding/index consistency,
+not merely an unauthenticated paid marker. SQLite integrity checks alone are
+not acceptance provenance. `acceptedAt` is the producer's observation time:
+timely settlement may be observed after terms expire, so that timestamp does
+not supply an independent settlement-deadline check.
+
+This consumer does not execute fulfillment, reserve inventory, pay invoices,
+grant recovery rights or provide rollback-resistant custody. Persisted exact
+replay causes no external effects. A bound order without acceptance remains
+waiting; native sandbox, bridge/provider evidence and public status are not
+Lightning acceptance. Actual ecommerce order authentication, external effect
+idempotency and production deployment remain separate release gates.
+
 ## Merchant ledger
 
 Import `MerchantLedger` from `@rillswap/payments/merchant` in Bun. Provision
