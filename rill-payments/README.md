@@ -355,10 +355,38 @@ replacement valid certificate/key pair can serve. A mismatched key is refused;
 this is not enforcement of original-certificate continuity. Acquisition clients
 must independently retain and verify their original leaf pin.
 
+To opt into the accepted order-binding gate, first provision the merchant with
+the unchanged configuration above. Then explicitly add `acceptanceConsumerPath`
+as a canonical absolute path in the same private directory and provision only
+that fresh consumer:
+
+```sh
+RILLSWAP_REGTEST_MERCHANT=1 bun scripts/regtest-merchant.ts provision-acceptance-https /absolute/private/config.json
+RILLSWAP_REGTEST_MERCHANT=1 bun scripts/regtest-merchant.ts serve-https /absolute/private/config.json
+```
+
+The new command requires a matching existing merchant ledger and live LND
+identity. It exclusively creates one consumer, never overwrites or removes a
+failed/partial store. `provision-https` refuses consumer-configured input rather
+than attempting cross-file provisioning. Consumer paths and SQLite sidecar
+namespaces must not overlap the merchant store, configuration or credentials.
+The optional field is not accepted by legacy HTTP commands or the separate CLI.
+
+With the option present, serving opens both matching stores before any listener
+or timer. Missing, partial, unsupported, foreign or invalid consumer state
+refuses startup, never downgrades to unbound service. A valid empty consumer
+withholds invoices until explicit admin order registration. Existing invoices
+and history are retained; no historical binding, acceptance consumption or
+fulfillment happens at startup. Setup failure and shutdown close both handles.
+Old HTTPS configurations retain their original behavior. This remains a trusted
+regtest diagnostic, not a production service or rollback-resistant store.
+
 Offline tests use actual certificate-validated HTTPS and SQLite with a synthetic
 LND identity endpoint. They exercise wrong trust/hostname, malformed/mismatched
 or expired TLS, occupied-port refusal, retained inputs/history, and legacy HTTP
-compatibility. They issue no invoices or payments and do not establish real LND
+compatibility and explicit consumer startup/reopen. Additional gate cases use
+signed synthetic invoice fixtures, never remote invoice issuance or payment.
+They do not establish real LND
 identity, source-credit provenance or funded conversion. Exact leaf pinning before
 sending a capability remains a separate acquisition-client requirement. Existing
 installations receive no automatic profile selection, listener or migration.

@@ -1,11 +1,16 @@
-// Synthetic LND REST identity, actual Bun/HTTPS/SQLite. No invoices or funding.
+// Synthetic LND identity/invoice fixtures, actual Bun/HTTPS/SQLite. No funding.
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash, X509Certificate } from "node:crypto";
 import { request } from "node:https";
-import { join, resolve } from "node:path";
-import { receiver } from "./helpers";
+import { dirname, join, resolve } from "node:path";
+import { receiver, testInvoice } from "./helpers";
+import { LndInvoiceBackend, lndRestTransport } from "../src/lnd";
+import { MerchantLedger } from "../src/merchant";
+import { LightningAcceptanceConsumer } from "../src/acceptanceConsumer";
+import { ed25519 } from "@noble/curves/ed25519.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 
 const root = resolve("../tmp");
 const fixtureCredential = Buffer.from("synthetic-lnd-read-credential");
@@ -191,6 +196,144 @@ test("legacy HTTP commands retain their original configuration and serving behav
     expect((await f.command("provision"))[2]).toBe(0); const running = await f.start("serve");
     expect((await fetch(`http://127.0.0.1:${running.ready.port}/not-found`, { redirect: "error" })).status).toBe(404);
     await f.end(running.child); expect(await running.errors).toBe(""); expect(f.forbidden()).toBe(0);
+  } finally { await f.cleanup(); }
+}, 10000);
+
+function configureConsumer(f: Awaited<ReturnType<typeof fixture>>): string {
+  const path = join(f.directory, "acceptance.sqlite"); f.config.acceptanceConsumerPath = path; f.save(); return path;
+}
+function consumerIdentity(f: Awaited<ReturnType<typeof fixture>>) {
+  return { merchantOrigin: f.config.origin!, receiver, network: "regtest" as const,
+    merchantPublicKey: bytesToHex(ed25519.getPublicKey(readFileSync(f.config.eventKeyPath!))) };
+}
+function consumerHistory(path: string) {
+  const db = new Database(path, { readonly: true });
+  try { return ["metadata", "orders", "acceptances"].map((table) => db.query(`SELECT * FROM ${table} ORDER BY rowid`).all()); }
+  finally { db.close(); }
+}
+
+test("configured HTTPS consumer is explicitly provisioned and suppresses an original invoice until admin binding", async () => {
+  const f = await fixture();
+  try {
+    expect((await f.command("provision-https"))[2]).toBe(0);
+    const backend = new LndInvoiceBackend(lndRestTransport(f.config.endpoint!, readFileSync(f.lndTls.cert), fixtureCredential),
+      { origin: f.config.origin!, receiver, network: "regtest" }, readFileSync(f.config.issuanceKeyPath!));
+    const identity = await backend.identity(), ledger = MerchantLedger.open(f.config.ledgerPath!, identity), now = Math.floor(Date.now() / 1000);
+    let intentId: string, invoice: string;
+    try {
+      const intent = ledger.createIntent("original-https-order", "1000000", now + 600, "https_binding_intent_01", now);
+      const attempt = ledger.createAttempt(intent.id, "https_binding_attempt_01", now);
+      invoice = testInvoice("synthetic-https", "1000000", now, now + 600); intentId = intent.id;
+      await ledger.issue(attempt.id, { identity: async () => identity, create: async () => invoice }, () => now);
+    } finally { ledger.close(); }
+    const path = configureConsumer(f), originalHistory = history(f.config.ledgerPath!);
+    expect(await f.command("serve-https")).toEqual(["", "Regtest merchant diagnostic refused\n", 1]);
+    expect(existsSync(path)).toBe(false); expect(history(f.config.ledgerPath!)).toEqual(originalHistory);
+    expect(await f.command("provision-acceptance-https")).toEqual(['{"acceptanceProvisioned":true}\n', "", 0]);
+    const before = consumerHistory(path), inode = lstatSync(path).ino;
+    expect(await f.command("provision-acceptance-https")).toEqual(["", "Regtest merchant diagnostic refused\n", 1]);
+    expect(consumerHistory(path)).toEqual(before);
+    let serving = await f.start(); const headers = { Authorization: `Bearer ${admin}`, Origin: f.config.origin! };
+    const url = f.config.origin + "/v1/intents/" + intentId!;
+    const hidden = await http(url, readFileSync(f.listener.cert), { headers }); expect(hidden.status).toBe(200); expect(JSON.parse(hidden.body).attempt).toBeNull();
+    expect(consumerHistory(path)).toEqual(before);
+    const registered = await http(url + "/order-binding", readFileSync(f.listener.cert), { method: "PUT", headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify({ orderRef: "original-https-order", amountMsat: "1000000" }) });
+    expect(registered.status).toBe(200); expect(JSON.parse(registered.body).attempt.invoice).toBe(invoice!);
+    await f.end(serving.child); expect(await serving.errors).toBe(""); const bound = consumerHistory(path);
+    serving = await f.start(); const admitted = await http(url, readFileSync(f.listener.cert), { headers });
+    expect(JSON.parse(admitted.body).attempt.invoice).toBe(invoice!);
+    await f.end(serving.child); expect(await serving.errors).toBe(""); expect(consumerHistory(path)).toEqual(bound); expect(lstatSync(path).ino).toBe(inode);
+    expect(history(f.config.ledgerPath!)).toEqual(originalHistory);
+  } finally { await f.cleanup(); }
+}, 20000);
+
+test("consumer provisioning is a distinct explicit command against an existing merchant, never a bundled migration", async () => {
+  const f = await fixture();
+  try {
+    expect(await f.command("provision-acceptance-https")).toEqual(["", "Regtest merchant diagnostic refused\n", 1]);
+    const path = configureConsumer(f);
+    for (const command of ["provision-https", "provision-acceptance-https", "serve-https"]) expect(await f.command(command)).toEqual(["", "Regtest merchant diagnostic refused\n", 1]);
+    expect(existsSync(path)).toBe(false); expect(existsSync(f.config.ledgerPath!)).toBe(false);
+    for (const field of ["profile", "listenerPort", "listenerCertificatePath", "listenerKeyPath"]) delete f.config[field];
+    f.config.origin = "https://merchant.invalid"; f.save();
+    expect(await f.command("provision")).toEqual(["", "Regtest merchant diagnostic refused\n", 1]);
+    expect(existsSync(f.config.ledgerPath!)).toBe(false); expect(f.forbidden()).toBe(0);
+  } finally { await f.cleanup(); }
+}, 10000);
+
+for (const fault of ["partial", "older", "newer", "foreign_key", "schema", "symlink", "public"] as const) {
+  test(`configured HTTPS startup refuses ${fault} consumer state without repair or downgrade`, async () => {
+    const f = await fixture();
+    try {
+      expect((await f.command("provision-https"))[2]).toBe(0); const original = history(f.config.ledgerPath!), path = configureConsumer(f);
+      if (fault === "partial") writeFileSync(path, "", { mode: 0o600 });
+      else {
+        const identity = consumerIdentity(f);
+        LightningAcceptanceConsumer.provision(path, fault === "foreign_key" ? { ...identity, merchantPublicKey: "22".repeat(32) } : identity).close();
+        if (fault === "older" || fault === "newer" || fault === "schema") {
+          const db = new Database(path, { readwrite: true });
+          try { if (fault === "schema") db.exec("CREATE TABLE unknown_format (id TEXT)");
+            else db.query("UPDATE metadata SET value=? WHERE key='format'").run("lightning-acceptance-consumer/" + (fault === "older" ? "0" : "2"));
+          } finally { db.close(); }
+        } else if (fault === "symlink") { const alias = join(f.directory, "symlink.sqlite"); symlinkSync(path, alias); f.config.acceptanceConsumerPath = alias; f.save(); }
+        else if (fault === "public") chmodSync(path, 0o644);
+      }
+      const bytes = readFileSync(path), inode = lstatSync(path).ino;
+      expect(await f.command("serve-https")).toEqual(["", "Regtest merchant diagnostic refused\n", 1]);
+      await expect(http(f.config.origin!, readFileSync(f.listener.cert))).rejects.toThrow();
+      expect(readFileSync(path)).toEqual(bytes); expect(lstatSync(path).ino).toBe(inode); expect(history(f.config.ledgerPath!)).toEqual(original); expect(f.forbidden()).toBe(0);
+    } finally { await f.cleanup(); }
+  }, 10000);
+}
+
+test("consumer paths and SQLite sidecar namespaces cannot collide with stores, configuration or credentials", async () => {
+  const f = await fixture();
+  try {
+    expect((await f.command("provision-https"))[2]).toBe(0);
+    const credential = f.config.eventKeyPath!, originalLedger = f.config.ledgerPath!, originalMacaroon = f.config.macaroonPath!;
+    const inputs = [originalLedger, credential, originalMacaroon], before = immutable(inputs);
+    const invalidPaths = [f.path, originalLedger, originalLedger + "-wal", originalLedger + "-shm", originalLedger + "-journal",
+      credential, credential + "/../consumer.sqlite", "relative.sqlite", join(dirname(f.directory), "foreign.sqlite")];
+    for (const path of invalidPaths) {
+      f.config.acceptanceConsumerPath = path; f.save();
+      expect(await f.command("provision-acceptance-https")).toEqual(["", "Regtest merchant diagnostic refused\n", 1]);
+      expect(immutable(inputs)).toEqual(before);
+    }
+    f.config.acceptanceConsumerPath = join(f.directory, "sidecar.sqlite");
+    for (const suffix of ["-wal", "-shm", "-journal"]) {
+      f.config.macaroonPath = f.config.acceptanceConsumerPath + suffix; f.save();
+      expect(await f.command("provision-acceptance-https")).toEqual(["", "Regtest merchant diagnostic refused\n", 1]);
+      expect(existsSync(f.config.acceptanceConsumerPath)).toBe(false); expect(immutable(inputs)).toEqual(before);
+    }
+  } finally { await f.cleanup(); }
+}, 15000);
+
+test("occupied configured HTTPS listener closes both opened stores without starting observation", async () => {
+  const f = await fixture(); let blocker: ReturnType<typeof Bun.serve> | undefined;
+  try {
+    expect((await f.command("provision-https"))[2]).toBe(0); const path = configureConsumer(f);
+    expect((await f.command("provision-acceptance-https"))[2]).toBe(0);
+    const original = history(f.config.ledgerPath!), before = consumerHistory(path);
+    blocker = Bun.serve({ hostname: "127.0.0.1", port: f.port, fetch: () => new Response() });
+    expect(await f.command("serve-https")).toEqual(["", "Regtest merchant diagnostic refused\n", 1]);
+    expect(history(f.config.ledgerPath!)).toEqual(original); expect(consumerHistory(path)).toEqual(before); expect(f.forbidden()).toBe(0);
+    const reopened = LightningAcceptanceConsumer.open(path, consumerIdentity(f)); reopened.close();
+  } finally { blocker?.stop(true); await f.cleanup(); }
+}, 10000);
+
+test("explicit consumer provisioning refuses a foreign merchant ledger without creating its file", async () => {
+  const f = await fixture();
+  try {
+    expect((await f.command("provision-https"))[2]).toBe(0); const path = configureConsumer(f);
+    const db = new Database(f.config.ledgerPath!, { readwrite: true });
+    try {
+      const row = db.query("SELECT value FROM metadata WHERE key='identity'").get() as { value: string };
+      db.query("UPDATE metadata SET value=? WHERE key='identity'").run(JSON.stringify({ ...JSON.parse(row.value), origin: "https://foreign.invalid" }));
+    } finally { db.close(); }
+    const original = history(f.config.ledgerPath!);
+    expect(await f.command("provision-acceptance-https")).toEqual(["", "Regtest merchant diagnostic refused\n", 1]);
+    expect(existsSync(path)).toBe(false); expect(history(f.config.ledgerPath!)).toEqual(original);
   } finally { await f.cleanup(); }
 }, 10000);
 
