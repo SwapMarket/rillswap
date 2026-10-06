@@ -1846,6 +1846,17 @@ SDK return still requires separate fresh receipt reconciliation before merchant
 completion. Defaults, persisted formats and upgrade behavior do not enable the
 mode automatically or restore rights to existing jobs.
 
+Test-local paid-refusal diagnostics can name prevalidated explicit raise sites
+in the synchronous live-context and bound-invoice methods before sanitization.
+The probe uses a copied paid-phase context and temporary thread-scoped tracing,
+never exception text, arguments, locals or traceback chains. Fixed type/guard
+metadata is bounded; unknown sites and instrumentation conflicts remain unknown.
+Existing tracing is preserved and diagnostic failures must not replace original
+returns or exceptions. Hook overhead consumes the unchanged operation window.
+A late worker's named guard is not necessarily its canceled parent's cause.
+Neither unit coverage nor a successful capture run classifies historical paid
+refusals or closes their production release blockers.
+
 An internal **treasury accounting observer** is available as
 `rill_provider.lnd_treasury_observation.LndTreasuryObserver`. Provision a protected
 credential with only `info:read` and `offchain:read`, numeric loopback endpoint,
