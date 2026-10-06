@@ -43,6 +43,7 @@ from rill_provider.live_session_store import (
     StaleSwapError,
     _ReversePaidProposalEvidence,
 )
+from rill_provider.lnd_hold_invoice import _BoundInvoiceSyncBeforeSubmissionError
 from rill_provider.lnd_payment_observation import LndNotSyncedError, LndObservationError
 from rill_provider.settlement_policy import offered_terms
 
@@ -284,7 +285,10 @@ class ReverseSettlement:
         if len(work) == 1:
             # Repayment of the admitted debt; a concurrent settlement pass may
             # already have done it, which the paid evidence below rechecks.
-            await self.advance(work[0], now)
+            try:
+                await self.advance(work[0], now)
+            except _BoundInvoiceSyncBeforeSubmissionError:
+                await self._repay_original_unsynced_debt(document, now)
         async with self._store.reverse_operations.operation() as operation:
             evidence = await self._collect_paid_proposal_evidence(
                 document,
@@ -326,6 +330,70 @@ class ReverseSettlement:
                 return await self._step(work[0], now)
             finally:
                 self._operation = None
+
+    async def _repay_original_unsynced_debt(self, document: bytes, now: int) -> None:
+        """Resample only the original bound debt after a known no-dispatch refusal.
+
+        The first advance is unchanged. These remaining attempts cannot fund,
+        refund, renew cooperation, or retry an ambiguous financial submission.
+        """
+        window: ReverseCooperationWindow | None = None
+        completed = False
+        try:
+            async with self._store.reverse_operations.operation() as operation:
+                original = self._store._reverse_live_proposal_context(  # noqa: SLF001 - canonical original-owner join
+                    document, operation=operation, purpose="repayment"
+                )
+                window = original.window
+                # The preceding native join authenticates this exact document.
+                # Never accept a separately supplied work/session selector.
+                session_id = Envelope.model_validate_json(document, strict=True).session_id
+            for _ in range(TIP_AGREEMENT_ATTEMPTS - 1):
+                window.evidence_time()
+                await asyncio.sleep(TIP_AGREEMENT_PAUSE_SECONDS)
+                async with self._store.reverse_operations.operation() as operation:
+                    context = self._store._reverse_live_proposal_context(  # noqa: SLF001 - after gate wait, never reconstruct a grant
+                        document, operation=operation, purpose="repayment"
+                    )
+                    if context.window is not window or context.binding != original.binding:
+                        raise LiveSessionStoreError("reverse original repayment context differs")
+                    work = self._store.settlement_work(session_id=session_id)
+                    if not work:
+                        # Absence of work proves nothing. Affirmatively validate
+                        # SETTLED with the exact original preimage before returning.
+                        paid = self._store._reverse_live_proposal_context(  # noqa: SLF001 - native original SETTLED join, not financial proof
+                            document, operation=operation, purpose="paid-signing"
+                        )
+                        if paid.window is not window or paid.binding != original.binding:
+                            raise LiveSessionStoreError(
+                                "reverse original repayment context differs"
+                            )
+                        completed = True
+                        return
+                    if len(work) != 1 or work[0].state != "FUNDED" or work[0].preimage is None:
+                        raise LiveSessionStoreError("reverse original repayment work refused")
+                    binding = self._store._reverse_repayment_binding(session_id)  # noqa: SLF001 - same-operation bound-only classification
+                    if binding is None or binding != context.terms.invoice_binding:
+                        raise LiveSessionStoreError("reverse original repayment binding differs")
+                    self._operation = operation
+                    try:
+                        await self._settle_claim(
+                            work[0],
+                            context.terms,
+                            now,
+                            work[0].preimage,
+                            cooperation_window=window,
+                        )
+                    except _BoundInvoiceSyncBeforeSubmissionError:
+                        continue
+                    finally:
+                        self._operation = None
+                    completed = True
+                    return
+            raise LiveSessionStoreError("reverse original repayment synchronization refused")
+        finally:
+            if window is not None and not completed:
+                window.abandon()
 
     async def _acquire_proposal_debt(
         self,
@@ -749,19 +817,32 @@ class ReverseSettlement:
         )
 
     async def _settle_claim(
-        self, item: SettlementItem, terms: ContractTerms, now: int, preimage: str
+        self,
+        item: SettlementItem,
+        terms: ContractTerms,
+        now: int,
+        preimage: str,
+        *,
+        cooperation_window: ReverseCooperationWindow | None = None,
     ) -> str:
         operation = self._check_operation()
         self._store.record_reverse_settlement_preimage(
             item.session_id, from_state=item.state, preimage=preimage, now=now
         )
         binding = self._store._reverse_repayment_binding(item.session_id)  # noqa: SLF001 - owner-authenticated archive boundary
+        if cooperation_window is not None and binding is None:
+            raise LiveSessionStoreError("reverse original repayment binding absent")
         if binding is None:
             await self._settle(preimage, terms.invoice_binding.payment_hash)
         else:
             # Capture the actual task-owned token before queuing an RPC worker.
             # This checkpoint grants no signing authority or deadline renewal.
             submission_allowed = operation.submission_allowed
+            if cooperation_window is not None:
+
+                def submission_allowed() -> bool:
+                    return operation.submission_allowed() and cooperation_window.time_allowed()
+
             await self._worker(
                 self._hold.settle_bound_invoice,
                 binding,

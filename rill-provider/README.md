@@ -1022,6 +1022,32 @@ does not prove an unpaid invoice or create a recovery action. Older terminal
 A preimage already lost by a previous-release crash cannot be reconstructed by
 this fix and remains an unresolved recovery case.
 
+### Cooperative repayment sync refusals
+
+Original cooperative debt repayment may observe LND briefly unsynchronized after
+a block. The bound adapter distinguishes only a sync refusal inside its read-only
+GetInfo/LookupInvoice/GetInfo checks before the sole SettleInvoice dispatch. This
+trusted local signal proves no dispatch by that invocation, not the absence of an
+earlier submission, payment, custody, or renewed permission.
+
+Only the already-admitted original bound debt can be resampled, with four attempts
+total and the existing 0.5-second cadence. Each remaining attempt reacquires the
+owner gate and authenticates the same original proposal, funding binding, exact
+preimage, burned reservation and nonrenewing window. It cannot take another
+funding, refund or legacy-settlement branch. Missing work is not proof of payment;
+an affirmative original SETTLED join and fresh financial observations remain
+required before one scope-bound nonce and archived reply. Generic sync errors,
+setup failures and ambiguous post-dispatch errors do not authorize resampling.
+
+Expiry, refusal and cancellation after context acquisition abandon the original
+window. Cancellation while awaiting the initial gate cannot recover that context;
+it leaves the reservation burned and replay empty, never a fresh signing right.
+Late known repayment success remains recorded even when signing has expired.
+Existing independently owed debt repayment is unchanged. No schema, startup,
+backfill or reconstruction changes are added on upgrade; absent or partial live
+state confers no cooperation rights. This bounded fix does not establish general
+cooperative stability, rollback safety or production readiness.
+
 ### Operator entrypoint
 
 ```sh

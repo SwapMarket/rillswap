@@ -3622,7 +3622,7 @@ class LiveSessionStore:
         document: bytes,
         *,
         operation: ReverseOperation,
-        purpose: Literal["acquisition", "paid-signing"],
+        purpose: Literal["acquisition", "repayment", "paid-signing"],
     ) -> _ReverseLiveProposalContext:
         """Preflight original read inputs, never financial or signing authority.
 
@@ -3636,7 +3636,7 @@ class LiveSessionStore:
         Failure after identifying the original attempt abandons its window.
         """
         self.reverse_operations.check(operation)
-        if type(purpose) is not str or purpose not in ("acquisition", "paid-signing"):
+        if type(purpose) is not str or purpose not in ("acquisition", "repayment", "paid-signing"):
             raise LiveSessionStoreError("reverse proposal context purpose refused")
         context: _ReverseLiveProposalContext | None = None
         try:
@@ -3661,11 +3661,11 @@ class LiveSessionStore:
         document: bytes,
         *,
         operation: ReverseOperation,
-        purpose: Literal["acquisition", "paid-signing"],
+        purpose: Literal["acquisition", "repayment", "paid-signing"],
     ) -> _ReverseLiveProposalContext:
         """Check original context inside the caller's explicit owner transaction."""
         self.reverse_operations.check(operation)
-        if type(purpose) is not str or purpose not in ("acquisition", "paid-signing"):
+        if type(purpose) is not str or purpose not in ("acquisition", "repayment", "paid-signing"):
             raise LiveSessionStoreError("reverse proposal context purpose refused")
         if connection is not self._connection or not connection.in_transaction:
             raise LiveSessionStoreError("reverse proposal context connection refused")
@@ -3694,6 +3694,10 @@ class LiveSessionStore:
                 row is None
                 or not self._matches_reverse_negotiation(outer.session_id, row[3], row[:5])
                 or (purpose == "acquisition" and (row[6] != "FUNDED" or row[7] is not None))
+                or (
+                    purpose == "repayment"
+                    and (row[6] not in ("FUNDED", "SETTLED") or row[7] != payload.payment_preimage)
+                )
                 or (
                     purpose == "paid-signing"
                     and (row[6] != "SETTLED" or row[7] != payload.payment_preimage)

@@ -54,6 +54,15 @@ MAX_CLTV_DELTA = 2016
 MAX_EXPIRY_SECONDS = 7 * 24 * 3600
 MAX_MSAT = 21_000_000 * 100_000_000 * 1000
 
+
+class _BoundInvoiceSyncBeforeSubmissionError(LndNotSyncedError):
+    """Report bound settlement sync refusal before this invocation's dispatch.
+
+    This is a trusted adapter contract, not proof about earlier or concurrent
+    submissions, invoice payment, custody, or permission to repeat settlement.
+    """
+
+
 HoldState = Literal["OPEN", "ACCEPTED", "SETTLED", "CANCELED"]
 _STATES: dict[int, HoldState] = {
     lightning_pb2.Invoice.OPEN: "OPEN",
@@ -331,9 +340,16 @@ class LndHoldInvoices:
         call_deadline = _bounded_deadline(deadline)
         _check_submission_authority(call_deadline, submission_allowed)
         with self._connect() as calls:
-            observation, invoice = self._observe_bound_invoice_on_calls(
-                calls, expected, call_deadline, submission_allowed
-            )
+            try:
+                observation, invoice = self._observe_bound_invoice_on_calls(
+                    calls, expected, call_deadline, submission_allowed
+                )
+            except LndNotSyncedError:
+                # Only these read-only observations precede the dispatch below.
+                # Never translate setup, dispatch, or context-exit failures.
+                raise _BoundInvoiceSyncBeforeSubmissionError(
+                    "LND invoice observation requires a synchronized tip"
+                ) from None
             amount = int(expected.amount_msat)
             if observation.status.state == "SETTLED":
                 if invoice.amt_paid_msat < amount:
