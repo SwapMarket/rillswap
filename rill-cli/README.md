@@ -914,7 +914,40 @@ An explicit v2 request with an absent, partial, unsafe, incompatible or mismatch
 hint refuses without scanning, fallback, repair or overwrite and retains holds.
 A compatible hint is historical input subject to fresh proof. Older binaries
 reject v2. There is no startup read, backfill or migration, and no claim that
-original-SDK process death or restored database/fence authority is solved.
+general original-SDK process-death recovery or restored database/fence authority is solved.
+
+### Bounded original-SDK interruption conformance
+
+The funded conformance fixture isolates one SDK death boundary: the original
+process owns its reservation/invocation, publishes the actual funded recovery and
+encrypted inclusion hint, acknowledges capture, then is killed with SIGKILL
+before acquiring the claim signer. Provider, relay, Core, LND and merchant remain
+alive. This is not an SDK restart or transferable invocation right.
+
+Explicit manual `recover prepare-claim` and `recover broadcast-claim` use the
+**original signed funded recovery**, selected binding and original AGE identity.
+The metadata hint contains no claim key or preimage and cannot replace that
+recovery snapshot. Preparation verifies and privately encrypts a signed plan;
+broadcast requires `--acknowledge-regtest-preimage-disclosure` and a new durable
+encrypted exact-byte intent before preflight/submission. Even a rejected
+preflight can disclose the preimage. Unknown outcomes grant no automatic retry.
+Never create a replacement SDK operation, session, preimage or payment because
+the old process died or a hint is absent.
+
+The fixture validates the actual native unilateral transaction against original
+keys/preimage/binding, retains the liability until actual claim depth 3 and the
+one source payment settle, then uses saved-hint v2 fresh reconciliation for one
+atomic completion. Original encrypted recovery files remain unchanged. Its
+disposable miner is deliberately frozen during stable-tip capture and manual
+observation; this does not establish moving-tip availability.
+
+This gate covers only death **after funded/hint acknowledgment and before claim
+signing**, with retained original custody inputs and surviving external services.
+It does not cover arbitrary SDK death, ambiguous disclosure/broadcast recovery,
+lost or partial artifacts, multiple replacements, power loss, container/wallet
+recovery, database rollback or production custody. `watch-claim` is not used as
+proof of this route. No runtime recovery controller, startup action, migration or
+production funding enablement is added; upgrades retain existing behavior.
 
 ### Merchant credit correspondence (internal, provenance only)
 

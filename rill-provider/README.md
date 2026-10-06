@@ -1805,6 +1805,16 @@ and selecting a missing native library. Original recovery artifacts remain
 untouched; no runtime command deletes them. This is explicit regtest admission,
 not producer authentication, automatic recovery or production accounting.
 
+The separate original-SDK process-death case starts the original SDK in a child
+with its own fresh reservation and invocation right, waits for actual funding
+capture acknowledgment, and kills it before claim-signer acquisition. The
+parent-owned provider and daemons survive. Existing public regtest manual claim
+commands use only retained original funded recovery/custody inputs, followed by
+native actual-byte validation, one source payment/HTLC, approved claim depth and
+saved-hint fresh public completion. No SDK restart or new payment is made. The
+unchanged older cases remain separate; this exact instrumented boundary is not
+general crash, wallet, container, power-loss or production recovery acceptance.
+
 An internal **treasury accounting observer** is available as
 `rill_provider.lnd_treasury_observation.LndTreasuryObserver`. Provision a protected
 credential with only `info:read` and `offchain:read`, numeric loopback endpoint,

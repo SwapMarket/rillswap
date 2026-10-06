@@ -303,6 +303,7 @@ jobs:
             tests/test_merchant_conversion_pinned.py::test_pinned_operator_cli_verified_completion \
             tests/test_merchant_conversion_pinned.py::test_pinned_original_sdk_retains_encrypted_funding_inclusion_before_claim \
             tests/test_merchant_conversion_pinned.py::test_pinned_operator_cli_reconciles_original_saved_funding_hint \
+            tests/test_merchant_sdk_death_pinned.py::test_pinned_original_sdk_death_before_claim_recovers_with_original_keys \
             --basetemp=tmp/pytest-ci-treasury-cli
 
   cli:
