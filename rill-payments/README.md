@@ -514,6 +514,40 @@ installations receive no automatic profile selection, listener or migration.
 
 ## Regtest merchant API and SDK
 
+Lightning SDK merchant status reads now use a setup-inclusive ten-second
+header/body/decode budget. `merchantReadTimeoutMs` selects an integer from 1
+through 30000 milliseconds, captured at construction. This is not a wallet RPC
+deadline, invoice lifetime or settlement guarantee. Each explicit read makes
+one GET with bearer status capability, no credentials/referrer, no redirect or
+cache. No automatic retry or fallback is added.
+
+Reads require status 200, an `application/json` media type (case-insensitive,
+parameters allowed), valid UTF-8 and at most 8192 actual streamed bytes. Reported
+delivery URLs must equal the original intent URL and redirected responses are
+refused. Default fetch must report its delivery URL; an explicitly supplied
+trusted transport may return URL-less in-process responses. Injected transports
+must authenticate the pinned HTTPS origin and honor request policy; server
+adapters also own DNS/egress safeguards. Neither response URL fields nor matching
+body pins authenticate a privileged adapter that lies about delivery.
+
+These are deliberate availability restrictions: slow merchants, successful
+non-200 statuses, missing/unconventional JSON headers and oversized valid
+extensions that older readers accepted now refuse. Supported canonical views
+fit the cap; only request-budget configuration is adjustable. Timeout aborts and
+cancels best-effort without awaiting hung cleanup. Late transport completion
+cannot change checkout state/progress, create checkpoints or dispatch a wallet.
+The transport is trusted in-process code, not a JavaScript execution sandbox.
+Synchronous blocking code can delay timers and return; overdue results are then
+refused by monotonic admission checks. Abort/cancel cannot guarantee termination
+of a privileged adapter. The deadline bounds asynchronous waiting, not arbitrary
+JavaScript execution.
+
+Upgrading does not change stored checkpoints or grant recovery/retry rights.
+Failed reads create no checkpoint; older dispatched records retain duplicate
+payment protection. Partial/conflicting records retain existing verification.
+A user can explicitly request another status read, but timeout is never payment
+retry permission. Wallet dispatch barriers and financial deadlines are unchanged.
+
 `bun run merchant provision /absolute/private/config.json` is an explicit
 one-time operation. `bun run merchant serve /absolute/private/config.json` opens
 only that existing store and serves on `127.0.0.1:8787`. Put an HTTPS reverse

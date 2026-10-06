@@ -132,3 +132,42 @@ test("browser manifest parsing is advisory, pinned and immutable without network
   expect(result).toEqual({ receiverRetained: true, frozen: true, wrongPinRefused: true, extensionRefused: true, productionEnabled: false, quantum: "1000" });
   expect(externalRequests).toBe(0); expect(await page.evaluate(() => window.checkoutCalls())).toBe(0);
 });
+
+test("default browser status reads abort stalled HTTPS acquisition without dispatch or late paid progress", async ({ context }, info) => {
+  // The existing explicit fixture profile approves only this HTTPS origin.
+  // Do not bypass CSP or relax the default disconnected fixture.
+  const page = await context.newPage(); await page.goto("/?lnurl=1&case=" + encodeURIComponent(info.testId)); await page.waitForFunction(() => window.checkoutReady);
+  const view = await page.evaluate(() => {
+    const original = window.merchantReadView;
+    window.merchantReadView = { ...original, attempt: { ...original.attempt!, terms: { ...original.attempt!.terms, merchantOrigin: "https://receiver.example" } } };
+    return window.merchantReadView;
+  });
+  let release!: () => void, handled!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; }), finished = new Promise<void>((resolve) => { handled = resolve; });
+  let requests = 0; const observedHeaders: Record<string, string>[] = [];
+  const cors = { "Access-Control-Allow-Origin": new URL(page.url()).origin, "Access-Control-Allow-Headers": "authorization", "Access-Control-Allow-Methods": "GET", "Content-Type": "application/json" };
+  await context.route("https://receiver.example/**", async (route) => {
+    if (route.request().method() === "OPTIONS") { await route.fulfill({ status: 204, headers: cors }); return; }
+    requests++; observedHeaders.push(await route.request().allHeaders());
+    if (requests === 1) {
+      await held;
+      try { await route.fulfill({ status: 200, headers: cors, body: JSON.stringify({ ...view, status: "paid", attempt: null }) }); } catch {}
+      finally { handled(); }
+    } else await route.fulfill({ status: 200, headers: cors, body: JSON.stringify(view) });
+  });
+  const result = await page.evaluate(async () => {
+    const view = window.merchantReadView, terms = view.attempt!.terms; let wallet = 0, begin = 0, update = 0, refused = false;
+    const checkout = window.createCheckout({ intentUrl: terms.merchantOrigin + "/v1/intents/" + view.id, statusToken: "browser_bounded_read_capability_0001",
+      policy: { version: "native-lightning/1", merchantOrigin: terms.merchantOrigin, receiver: terms.receiver, network: "regtest", maxBuyerExtraMsat: "0", maxBuyerExtraBps: 0 },
+      wallet: { canLimitFees: true, payInvoice: async () => { wallet++; } }, recoveryStore: { load: async () => null, begin: async () => { begin++; return true; }, update: async () => { update++; } },
+      now: () => 1200, merchantReadTimeoutMs: 200 });
+    checkout.on("progress", (event) => { document.getElementById("tracking")!.textContent = event.state; });
+    try { await checkout.pay(); } catch { refused = true; }
+    const status = (await checkout.open()).status; return { refused, status, wallet, begin, update };
+  }).finally(async () => { release(); if (requests > 0) await finished; });
+  expect(result).toEqual({ refused: true, status: "waiting", wallet: 0, begin: 0, update: 0 }); expect(requests).toBe(2);
+  for (const headers of observedHeaders) {
+    expect(headers.authorization).toBe("Bearer browser_bounded_read_capability_0001"); expect(headers.referer).toBeUndefined(); expect(headers.cookie).toBeUndefined();
+  }
+  await expect(page.locator("#tracking")).toHaveText("ready"); expect(await page.evaluate(() => window.checkoutCalls())).toBe(0);
+});

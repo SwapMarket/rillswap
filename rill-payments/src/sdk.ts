@@ -41,7 +41,13 @@ export interface CheckoutOptions {
   readonly policy: NativePolicy;
   readonly wallet: LightningWallet;
   readonly recoveryStore: CheckoutStore;
+  /** Trusted transport: authenticate the pinned HTTPS origin and honor request
+   * policy. Server adapters also own DNS/egress controls. Response URL checks
+   * cannot authenticate a privileged injected implementation.
+   */
   readonly fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  /** Header/body/decode budget, not wallet payment or settlement lifetime. */
+  readonly merchantReadTimeoutMs?: number;
   readonly now?: () => number;
 }
 
@@ -51,7 +57,12 @@ export function createCheckout(options: CheckoutOptions) {
   if (endpoint.protocol !== "https:" || endpoint.origin !== options.policy.merchantOrigin || endpoint.username || endpoint.password || endpoint.search || endpoint.hash ||
       !/^\/v1\/intents\/[A-Za-z0-9_-]{16,128}$/.test(endpoint.pathname) || !/^[A-Za-z0-9_-]{32,128}$/.test(options.statusToken)) throw new Error("Untrusted intent URL or token");
   const intentId = endpoint.pathname.split("/").at(-1)!;
-  const request = options.fetch ?? fetch;
+  const suppliedFetch = options.fetch, suppliedReadBudget = options.merchantReadTimeoutMs;
+  if (suppliedFetch !== undefined && typeof suppliedFetch !== "function") throw new Error("Invalid merchant transport");
+  const intentHref = endpoint.href, injectedTransport = suppliedFetch !== undefined;
+  const request = suppliedFetch ?? fetch;
+  const merchantReadTimeoutMs = suppliedReadBudget === undefined ? 10_000 : suppliedReadBudget;
+  if (!Number.isSafeInteger(merchantReadTimeoutMs) || merchantReadTimeoutMs < 1 || merchantReadTimeoutMs > 30_000) throw new Error("Invalid merchant read budget");
   const now = options.now ?? (() => Math.floor(Date.now() / 1000));
   const listeners = new Set<(progress: CheckoutProgress) => void>();
   let current: IntentView | null = null;
@@ -66,9 +77,45 @@ export function createCheckout(options: CheckoutOptions) {
         binding.expires_at < terms.expiresAt || binding.created_at > now()) throw new Error("Invoice differs from merchant terms");
   };
   const load = async (): Promise<IntentView> => {
-    const response = await request(endpoint, { headers: { Authorization: `Bearer ${options.statusToken}` }, redirect: "error", cache: "no-store" });
-    if (!response.ok) throw new Error("Merchant status unavailable");
-    const raw = await response.json() as IntentView;
+    const controller = new AbortController(), started = performance.now();
+    let terminal = false, succeeded = false, timer: ReturnType<typeof setTimeout> | undefined;
+    let body: ReadableStream<Uint8Array> | null = null, reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    const stop = () => {
+      try { controller.abort(); } catch {}
+      try { const canceled = reader ? reader.cancel() : body?.cancel(); void canceled?.catch(() => {}); } catch {}
+    };
+    const checkBudget = () => {
+      if (terminal || performance.now() - started >= merchantReadTimeoutMs) { terminal = true; throw new Error("Merchant status unavailable"); }
+    };
+    const acquire = async (): Promise<IntentView> => {
+      const response = await request(new URL(intentHref), { headers: { Authorization: `Bearer ${options.statusToken}`, Accept: "application/json" },
+        redirect: "error", cache: "no-store", credentials: "omit", referrerPolicy: "no-referrer", signal: controller.signal });
+      body = response.body;
+      if (terminal) { stop(); throw new Error("Merchant status unavailable"); }
+      checkBudget();
+      if (response.status !== 200 || response.redirected || (response.url ? response.url !== intentHref : !injectedTransport) ||
+          response.headers.get("Content-Type")?.split(";")[0]?.trim().toLowerCase() !== "application/json" || !body) throw new Error("Merchant status unavailable");
+      reader = body.getReader(); const chunks: Uint8Array[] = []; let size = 0;
+      while (true) {
+        const next = await reader.read(); checkBudget(); if (next.done) break;
+        if (!(next.value instanceof Uint8Array) || (size += next.value.byteLength) > 8192) throw new Error("Merchant status unavailable");
+        if (next.value.byteLength === 0) continue;
+        chunks.push(new Uint8Array(next.value));
+      }
+      const bytes = new Uint8Array(size); let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      const raw = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as IntentView;
+      checkBudget(); return raw;
+    };
+    let raw: IntentView;
+    try {
+      const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => { terminal = true; reject(new Error("Merchant status unavailable")); stop(); }, merchantReadTimeoutMs); });
+      raw = await Promise.race([acquire(), deadline]); checkBudget(); succeeded = true;
+    } catch { throw new Error("Merchant status unavailable"); }
+    finally {
+      terminal = true; clearTimeout(timer); if (!succeeded) stop();
+      try { reader?.releaseLock(); } catch {}
+    }
     if (raw.version !== "checkout-view/1" || raw.id !== intentId || !["waiting", "paid", "reconciliation"].includes(raw.status)) throw new Error("Invalid merchant view");
     let attempt: IntentView["attempt"] = null;
     if (raw.attempt) {

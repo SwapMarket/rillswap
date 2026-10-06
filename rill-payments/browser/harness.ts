@@ -1,4 +1,4 @@
-import { createCheckout, indexedDbCheckoutStore } from "../src/sdk";
+import { createCheckout, indexedDbCheckoutStore, type IntentView } from "../src/sdk";
 import { mountTracking } from "../src/tracking";
 import { discoverLightningAddress, validateLnurlPayInvoice, requestLnurlPayInvoice } from "../src/lnurlPay";
 import { createNativeLightningMerchantManifest, parseNativeLightningMerchantManifest } from "../src/manifest";
@@ -15,12 +15,14 @@ declare global { interface Window { checkoutPay(): Promise<string>; checkoutCall
   requestLnurlPayInvoice: typeof requestLnurlPayInvoice;
   createNativeLightningMerchantManifest: typeof createNativeLightningMerchantManifest;
   parseNativeLightningMerchantManifest: typeof parseNativeLightningMerchantManifest;
+  createCheckout: typeof createCheckout; merchantReadView: IntentView;
   lnurlFixture: { receiver: string; invoice: string; hashedInvoice: string; metadata: string } } }
 window.discoverLightningAddress = discoverLightningAddress;
 window.validateLnurlPayInvoice = validateLnurlPayInvoice;
 window.requestLnurlPayInvoice = requestLnurlPayInvoice;
 window.createNativeLightningMerchantManifest = createNativeLightningMerchantManifest;
 window.parseNativeLightningMerchantManifest = parseNativeLightningMerchantManifest;
+window.createCheckout = createCheckout;
 
 const invoice = testInvoice("browser_fixture"); const binding = invoiceBinding(invoice, "regtest");
 const lnurlMetadata = '[["text/plain","Receiver"],["text/identifier","buyer@receiver.example"]]';
@@ -29,6 +31,7 @@ window.lnurlFixture = { receiver, invoice, metadata: lnurlMetadata,
 const terms = { version: "checkout/0.1" as const, policyVersion: "native-lightning/1" as const, merchantOrigin: "https://merchant.example",
   intentId: "browser_intent_0001", attemptId: "browser_attempt_001", receiver, network: "regtest" as const,
   amountMsat: binding.amount_msat, paymentHash: binding.payment_hash, expiresAt: 2000, buyerExtraMsat: "0" };
+window.merchantReadView = { version: "checkout-view/1", id: terms.intentId, status: "waiting", attempt: { terms, invoice } };
 let calls = 0;
 const checkout = createCheckout({ intentUrl: "https://merchant.example/v1/intents/" + terms.intentId, statusToken: "s".repeat(43),
   policy: { version: "native-lightning/1", merchantOrigin: terms.merchantOrigin, receiver, network: "regtest", maxBuyerExtraMsat: "100000", maxBuyerExtraBps: 1000 },
