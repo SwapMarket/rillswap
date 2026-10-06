@@ -1,5 +1,6 @@
 import { createCheckout, indexedDbCheckoutStore } from "../src/sdk";
 import { mountTracking } from "../src/tracking";
+import { discoverLightningAddress } from "../src/lnurlPay";
 import { invoiceBinding } from "../src/bolt11";
 import { receiver, testInvoice } from "../tests/helpers";
 import { createNativeSandboxCheckout, type NativeSandboxCheckpoint } from "../src/nativeSdk";
@@ -8,7 +9,8 @@ import { Wallet } from "ethers";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 
-declare global { interface Window { checkoutPay(): Promise<string>; checkoutCalls(): number; checkoutReady: boolean } }
+declare global { interface Window { checkoutPay(): Promise<string>; checkoutCalls(): number; checkoutReady: boolean; discoverLightningAddress: typeof discoverLightningAddress } }
+window.discoverLightningAddress = discoverLightningAddress;
 
 const invoice = testInvoice("browser_fixture"); const binding = invoiceBinding(invoice, "regtest");
 const terms = { version: "checkout/0.1" as const, policyVersion: "native-lightning/1" as const, merchantOrigin: "https://merchant.example",

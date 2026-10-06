@@ -39,6 +39,42 @@ no HTTP request or invoice issuance. Signature authentication and a metadata
 match do not independently establish the expected merchant/order/amount,
 current expiry, custody or settlement. Those checks remain the caller's duty.
 
+## Lightning Address discovery (no invoice request)
+
+`@rillswap/payments/lnurl-pay` exports
+`discoverLightningAddress(address, approvedOrigins, transport?)`. The caller
+independently approves canonical HTTPS receiver/callback origins. This strict
+profile accepts lowercase ASCII addresses, public DNS-form hostnames and default
+HTTPS ports. It rejects literal IPs, local/onion host profiles, unknown delegated
+callbacks, unsafe numeric bounds, duplicate-key JSON and missing identity metadata.
+These restrictions are toolkit policy, not universal LUD compliance.
+
+One GET retrieves the pay-request descriptor, with redirects refused,
+credentials/referrer omitted, a 10-second abort through streaming consumption,
+and a 64 KiB response limit. Non-success HTTP, non-JSON media types, malformed
+UTF-8 and metadata over 16 KiB are refused. Original metadata is preserved;
+claimed identifiers and description remain untrusted informational content.
+Use text rendering, never interpret the description as HTML.
+
+Default transport is available only in a browser document. Other hosts require
+an explicitly trusted transport enforcing DNS resolution, private-address
+rejection, connection pinning and egress policy. Origin approval alone is not
+general server SSRF protection, and browser CORS is not request-side protection.
+Injected transports must honor the abort contract through response-body reads.
+An empty `Response.url` is allowed only for explicitly trusted transports,
+including synthetic responses; default browser responses must retain the exact
+canonical discovery URL. Nonempty response URLs are always checked.
+Merchant browser CSP must separately permit its approved discovery origin.
+
+The frozen descriptor is transient, not a stored quote or execution capability.
+Its callback may contain sensitive capabilities: do not log it, persist it in
+ordinary checkout records, or expose it in status/explorer links. This function
+never calls that callback, requests an invoice, retries, or activates funding.
+Separate invoice retrieval can cause remote issuance and needs original order
+authorization, independent payee/amount/network/expiry validation and an explicit
+hash-profile choice. It does not establish recoverable merchant issuance or
+receipt verification; funded invoices must not be silently replaced.
+
 ## Merchant ledger
 
 Import `MerchantLedger` from `@rillswap/payments/merchant` in Bun. Provision
