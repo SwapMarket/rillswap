@@ -685,9 +685,11 @@ the store.
   origin>:<id>`. The first admitted request creates that intent under a
   route-specific idempotency key, with expiry `now + intentTtlSeconds`, one
   attempt and one invoice. Replays (including a concurrent first request that
-  lost the race) return the same intent and invoice. An existing intent not
-  created by this route, for example an admin intent with the same reference and
-  amount, is refused (`409`): consistency is not provenance.
+   lost the race) return the same intent and invoice. An existing intent without
+   the matching route-specific key, for example an ordinary admin intent with
+   the same reference and amount, is refused (`409`). The key is a consistency
+   linkage, not proof of authorship: admins can deliberately supply it and
+   already have order-binding authority.
 - A later store total that differs from the persisted intent, or a non-pending
   order, is refused (`409`); persisted terms are never replaced. Refusal does
   not revoke an issued invoice, so store cancellations and price changes after
@@ -695,14 +697,34 @@ the store.
 - Ambiguous issuance returns `202` with `actionRequired: "issuance_reconciliation"`;
   later requests (or `tick`) retry the same issuer operation.
 - With an acceptance consumer configured, the invoice stays hidden until the
-  trusted backend registers the order binding, as for admin intents.
+  trusted backend registers the order binding, as for admin intents. Optional
+  `wooCommerce.bindVerifiedOrders: true` explicitly delegates registration to
+  this verified-store backend instead of requiring a second admin request;
+  it requires a configured consumer. Absent/false preserves manual registration.
+  Each checkout must first admit a fresh store read, match the persisted amount
+  and route key, resolve issuance, and reverify the invoice amount/payee/hash
+  before binding complete terms and exposing the invoice. Binding conflicts or
+  corruption refuse with `503`; unknown issuance stays unbound (`202`). New
+  bindings require waiting state and an unexpired invoice (`409` otherwise), so
+  historical paid/reconciliation state cannot create a missing binding. Original
+  bindings replay without extending expiry or replacing terms.
+  The waiting-state check and consumer insertion are separate transactions;
+  this does not claim cross-database serialization against another process.
+  Configuration, source methods and returned price scalars are captured before
+  backend awaits. Custom source implementations are trusted backend code, not
+  untrusted transports.
 - The adapter never writes to the store and does not mark orders paid. The route
   is unauthenticated by design, so each well-formed request may cause one
   bounded store read; deploy it behind rate and concurrency limits.
 
 Upgrades: nothing changes unless the option is supplied. No schema or stored
-format changed. Existing intents carry no store provenance and are never adopted
-by this route. Mainnet remains disabled by the merchant ledger.
+format changed. Existing intents without the route key are never adopted by this
+route. Missing consumer bindings alone prove nothing: no startup, tick or status
+read registers them. Explicit true plus a fresh admitted checkout can register
+an older matching, waiting, unexpired invoice. A store read is a snapshot, not an
+order lock: price/status can change during issuance or after exposure, so this
+policy does not guarantee current Woo fulfillment eligibility. Actual receipt
+verification is unchanged. Mainnet remains disabled by the merchant ledger.
 
 Public references: [REST API v3 order retrieval](https://woocommerce.github.io/woocommerce-rest-api-docs/#retrieve-an-order),
 [HTTPS authentication](https://woocommerce.github.io/woocommerce-rest-api-docs/#authentication-over-https),

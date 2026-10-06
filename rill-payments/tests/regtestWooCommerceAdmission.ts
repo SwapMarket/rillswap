@@ -4,6 +4,9 @@ import { readFileSync } from "node:fs";
 import { createWooCommerceOrderSource, WooCommerceOrderRefused } from "../src/woocommerce";
 import { MerchantLedger } from "../src/merchant";
 import { createMerchantService } from "../src/server";
+import { LightningAcceptanceConsumer } from "../src/acceptanceConsumer";
+import { ed25519 } from "@noble/curves/ed25519.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 import { receiver, testInvoice } from "./helpers";
 
 const input = JSON.parse(readFileSync(process.argv[2]!, "utf8")) as {
@@ -32,14 +35,17 @@ if (process.argv[3] === "refusal" || process.argv[3] === "auth-refusal") {
 } else {
   const identity = { origin: "https://merchant.example", receiver, network: "regtest" as const, issuerId: "synthetic_woo_fixture" };
   const ledger = MerchantLedger.provision(input.ledgerPath, identity);
+  const eventKey = new Uint8Array(32).fill(3);
+  const consumer = LightningAcceptanceConsumer.provision(input.ledgerPath + ".consumer", { merchantOrigin: identity.origin, receiver,
+    network: identity.network, merchantPublicKey: bytesToHex(ed25519.getPublicKey(eventKey)) });
   let issued = 0;
   const issuer = { identity: async () => identity, create: async (operation: { operationId: string; amountMsat: string }) => {
     issued++; return testInvoice(operation.operationId, operation.amountMsat);
   } };
   const observer = { identity: async () => identity, lookup: async () => { throw new Error("No settlement authority in store diagnostic"); } };
   const service = createMerchantService({ ledger, issuer, observer, adminToken: "fixture_woo_admin_token_0000000000001",
-    statusKey: new Uint8Array(32).fill(2), eventSigningKey: new Uint8Array(32).fill(3), now: () => 1200,
-    wooCommerce: { source, intentTtlSeconds: 600, orderKeyGrantsStatusAccess: true } });
+    statusKey: new Uint8Array(32).fill(2), eventSigningKey: eventKey, now: () => 1200, acceptanceConsumer: consumer,
+    wooCommerce: { source, intentTtlSeconds: 600, orderKeyGrantsStatusAccess: true, bindVerifiedOrders: true } });
   const request = (key: string) => service.fetch(new Request(`${identity.origin}/v1/woocommerce/orders/${input.orderId}/checkout`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ orderKey: key }),
   }));
@@ -53,7 +59,8 @@ if (process.argv[3] === "refusal" || process.argv[3] === "auth-refusal") {
         a.attempt.terms.amountMsat !== "12345000" || b.attempt.terms.amountMsat !== "12345000" || issued !== 1 ||
         a.status !== "waiting" || b.status !== "waiting" || ledger.getIntent(a.id).status !== "waiting" ||
         ledger.pendingEvents().length !== 0) throw new Error("Real store admission mismatch");
+    if (consumer.getOrder(ledger.getIntent(a.id).order_ref).state !== "waiting") throw new Error("Verified store price was not bound");
     console.log(JSON.stringify({ admitted: true, amountMsat: a.attempt.terms.amountMsat, replayed: true, issued,
       fulfilled: ledger.getIntent(a.id).status === "paid" }));
-  } finally { ledger.close(); }
+  } finally { consumer.close(); ledger.close(); }
 }
