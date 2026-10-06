@@ -195,6 +195,7 @@ checkout or multichain conformance has passed. Offline `rill-payments` and
 | M61 | Explicit HTTPS consumer configuration and lifecycle | Separate fresh consumer provision against matching merchant state, strict open before listening, full identity/path/SQLite-sidecar collision checks and original invoice suppression; old configurations unchanged, no automatic initialization, repair, binding or fulfillment |
 | M62 | Advisory native Lightning merchant manifest | Closed canonical schema and browser parser, independent origin/key declarations, immutable regtest-only opt-in publication with no backend calls or writes; unsigned contents require authenticated origin delivery, no invoice authority, capability adoption or production route |
 | M63 | Explicit HTTPS manifest profile selection | Exact HTTPS-only string profile, TLS-verified public publication, rejection before backend calls/state creation, retained protected routes and optional consumer invoice gate; absent field remains 404, no default publication or production authority |
+| M64 | Keyless deterministic acceptance signer | Exclusive public-key/sign-byte capability, immutable original payload, verified output before exposure/ack, canonical prime-subgroup keys, child IPC/concurrent reads/ack-loss/reopen conformance; raw-key compatibility preserved, no hardware custody, nondeterministic signatures or stored-format change |
 
 ## Test evidence and accounting
 

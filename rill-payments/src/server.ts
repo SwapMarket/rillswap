@@ -12,10 +12,18 @@ export interface SignedAcceptance {
   readonly event: AcceptanceEvent;
   readonly signature: string;
 }
+const EVENT_FIELDS = "acceptedAt,amountMsat,attemptId,id,intentId,merchantOrigin,paymentHash,type,version";
 const eventBytes = (event: AcceptanceEvent): Uint8Array => new TextEncoder().encode(JSON.stringify([
   "rillswap-payment-event/1", event.version, event.id, event.merchantOrigin, event.type, event.intentId,
   event.attemptId, event.paymentHash, event.amountMsat, event.acceptedAt,
 ]));
+function validEvent(event: AcceptanceEvent): boolean {
+  return event.version === "checkout-event/1" && event.type === "payment.accepted" &&
+    Object.keys(event).sort().join(",") === EVENT_FIELDS &&
+    [event.id, event.intentId, event.attemptId].every((id) => /^[A-Za-z0-9_-]{16,128}$/.test(id)) &&
+    new URL(event.merchantOrigin).origin === event.merchantOrigin && event.merchantOrigin.startsWith("https://") &&
+    /^[0-9a-f]{64}$/.test(event.paymentHash) && /^[1-9][0-9]{0,18}$/.test(event.amountMsat) && Number.isSafeInteger(event.acceptedAt) && event.acceptedAt >= 0;
+}
 export function signAcceptance(event: AcceptanceEvent, key: Uint8Array): SignedAcceptance {
   return { algorithm: "Ed25519", publicKey: bytesToHex(ed25519.getPublicKey(key)), event,
     signature: bytesToHex(ed25519.sign(eventBytes(event), key)) };
@@ -24,11 +32,7 @@ export function signAcceptance(event: AcceptanceEvent, key: Uint8Array): SignedA
 export function verifyAcceptance(envelope: SignedAcceptance, expectedPublicKey: string): boolean {
   try {
     const event = envelope.event;
-    return envelope.algorithm === "Ed25519" && envelope.publicKey === expectedPublicKey && event.version === "checkout-event/1" && event.type === "payment.accepted" &&
-      Object.keys(event).sort().join(",") === "acceptedAt,amountMsat,attemptId,id,intentId,merchantOrigin,paymentHash,type,version" &&
-      [event.id, event.intentId, event.attemptId].every((id) => /^[A-Za-z0-9_-]{16,128}$/.test(id)) &&
-      new URL(event.merchantOrigin).origin === event.merchantOrigin && event.merchantOrigin.startsWith("https://") &&
-      /^[0-9a-f]{64}$/.test(event.paymentHash) && /^[1-9][0-9]{0,18}$/.test(event.amountMsat) && Number.isSafeInteger(event.acceptedAt) && event.acceptedAt >= 0 &&
+    return envelope.algorithm === "Ed25519" && envelope.publicKey === expectedPublicKey && validEvent(event) &&
       ed25519.verify(hexToBytes(envelope.signature), eventBytes(event), hexToBytes(expectedPublicKey));
   } catch { return false; }
 }
@@ -39,10 +43,24 @@ export interface MerchantServiceOptions {
   readonly adminToken: string;
   readonly statusKey: Uint8Array;
   readonly eventSigningKey: Uint8Array;
+  readonly acceptanceSigner?: never;
   readonly now?: () => number;
   readonly acceptanceConsumer?: LightningAcceptanceConsumer;
   readonly publishManifest?: boolean;
 }
+/** Dedicated acceptance key, not a wallet/spending signer. Implementations MUST
+ * produce standard RFC 8032 deterministic Ed25519 signatures for identical
+ * canonical bytes across retries, concurrency and restarts. Validity alone
+ * cannot prove this requirement; provider conformance is independently required.
+ */
+export interface AcceptanceSigner {
+  readonly publicKey: string;
+  sign(canonicalBytes: Uint8Array): Promise<Uint8Array>;
+}
+export type KeylessMerchantServiceOptions = Omit<MerchantServiceOptions, "eventSigningKey" | "acceptanceSigner"> & {
+  readonly eventSigningKey?: never;
+  readonly acceptanceSigner: AcceptanceSigner;
+};
 class HttpError extends Error { constructor(readonly status: number) { super("Checkout request refused"); } }
 const equal = (a: string, b: string): boolean => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 async function body(request: Request): Promise<Record<string, unknown>> {
@@ -56,8 +74,22 @@ async function body(request: Request): Promise<Record<string, unknown>> {
 }
 
 /** Runnable fetch handler plus durable-job tick; mounting and scheduling are explicit. */
-export function createMerchantService(options: MerchantServiceOptions) {
-  if (!/^[A-Za-z0-9_-]{32,128}$/.test(options.adminToken) || options.statusKey.length !== 32 || options.eventSigningKey.length !== 32) throw new Error("Persistent merchant authentication keys required");
+export function createMerchantService(options: MerchantServiceOptions | KeylessMerchantServiceOptions) {
+  const configuredSigner = "acceptanceSigner" in options;
+  const rawKey = options.eventSigningKey, signer = configuredSigner ? options.acceptanceSigner : undefined;
+  if (configuredSigner ? rawKey !== undefined || signer === undefined || signer === null : rawKey === undefined) throw new Error("Exactly one acceptance signing source required");
+  if (!/^[A-Za-z0-9_-]{32,128}$/.test(options.adminToken) || options.statusKey.length !== 32 || (rawKey !== undefined && rawKey.length !== 32)) throw new Error("Persistent merchant authentication keys required");
+  const signerPublicKey = signer?.publicKey, signerMethod = signer?.sign;
+  if (signer !== undefined && (typeof signerPublicKey !== "string" || !/^[0-9a-f]{64}$/.test(signerPublicKey) || typeof signerMethod !== "function")) throw new Error("Invalid acceptance signer");
+  if (signer !== undefined) {
+    try {
+      const point = ed25519.Point.fromBytes(hexToBytes(signerPublicKey!));
+      // ZIP-215 verification accepts small-order keys. External dedicated keys
+      // must instead be canonical, nonidentity, prime-subgroup signing keys.
+      if (point.isSmallOrder() || !point.isTorsionFree() || bytesToHex(point.toBytes()) !== signerPublicKey) throw new Error();
+    } catch { throw new Error("Invalid acceptance signer"); }
+  }
+  const customSign = signerMethod?.bind(signer);
   const { ledger } = options;
   const consumer = options.acceptanceConsumer;
   const publication = options.publishManifest;
@@ -66,10 +98,27 @@ export function createMerchantService(options: MerchantServiceOptions) {
   if (publishing && ledger.identity.network !== "regtest") throw new Error("Manifest publication is regtest only");
   // Opt-in pins the event key as well as binding identity. Default key behavior
   // remains unchanged; caller mutation cannot rotate an opted-in signing key.
-  const eventSigningKey = consumer || publishing ? new Uint8Array(options.eventSigningKey) : options.eventSigningKey;
+  const eventSigningKey = rawKey === undefined ? undefined : consumer || publishing ? new Uint8Array(rawKey) : rawKey;
+  const pinnedPublicKey = signerPublicKey ?? (consumer || publishing ? bytesToHex(ed25519.getPublicKey(eventSigningKey!)) : undefined);
   if (consumer && (consumer.identity.merchantOrigin !== ledger.identity.origin || consumer.identity.receiver !== ledger.identity.receiver ||
-      consumer.identity.network !== ledger.identity.network || consumer.identity.merchantPublicKey !== bytesToHex(ed25519.getPublicKey(eventSigningKey)))) throw new Error("Acceptance consumer identity mismatch");
-  const manifest = publishing ? createNativeLightningMerchantManifest(ledger.identity.origin, ledger.identity.receiver, bytesToHex(ed25519.getPublicKey(eventSigningKey))) : null;
+      consumer.identity.network !== ledger.identity.network || consumer.identity.merchantPublicKey !== pinnedPublicKey)) throw new Error("Acceptance consumer identity mismatch");
+  const manifest = publishing ? createNativeLightningMerchantManifest(ledger.identity.origin, ledger.identity.receiver, pinnedPublicKey!) : null;
+  const signedEvent = async (event: AcceptanceEvent): Promise<SignedAcceptance> => {
+    // Legacy raw mode deliberately retains the original mutable-key behavior.
+    if (!customSign) return signAcceptance(event, eventSigningKey!);
+    try {
+      if (Object.keys(event).sort().join(",") !== EVENT_FIELDS) throw new Error();
+      const captured = Object.freeze({ version: event.version, id: event.id, merchantOrigin: event.merchantOrigin, type: event.type,
+        intentId: event.intentId, attemptId: event.attemptId, paymentHash: event.paymentHash, amountMsat: event.amountMsat, acceptedAt: event.acceptedAt });
+      if ([captured.version, captured.id, captured.merchantOrigin, captured.type, captured.intentId, captured.attemptId, captured.paymentHash, captured.amountMsat].some((value) => typeof value !== "string") || !validEvent(captured)) throw new Error();
+      // The delegated signer receives its own byte copy, never the event object.
+      const signature = await customSign(eventBytes(captured));
+      if (!(signature instanceof Uint8Array) || signature.length !== 64) throw new Error();
+      const envelope: SignedAcceptance = { algorithm: "Ed25519", publicKey: signerPublicKey!, event: captured, signature: bytesToHex(new Uint8Array(signature)) };
+      if (!verifyAcceptance(envelope, signerPublicKey!)) throw new Error();
+      return Object.freeze(envelope);
+    } catch { throw new Error("Acceptance signing refused"); }
+  };
   const now = options.now ?? (() => Math.floor(Date.now() / 1000));
   const token = (intentId: string): string => createHmac("sha256", options.statusKey).update("checkout-status/1:" + ledger.identity.origin + ":" + intentId).digest("base64url");
   const snapshot = (intentId: string): IntentView => {
@@ -134,7 +183,11 @@ export function createMerchantService(options: MerchantServiceOptions) {
           consumer.bindOrder(input.orderRef, input.amountMsat, ledger.terms(attempt.id));
           return response(snapshot(intentId));
         }
-        if (operation === "events" && request.method === "GET") return response(ledger.eventsForIntent(intentId).map((event) => signAcceptance(event, eventSigningKey)));
+        if (operation === "events" && request.method === "GET") {
+          const signed: SignedAcceptance[] = [];
+          for (const event of ledger.eventsForIntent(intentId)) signed.push(await signedEvent(event));
+          return response(signed);
+        }
         if (operation === "attempts" && request.method === "POST") {
           if (!admin) throw new HttpError(403); // Read-only status capabilities cannot mutate order terms.
           const input = await body(request); if (Object.keys(input).length !== 0) throw new HttpError(400);
@@ -163,7 +216,7 @@ export function createMerchantService(options: MerchantServiceOptions) {
     },
     async deliverEvents(deliver: (event: SignedAcceptance) => Promise<void>): Promise<void> {
       for (const event of ledger.pendingEvents()) {
-        await deliver(signAcceptance(event, eventSigningKey));
+        await deliver(await signedEvent(event));
         ledger.acknowledgeEvent(event.id);
       }
     },

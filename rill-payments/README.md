@@ -205,6 +205,44 @@ uses the provider cooperative paid collector nor proves its historical failures
 resolved. This is not production fulfillment or process-crash/power-loss proof.
 Execution requires both existing LND/Bun opt-ins and pinned disposable fixtures.
 
+## Keyless acceptance signing
+
+`createMerchantService` also accepts `KeylessMerchantServiceOptions`: omit
+`eventSigningKey` and supply `acceptanceSigner: { publicKey, sign }` instead.
+The dedicated signer receives only canonical `rillswap-payment-event/1` bytes
+and asynchronously returns a 64-byte signature. Both or neither signing source
+is refused; a configured signer failure never falls back to local private bytes.
+Its public key and bound method are captured once. Custom keys must be canonical,
+nonidentity prime-subgroup Ed25519 keys, not small-order verification keys.
+
+The signer must produce **standard RFC 8032 deterministic Ed25519** signatures
+for identical bytes across retries, concurrency, restarts and provider replacement.
+Signature validity alone cannot prove deterministic conformance. Before adopting
+an external provider, compare its output byte-for-byte against the existing
+implementation. The consumer deduplicates complete serialized envelopes, so a
+different valid signature on replay is still a conflict. Nondeterministic
+providers are unsupported; no new signature cache or stored format is introduced.
+
+Authenticated event reads and explicit outbox delivery await signing, then verify
+the returned signature against the captured original event/key before exposing
+or acknowledging it. Returned bytes cannot change event terms. Failed signing
+returns no envelope and leaves the paid state/event pending; sanitized errors
+contain no signer reason or cause. Publication uses the pinned public key without
+invoking the signer. Manifest, consumer and event pins must still match.
+
+Existing `MerchantServiceOptions`, synchronous `signAcceptance`/`verifyAcceptance`,
+signature bytes and raw-key behavior remain compatible. Unconfigured raw mode
+retains its original mutable key reference; consumer/publication opt-in still
+copies Buffer-backed keys. No migration, backfill, automatic signing job, invoice
+refresh or new spending authority is added. Launcher key files remain unchanged;
+this capability is programmatic, not an automatic custody reconfiguration.
+
+An owned test-only child key holder exercises actual IPC, concurrent HTTP reads,
+lost acknowledgment and application/signer reopen with stable envelopes. It does
+not establish different-UID isolation, hardware custody, human approval or
+production signer conformance. Dedicated acceptance keys must never be reused
+as wallet/spending keys. Production custody remains a separate release gate.
+
 ## Advisory native Lightning merchant manifest
 
 `createMerchantService({ ...options, publishManifest: true })` explicitly
