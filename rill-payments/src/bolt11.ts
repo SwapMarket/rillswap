@@ -18,6 +18,9 @@ const HASH_WORDS = 52;
 const PAYEE_WORDS = 53;
 const MULTIPLIER: Record<string, bigint> = { "": 100_000_000_000n, m: 100_000_000n, u: 100_000n, n: 100n };
 const ACCEPTED_FEATURES = new Set([8, 9, 14, 15, 17, 25]);
+// s, x, n, c: fields that must appear at most once (see parseFields). A
+// repeated `9` stays last-wins; tests/bolt11Metadata.test.ts relies on it.
+const BINDING_TAGS = new Set([16, 6, 19, 24]);
 const encoder = new TextEncoder();
 
 export class InvoiceRejectedError extends Error {
@@ -162,6 +165,7 @@ function parseFields(words: readonly number[]): Fields {
     metadataHashCanonical: false,
     hasDescription: false,
   };
+  const seen = new Set<number>();
   let index = 0;
   while (index < words.length) {
     if (index + 3 > words.length) throw new InvoiceRejectedError("tagged field truncated");
@@ -180,7 +184,24 @@ function parseFields(words: readonly number[]): Fields {
         fields.metadataHashCanonical = (value[HASH_WORDS - 1]! & 15) === 0;
       }
     }
-    // A reader skips a field of unexpected length; the first valid one wins.
+    // Payment hash, secret and payee must have their fixed length, and the
+    // payment hash must appear once (BOLT11 reader rules, lightning/bolts#1357).
+    // Otherwise different components could pick different hashes from one
+    // signed invoice, as in the 2026 lnp2pbot loss.
+    if (type === 1) {
+      if (length !== HASH_WORDS) throw new InvoiceRejectedError("payment hash length invalid");
+      if (fields.paymentHash !== null) throw new InvoiceRejectedError("multiple payment hashes");
+    }
+    if ((type === 16 && length !== HASH_WORDS) || (type === 19 && length !== PAYEE_WORDS)) {
+      throw new InvoiceRejectedError("fixed-length field invalid");
+    }
+    // Secret, payee, expiry and CLTV feed the binding and payment.
+    // Readers disagree on repeats (LND keeps the first), so refuse them.
+    if (BINDING_TAGS.has(type)) {
+      if (seen.has(type)) throw new InvoiceRejectedError("duplicate binding field");
+      seen.add(type);
+    }
+    // Description hashes keep the older skip rule (see bolt11Metadata tests).
     if (type === 1 && length === HASH_WORDS && fields.paymentHash === null) {
       fields.paymentHash = bytesToHex(wordsToBytes(value, false).slice(0, 32));
     } else if (type === 16 && length === HASH_WORDS && fields.paymentSecret === null) {

@@ -85,3 +85,28 @@ test("ordinary modern unhashed invoice acceptance remains unchanged", () => {
   expect(invoiceBinding(signed, "regtest").payee_compressed_pubkey).toBe(receiver);
   expect(() => invoiceMetadataBinding(signed, "regtest", "metadata")).toThrow("description tags");
 });
+
+// lightning/bolts#1357 (stacker.news/items/1576513): one signed invoice must
+// not let different components pick different payment hashes.
+test("multiple or malformed payment hashes are refused by every reader", () => {
+  const other = tag(1, bech32.toWords(new Uint8Array(32).fill(7)));
+  for (const tags of [[other], [tag(1, [1])], [tag(1, bech32.toWords(new Uint8Array(33)))]]) {
+    const signed = invoice(tags);
+    expect(() => decodeBolt11(signed)).toThrow("Invoice refused");
+    expect(() => invoiceBinding(signed, "regtest")).toThrow("Invoice refused");
+    expect(() => invoiceMetadataBinding(signed, "regtest", "exact")).toThrow("Invoice refused");
+  }
+  expect(() => decodeBolt11(invoice([other]))).toThrow("multiple payment hashes");
+  // Wrong-length payment secret or payee is also refused instead of skipped.
+  expect(() => decodeBolt11(invoice([tag(16, [1])]))).toThrow("fixed-length");
+  expect(() => decodeBolt11(invoice([tag(19, [1])]))).toThrow("fixed-length");
+  // Repeated binding fields (secret, expiry, payee, CLTV) are
+  // resolved differently by readers (LND keeps the first), so they are refused.
+  // The fixture already carries s, x and n once; c is added twice.
+  for (const repeated of [[tag(16, bech32.toWords(new Uint8Array(32).fill(9)))], [tag(6, [1, 0])],
+    [tag(19, bech32.toWords(hexToBytes(receiver)))], [tag(24, [9]), tag(24, [9])]]) {
+    expect(() => decodeBolt11(invoice(repeated))).toThrow("duplicate binding field");
+  }
+  expect(decodeBolt11(invoice([tag(24, [9])])).minFinalCltvDelta).toBe(9);
+  expect(invoiceBinding(invoice([]), "regtest").payee_compressed_pubkey).toBe(receiver);
+});
