@@ -1837,6 +1837,15 @@ while the SDK's read-only settlement phase runs. This proves the explicitly
 equipped SDK path, not automatic terminal support in the legacy merchant adapter,
 irreversible finality, remaining inventory or general production readiness.
 
+An additional public-conversion case calls
+`run_reserved_conversion(..., await_settlement=True)` without a private-backend
+shim. The original destination wallet adapter forwards observation to its same
+pinned Core backend. Strict option admission precedes consuming invocation rights;
+the original payment/checkpoint/dispatch barriers and deadlines remain unchanged.
+SDK return still requires separate fresh receipt reconciliation before merchant
+completion. Defaults, persisted formats and upgrade behavior do not enable the
+mode automatically or restore rights to existing jobs.
+
 An internal **treasury accounting observer** is available as
 `rill_provider.lnd_treasury_observation.LndTreasuryObserver`. Provision a protected
 credential with only `info:read` and `offchain:read`, numeric loopback endpoint,

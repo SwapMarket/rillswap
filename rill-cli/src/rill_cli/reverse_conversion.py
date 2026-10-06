@@ -54,7 +54,7 @@ if TYPE_CHECKING:
 
     from rill_cli.conversion_journal import ConversionJournal, ConversionReservation, _LiveRight
     from rill_cli.hold_payment import HoldStatus
-    from rill_cli.wallet_rpc import ConfirmedOutput
+    from rill_cli.wallet_rpc import ConfirmedOutput, HistoricalWalletOutput
 
 
 class ReverseConversionError(ValueError):
@@ -100,6 +100,20 @@ class _DestinationWallet:
 
     def wallet_confirmations(self, txid: str) -> int | None:
         return self._wallet.wallet_confirmations(txid)
+
+    def observe_historical_wallet_output(
+        self,
+        txid: str,
+        treasury_script: bytes,
+        *,
+        deadline_seconds: float = 10,
+    ) -> HistoricalWalletOutput:
+        """Reuse the original pinned operator backend for explicit observation."""
+        return self._wallet.observe_historical_wallet_output(
+            txid,
+            treasury_script,
+            deadline_seconds=deadline_seconds,
+        )
 
     def broadcast(
         self,
@@ -408,6 +422,7 @@ async def run_reserved_conversion(  # noqa: PLR0913 - one explicit original exec
     timeout: float = 60,  # noqa: ASYNC109 - existing SDK response timeout, no new protocol
     settle_timeout: float = 1800,
     retain_funding_inclusion: bool = False,
+    await_settlement: bool = False,
 ) -> ReverseSwapOutcome:
     """Invoke once with durable bindings; leave completion/release evidence pending.
 
@@ -416,6 +431,11 @@ async def run_reserved_conversion(  # noqa: PLR0913 - one explicit original exec
     Capture failure after payment stops progression with the liability retained;
     inspection, never replacement execution, is required. Old/missing hints
     trigger no acquisition, provisioning, migration or restored invocation rights.
+
+    Explicit ``await_settlement=True`` asks that same original SDK execution to
+    observe signed-depth chain completion, using the original wallet and lifetime.
+    Neither opt-in persists or completes a receipt, releases the liability, or
+    grants a reopened job new execution rights. Default SDK keywords stay intact.
     """
     outcome = None
     try:
@@ -429,6 +449,7 @@ async def run_reserved_conversion(  # noqa: PLR0913 - one explicit original exec
         if (
             not isinstance(limits, ReverseSwapLimits)
             or type(retain_funding_inclusion) is not bool
+            or type(await_settlement) is not bool
             or not isinstance(credentials, X25519Credentials)
             or any(
                 type(getattr(limits, field.name)) is not int or getattr(limits, field.name) < 0
@@ -507,6 +528,8 @@ async def run_reserved_conversion(  # noqa: PLR0913 - one explicit original exec
         )
         # Default callers receive exactly the original keywords, even when the
         # concrete SDK has been replaced by a closed-signature implementation.
+        if await_settlement:
+            swap = partial(swap, await_settlement=True)
         if retain_funding_inclusion:
             outcome = await swap(funding_inclusion_observer=owner.capture_funding_inclusion)
         else:

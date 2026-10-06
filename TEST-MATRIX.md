@@ -182,6 +182,7 @@ checkout or multichain conformance has passed. Offline `rill-payments` and
 | M48 | Actual pending incoming LND accounting | Receiver's zero-push channel retains its measured zero local floor while incoming 1,000,000-msat hold remains separate; receiver-scoped accounting and independent payer read credentials, original send budget and single cancellation preserved; no wallet-balance, atomicity or spendability claim |
 | M49 | Positive-only claim confirmation evidence | Conflicted negative wallet depths and malformed callbacks never confirm an attempt; older positive attempts still win, depth-one behavior and post-callback lifetime checks remain unchanged; wallet HTTP-adapter simulation and native SDK compatibility are separate from actual funded conflict or depth-policy proof |
 | M50 | Explicit SDK signed-depth chain completion | Opt-in block-revalidated observation of the selected original claim within its original lifetime, no renewed financial effects; native cooperative/unilateral/older-selected tests and actual wallet backend conformance remain distinct from legacy claim progress, merchant completion and irreversible finality |
+| M51 | Explicit original conversion settlement | Strict boolean opt-in before consuming original invocation rights, same-wallet signed-depth SDK observation and unchanged default keywords; dispatched liabilities remain retained until independent fresh receipt reconciliation, with no persisted mode or restored execution rights |
 
 ## Test evidence and accounting
 

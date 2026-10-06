@@ -306,6 +306,7 @@ jobs:
             tests/test_merchant_sdk_death_pinned.py::test_pinned_original_sdk_death_before_claim_recovers_with_original_keys \
             tests/test_merchant_sdk_fallback_death_pinned.py::test_pinned_original_sdk_death_after_signed_fallback_recovers_with_original_keys \
             tests/test_merchant_sdk_settlement_pinned.py::test_pinned_original_sdk_awaits_actual_wallet_claim_depth_three \
+            tests/test_merchant_conversion_settlement_pinned.py::test_pinned_public_conversion_observes_signed_claim_depth_with_original_wallet \
             --basetemp=tmp/pytest-ci-treasury-cli
 
   cli:

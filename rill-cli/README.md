@@ -179,6 +179,16 @@ execution authority remains monotonic. This is sampled terminal chain completion
 for that claim, not irreversible finality, merchant fulfillment, remaining
 inventory or restored execution rights. Existing installations keep the default;
 missing or older metadata never enables the stronger mode automatically.
+
+`run_reserved_conversion(..., await_settlement=True)` explicitly forwards that
+request to the same original SDK execution and pinned Core wallet. Only exact
+booleans are accepted, before consuming the original live reservation right.
+The default supplies no new SDK keywords or historical observations. Both modes
+can retain the original encrypted funding hint independently. Observed chain
+completion does not complete the journal or release inventory: independent fresh
+receipt reconciliation remains required. Observation failure leaves the existing
+liability retained and grants no replay rights. No option is persisted, migrated,
+or inferred from missing state; reopened jobs cannot reconstruct a live right.
 The reverse dispatcher supplies this authority to sizing signatures, claim
 signing, and watching. Startup recovery publication and settlement workers are
 shielded and owned until their actual completion. Cancellation stops new work;
