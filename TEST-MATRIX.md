@@ -179,6 +179,7 @@ checkout or multichain conformance has passed. Offline `rill-payments` and
 | M45 | Original SDK death before claim signer | One acknowledged funded/hint boundary is SIGKILLed in the original owner process; explicit original-key regtest plan/disclosure, actual native unilateral bytes, one settled source attempt, retained liability and saved-hint fresh completion; no general crash, retry, restore or production-recovery claim |
 | M46 | Original SDK death after signed fallback ACK | Actual publisher, one signer acquisition/two local signatures, independent retained fallback native validation before ACK/SIGKILL; explicit manual re-signing from fallback, witness-inclusive Core bytes equal its verified manual plan, original funded snapshot for fresh receipt/completion, no SDK restart or general recovery claim |
 | M47 | Actual pending outgoing LND accounting | One supported channel/committed 1,000,000-msat outgoing hold, complete channel coverage and actual local/reserve/pending field correspondence while payment remains IN_FLIGHT, bounded original send budget and unchanged single cancellation; no invoice-metadata allowlist change, inventory eligibility or spending authority |
+| M48 | Actual pending incoming LND accounting | Receiver's zero-push channel retains its measured zero local floor while incoming 1,000,000-msat hold remains separate; receiver-scoped accounting and independent payer read credentials, original send budget and single cancellation preserved; no wallet-balance, atomicity or spendability claim |
 
 ## Test evidence and accounting
 

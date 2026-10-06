@@ -1872,6 +1872,15 @@ matching samples do not establish atomicity, all liabilities or remaining
 inventory. No credit, eligibility, SDK invocation, spendable-capacity adapter,
 production funding or upgrade/startup behavior is added.
 
+A separate receiver-side case measures the zero-push channel's actual local
+balance before sending, then requires it to remain zero while the committed
+incoming 1,000,000-msat hold is reported separately. Receiver accounting uses its
+own read credential and pinned node identity; payer payment history uses the
+payer's independent read credential. Both directions preserve the original send
+budget and single cancellation. This is not a zero-wallet assertion, proof of
+atomicity, or permission to add pending income to inventory. No accounting formula,
+invoice-metadata refusal, spending policy or upgrade behavior changes.
+
 `observe_completed_payment(hash, expected_amount_msat)` requires payment-level
 `SUCCEEDED` and reconciles successful shard recipient amounts and settled route
 fees with exact reported value/fees. Failed attempts contribute neither settled
