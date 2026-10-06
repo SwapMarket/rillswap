@@ -967,6 +967,49 @@ Only nonupgradeable Ethereum L1/Sepolia profiles are handled; proxies, L2s,
 custom implementations and compose require dedicated profiles. No deployed
 USDT/USDT0 pathway or operational fee/recovery conformance is configured here.
 
+### Explicit ULN302 configuration observations
+
+`observeUln302Configuration(request, reader)` now observes one caller-recognized
+send or receive library's effective messaging configuration. Its separate
+`layerzero-uln302-observation/1` request requires independently supplied chain,
+genesis, endpoint EID, remote EID, endpoint/OApp/library addresses and raw runtime
+hashes, recognized library direction, and a reference block number/hash. It does
+not discover a trusted library from its version or adopt RPC results as pins.
+The returned frozen, JSON-safe artifact always says `authority: "none"`.
+
+The four-method reader only supplies network, block, code and read-only calls.
+Pins and methods are captured before awaiting. Code, endpoint identity, selected
+library and version `(3,0,2)` are checked at the explicit reference block; the
+network, genesis and block anchor are rechecked before returning. This is
+consistency under a trusted reader, not cryptographic authentication of RPC or
+protection against a dishonest reader. The adapter owns RPC deadlines and egress.
+
+Endpoint `getConfig` supplies the effective, already merged ULN configuration:
+confirmations, sorted required/optional DVNs and optional threshold. The observer
+never merges raw override sentinels itself. Literal zero confirmations are valid;
+cross-array DVN overlap is permitted. Each list supports the pinned protocol's
+full 127-address maximum. Canonical outer and inner ABI encodings are checked
+before accepting bounded configuration bytes (32768 inner, 33024 outer bytes).
+Source executor configuration is read only for send libraries. Unset executor
+size/address values remain visible with `configured: false`; nonzero fields are
+not proof of executor identity, sufficient gas or operational delivery.
+
+Receive observations select the default or OApp timeout getter from the selected
+library's `isDefault` flag. Expiry is compared to the reference block number,
+not wall time. Zero-library/positive-expiry and expired tuples are preserved.
+`nonzeroLibraryWithinWindow` describes those fields only: timeout-library code,
+configuration, usability and security approval remain unobserved. No timeout
+library is silently treated as having the selected library's configuration.
+
+Caller hashes and the ABI source commit do not prove deployed source correspondence,
+ownership, upgrade authority, peer connectivity or security-policy approval.
+Actual USDT0 deployment conformance remains unproved; published directory entries
+are not reciprocal peer evidence. This diagnostic supports explicit observation
+requests without changing the old quote/receipt profile's network/proxy restrictions.
+It produces no quote, pathway, signing payload, route approval, merchant acceptance
+or recovery authority. It makes no automatic requests or writes. Existing stores,
+startup, persisted formats and upgrade behavior are unchanged.
+
 `readSourceOftPacket` verifies finalized endpoint PacketSent routing evidence,
 not payer debit ownership or order acceptance. `observeOftReceive` distinguishes
 exact destination commitment, nilification, unresolved state and finalized

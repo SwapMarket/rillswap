@@ -1,4 +1,4 @@
-import { Interface, concat, getBytes, hexlify, keccak256, solidityPackedKeccak256 } from "ethers";
+import { AbiCoder, Interface, concat, getBytes, hexlify, keccak256, solidityPackedKeccak256 } from "ethers";
 import type { EvmReader, EvmReceipt } from "./evmReceipt";
 
 export const LAYERZERO_SOURCE_PINS = Object.freeze({ protocol: "9c741e7f9790639537b1710a203bcdfd73b0b9ac", oft: "4973ba8bef7b0fdf7268469abea3ea50dbd4bbd8" });
@@ -6,6 +6,9 @@ const endpointAbi = new Interface([
   "function eid() view returns(uint32)", "function inboundPayloadHash(address,uint32,bytes32,uint64) view returns(bytes32)",
   "function lazyInboundNonce(address,uint32,bytes32) view returns(uint64)", "function getReceiveLibrary(address,uint32) view returns(address,bool)",
   "function getSendLibrary(address,uint32) view returns(address)",
+  "function receiveLibraryTimeout(address,uint32) view returns(address,uint256)",
+  "function defaultReceiveLibraryTimeout(uint32) view returns(address,uint256)",
+  "function getConfig(address,address,uint32,uint32) view returns(bytes)",
   "function lzReceive((uint32 srcEid,bytes32 sender,uint64 nonce),address,bytes32,bytes,bytes) payable",
   "event PacketSent(bytes encodedPayload,bytes options,address sendLibrary)",
   "event PacketDelivered((uint32 srcEid,bytes32 sender,uint64 nonce) origin,address receiver)",
@@ -32,6 +35,111 @@ export interface OftDeployment {
   readonly endpoint: string; readonly endpointCodeHash: string; readonly oft: string; readonly oftCodeHash: string;
   readonly token: string; readonly tokenCodeHash: string; readonly tokenDecimals: number; readonly sharedDecimals: number;
   readonly messageLibrary: string; readonly messageLibraryCodeHash: string;
+}
+
+export interface Uln302ConfigurationRequest {
+  readonly version: "layerzero-uln302-observation/1";
+  readonly chainId: string; readonly genesisHash: string; readonly eid: number; readonly remoteEid: number;
+  readonly endpoint: { readonly address: string; readonly codeHash: string };
+  readonly oapp: { readonly address: string; readonly codeHash: string };
+  /** Caller-recognized profile and runtime pins, not discovered from version(). */
+  readonly library: { readonly address: string; readonly codeHash: string; readonly kind: "send" | "receive" };
+  readonly block: { readonly number: number; readonly hash: string };
+}
+export type Uln302ConfigurationReader = Pick<EvmReader, "getNetwork" | "getBlock" | "getCode" | "call">;
+export interface Uln302ConfigurationObservation {
+  readonly version: "layerzero-uln302-observation/1"; readonly authority: "none";
+  readonly abiSourcePin: string; readonly request: Readonly<Uln302ConfigurationRequest>;
+  readonly blockTimestamp: number;
+  readonly uln: { readonly confirmations: string; readonly requiredDVNs: readonly string[];
+    readonly optionalDVNs: readonly string[]; readonly optionalDVNThreshold: number };
+  readonly executor: { readonly maxMessageSize: number; readonly address: string; readonly configured: boolean } | null;
+  readonly receive: { readonly isDefault: boolean; readonly timeoutLibrary: string; readonly expiryBlock: string;
+    readonly withinWindow: boolean; readonly nonzeroLibraryWithinWindow: boolean; readonly timeoutLibraryConfiguration: "not_observed" } | null;
+}
+const libraryAbi = new Interface(["function version() pure returns(uint64,uint8,uint8)"]);
+const ulnType = "tuple(uint64 confirmations,uint8 requiredDVNCount,uint8 optionalDVNCount,uint8 optionalDVNThreshold,address[] requiredDVNs,address[] optionalDVNs)";
+const executorType = "tuple(uint32 maxMessageSize,address executor)";
+const configurationCoder = AbiCoder.defaultAbiCoder();
+const zeroAddress = "0x" + "0".repeat(40);
+
+/** Explicit, read-only observation of one caller-recognized ULN302 direction.
+ * Pins and RPC consistency are not independent source, policy, upgrade or route
+ * conformance proof. This never grants execution, acceptance or recovery rights.
+ */
+export async function observeUln302Configuration(input: Uln302ConfigurationRequest, provider: Uln302ConfigurationReader): Promise<Uln302ConfigurationObservation> {
+  try {
+    const request: Uln302ConfigurationRequest = Object.freeze({ version: input.version, chainId: input.chainId, genesisHash: input.genesisHash,
+      eid: input.eid, remoteEid: input.remoteEid, endpoint: Object.freeze({ address: input.endpoint.address, codeHash: input.endpoint.codeHash }),
+      oapp: Object.freeze({ address: input.oapp.address, codeHash: input.oapp.codeHash }),
+      library: Object.freeze({ address: input.library.address, codeHash: input.library.codeHash, kind: input.library.kind }),
+      block: Object.freeze({ number: input.block.number, hash: input.block.hash }) });
+    const nonzeroHash = (value: string) => typeof value === "string" && bytes32(value) && BigInt(value) !== 0n;
+    const eid = (value: number) => Number.isSafeInteger(value) && value > 0 && value < 2 ** 32;
+    if (request.version !== "layerzero-uln302-observation/1" || typeof request.chainId !== "string" || !/^[1-9][0-9]{0,77}$/.test(request.chainId) || BigInt(request.chainId) >= 1n << 256n ||
+        !nonzeroHash(request.genesisHash) || !eid(request.eid) || !eid(request.remoteEid) || request.eid === request.remoteEid ||
+        ![request.endpoint, request.oapp, request.library].every((pin) => typeof pin.address === "string" && address(pin.address) && nonzeroHash(pin.codeHash)) ||
+        !["send", "receive"].includes(request.library.kind) || !Number.isSafeInteger(request.block.number) || request.block.number < 0 || !nonzeroHash(request.block.hash)) throw new Error();
+    const network = provider.getNetwork.bind(provider), block = provider.getBlock.bind(provider), code = provider.getCode.bind(provider), call = provider.call.bind(provider);
+    const anchor = async () => {
+      const actual = await block(request.block.number);
+      if ((await network()).chainId !== BigInt(request.chainId) || (await block(0))?.hash?.toLowerCase() !== request.genesisHash ||
+          actual?.number !== request.block.number || actual.hash?.toLowerCase() !== request.block.hash ||
+          !Number.isSafeInteger(actual.timestamp) || actual.timestamp < 0) throw new Error();
+      return actual.timestamp;
+    };
+    const timestamp = await anchor();
+    for (const pin of [request.endpoint, request.oapp, request.library]) {
+      const runtime = await code(pin.address, request.block.number);
+      if (runtime === "0x" || keccak256(runtime) !== pin.codeHash) throw new Error();
+    }
+    const decoded = async (abi: Interface, target: string, name: string, args: readonly unknown[]) => {
+      const raw = await call({ to: target, data: abi.encodeFunctionData(name, args), blockTag: request.block.number });
+      // Bound both dynamic ABI layers before decoding, allowing the full pinned
+      // protocol's two 127-address DVN arrays plus wrapping and headroom.
+      if (!/^0x(?:[0-9a-fA-F]{2})*$/.test(raw) || raw.length > 2 + 2 * 33_024) throw new Error();
+      const value = abi.decodeFunctionResult(name, raw);
+      if (abi.encodeFunctionResult(name, value) !== raw.toLowerCase()) throw new Error();
+      return value;
+    };
+    if (Number((await decoded(endpointAbi, request.endpoint.address, "eid", []))[0]) !== request.eid) throw new Error();
+    const selected = await decoded(endpointAbi, request.endpoint.address, request.library.kind === "send" ? "getSendLibrary" : "getReceiveLibrary", [request.oapp.address, request.remoteEid]);
+    if (String(selected[0]).toLowerCase() !== request.library.address) throw new Error();
+    const version = await decoded(libraryAbi, request.library.address, "version", []);
+    if (BigInt(version[0]) !== 3n || Number(version[1]) !== 0 || Number(version[2]) !== 2) throw new Error();
+    const config = async (type: string, configType: number) => {
+      const encoded = String((await decoded(endpointAbi, request.endpoint.address, "getConfig", [request.oapp.address, request.library.address, request.remoteEid, configType]))[0]);
+      if (encoded.length > 2 + 2 * 32_768) throw new Error();
+      const value = configurationCoder.decode([type], encoded);
+      if (configurationCoder.encode([type], value) !== encoded.toLowerCase()) throw new Error();
+      return value[0];
+    };
+    const effective = await config(ulnType, 2);
+    const dvns = (values: readonly string[], count: bigint): readonly string[] => {
+      if (count > 127n || BigInt(values.length) !== count) throw new Error();
+      const result = values.map((value) => value.toLowerCase());
+      if (result.some((value, index) => !address(value) || (index > 0 && BigInt(value) <= BigInt(result[index - 1]!)))) throw new Error();
+      return Object.freeze(result);
+    };
+    const requiredDVNs = dvns(effective.requiredDVNs, BigInt(effective.requiredDVNCount)), optionalDVNs = dvns(effective.optionalDVNs, BigInt(effective.optionalDVNCount));
+    const threshold = Number(effective.optionalDVNThreshold);
+    if ((optionalDVNs.length ? threshold < 1 || threshold > optionalDVNs.length : threshold !== 0) || requiredDVNs.length + optionalDVNs.length === 0 || BigInt(effective.confirmations) === (1n << 64n) - 1n) throw new Error();
+    const uln = Object.freeze({ confirmations: BigInt(effective.confirmations).toString(), requiredDVNs, optionalDVNs, optionalDVNThreshold: threshold });
+    let executor: Uln302ConfigurationObservation["executor"] = null, receive: Uln302ConfigurationObservation["receive"] = null;
+    if (request.library.kind === "send") {
+      const value = await config(executorType, 1), maxMessageSize = Number(value.maxMessageSize), executorAddress = String(value.executor).toLowerCase();
+      executor = Object.freeze({ maxMessageSize, address: executorAddress, configured: maxMessageSize > 0 && executorAddress !== zeroAddress });
+    } else {
+      const isDefault = selected[1] as boolean;
+      const timeout = await decoded(endpointAbi, request.endpoint.address, isDefault ? "defaultReceiveLibraryTimeout" : "receiveLibraryTimeout", isDefault ? [request.remoteEid] : [request.oapp.address, request.remoteEid]);
+      const timeoutLibrary = String(timeout[0]).toLowerCase(), expiry = BigInt(timeout[1]), withinWindow = expiry > BigInt(request.block.number);
+      receive = Object.freeze({ isDefault, timeoutLibrary, expiryBlock: expiry.toString(), withinWindow,
+        nonzeroLibraryWithinWindow: withinWindow && timeoutLibrary !== zeroAddress, timeoutLibraryConfiguration: "not_observed" });
+    }
+    if (await anchor() !== timestamp) throw new Error();
+    return Object.freeze({ version: "layerzero-uln302-observation/1", authority: "none", abiSourcePin: LAYERZERO_SOURCE_PINS.protocol,
+      request, blockTimestamp: timestamp, uln, executor, receive });
+  } catch { throw new Error("LayerZero configuration observation refused"); }
 }
 export interface OftPathway {
   readonly version: "oft-pathway/1";
