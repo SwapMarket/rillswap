@@ -180,3 +180,17 @@ test("real producer observation, signed delivery and acknowledgment loss retain 
   await service.deliverEvents(async (envelope) => { deliveries++; expect(reopened.consume(envelope, 1201)).toEqual(accepted); });
   expect(deliveries).toBe(2); expect(ledger.pendingEvents().length).toBe(0); expect(reopened.getOrder(intent.order_ref)).toEqual(accepted);
 });
+
+test("accepted-order facts are exposed only after a verified acceptance and fail closed on tampering", () => {
+  const f = fixture();
+  expect(() => f.consumer.acceptedOrder("order-1")).toThrow("Unknown");
+  f.consumer.bindOrder("order-1", terms.amountMsat, terms);
+  expect(f.consumer.acceptedOrder("order-1")).toBeNull();
+  f.consumer.consume(signAcceptance(event, key), 1200);
+  expect(f.consumer.acceptedOrder("order-1")).toEqual({ orderRef: "order-1", amountMsat: terms.amountMsat, paymentHash: terms.paymentHash, eventId: event.id });
+  expect(Object.isFrozen(f.consumer.acceptedOrder("order-1"))).toBe(true);
+  f.consumer.close();
+  alter(f.path, "UPDATE orders SET payment_hash=? WHERE order_ref='order-1'", "22".repeat(32));
+  const reopened = LightningAcceptanceConsumer.open(f.path, identity); handles.push(reopened);
+  expect(() => reopened.acceptedOrder("order-1")).toThrow();
+});

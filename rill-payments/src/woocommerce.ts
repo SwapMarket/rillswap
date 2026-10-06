@@ -90,7 +90,8 @@ async function readOrder(request: () => Promise<Response>, url: string, injected
   }
 }
 
-export function createWooCommerceOrderSource(options: WooCommerceOrderSourceOptions): WooCommerceOrderSource {
+/** Validated store origin and credentials plus exact-URL order GET/PUT. */
+function storeClient(options: WooCommerceOrderSourceOptions) {
   let origin: URL;
   try { origin = new URL(options.storeOrigin); } catch { throw new Error("Invalid WooCommerce store origin"); }
   if (origin.protocol !== "https:" || origin.origin !== options.storeOrigin) throw new Error("Invalid WooCommerce store origin");
@@ -103,22 +104,131 @@ export function createWooCommerceOrderSource(options: WooCommerceOrderSourceOpti
   const storeOrigin = options.storeOrigin;
   // Store-bound reference: another store's order with the same ID never maps here.
   const storeTag = createHash("sha256").update("woocommerce-store/1:" + storeOrigin).digest("hex").slice(0, 32);
+  const exchange = async (orderId: string, method: "GET" | "PUT", body?: string): Promise<Record<string, unknown>> => {
+    const url = `${storeOrigin}/wp-json/wc/v3/orders/${orderId}`;
+    const controller = new AbortController();
+    const headers: Record<string, string> = { Accept: "application/json", Authorization: authorization };
+    if (body !== undefined) headers["Content-Type"] = "application/json";
+    const order = await readOrder(() => request(url, { method, body, redirect: "error", credentials: "omit", referrerPolicy: "no-referrer", cache: "no-store",
+      headers, signal: controller.signal }), url, injected, timeoutMs, controller);
+    if (!order || typeof order !== "object" || Array.isArray(order)) return refuse("unavailable");
+    const value = order as Record<string, unknown>;
+    if (value.id !== Number(orderId)) return refuse("unavailable");
+    return value;
+  };
+  return { storeOrigin, storeTag, exchange };
+}
+const validOrderId = (orderId: unknown): orderId is string => typeof orderId === "string" && WOOCOMMERCE_ORDER_ID.test(orderId) && Number.isSafeInteger(Number(orderId));
+
+export function createWooCommerceOrderSource(options: WooCommerceOrderSourceOptions): WooCommerceOrderSource {
+  const { storeOrigin, storeTag, exchange } = storeClient(options);
   return Object.freeze({
     storeOrigin,
     async readPayableOrder(orderId: string, orderKey: string): Promise<WooCommerceOrderPrice> {
-      if (typeof orderId !== "string" || !WOOCOMMERCE_ORDER_ID.test(orderId) || !Number.isSafeInteger(Number(orderId)) || typeof orderKey !== "string" || !ORDER_KEY.test(orderKey)) return refuse("not_found");
-      const url = `${storeOrigin}/wp-json/wc/v3/orders/${orderId}`;
-      const controller = new AbortController();
-      const order = await readOrder(() => request(url, { method: "GET", redirect: "error", credentials: "omit", referrerPolicy: "no-referrer", cache: "no-store",
-        headers: { Accept: "application/json", Authorization: authorization }, signal: controller.signal }), url, injected, timeoutMs, controller);
-      if (!order || typeof order !== "object" || Array.isArray(order)) return refuse("unavailable");
-      const value = order as Record<string, unknown>;
-      if (value.id !== Number(orderId) || typeof value.order_key !== "string") return refuse("unavailable");
+      if (!validOrderId(orderId) || typeof orderKey !== "string" || !ORDER_KEY.test(orderKey)) return refuse("not_found");
+      const value = await exchange(orderId, "GET");
+      if (typeof value.order_key !== "string") return refuse("unavailable");
       if (!same(value.order_key, orderKey)) return refuse("not_found");
       if (value.status !== "pending" || value.currency !== "BTC" || typeof value.total !== "string") return refuse("not_payable");
       let amountMsat: string;
       try { amountMsat = btcTotalToMsat(value.total); } catch { return refuse("not_payable"); }
       return Object.freeze({ orderRef: `woocommerce:${storeTag}:${orderId}`, amountMsat });
+    },
+  });
+}
+
+/** Verified acceptance facts the fulfillment needs (see LightningAcceptanceConsumer.acceptedOrder). */
+export interface AcceptedOrderSource {
+  acceptedOrder(orderRef: string): Readonly<{ orderRef: string; amountMsat: string; paymentHash: string; eventId: string }> | null;
+}
+export interface WooCommerceFulfillmentOptions extends WooCommerceOrderSourceOptions {
+  readonly acceptances: AcceptedOrderSource;
+  /** Acceptances come from regtest/signet only; never point this at a production store. */
+  readonly testStoreOnly: true;
+}
+export type WooCommerceFulfillmentResult = Readonly<
+  | { outcome: "fulfilled"; orderRef: string; transactionId: string; wrote: boolean }
+  | { outcome: "not_accepted"; orderRef: string }
+  /** Store state differs from the verified acceptance; nothing was written by this call. */
+  | { outcome: "reconciliation_required"; orderRef: string; reason: "missing" | "status" | "price" | "transaction" }
+  /** The read-back after this call's write did not prove payment completion. */
+  | { outcome: "write_unconfirmed"; orderRef: string }
+  /** The store could not be read; nothing was written by this call. */
+  | { outcome: "unavailable"; orderRef: string }
+  /** A write was dispatched and may have committed or still be executing. Resolve before retrying. */
+  | { outcome: "unknown"; orderRef: string }
+>;
+export interface WooCommerceFulfillment {
+  readonly storeOrigin: string;
+  fulfill(orderRef: string): Promise<WooCommerceFulfillmentResult>;
+}
+
+const PAID_AT = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$/;
+function exactBtcTotal(value: Record<string, unknown>, amountMsat: string): boolean {
+  if (value.currency !== "BTC" || typeof value.total !== "string") return false;
+  try { return btcTotalToMsat(value.total) === amountMsat; } catch { return false; }
+}
+function paidBy(value: Record<string, unknown>, amountMsat: string, transactionId: string): boolean {
+  return (value.status === "processing" || value.status === "completed") && value.transaction_id === transactionId &&
+    exactBtcTotal(value, amountMsat) && typeof value.date_paid_gmt === "string" && PAID_AT.test(value.date_paid_gmt) &&
+    Number.isFinite(Date.parse(value.date_paid_gmt + "Z"));
+}
+
+/** Best-effort, caller-driven writeback of verified acceptances to a TEST store.
+ * WooCommerce has no conditional update, so read-before-write cannot make the
+ * checked status/price atomic with payment completion; read-back only detects
+ * damage after store hooks ran. Writes only `set_paid` and `transaction_id`
+ * (the payment hash), never `status`, and only for a pending, exact-price BTC
+ * order without a transaction ID. Nothing is persisted locally: no startup,
+ * tick or delivery callback calls this. After `unknown` or `write_unconfirmed`
+ * the earlier write may still be executing: do not call again for that order
+ * until an operator has resolved it.
+ */
+export function createWooCommerceFulfillment(options: WooCommerceFulfillmentOptions): WooCommerceFulfillment {
+  if (!options || options.testStoreOnly !== true || typeof options.acceptances?.acceptedOrder !== "function") throw new Error("Invalid WooCommerce fulfillment options");
+  const { storeOrigin, storeTag, exchange } = storeClient(options);
+  const acceptedOrder = options.acceptances.acceptedOrder.bind(options.acceptances);
+  const prefix = `woocommerce:${storeTag}:`;
+  const inFlight = new Map<string, Promise<WooCommerceFulfillmentResult>>();
+
+  async function run(orderRef: string, orderId: string): Promise<WooCommerceFulfillmentResult> {
+    const accepted = acceptedOrder(orderRef);
+    if (!accepted) return Object.freeze({ outcome: "not_accepted", orderRef });
+    const amountMsat = accepted.amountMsat, transactionId = accepted.paymentHash;
+    if (accepted.orderRef !== orderRef || typeof amountMsat !== "string" || typeof transactionId !== "string" || !/^[0-9a-f]{64}$/.test(transactionId)) throw new Error("Invalid accepted order");
+    let current: Record<string, unknown>;
+    try { current = await exchange(orderId, "GET"); }
+    catch (error) {
+      if (error instanceof WooCommerceOrderRefused && error.reason === "not_found") return Object.freeze({ outcome: "reconciliation_required", orderRef, reason: "missing" });
+      return Object.freeze({ outcome: "unavailable", orderRef });
+    }
+    if (paidBy(current, amountMsat, transactionId)) return Object.freeze({ outcome: "fulfilled", orderRef, transactionId, wrote: false });
+    if (current.status !== "pending") return Object.freeze({ outcome: "reconciliation_required", orderRef, reason: "status" });
+    if (!exactBtcTotal(current, amountMsat)) return Object.freeze({ outcome: "reconciliation_required", orderRef, reason: "price" });
+    if (current.transaction_id !== "") return Object.freeze({ outcome: "reconciliation_required", orderRef, reason: "transaction" });
+    // From dispatch on, every failure is potentially committed.
+    try { await exchange(orderId, "PUT", JSON.stringify({ set_paid: true, transaction_id: transactionId })); }
+    catch { return Object.freeze({ outcome: "unknown", orderRef }); }
+    let after: Record<string, unknown>;
+    try { after = await exchange(orderId, "GET"); } catch { return Object.freeze({ outcome: "unknown", orderRef }); }
+    return paidBy(after, amountMsat, transactionId)
+      ? Object.freeze({ outcome: "fulfilled", orderRef, transactionId, wrote: true })
+      : Object.freeze({ outcome: "write_unconfirmed", orderRef });
+  }
+
+  return Object.freeze({
+    storeOrigin,
+    fulfill(orderRef: string): Promise<WooCommerceFulfillmentResult> {
+      if (typeof orderRef !== "string" || !orderRef.startsWith(prefix) || !validOrderId(orderRef.slice(prefix.length))) {
+        return Promise.reject(new Error("Order reference does not belong to this store"));
+      }
+      // Concurrent calls for one order on this adapter instance share one attempt.
+      // Other instances and processes are not serialized.
+      const existing = inFlight.get(orderRef);
+      if (existing) return existing;
+      const attempt = run(orderRef, orderRef.slice(prefix.length)).finally(() => inFlight.delete(orderRef));
+      inFlight.set(orderRef, attempt);
+      return attempt;
     },
   });
 }

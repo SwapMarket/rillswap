@@ -760,6 +760,52 @@ store's hosting configuration, checkout plugin, rate limits, settlement, signer
 custody, mainnet authority or production readiness. The synthetic invoice issuer
 does not contact a Lightning node and the fixture never spends funds.
 
+### Fulfillment writeback to a test store (opt-in, best effort)
+
+`createWooCommerceFulfillment({ storeOrigin, consumerKey, consumerSecret,
+acceptances: consumer, testStoreOnly: true })` marks a WooCommerce order paid
+after the acceptance consumer holds a verified acceptance for it. Use a
+separate `read_write` REST key; checkout keeps its read-only key. Acceptances
+only exist for regtest/signet, so `testStoreOnly: true` is required and the
+store must not be a production store: the flag cannot verify that for you.
+
+`fulfill(orderRef)` is caller-driven. Nothing calls it on startup, `tick` or
+event delivery, and it persists no local state, so upgrading changes nothing
+and historical acceptances are only written back when you call it for that
+order. It refuses references from another store, and returns:
+
+- `not_accepted`: the consumer has no verified acceptance; the store is not contacted.
+- `fulfilled`: the order is `processing` or `completed` with `transaction_id`
+  equal to the payment hash, the exact bound BTC total and a valid paid time.
+  `wrote` says whether this call performed the write.
+- `reconciliation_required` (`missing`, `status`, `price`, `transaction`): the
+  store disagrees with the acceptance (for example cancelled, on-hold, failed,
+  different total or another transaction ID). Nothing is written.
+- `unavailable`: the first read failed; nothing was written.
+- `unknown`: the write was dispatched and may have committed, or may still be
+  executing (for example after a timeout).
+- `write_unconfirmed`: the write succeeded but the read-back does not prove
+  payment completion (for example the order was cancelled meanwhile).
+
+After `unknown` or `write_unconfirmed`, do not call `fulfill` again for that
+order until an operator has resolved it: a later read showing `pending` with an
+empty transaction ID does not prove the earlier request stopped executing.
+
+The only write is `PUT /wc/v3/orders/<id>` with exactly
+`{ "set_paid": true, "transaction_id": "<payment hash>" }`, never a `status`
+field, and only for a `pending` order with the exact BTC total and an empty
+transaction ID. WooCommerce has no conditional update (WooCommerce 11.1.2
+source), so the checked status and price are not atomic with the write: a
+concurrent store change can still land between the read and the write, and the
+read-back only detects it after store hooks (emails, stock) ran. Concurrent
+calls for one order on the same adapter instance share one attempt; other
+instances and processes are not serialized. The diagnostic's fixture order has
+no line items and goes straight to `completed`; orders that need processing
+end in `processing`.
+The disposable real-store diagnostic exercises the full path (checkout,
+synthetic settlement, signed delivery, consumer acceptance, writeback, replay)
+and checks that a cancelled order stays untouched.
+
 ## External provider readiness
 
 `bun run probe:providers` performs bounded read-only GET requests to the official

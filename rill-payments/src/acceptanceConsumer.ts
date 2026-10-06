@@ -178,6 +178,16 @@ export class LightningAcceptanceConsumer {
     return this.db.transaction(() => this.status(orderRef, this.readOrder(orderRef).accepted)).deferred();
   }
 
+  /** Verified acceptance facts for downstream fulfillment, or null while waiting.
+   * Reads through the same provenance checks as getOrder; unknown orders throw. */
+  acceptedOrder(orderRef: string): Readonly<{ orderRef: string; amountMsat: string; paymentHash: string; eventId: string }> | null {
+    orderReference(orderRef);
+    return this.db.transaction(() => {
+      const { row, accepted } = this.readOrder(orderRef);
+      return accepted ? Object.freeze({ orderRef: row.order_ref, amountMsat: row.amount_msat, paymentHash: row.payment_hash, eventId: accepted.event_id }) : null;
+    }).deferred();
+  }
+
   consume(input: SignedAcceptance, now: number): Readonly<BoundOrderStatus> {
     clock(now);
     const envelope = envelopeSnapshot(input);

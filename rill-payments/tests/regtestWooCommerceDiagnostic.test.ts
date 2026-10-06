@@ -144,14 +144,15 @@ test.skipIf(!enabled)("real WooCommerce BTC price admits one invoice over truste
     // their private IPs unreachable from the host. Exec a bounded PHP HTTP
     // client into this exact owned container to reach its real Apache server.
     // The TLS proxy is still a real listener used by production default fetch.
-    const storeRead = async (path: string, authorization = "", host = "localhost") => {
+    const storeRead = async (path: string, authorization = "", host = "localhost", method = "GET", body = "") => {
       const phpRequest = `$c = curl_init('http://127.0.0.1' . getenv('WOO_PATH'));
-curl_setopt_array($c, array(CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => false, CURLOPT_TIMEOUT => 5,
-CURLOPT_HTTPHEADER => array('Authorization: ' . getenv('WOO_AUTH'), 'X-Forwarded-Proto: https', 'Host: ' . getenv('WOO_HOST'))));
+$headers = array('Authorization: ' . getenv('WOO_AUTH'), 'X-Forwarded-Proto: https', 'Host: ' . getenv('WOO_HOST'));
+if (getenv('WOO_METHOD') === 'PUT') { $headers[] = 'Content-Type: application/json'; curl_setopt($c, CURLOPT_CUSTOMREQUEST, 'PUT'); curl_setopt($c, CURLOPT_POSTFIELDS, getenv('WOO_BODY')); }
+curl_setopt_array($c, array(CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => false, CURLOPT_TIMEOUT => 5, CURLOPT_HTTPHEADER => $headers));
 $body = curl_exec($c); if ($body === false || strlen($body) > 262144) { exit(2); }
 echo json_encode(array('status' => curl_getinfo($c, CURLINFO_RESPONSE_CODE), 'type' => curl_getinfo($c, CURLINFO_CONTENT_TYPE), 'body' => $body));`;
       return JSON.parse(await work(["docker", "exec", "--env", "WOO_PATH=" + path, "--env", "WOO_AUTH=" + authorization, "--env", "WOO_HOST=" + host,
-        wordpress, "php", "-r", phpRequest], process.env, 10_000)) as { status: number; type: string | null; body: string };
+        "--env", "WOO_METHOD=" + method, "--env", "WOO_BODY=" + body, wordpress, "php", "-r", phpRequest], process.env, 10_000)) as { status: number; type: string | null; body: string };
     };
     let ready = false;
     for (let i = 0; i < 90; i++) {
@@ -166,8 +167,10 @@ echo json_encode(array('status' => curl_getinfo($c, CURLINFO_RESPONSE_CODE), 'ty
     proxy = Bun.serve({ hostname: "127.0.0.1", port: 0, tls: { cert: readFileSync(join(root, "store.crt")), key: readFileSync(join(root, "store.key")) },
       async fetch(request) {
         const url = new URL(request.url);
-        if (request.method !== "GET" || !/^\/wp-json\/wc\/v3\/orders\/[1-9][0-9]*$/.test(url.pathname) || url.search) return new Response("", { status: 404 });
-        const upstream = await storeRead(url.pathname, request.headers.get("Authorization") ?? "", url.host);
+        if (!["GET", "PUT"].includes(request.method) || !/^\/wp-json\/wc\/v3\/orders\/[1-9][0-9]*$/.test(url.pathname) || url.search) return new Response("", { status: 404 });
+        const body = request.method === "PUT" ? await request.text() : "";
+        if (body.length > 4096) return new Response("", { status: 413 });
+        const upstream = await storeRead(url.pathname, request.headers.get("Authorization") ?? "", url.host, request.method, body);
         return new Response(upstream.body, { status: upstream.status, headers: { "Content-Type": upstream.type ?? "" } });
       } });
     const origin = `https://localhost:${proxy.port}`;
@@ -183,7 +186,8 @@ echo json_encode(array('status' => curl_getinfo($c, CURLINFO_RESPONSE_CODE), 'ty
     await cli(["plugin", "install", "/tmp/woocommerce.zip", "--activate"], ["--mount", `type=bind,source=${zip},target=/tmp/woocommerce.zip,readonly`]);
     const consumerKey = "ck_" + randomBytes(20).toString("hex"), consumerSecret = "cs_" + randomBytes(20).toString("hex");
     const fixtureEnv = join(root, "fixture.env"), php = join(root, "create-order.php");
-    writeFileSync(fixtureEnv, `WC_FIXTURE_KEY=${consumerKey}\nWC_FIXTURE_SECRET=${consumerSecret}\n`, { mode: 0o600 });
+    const writeKey = "ck_" + randomBytes(20).toString("hex"), writeSecret = "cs_" + randomBytes(20).toString("hex");
+    writeFileSync(fixtureEnv, `WC_FIXTURE_KEY=${consumerKey}\nWC_FIXTURE_SECRET=${consumerSecret}\nWC_FIXTURE_WRITE_KEY=${writeKey}\nWC_FIXTURE_WRITE_SECRET=${writeSecret}\n`, { mode: 0o600 });
     writeFileSync(php, `<?php
 if (WC()->version !== '11.1.2') { throw new Exception('Wrong fixture plugin'); }
 update_option('woocommerce_currency', 'BTC');
@@ -193,15 +197,19 @@ global $wpdb;
 $wpdb->insert($wpdb->prefix . 'woocommerce_api_keys', array('user_id' => get_user_by('login', 'fixture_admin')->ID, 'description' => 'Disposable read-only diagnostic',
  'permissions' => 'read', 'consumer_key' => wc_api_hash(getenv('WC_FIXTURE_KEY')), 'consumer_secret' => getenv('WC_FIXTURE_SECRET'), 'truncated_key' => substr(getenv('WC_FIXTURE_KEY'), -7)));
 if (!$wpdb->insert_id) { throw new Exception('Fixture read key unavailable'); }
-echo 'RILLSWAP_FIXTURE:' . json_encode(array('orderId' => (string)$order->get_id(), 'orderKey' => $order->get_order_key(), 'total' => $order->get_total(), 'version' => WC()->version)) . "\\n";
+$wpdb->insert($wpdb->prefix . 'woocommerce_api_keys', array('user_id' => get_user_by('login', 'fixture_admin')->ID, 'description' => 'Disposable writeback diagnostic',
+ 'permissions' => 'read_write', 'consumer_key' => wc_api_hash(getenv('WC_FIXTURE_WRITE_KEY')), 'consumer_secret' => getenv('WC_FIXTURE_WRITE_SECRET'), 'truncated_key' => substr(getenv('WC_FIXTURE_WRITE_KEY'), -7)));
+if (!$wpdb->insert_id) { throw new Exception('Fixture write key unavailable'); }
+$cancelled = new WC_Order(); $cancelled->set_currency('BTC'); $cancelled->set_status('cancelled'); $cancelled->set_total('0.00012345'); $cancelled->save();
+echo 'RILLSWAP_FIXTURE:' . json_encode(array('orderId' => (string)$order->get_id(), 'orderKey' => $order->get_order_key(), 'total' => $order->get_total(), 'version' => WC()->version, 'cancelledOrderId' => (string)$cancelled->get_id())) . "\\n";
 `, { mode: 0o644 });
     const setup = await cli(["eval-file", "/tmp/create-order.php"], ["--mount", `type=bind,source=${php},target=/tmp/create-order.php,readonly`], fixtureEnv);
     const line = setup.split("\n").find((value) => value.startsWith("RILLSWAP_FIXTURE:"));
     if (!line) throw new Error("Owned WooCommerce fixture failed to create order");
-    const order = JSON.parse(line.slice("RILLSWAP_FIXTURE:".length)) as { orderId: string; orderKey: string; total: string; version: string };
+    const order = JSON.parse(line.slice("RILLSWAP_FIXTURE:".length)) as { orderId: string; orderKey: string; total: string; version: string; cancelledOrderId: string };
     expect(order.total).toBe("0.00012345"); expect(order.version).toBe("11.1.2");
     const config = join(root, "probe.json");
-    writeFileSync(config, JSON.stringify({ origin, consumerKey, consumerSecret, ...order, ledgerPath: join(root, "merchant.sqlite") }), { mode: 0o600 });
+    writeFileSync(config, JSON.stringify({ origin, consumerKey, consumerSecret, writeKey, writeSecret, ...order, ledgerPath: join(root, "merchant.sqlite") }), { mode: 0o600 });
     const probe = async (ca: string, mode: string, override = origin) => {
       const env: NodeJS.ProcessEnv = { ...process.env, NODE_EXTRA_CA_CERTS: ca, RILLSWAP_WOO_PROBE_ORIGIN: override };
       delete env.NODE_TLS_REJECT_UNAUTHORIZED; delete env.SSL_CERT_FILE;
@@ -212,6 +220,10 @@ echo 'RILLSWAP_FIXTURE:' . json_encode(array('orderId' => (string)$order->get_id
     expect(await probe(join(root, "store.crt"), "refusal", `https://127.0.0.1:${proxy.port}`)).toEqual({ refused: true, tlsCode: "ERR_TLS_CERT_ALTNAME_INVALID" });
     expect(await probe(join(root, "store.crt"), "auth-refusal")).toEqual({ refused: true, httpStatus: 401 });
     expect(await probe(join(root, "store.crt"), "admit")).toEqual({ admitted: true, amountMsat: "12345000", replayed: true, issued: 1, fulfilled: false });
+    // The fixture order has no line items, so needs_processing() is false and
+    // payment_complete() moves it straight to completed (not processing).
+    expect(await probe(join(root, "store.crt"), "fulfill")).toEqual({ early: "not_accepted", first: "fulfilled", wrote: true, replayWrote: false,
+      storeStatus: "completed", transactionMatches: true, paidAt: true, cancelled: "status", cancelledStatus: "cancelled", cancelledTransaction: "" });
   } finally {
     proxy?.stop(true);
     // Only exact names created by this invocation and still bearing its label.
