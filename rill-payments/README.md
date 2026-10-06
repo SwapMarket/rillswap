@@ -243,6 +243,32 @@ not establish different-UID isolation, hardware custody, human approval or
 production signer conformance. Dedicated acceptance keys must never be reused
 as wallet/spending keys. Production custody remains a separate release gate.
 
+### Weak acceptance-key rejection and upgrades
+
+Public `verifyAcceptance` and consumer identity validation now reject small-order
+public keys. Those points have no nonzero prime-order component: the underlying
+consensus-oriented ZIP-215 verifier can otherwise accept a matching unsigned
+event with a zero signature. An independently configured pin is not sufficient
+if that pin is itself a weak key. Ordinary generated keys, including keys from
+an all-zero private seed, are not this weak-public-key case.
+
+The legacy verifier retains ZIP-215 mixed-order and noncanonical point behavior,
+including its original textual key handling. Consumer pins still require lowercase
+64-character hex. The new `hasNontrivialAcceptanceKey` guard explicitly decodes
+with ZIP-215 semantics; it does not impose the custom signer's stricter canonical
+prime-subgroup contract on existing consumers. Generated-key signatures, envelope
+bytes and valid-store replay are unchanged.
+
+Small-order or undecodable consumer identities refuse before file creation or
+opening, even when an older store contains a matching identity and historical
+acceptances. No repair, deletion, key rotation, migration or history rewrite is
+performed. Existing valid-key stores reopen unchanged; missing/partial/unsupported
+stores retain their existing refusal. Operators with weak-key state must preserve
+that evidence and independently investigate original payment provenance before
+any separately authorized replacement provisioning. Changing configuration cannot
+bless its old acceptances. This intentional availability loss applies to weak-key
+installations, not to normal generated-key or supported mixed-order installations.
+
 ## Advisory native Lightning merchant manifest
 
 `createMerchantService({ ...options, publishManifest: true })` explicitly

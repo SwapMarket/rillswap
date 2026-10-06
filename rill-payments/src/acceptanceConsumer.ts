@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { closeSync, lstatSync, openSync, realpathSync } from "node:fs";
 import { dirname } from "node:path";
 import { MAX_MSAT, parseTerms, type NativeLightningTerms, type Network } from "./contract";
-import { verifyAcceptance, type SignedAcceptance } from "./server";
+import { hasNontrivialAcceptanceKey, verifyAcceptance, type SignedAcceptance } from "./server";
 
 export interface AcceptanceConsumerIdentity {
   readonly merchantOrigin: string;
@@ -47,7 +47,7 @@ function consumerIdentity(input: AcceptanceConsumerIdentity): Readonly<Acceptanc
   parseTerms({ version: "checkout/0.1", policyVersion: "native-lightning/1", merchantOrigin: identity.merchantOrigin,
     receiver: identity.receiver, network: identity.network, intentId: "consumer_check_1", attemptId: "consumer_check_2",
     amountMsat: "1000", buyerExtraMsat: "0", paymentHash: "0".repeat(64), expiresAt: 1 });
-  if (identity.network === "mainnet" || typeof identity.merchantPublicKey !== "string" || !/^[0-9a-f]{64}$/.test(identity.merchantPublicKey)) throw new Error("Unsupported acceptance identity");
+  if (identity.network === "mainnet" || typeof identity.merchantPublicKey !== "string" || !/^[0-9a-f]{64}$/.test(identity.merchantPublicKey) || !hasNontrivialAcceptanceKey(identity.merchantPublicKey)) throw new Error("Unsupported acceptance identity");
   return Object.freeze(identity);
 }
 function privateDirectory(path: string): void {

@@ -28,11 +28,20 @@ export function signAcceptance(event: AcceptanceEvent, key: Uint8Array): SignedA
   return { algorithm: "Ed25519", publicKey: bytesToHex(ed25519.getPublicKey(key)), event,
     signature: bytesToHex(ed25519.sign(eventBytes(event), key)) };
 }
+/** Additional acceptance-key restriction atop legacy ZIP-215 verification.
+ * Mixed-order and noncanonical ZIP-215 points remain supported; a small-order
+ * point has no nonzero prime-order component and cannot authenticate a signer.
+ * The custom RFC 8032 signer has a separate, stricter key contract below.
+ */
+export function hasNontrivialAcceptanceKey(publicKey: unknown): boolean {
+  try { return typeof publicKey === "string" && !ed25519.Point.fromBytes(hexToBytes(publicKey), true).isSmallOrder(); }
+  catch { return false; }
+}
 /** Verify against an independently pinned merchant key, then deduplicate the stable event ID. */
 export function verifyAcceptance(envelope: SignedAcceptance, expectedPublicKey: string): boolean {
   try {
     const event = envelope.event;
-    return envelope.algorithm === "Ed25519" && envelope.publicKey === expectedPublicKey && validEvent(event) &&
+    return envelope.algorithm === "Ed25519" && envelope.publicKey === expectedPublicKey && validEvent(event) && hasNontrivialAcceptanceKey(expectedPublicKey) &&
       ed25519.verify(hexToBytes(envelope.signature), eventBytes(event), hexToBytes(expectedPublicKey));
   } catch { return false; }
 }
