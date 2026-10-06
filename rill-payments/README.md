@@ -215,7 +215,8 @@ public key. Publication snapshots that key, including Buffer-backed inputs.
 No backend probe, invoice issuance, ledger write or order authorization occurs.
 Non-regtest publication and nonboolean options are refused. Existing service and
 store behavior remains unchanged without the option; launcher configuration does
-not yet expose this programmatic option.
+not enable it automatically. The trusted HTTPS diagnostic exposes the explicit
+`manifestProfile` selection described below; the separate CLI is unchanged.
 
 `@rillswap/payments/manifest` exports the browser-compatible constructor and
 `parseNativeLightningMerchantManifest(value, expectedOrigin, expectedPublicKey)`.
@@ -419,6 +420,23 @@ and history are retained; no historical binding, acceptance consumption or
 fulfillment happens at startup. Setup failure and shutdown close both handles.
 Old HTTPS configurations retain their original behavior. This remains a trusted
 regtest diagnostic, not a production service or rollback-resistant store.
+
+Optional HTTPS configuration `manifestProfile: "merchant-manifest/native-lightning/1"`
+selects the fixed advisory manifest published by public `GET /v1/manifest`.
+Omit the field to retain 404. It is an exact string profile, not a boolean or an
+arbitrary registry: unsupported values and legacy HTTP usage are refused before
+backend calls or state creation. Both provisioning commands retain their existing
+single-store responsibilities and do not start a publisher. Normal startup still
+checks live LND identity. Manifest construction and retrieval add no probe or
+order-state change; publication snapshots the configured identity/key.
+
+Publication alone does not enable order-binding enforcement. Configuring a
+consumer still requires its matching existing store; missing state refuses the
+whole listener rather than publishing with a downgraded gate. Previous configs
+without the field are unchanged, and older launchers safely reject the new field.
+Clients must independently provision TLS trust and identity pins. Public endpoint
+access and a declared key matching launcher output are not merchant authority,
+invoice permission, settlement proof or production readiness.
 
 Offline tests use actual certificate-validated HTTPS and SQLite with a synthetic
 LND identity endpoint. They exercise wrong trust/hostname, malformed/mismatched

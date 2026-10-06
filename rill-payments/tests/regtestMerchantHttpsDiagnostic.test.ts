@@ -11,6 +11,7 @@ import { MerchantLedger } from "../src/merchant";
 import { LightningAcceptanceConsumer } from "../src/acceptanceConsumer";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
+import { parseNativeLightningMerchantManifest } from "../src/manifest";
 
 const root = resolve("../tmp");
 const fixtureCredential = Buffer.from("synthetic-lnd-read-credential");
@@ -50,10 +51,11 @@ async function fixture() {
   let portReservation: ReturnType<typeof Bun.serve> | undefined;
   try {
   const lndTls = certificates(directory, "lnd"), listener = certificates(directory, "merchant");
-  let forbiddenRequests = 0;
+   let forbiddenRequests = 0, identityRequests = 0;
   const lnd = setupListener = Bun.serve({ hostname: "127.0.0.1", port: 0, tls: { cert: readFileSync(lndTls.cert), key: readFileSync(lndTls.key) }, fetch(input) {
     if (input.headers.get("Grpc-Metadata-macaroon") !== fixtureCredential.toString("hex")) return new Response("", { status: 403 });
-    if (input.method !== "GET" || new URL(input.url).pathname !== "/v1/getinfo") { forbiddenRequests++; return new Response("", { status: 501 }); }
+     if (input.method !== "GET" || new URL(input.url).pathname !== "/v1/getinfo") { forbiddenRequests++; return new Response("", { status: 501 }); }
+     identityRequests++;
     return Response.json({ identity_pubkey: receiver, chains: [{ chain: "bitcoin", network: "regtest" }], synced_to_chain: true });
   } });
   // Release a test-owned port; occupation between selection and bind is refusal,
@@ -98,7 +100,7 @@ async function fixture() {
     try { for (const child of children) await end(child); }
     finally { lnd.stop(true); rmSync(directory, { recursive: true, force: true }); }
   };
-  return { directory, config, path, listener, lndTls, port, save, launch, end, command, start, cleanup, track, forbidden: () => forbiddenRequests };
+   return { directory, config, path, listener, lndTls, port, save, launch, end, command, start, cleanup, track, forbidden: () => forbiddenRequests, identities: () => identityRequests };
   } catch {
     portReservation?.stop(true); setupListener?.stop(true); rmSync(directory, { recursive: true, force: true });
     throw new Error("Synthetic HTTPS fixture setup refused");
@@ -336,6 +338,79 @@ test("explicit consumer provisioning refuses a foreign merchant ledger without c
     expect(existsSync(path)).toBe(false); expect(history(f.config.ledgerPath!)).toEqual(original);
   } finally { await f.cleanup(); }
 }, 10000);
+
+test("HTTPS manifest profile publishes only fixed advisory data through independently trusted TLS", async () => {
+  const f = await fixture();
+  try {
+    f.config.manifestProfile = "merchant-manifest/native-lightning/1"; f.save();
+    const expectedKey = consumerIdentity(f).merchantPublicKey;
+    expect((await f.command("provision-https"))[2]).toBe(0);
+    const original = history(f.config.ledgerPath!), inputs = immutable([f.path, f.config.eventKeyPath!]);
+    let serving = await f.start(); const before = f.identities();
+    const published = await http(f.config.origin + "/v1/manifest", readFileSync(f.listener.cert));
+    expect(published.status).toBe(200); expect(published.headers["cache-control"]).toBe("no-store");
+    const raw = JSON.parse(published.body), manifest = parseNativeLightningMerchantManifest(raw, f.config.origin!, expectedKey);
+    expect(manifest.publicPolicy.receiver).toBe(receiver); expect(manifest.productionEnabled).toBe(false); expect(serving.ready.publicKey).toBe(expectedKey);
+    expect(f.identities()).toBe(before); expect(f.forbidden()).toBe(0); expect(history(f.config.ledgerPath!)).toEqual(original);
+    expect(published.body).not.toContain(admin); expect(published.body).not.toContain(f.directory);
+    expect((await http(f.config.origin + "/v1/manifest", readFileSync(f.listener.cert), { method: "POST" })).status).toBe(405);
+    expect((await http(f.config.origin + "/v1/manifest", readFileSync(f.listener.cert), { headers: { Origin: "https://foreign.example" } })).status).toBe(403);
+    expect((await http(f.config.origin + "/v1/intents/unknown_intent_01/events", readFileSync(f.listener.cert))).status).toBe(404);
+    await expect(http(f.config.origin + "/v1/manifest", readFileSync(f.lndTls.cert))).rejects.toThrow();
+    await f.end(serving.child); expect(await serving.errors).toBe("");
+    serving = await f.start();
+    expect(JSON.parse((await http(f.config.origin + "/v1/manifest", readFileSync(f.listener.cert))).body)).toEqual(raw);
+    await f.end(serving.child); expect(await serving.errors).toBe(""); expect(history(f.config.ledgerPath!)).toEqual(original); expect(immutable([f.path, f.config.eventKeyPath!])).toEqual(inputs);
+    delete f.config.manifestProfile; f.save(); serving = await f.start();
+    expect((await http(f.config.origin + "/v1/manifest", readFileSync(f.listener.cert))).status).toBe(404);
+    await f.end(serving.child); expect(await serving.errors).toBe("");
+  } finally { await f.cleanup(); }
+}, 15000);
+
+test("invalid manifest profiles and nonstring flags fail before backend calls or state creation", async () => {
+  const f = await fixture();
+  try {
+    for (const profile of ["", "true", "false", "merchant-manifest/native-lightning/0", "merchant-manifest/native-lightning/2", true, false, null, 1, {}]) {
+      Object.assign(f.config, { manifestProfile: profile }); f.save();
+      expect(await f.command("provision-https")).toEqual(["", "Regtest merchant diagnostic refused\n", 1]);
+      expect(f.identities()).toBe(0); expect(existsSync(f.config.ledgerPath!)).toBe(false);
+    }
+    f.config.manifestProfile = "merchant-manifest/native-lightning/1";
+    for (const field of ["profile", "listenerPort", "listenerCertificatePath", "listenerKeyPath"]) delete f.config[field];
+    f.config.origin = "https://merchant.invalid"; f.save();
+    expect(await f.command("provision")).toEqual(["", "Regtest merchant diagnostic refused\n", 1]);
+    expect(f.identities()).toBe(0); expect(existsSync(f.config.ledgerPath!)).toBe(false);
+  } finally { await f.cleanup(); }
+}, 15000);
+
+test("manifest publication cannot downgrade configured missing consumer state or expose an unbound invoice", async () => {
+  const f = await fixture();
+  try {
+    f.config.manifestProfile = "merchant-manifest/native-lightning/1"; f.save(); expect((await f.command("provision-https"))[2]).toBe(0);
+    const backend = new LndInvoiceBackend(lndRestTransport(f.config.endpoint!, readFileSync(f.lndTls.cert), fixtureCredential),
+      { origin: f.config.origin!, receiver, network: "regtest" }, readFileSync(f.config.issuanceKeyPath!));
+    const identity = await backend.identity(), ledger = MerchantLedger.open(f.config.ledgerPath!, identity), now = Math.floor(Date.now() / 1000);
+    let intentId: string;
+    try {
+      const intent = ledger.createIntent("manifest-bound-order", "1000000", now + 600, "manifest_https_intent_001", now);
+      const attempt = ledger.createAttempt(intent.id, "manifest_https_attempt_001", now); intentId = intent.id;
+      await ledger.issue(attempt.id, { identity: async () => identity, create: async () => testInvoice("manifest-https", "1000000", now, now + 600) }, () => now);
+    } finally { ledger.close(); }
+    const path = configureConsumer(f), original = history(f.config.ledgerPath!);
+    expect(await f.command("serve-https")).toEqual(["", "Regtest merchant diagnostic refused\n", 1]); expect(existsSync(path)).toBe(false);
+    await expect(http(f.config.origin + "/v1/manifest", readFileSync(f.listener.cert))).rejects.toThrow();
+    expect((await f.command("provision-acceptance-https"))[2]).toBe(0); const before = consumerHistory(path);
+    const serving = await f.start(); const published = await http(f.config.origin + "/v1/manifest", readFileSync(f.listener.cert));
+    expect(parseNativeLightningMerchantManifest(JSON.parse(published.body), f.config.origin!, consumerIdentity(f).merchantPublicKey).productionEnabled).toBe(false);
+    const status = await http(f.config.origin + "/v1/intents/" + intentId!, readFileSync(f.listener.cert), { headers: { Authorization: `Bearer ${admin}` } });
+    expect(status.status).toBe(200); expect(JSON.parse(status.body).attempt).toBeNull();
+    const eventsUrl = f.config.origin + "/v1/intents/" + intentId! + "/events";
+    expect((await http(eventsUrl, readFileSync(f.listener.cert))).status).toBe(404);
+    const authorizedEvents = await http(eventsUrl, readFileSync(f.listener.cert), { headers: { Authorization: `Bearer ${admin}` } });
+    expect(authorizedEvents.status).toBe(200); expect(JSON.parse(authorizedEvents.body)).toEqual([]);
+    await f.end(serving.child); expect(await serving.errors).toBe(""); expect(consumerHistory(path)).toEqual(before); expect(history(f.config.ledgerPath!)).toEqual(original);
+  } finally { await f.cleanup(); }
+}, 15000);
 
 const readerPython = process.env.RILLSWAP_MERCHANT_READER_PYTHON;
 test.skipIf(!readerPython)("leaf-pinned Python reader acquires actual Bun HTTPS view and events without issuing invoices", async () => {

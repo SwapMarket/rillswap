@@ -34,12 +34,15 @@ async function main(): Promise<void> {
   };
   const config = JSON.parse(privateBytes(configPath).toString("utf8")) as Record<string, string>;
   const configuredConsumer = Object.hasOwn(config, "acceptanceConsumerPath");
+  const configuredManifest = Object.hasOwn(config, "manifestProfile");
   const fields = ["adminTokenPath", "certificatePath", "endpoint", "eventKeyPath", "issuanceKeyPath", "ledgerPath", "macaroonPath", "origin", "receiver", "statusKeyPath"];
   if (https) fields.push("profile", "listenerCertificatePath", "listenerKeyPath", "listenerPort");
   if (https && configuredConsumer) fields.push("acceptanceConsumerPath");
+  if (https && configuredManifest) fields.push("manifestProfile");
   if (Object.keys(config).sort().join(",") !== fields.sort().join(",") ||
       Object.values(config).some((value) => typeof value !== "string") || (!https && config.origin !== "https://merchant.invalid") ||
       !isAbsolute(config.ledgerPath!) || dirname(config.ledgerPath!) !== directory) throw new Error();
+  if (configuredManifest && config.manifestProfile !== "merchant-manifest/native-lightning/1") throw new Error();
   // Configuration opt-in is explicit, never a missing-state migration. Existing
   // merchant provisioning remains a one-store operation.
   if ((provisionConsumer && !configuredConsumer) || (command === "provision-https" && configuredConsumer)) throw new Error();
@@ -126,7 +129,7 @@ async function main(): Promise<void> {
   try {
     if (configuredConsumer) consumer = Consumer!.open(config.acceptanceConsumerPath!, consumerIdentity!);
     service = createMerchantService({ ledger, issuer: backend, observer, adminToken: httpsAdminToken ?? privateBytes(config.adminTokenPath!).toString("utf8"), statusKey, eventSigningKey: eventKey,
-      ...(consumer ? { acceptanceConsumer: consumer } : {}) });
+      ...(consumer ? { acceptanceConsumer: consumer } : {}), ...(configuredManifest ? { publishManifest: true } : {}) });
     server = Bun.serve({ hostname: "127.0.0.1", port: listenerPort, fetch: service.fetch, ...(tls ? { tls } : {}) });
   } catch (error) {
     // HTTPS setup must not leave an opened store or observation timer behind.
