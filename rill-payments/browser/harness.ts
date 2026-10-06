@@ -1,6 +1,7 @@
 import { createCheckout, indexedDbCheckoutStore } from "../src/sdk";
 import { mountTracking } from "../src/tracking";
 import { discoverLightningAddress, validateLnurlPayInvoice, requestLnurlPayInvoice } from "../src/lnurlPay";
+import { createNativeLightningMerchantManifest, parseNativeLightningMerchantManifest } from "../src/manifest";
 import { invoiceBinding } from "../src/bolt11";
 import { receiver, testInvoice } from "../tests/helpers";
 import { createNativeSandboxCheckout, type NativeSandboxCheckpoint } from "../src/nativeSdk";
@@ -12,10 +13,14 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 declare global { interface Window { checkoutPay(): Promise<string>; checkoutCalls(): number; checkoutReady: boolean;
   discoverLightningAddress: typeof discoverLightningAddress; validateLnurlPayInvoice: typeof validateLnurlPayInvoice;
   requestLnurlPayInvoice: typeof requestLnurlPayInvoice;
+  createNativeLightningMerchantManifest: typeof createNativeLightningMerchantManifest;
+  parseNativeLightningMerchantManifest: typeof parseNativeLightningMerchantManifest;
   lnurlFixture: { receiver: string; invoice: string; hashedInvoice: string; metadata: string } } }
 window.discoverLightningAddress = discoverLightningAddress;
 window.validateLnurlPayInvoice = validateLnurlPayInvoice;
 window.requestLnurlPayInvoice = requestLnurlPayInvoice;
+window.createNativeLightningMerchantManifest = createNativeLightningMerchantManifest;
+window.parseNativeLightningMerchantManifest = parseNativeLightningMerchantManifest;
 
 const invoice = testInvoice("browser_fixture"); const binding = invoiceBinding(invoice, "regtest");
 const lnurlMetadata = '[["text/plain","Receiver"],["text/identifier","buyer@receiver.example"]]';

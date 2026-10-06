@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spec.rillswap.invalid/schemas/checkout/native-lightning-manifest.schema.json",
+  "title": "Advisory native Lightning regtest merchant manifest (not execution authority)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "merchantOrigin", "intentApi", "receiptVerification", "allowedPayerAssets", "acceptedReceiptAssets", "publicPolicy", "routingProfiles", "approvedAdapters", "productionEnabled"],
+  "properties": {
+    "version": { "const": "merchant-manifest/native-lightning/1" },
+    "merchantOrigin": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "intentApi": { "type": "string", "minLength": 1, "maxLength": 266 },
+    "productionEnabled": { "const": false },
+    "receiptVerification": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "algorithm", "publicKey", "eventPathTemplate"],
+      "properties": {
+        "version": { "const": "checkout-event/1" },
+        "algorithm": { "const": "Ed25519" },
+        "publicKey": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "eventPathTemplate": { "const": "/v1/intents/{id}/events" }
+      }
+    },
+    "allowedPayerAssets": { "type": "array", "minItems": 1, "maxItems": 1, "items": { "$ref": "#/$defs/asset" } },
+    "acceptedReceiptAssets": { "type": "array", "minItems": 1, "maxItems": 1, "items": { "$ref": "#/$defs/asset" } },
+    "publicPolicy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "receiver", "network", "maxBuyerExtraMsat", "maxBuyerExtraBps"],
+      "properties": {
+        "version": { "const": "native-lightning/1" },
+        "receiver": { "type": "string", "pattern": "^(02|03)[0-9a-f]{64}$" },
+        "network": { "const": "regtest" },
+        "maxBuyerExtraMsat": { "const": "0" },
+        "maxBuyerExtraBps": { "const": 0 }
+      }
+    },
+    "routingProfiles": {
+      "type": "array", "minItems": 1, "maxItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["id", "routeClass"],
+        "properties": { "id": { "const": "native-lightning/1" }, "routeClass": { "const": "native" } }
+      }
+    },
+    "approvedAdapters": {
+      "type": "array", "minItems": 1, "maxItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["id", "version"],
+        "properties": { "id": { "const": "native-lightning" }, "version": { "const": "native-lightning/1" } }
+      }
+    }
+  },
+  "$defs": {
+    "asset": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "rail", "network", "amountUnit", "decimals", "quantum", "tokenBehavior"],
+      "properties": {
+        "id": { "const": "LN_BTC_REGTEST" },
+        "rail": { "const": "lightning" },
+        "network": { "const": "regtest" },
+        "amountUnit": { "const": "msat" },
+        "decimals": { "const": 11 },
+        "quantum": { "const": "1000" },
+        "tokenBehavior": { "const": "not_applicable" }
+      }
+    }
+  }
+}

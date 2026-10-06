@@ -4,6 +4,7 @@ import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import type { AcceptanceEvent, InvoiceIssuer, MerchantLedger, ReceiptObserver } from "./merchant";
 import type { IntentView } from "./sdk";
 import type { LightningAcceptanceConsumer } from "./acceptanceConsumer";
+import { createNativeLightningMerchantManifest } from "./manifest";
 
 export interface SignedAcceptance {
   readonly algorithm: "Ed25519";
@@ -40,6 +41,7 @@ export interface MerchantServiceOptions {
   readonly eventSigningKey: Uint8Array;
   readonly now?: () => number;
   readonly acceptanceConsumer?: LightningAcceptanceConsumer;
+  readonly publishManifest?: boolean;
 }
 class HttpError extends Error { constructor(readonly status: number) { super("Checkout request refused"); } }
 const equal = (a: string, b: string): boolean => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -58,11 +60,16 @@ export function createMerchantService(options: MerchantServiceOptions) {
   if (!/^[A-Za-z0-9_-]{32,128}$/.test(options.adminToken) || options.statusKey.length !== 32 || options.eventSigningKey.length !== 32) throw new Error("Persistent merchant authentication keys required");
   const { ledger } = options;
   const consumer = options.acceptanceConsumer;
+  const publication = options.publishManifest;
+  if (publication !== undefined && typeof publication !== "boolean") throw new Error("Invalid manifest publication option");
+  const publishing = publication === true;
+  if (publishing && ledger.identity.network !== "regtest") throw new Error("Manifest publication is regtest only");
   // Opt-in pins the event key as well as binding identity. Default key behavior
   // remains unchanged; caller mutation cannot rotate an opted-in signing key.
-  const eventSigningKey = consumer ? new Uint8Array(options.eventSigningKey) : options.eventSigningKey;
+  const eventSigningKey = consumer || publishing ? new Uint8Array(options.eventSigningKey) : options.eventSigningKey;
   if (consumer && (consumer.identity.merchantOrigin !== ledger.identity.origin || consumer.identity.receiver !== ledger.identity.receiver ||
       consumer.identity.network !== ledger.identity.network || consumer.identity.merchantPublicKey !== bytesToHex(ed25519.getPublicKey(eventSigningKey)))) throw new Error("Acceptance consumer identity mismatch");
+  const manifest = publishing ? createNativeLightningMerchantManifest(ledger.identity.origin, ledger.identity.receiver, bytesToHex(ed25519.getPublicKey(eventSigningKey))) : null;
   const now = options.now ?? (() => Math.floor(Date.now() / 1000));
   const token = (intentId: string): string => createHmac("sha256", options.statusKey).update("checkout-status/1:" + ledger.identity.origin + ":" + intentId).digest("base64url");
   const snapshot = (intentId: string): IntentView => {
@@ -89,6 +96,11 @@ export function createMerchantService(options: MerchantServiceOptions) {
       try {
         const url = new URL(request.url);
         if (url.search || url.hash || (request.headers.has("Origin") && request.headers.get("Origin") !== ledger.identity.origin)) throw new HttpError(403);
+        if (url.pathname === "/v1/manifest") {
+          if (!manifest) throw new HttpError(404);
+          if (request.method !== "GET") throw new HttpError(405);
+          return response(manifest);
+        }
         const authorization = request.headers.get("Authorization") ?? "";
         const admin = equal(authorization, `Bearer ${options.adminToken}`);
         if (url.pathname === "/v1/intents" && request.method === "POST") {

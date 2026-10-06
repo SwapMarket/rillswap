@@ -193,6 +193,7 @@ checkout or multichain conformance has passed. Offline `rill-payments` and
 | M59 | Opt-in merchant invoice exposure gate | Existing full bindings required on every invoice snapshot, explicit admin resource registration, immutable identity/event key, safe missing/corrupt state and legacy registration; buyer cannot register, no passive backfill, default API preserved, SDK dispatch held until affirmative binding |
 | M60 | Isolated native funded HTTPS admission conformance | Parent-pinned original order/invoice and one SDK/native-LND dispatch, actual receiver observation, signed consumer commit/ack-loss/reopen/replay checks; explicit opt-ins, no cooperative-refusal classification, external fulfillment or power-loss claim |
 | M61 | Explicit HTTPS consumer configuration and lifecycle | Separate fresh consumer provision against matching merchant state, strict open before listening, full identity/path/SQLite-sidecar collision checks and original invoice suppression; old configurations unchanged, no automatic initialization, repair, binding or fulfillment |
+| M62 | Advisory native Lightning merchant manifest | Closed canonical schema and browser parser, independent origin/key declarations, immutable regtest-only opt-in publication with no backend calls or writes; unsigned contents require authenticated origin delivery, no invoice authority, capability adoption or production route |
 
 ## Test evidence and accounting
 

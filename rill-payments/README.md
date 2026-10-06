@@ -205,6 +205,45 @@ uses the provider cooperative paid collector nor proves its historical failures
 resolved. This is not production fulfillment or process-crash/power-loss proof.
 Execution requires both existing LND/Bun opt-ins and pinned disposable fixtures.
 
+## Advisory native Lightning merchant manifest
+
+`createMerchantService({ ...options, publishManifest: true })` explicitly
+publishes public `GET /v1/manifest`. The default and explicit false retain 404.
+This fixed `merchant-manifest/native-lightning/1` profile advertises only regtest
+native Lightning, its intent API, protected signed-event path and original event
+public key. Publication snapshots that key, including Buffer-backed inputs.
+No backend probe, invoice issuance, ledger write or order authorization occurs.
+Non-regtest publication and nonboolean options are refused. Existing service and
+store behavior remains unchanged without the option; launcher configuration does
+not yet expose this programmatic option.
+
+`@rillswap/payments/manifest` exports the browser-compatible constructor and
+`parseNativeLightningMerchantManifest(value, expectedOrigin, expectedPublicKey)`.
+Both pins must come from independent trusted configuration. The parser accepts
+bounded plain JSON data, rejects nested extensions/accessors, checks the exact
+intent URL and returns a deeply frozen snapshot. The published canonical schema
+is `rill-docs/schemas/checkout/native-lightning-manifest.schema.json`; generated
+validator parity is checked by the existing schema command.
+Bound the transport response before decoding (this profile fits within 8192
+bytes). This parser is not a sandbox for arbitrary JavaScript objects or Proxies;
+introspection traps and initial property enumeration are not isolated or bounded
+by its profile limits. The public conformance fixture and independent Python
+schema checks live alongside the schema in `rill-docs`.
+
+This manifest is unsigned. Matching public pins does **not** authenticate its
+contents or receiver: the caller must authenticate HTTPS delivery from the
+expected origin. Never replace independently trusted invoice/order/receiver pins
+with advertised values. Event retrieval still requires its status/admin
+capability. Advertisements establish neither live payability nor settlement,
+deployment conformance, execution rights or production readiness.
+
+Asset decimals are relative to BTC (`11` for msat); quantum `1000` is measured
+in msat and describes this whole-satoshi checkout profile, not Lightning's
+general precision. Token contract/mint and token behavior are not applicable.
+The named regtest network does not identify a unique private chain or topology.
+`productionEnabled` is always false; no bridge, swap or sandbox-native route is
+advertised. Publication is an in-memory opt-in, not a migration or funding gate.
+
 ## Merchant ledger
 
 Import `MerchantLedger` from `@rillswap/payments/merchant` in Bun. Provision

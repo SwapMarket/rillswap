@@ -113,3 +113,22 @@ test("explicit browser acquisition makes one invoice request without payment or 
   for (const request of seen) for (const name of ["cookie", "authorization", "referer"]) expect(request.headers[name]).toBeUndefined();
   expect(await page.evaluate(() => window.checkoutCalls())).toBe(0);
 });
+
+test("browser manifest parsing is advisory, pinned and immutable without network or payment", async ({ context }, info) => {
+  const page = await context.newPage(); let externalRequests = 0;
+  await context.route("https://**", async (route) => { externalRequests++; await route.abort(); });
+  await page.goto("/?case=" + encodeURIComponent(info.testId)); await page.waitForFunction(() => window.checkoutReady);
+  const result = await page.evaluate(() => {
+    const origin = "https://merchant.example", key = "22".repeat(32), receiver = window.lnurlFixture.receiver;
+    const original = window.createNativeLightningMerchantManifest(origin, receiver, key);
+    const raw = JSON.parse(JSON.stringify(original));
+    const parsed = window.parseNativeLightningMerchantManifest(raw, origin, key); raw.publicPolicy.receiver = "03" + "ab".repeat(32);
+    let wrongPinRefused = false, extensionRefused = false;
+    try { window.parseNativeLightningMerchantManifest(original, origin, "33".repeat(32)); } catch { wrongPinRefused = true; }
+    try { window.parseNativeLightningMerchantManifest({ ...original, executable: true }, origin, key); } catch { extensionRefused = true; }
+    return { receiverRetained: parsed.publicPolicy.receiver === receiver, frozen: Object.isFrozen(parsed) && Object.isFrozen(parsed.publicPolicy) && Object.isFrozen(parsed.allowedPayerAssets[0]),
+      wrongPinRefused, extensionRefused, productionEnabled: parsed.productionEnabled, quantum: parsed.allowedPayerAssets[0]!.quantum };
+  });
+  expect(result).toEqual({ receiverRetained: true, frozen: true, wrongPinRefused: true, extensionRefused: true, productionEnabled: false, quantum: "1000" });
+  expect(externalRequests).toBe(0); expect(await page.evaluate(() => window.checkoutCalls())).toBe(0);
+});
