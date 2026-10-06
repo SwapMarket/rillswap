@@ -949,6 +949,32 @@ recovery, database rollback or production custody. `watch-claim` is not used as
 proof of this route. No runtime recovery controller, startup action, migration or
 production funding enablement is added; upgrades retain existing behavior.
 
+#### Signed-fallback acknowledgment boundary
+
+A separate case lets the original SDK acquire its signer and make both local
+signatures (probe and fallback). It awaits the real encrypted fallback publisher.
+Before acknowledging retention and killing the child, the parent independently
+reads `initial.age.fallback`, checks initial-to-funded-to-fallback native lineage,
+and validates its signed claim against the original binding, keys, preimage,
+destination and fee. The child's event loop is blocked at that exact barrier;
+external provider and daemon activity remains independent. Cooperation and SDK
+claim watchers have not begun. The snapshot's dangerous-signature flag remains
+false, which does not mean it contains no local signature.
+
+Explicit manual preparation/disclosure consumes that actual fallback snapshot,
+creating a new privately verified plan. Core's witness-inclusive transaction bytes
+must equal the **manual plan**, not the SDK fallback. Signing randomness means no
+equality or inequality of those two transactions is assumed. Fresh receipt and
+public completion instead use retained original `initial.age.funded`, a direct
+successor of the journal's initial checkpoint. A valid multi-step fallback lineage
+cannot replace that direct-successor admission contract. All three original
+encrypted custody snapshots remain unchanged, with one source payment/HTLC,
+approved claim depth and liability retention until fresh atomic completion.
+
+This adds only a separate controlled interruption test, not automatic recovery,
+new SDK rights, a byte-replay runtime adapter or production funding. Existing
+installations and missing, partial or older artifacts gain no new behavior.
+
 ### Merchant credit correspondence (internal, provenance only)
 
 `rill_cli.merchant_credit.verify_merchant_credit` verifies the existing merchant

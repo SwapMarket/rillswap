@@ -1815,6 +1815,18 @@ saved-hint fresh public completion. No SDK restart or new payment is made. The
 unchanged older cases remain separate; this exact instrumented boundary is not
 general crash, wallet, container, power-loss or production recovery acceptance.
 
+Another separate case kills the original SDK after independently acknowledged
+encrypted signed-fallback retention, before cooperation or SDK claim watchers.
+It uses the actual publisher and verifies one signer acquisition and two local
+signatures. The child event loop is blocked at the ACK barrier; external services
+continue. Native validation joins initial, funded and fallback custody snapshots.
+Explicit manual recovery re-signs from the actual fallback; Core's full transaction
+bytes must match its verified manual plan, not the SDK fallback. Fresh receipt and
+saved-hint completion retain the original funded snapshot's direct-successor
+admission rule. All three custody snapshots stay immutable. No SDK restart, new
+payment, runtime adapter, startup/migration change or general recovery claim is
+added. The separate unidentified cooperative refusal remains a production blocker.
+
 An internal **treasury accounting observer** is available as
 `rill_provider.lnd_treasury_observation.LndTreasuryObserver`. Provision a protected
 credential with only `info:read` and `offchain:read`, numeric loopback endpoint,
