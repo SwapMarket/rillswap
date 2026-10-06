@@ -1873,6 +1873,24 @@ A late worker's named guard is not necessarily its canceled parent's cause.
 Neither unit coverage nor a successful capture run classifies historical paid
 refusals or closes their production release blockers.
 
+An offline native-crypto integration test now runs the actual live-store
+missing-original-memory guard under that probe. It verifies the leaf category
+before the unchanged sanitized exception, trace restoration, bounded metadata,
+and unchanged durable paid rows/outbox with no reconstructed signing handles.
+The local repayment fixture uses mocked backends, not an LND payment or funded
+capture. From `rill-provider`, run:
+
+```sh
+RILLSWAP_RUN_NATIVE_CRYPTO=1 RILL_CRYPTO_LIBRARY="$PWD/tmp/native/librill_crypto.so" \
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q \
+  tests/test_reverse_paid_context.py::test_paid_refusal_probe_classifies_actual_missing_original_context_without_authority
+```
+
+This characterizes one known current refusal, not the historical gate04 or
+timeout incidents. Their correlated leaf evidence remains unavailable; they
+remain unknown. No product guards, deadlines, persisted formats, startup paths
+or upgrade behavior change, and no additional paid diagnostic is triggered.
+
 An internal **treasury accounting observer** is available as
 `rill_provider.lnd_treasury_observation.LndTreasuryObserver`. Provision a protected
 credential with only `info:read` and `offchain:read`, numeric loopback endpoint,

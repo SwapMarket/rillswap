@@ -197,6 +197,7 @@ checkout or multichain conformance has passed. Offline `rill-payments` and
 | M63 | Explicit HTTPS manifest profile selection | Exact HTTPS-only string profile, TLS-verified public publication, rejection before backend calls/state creation, retained protected routes and optional consumer invoice gate; absent field remains 404, no default publication or production authority |
 | M64 | Keyless deterministic acceptance signer | Exclusive public-key/sign-byte capability, immutable original payload, verified output before exposure/ack, canonical prime-subgroup keys, child IPC/concurrent reads/ack-loss/reopen conformance; raw-key compatibility preserved, no hardware custody, nondeterministic signatures or stored-format change |
 | M65 | Weak acceptance-key rejection | Zero-signature/small-order forgery regression, refusal before consumer file creation/open, byte-preserved older weak-key stores, normal generated-key replay and legacy mixed-order/ZIP-215 encoding compatibility; no history blessing, automatic rotation or migration |
+| M66 | Actual offline paid-context refusal classification | Native-crypto/local mock-repayment fixture executes the real missing-original-memory guard under the bounded probe, retaining the sanitized exception, durable rows/outbox and absent signing handles; no historical incident classification, new authority, deadline change or funded capture |
 
 ## Test evidence and accounting
 

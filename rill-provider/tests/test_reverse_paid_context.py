@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+import threading
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
 import pytest
+from _paid_refusal_probe import PaidRefusalProbe
+from test_paid_refusal_probe import LIVE_GUARDS
 from test_reverse_proposal_debt import _commit, _facts, _prepare
 from test_reverse_proposal_debt import (
     pytestmark as pytestmark,  # noqa: PLC0414 - native test policy
@@ -71,6 +75,66 @@ def test_repayment_first_exposes_only_original_paid_context_without_backend_or_c
         assert not reserved.store._cooperation_handles
 
     asyncio.run(exercise())
+
+
+def test_paid_refusal_probe_classifies_actual_missing_original_context_without_authority(
+    reserved: ReservationCase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = PaidRefusalProbe(
+        ((ValueError, "ValueError"), (LiveSessionStoreError, "LiveSessionStoreError"))
+    )
+    probe.preflight()
+    original_trace, original_thread_trace = sys.gettrace(), threading.gettrace()
+
+    async def exercise() -> None:
+        await _debt(reserved)
+        await _repay(reserved)
+        store = reserved.store
+        # Inject the existing terminal missing-owner-memory fault. This never
+        # reconstructs signing authority from durable historical paid evidence.
+        store._reverse_proposals.clear()
+        queries = (
+            "SELECT * FROM swaps",
+            "SELECT * FROM cooperation_attempts",
+            "SELECT * FROM economic_reservations",
+        )
+        before = tuple(store._connection.execute(query).fetchall() for query in queries)
+        outbox = store.pending_outbox()
+        original = store._reverse_live_context_in_connection
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                store,
+                "_reverse_live_context_in_connection",
+                probe.synchronous(original, "live_context", LIVE_GUARDS),
+            )
+            async with store.reverse_operations.operation() as operation:
+                with pytest.raises(LiveSessionStoreError) as caught:
+                    store._reverse_live_proposal_context(
+                        reserved.document, operation=operation, purpose="paid-signing"
+                    )
+                assert caught.value.args == ("reverse proposal live context refused",)
+        assert store._reverse_live_context_in_connection == original
+        assert tuple(store._connection.execute(query).fetchall() for query in queries) == before
+        assert store.pending_outbox() == outbox
+        assert not store._reverse_proposals
+        assert not store._cooperation_handles
+
+    asyncio.run(probe.paid_phase(exercise)())
+    assert sys.gettrace() is original_trace
+    assert threading.gettrace() is original_thread_trace
+    assert [(event["method"], event["guard"], event["category"]) for event in probe.events] == [
+        ("paid_scope", "enter", "none"),
+        ("live_context", "original_reservation_absent", "ValueError"),
+        ("live_context", "live_context_sanitized", "LiveSessionStoreError"),
+        ("paid_scope", "exit", "none"),
+    ]
+    assert probe.unknown is False
+    assert len(probe.events) <= 64
+    for event in probe.events:
+        assert set(event) == {"method", "guard", "category", "elapsed_ms"}
+        assert isinstance(event["elapsed_ms"], int)
+        assert 0 <= event["elapsed_ms"] <= 600_000
 
 
 def test_early_paid_context_refusal_is_terminal_but_independent_repayment_survives(
