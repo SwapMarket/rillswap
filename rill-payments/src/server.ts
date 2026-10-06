@@ -5,6 +5,7 @@ import type { AcceptanceEvent, InvoiceIssuer, MerchantLedger, ReceiptObserver } 
 import type { IntentView } from "./sdk";
 import type { LightningAcceptanceConsumer } from "./acceptanceConsumer";
 import { createNativeLightningMerchantManifest } from "./manifest";
+import { WooCommerceOrderRefused, type WooCommerceOrderSource } from "./woocommerce";
 
 export interface SignedAcceptance {
   readonly algorithm: "Ed25519";
@@ -56,6 +57,10 @@ export interface MerchantServiceOptions {
   readonly now?: () => number;
   readonly acceptanceConsumer?: LightningAcceptanceConsumer;
   readonly publishManifest?: boolean;
+  /** Buyer-initiated checkout priced by the store; the buyer supplies only the order key. */
+  /** `orderKeyGrantsStatusAccess: true` acknowledges the pay-by-link policy: anyone
+   * holding an order ID and key receives an enduring status/events capability. */
+  readonly wooCommerce?: { readonly source: WooCommerceOrderSource; readonly intentTtlSeconds: number; readonly orderKeyGrantsStatusAccess: true };
 }
 /** Dedicated acceptance key, not a wallet/spending signer. Implementations MUST
  * produce standard RFC 8032 deterministic Ed25519 signatures for identical
@@ -128,6 +133,10 @@ export function createMerchantService(options: MerchantServiceOptions | KeylessM
       return Object.freeze(envelope);
     } catch { throw new Error("Acceptance signing refused"); }
   };
+  const commerce = options.wooCommerce;
+  if (commerce !== undefined && (!commerce || typeof commerce.source?.readPayableOrder !== "function" ||
+      !Number.isSafeInteger(commerce.intentTtlSeconds) || commerce.intentTtlSeconds < 60 || commerce.intentTtlSeconds > 86_400 ||
+      commerce.orderKeyGrantsStatusAccess !== true)) throw new Error("Invalid WooCommerce checkout options");
   const now = options.now ?? (() => Math.floor(Date.now() / 1000));
   const token = (intentId: string): string => createHmac("sha256", options.statusKey).update("checkout-status/1:" + ledger.identity.origin + ":" + intentId).digest("base64url");
   const snapshot = (intentId: string): IntentView => {
@@ -168,6 +177,37 @@ export function createMerchantService(options: MerchantServiceOptions | KeylessM
           await health();
           const intent = ledger.createIntent(input.orderRef, input.amountMsat, input.expiresAt, request.headers.get("Idempotency-Key") ?? "", now());
           return response({ ...snapshot(intent.id), statusToken: token(intent.id) }, 201);
+        }
+        const wooOrder = /^\/v1\/woocommerce\/orders\/([1-9][0-9]{0,15})\/checkout$/.exec(url.pathname);
+        if (wooOrder) {
+          if (!commerce) throw new HttpError(404);
+          if (request.method !== "POST") throw new HttpError(405);
+          const input = await body(request);
+          if (Object.keys(input).join(",") !== "orderKey" || typeof input.orderKey !== "string") throw new HttpError(400);
+          let price;
+          try { price = await commerce.source.readPayableOrder(wooOrder[1]!, input.orderKey); }
+          catch (error) { throw new HttpError(error instanceof WooCommerceOrderRefused ? { not_found: 404, not_payable: 409, unavailable: 503 }[error.reason] : 503); }
+          await health(); // only after store admission, so unauthenticated probes cause no backend work
+          // The store total is authoritative. An existing intent is used only if this
+          // route created it (same store-bound key); never adopted by reference/amount.
+          const key = "woocommerce-intent:" + price.orderRef;
+          let intent = ledger.intentForOrder(price.orderRef);
+          if (!intent) {
+            const at = now();
+            try { intent = ledger.createIntent(price.orderRef, price.amountMsat, at + commerce.intentTtlSeconds, key, at); }
+            catch { intent = ledger.intentForOrder(price.orderRef); } // concurrent first request
+          }
+          if (intent && ledger.intentIdForKey(key) !== intent.id) throw new HttpError(409);
+          if (!intent || intent.amount_msat !== price.amountMsat) throw new HttpError(409);
+          let attempt = ledger.attemptForIntent(intent.id);
+          if (!attempt && intent.status === "waiting" && now() < intent.expires_at) {
+            try { attempt = ledger.createAttempt(intent.id, "woocommerce-attempt:" + intent.id, now()); } catch { attempt = ledger.attemptForIntent(intent.id); }
+          }
+          if (attempt && !attempt.invoice && intent.status === "waiting") {
+            try { await ledger.issue(attempt.id, options.issuer, now); }
+            catch { return response({ ...snapshot(intent.id), statusToken: token(intent.id), actionRequired: "issuance_reconciliation" }, 202); }
+          }
+          return response({ ...snapshot(intent.id), statusToken: token(intent.id) });
         }
         const match = /^\/v1\/intents\/([A-Za-z0-9_-]{16,128})(?:\/(attempts|events|evidence|order-binding))?$/.exec(url.pathname);
         if (!match) throw new HttpError(404);

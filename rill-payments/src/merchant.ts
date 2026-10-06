@@ -246,6 +246,11 @@ export class MerchantLedger {
     }).immediate();
   }
   pendingAttempts(): Attempt[] { return this.db.query("SELECT * FROM attempts ORDER BY rowid").all() as Attempt[]; }
+  /** Intent ID recorded for an exact intent idempotency key (provenance check), else null. */
+  intentIdForKey(key: string): string | null {
+    return (this.db.query("SELECT result_id FROM idempotency WHERE scope='intent' AND key=?").get(key) as { result_id: string } | null)?.result_id ?? null;
+  }
+  intentForOrder(orderRef: string): Intent | null { return this.db.query("SELECT * FROM intents WHERE order_ref=?").get(orderRef) as Intent | null; }
   attemptForIntent(intentId: string): Attempt | null { return this.db.query("SELECT * FROM attempts WHERE intent_id=?").get(intentId) as Attempt | null; }
   eventsForIntent(intentId: string): AcceptanceEvent[] {
     return (this.db.query("SELECT payload FROM outbox WHERE intent_id=? ORDER BY rowid").all(intentId) as { payload: string }[]).map((x) => JSON.parse(x.payload));

@@ -648,6 +648,67 @@ order fulfillment. Signature verification alone does not prevent replay.
 `createMerchantService().deliverEvents` retries unchanged event IDs until the
 consumer acknowledges. `GET .../events` retains history after acknowledgment.
 
+## WooCommerce-priced buyer checkout (opt-in)
+
+`createWooCommerceOrderSource` (`@rillswap/payments/woocommerce`) reads an order
+through the WooCommerce REST API v3 (`GET /wp-json/wc/v3/orders/:id`, HTTPS basic
+auth with a read-only `ck_`/`cs_` REST key). Passing
+`wooCommerce: { source, intentTtlSeconds, orderKeyGrantsStatusAccess: true }`
+(TTL 60 to 86400) to `createMerchantService` mounts
+`POST /v1/woocommerce/orders/:id/checkout`, body exactly
+`{ "orderKey": "wc_order_..." }`. The buyer supplies only the order ID and the
+order key that WooCommerce shows on its order pages; the price always comes from
+the store.
+
+- Pay-by-link policy: `orderKeyGrantsStatusAccess: true` is a required
+  acknowledgment that anyone holding an order ID and key receives the intent's
+  status token, which also reads signed events and survives order-key rotation.
+  This is weaker authentication than WooCommerce's own `order-pay` page, which additionally
+  checks `pay_for_order` and guest email verification.
+- Payable means: matching order key (timing-safe), status `pending`, currency
+  `BTC` and a positive `total` with at most 8 decimals, converted exactly to
+  millisatoshis. Set the store currency to Bitcoin with 8 decimals. Fiat-priced
+  stores are refused (`409`), because no exchange-rate authority is configured.
+  WooCommerce 11.1.2 includes BTC in core; no currency plugin is required.
+  Configure precision before creating orders: changing it later cannot repair
+  already-rounded totals. WooCommerce uses PHP floats when formatting totals;
+  this adapter exactly converts the returned total, not the unrounded catalog
+  price. Store arithmetic and discounts remain the merchant's authority.
+- A wrong key and a missing order both return `404`; store errors, redirects,
+  non-JSON, bodies over 256 KiB, mismatched order IDs and reads over the budget
+  return `503`. The budget (default 10 s, 1 to 30000 ms) is a hard deadline
+  over the request and every body read, even when the transport ignores abort;
+  late responses are discarded and the body is cancelled best effort.
+  Malformed IDs or keys never reach the store, and issuer/observer health runs
+  only after the store admits the order.
+- Order references are store-bound: `woocommerce:<sha256 tag of the store
+  origin>:<id>`. The first admitted request creates that intent under a
+  route-specific idempotency key, with expiry `now + intentTtlSeconds`, one
+  attempt and one invoice. Replays (including a concurrent first request that
+  lost the race) return the same intent and invoice. An existing intent not
+  created by this route, for example an admin intent with the same reference and
+  amount, is refused (`409`): consistency is not provenance.
+- A later store total that differs from the persisted intent, or a non-pending
+  order, is refused (`409`); persisted terms are never replaced. Refusal does
+  not revoke an issued invoice, so store cancellations and price changes after
+  issuance still need fulfillment reconciliation.
+- Ambiguous issuance returns `202` with `actionRequired: "issuance_reconciliation"`;
+  later requests (or `tick`) retry the same issuer operation.
+- With an acceptance consumer configured, the invoice stays hidden until the
+  trusted backend registers the order binding, as for admin intents.
+- The adapter never writes to the store and does not mark orders paid. The route
+  is unauthenticated by design, so each well-formed request may cause one
+  bounded store read; deploy it behind rate and concurrency limits.
+
+Upgrades: nothing changes unless the option is supplied. No schema or stored
+format changed. Existing intents carry no store provenance and are never adopted
+by this route. Mainnet remains disabled by the merchant ledger.
+
+Public references: [REST API v3 order retrieval](https://woocommerce.github.io/woocommerce-rest-api-docs/#retrieve-an-order),
+[HTTPS authentication](https://woocommerce.github.io/woocommerce-rest-api-docs/#authentication-over-https),
+[WooCommerce 11.1.2 BTC currencies](https://github.com/woocommerce/woocommerce/blob/11.1.2/plugins/woocommerce/i18n/currencies.php),
+and [decimal formatting](https://github.com/woocommerce/woocommerce/blob/11.1.2/plugins/woocommerce/includes/wc-formatting-functions.php).
+
 ## External provider readiness
 
 `bun run probe:providers` performs bounded read-only GET requests to the official
