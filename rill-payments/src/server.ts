@@ -3,6 +3,7 @@ import { ed25519 } from "@noble/curves/ed25519.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import type { AcceptanceEvent, InvoiceIssuer, MerchantLedger, ReceiptObserver } from "./merchant";
 import type { IntentView } from "./sdk";
+import type { LightningAcceptanceConsumer } from "./acceptanceConsumer";
 
 export interface SignedAcceptance {
   readonly algorithm: "Ed25519";
@@ -38,6 +39,7 @@ export interface MerchantServiceOptions {
   readonly statusKey: Uint8Array;
   readonly eventSigningKey: Uint8Array;
   readonly now?: () => number;
+  readonly acceptanceConsumer?: LightningAcceptanceConsumer;
 }
 class HttpError extends Error { constructor(readonly status: number) { super("Checkout request refused"); } }
 const equal = (a: string, b: string): boolean => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -55,12 +57,23 @@ async function body(request: Request): Promise<Record<string, unknown>> {
 export function createMerchantService(options: MerchantServiceOptions) {
   if (!/^[A-Za-z0-9_-]{32,128}$/.test(options.adminToken) || options.statusKey.length !== 32 || options.eventSigningKey.length !== 32) throw new Error("Persistent merchant authentication keys required");
   const { ledger } = options;
+  const consumer = options.acceptanceConsumer;
+  // Opt-in pins the event key as well as binding identity. Default key behavior
+  // remains unchanged; caller mutation cannot rotate an opted-in signing key.
+  const eventSigningKey = consumer ? new Uint8Array(options.eventSigningKey) : options.eventSigningKey;
+  if (consumer && (consumer.identity.merchantOrigin !== ledger.identity.origin || consumer.identity.receiver !== ledger.identity.receiver ||
+      consumer.identity.network !== ledger.identity.network || consumer.identity.merchantPublicKey !== bytesToHex(ed25519.getPublicKey(eventSigningKey)))) throw new Error("Acceptance consumer identity mismatch");
   const now = options.now ?? (() => Math.floor(Date.now() / 1000));
   const token = (intentId: string): string => createHmac("sha256", options.statusKey).update("checkout-status/1:" + ledger.identity.origin + ":" + intentId).digest("base64url");
   const snapshot = (intentId: string): IntentView => {
     const intent = ledger.getIntent(intentId); const attempt = ledger.attemptForIntent(intentId);
+    let admitted = true;
+    if (consumer && attempt?.invoice) {
+      try { admitted = consumer.existingBinding(intent.order_ref, intent.amount_msat, ledger.terms(attempt.id)) !== null; }
+      catch { throw new HttpError(503); } // Corrupt/conflicting provenance is not a missing binding.
+    }
     return { version: "checkout-view/1", id: intent.id, status: intent.status,
-      attempt: attempt?.invoice ? { terms: ledger.terms(attempt.id), invoice: attempt.invoice } : null };
+      attempt: admitted && attempt?.invoice ? { terms: ledger.terms(attempt.id), invoice: attempt.invoice } : null };
   };
   const response = (value: unknown, status = 200): Response => Response.json(value, { status, headers: {
     "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff",
@@ -86,7 +99,7 @@ export function createMerchantService(options: MerchantServiceOptions) {
           const intent = ledger.createIntent(input.orderRef, input.amountMsat, input.expiresAt, request.headers.get("Idempotency-Key") ?? "", now());
           return response({ ...snapshot(intent.id), statusToken: token(intent.id) }, 201);
         }
-        const match = /^\/v1\/intents\/([A-Za-z0-9_-]{16,128})(?:\/(attempts|events|evidence))?$/.exec(url.pathname);
+        const match = /^\/v1\/intents\/([A-Za-z0-9_-]{16,128})(?:\/(attempts|events|evidence|order-binding))?$/.exec(url.pathname);
         if (!match) throw new HttpError(404);
         const intentId = match[1]!, operation = match[2];
         if (!admin && !equal(authorization, `Bearer ${token(intentId)}`)) throw new HttpError(404);
@@ -95,7 +108,21 @@ export function createMerchantService(options: MerchantServiceOptions) {
           if (ledger.getIntent(intentId).status === "waiting") await health();
           return response(snapshot(intentId));
         }
-        if (operation === "events" && request.method === "GET") return response(ledger.eventsForIntent(intentId).map((event) => signAcceptance(event, options.eventSigningKey)));
+        if (operation === "order-binding") {
+          if (!consumer) throw new HttpError(404);
+          if (request.method !== "PUT") throw new HttpError(405);
+          if (!admin) throw new HttpError(403);
+          const input = await body(request), intent = ledger.getIntent(intentId);
+          if (Object.keys(input).sort().join(",") !== "amountMsat,orderRef" || typeof input.orderRef !== "string" || typeof input.amountMsat !== "string" ||
+              input.orderRef !== intent.order_ref || input.amountMsat !== intent.amount_msat) throw new HttpError(400);
+          const attempt = ledger.attemptForIntent(intentId);
+          if (!attempt?.invoice) throw new HttpError(409);
+          // Affirmative backend authorization, never a passive missing-state
+          // backfill. Resource-level exact replay, not an idempotency-key map.
+          consumer.bindOrder(input.orderRef, input.amountMsat, ledger.terms(attempt.id));
+          return response(snapshot(intentId));
+        }
+        if (operation === "events" && request.method === "GET") return response(ledger.eventsForIntent(intentId).map((event) => signAcceptance(event, eventSigningKey)));
         if (operation === "attempts" && request.method === "POST") {
           if (!admin) throw new HttpError(403); // Read-only status capabilities cannot mutate order terms.
           const input = await body(request); if (Object.keys(input).length !== 0) throw new HttpError(400);
@@ -124,7 +151,7 @@ export function createMerchantService(options: MerchantServiceOptions) {
     },
     async deliverEvents(deliver: (event: SignedAcceptance) => Promise<void>): Promise<void> {
       for (const event of ledger.pendingEvents()) {
-        await deliver(signAcceptance(event, options.eventSigningKey));
+        await deliver(signAcceptance(event, eventSigningKey));
         ledger.acknowledgeEvent(event.id);
       }
     },

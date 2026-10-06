@@ -190,6 +190,7 @@ checkout or multichain conformance has passed. Offline `rill-payments` and
 | M56 | Pure LNURL invoice-response validation | Independent payee/amount/network/lifetime pins, explicit ordinary or strict hash policy, unchanged seven-field binding and ignored extensions; browser and signed-fixture coverage, not order authorization, recoverable issuance or receipt proof |
 | M57 | Explicit LNURL invoice acquisition | Zero transport calls on invalid preflight, one per explicit callback request, fresh clocks and bounded elapsed/HTTP budget, immutable pins and sanitized unknown issuance after any invoked failure; no merchant issuer, retry, payment or recovery integration |
 | M58 | Durable bound Lightning acceptance consumer | Independent order price/payment bindings, verified signed event provenance on reads/replays, transactional deduplication and concurrent connections, producer late-observation/ack-loss/restart flow; no historical auto-binding, external fulfillment or rollback-resistant custody |
+| M59 | Opt-in merchant invoice exposure gate | Existing full bindings required on every invoice snapshot, explicit admin resource registration, immutable identity/event key, safe missing/corrupt state and legacy registration; buyer cannot register, no passive backfill, default API preserved, SDK dispatch held until affirmative binding |
 
 ## Test evidence and accounting
 

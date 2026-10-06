@@ -161,6 +161,40 @@ waiting; native sandbox, bridge/provider evidence and public status are not
 Lightning acceptance. Actual ecommerce order authentication, external effect
 idempotency and production deployment remain separate release gates.
 
+### Opt-in merchant invoice exposure gate
+
+Pass an already opened `acceptanceConsumer` to `createMerchantService` to require
+existing full order bindings before exposing invoices. The configured merchant
+origin, receiver, network and event signing key must match the consumer. This
+mode pins a copy of the event key; it does not perform key rotation. Default
+service behavior is unchanged when the option is absent.
+
+Every invoice-bearing snapshot, including status reads and admin creation
+replays, returns `attempt: null` if the original binding is missing. Conflicting
+or corrupt stored provenance produces HTTP 503 without invoice data. No GET,
+polling tick, constructor or historical event creates a binding. The consumer's
+`existingBinding(orderRef, amountMsat, terms)` performs the nonmutating full-term
+check, returning null only for an absent binding.
+
+Explicit admin `PUT /v1/intents/:id/order-binding` accepts exactly
+`{ "orderRef": "...", "amountMsat": "..." }` after the invoice is issued.
+The trusted backend must establish that price independently from its order
+system; an admin token alone does not prove price provenance. Both fields must
+match the original merchant intent. A successful registration authorizes invoice
+exposure, so it is not merely bookkeeping. Buyer status tokens cannot register.
+Resource-level exact replay is safe without an Idempotency-Key header; conflicting
+registration is refused. Responses may advance as acceptance status changes.
+
+Upgrading without opting in leaves merchant version-1 behavior unchanged. Opting
+in with missing bindings withholds existing invoices, including previously
+exposed or funded ones, without replacing them or proving any historical fact.
+Only explicit backend registration allocates matching original terms. Paid
+legacy orders may be registered for reconciliation, but that does not prove
+binding before their historical payment. New flows should register before buyer
+exposure. Consumer files are never initialized or migrated by the service.
+Signed event delivery remains caller-controlled; this mode neither consumes
+events automatically nor executes fulfillment or renews SDK dispatch rights.
+
 ## Merchant ledger
 
 Import `MerchantLedger` from `@rillswap/payments/merchant` in Bun. Provision

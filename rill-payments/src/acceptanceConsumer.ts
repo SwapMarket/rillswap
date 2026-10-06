@@ -138,14 +138,18 @@ export class LightningAcceptanceConsumer {
   private status(orderRef: string, accepted: AcceptanceRow | null): Readonly<BoundOrderStatus> {
     return Object.freeze({ orderRef, state: accepted ? "accepted" : "waiting", eventId: accepted?.event_id ?? null });
   }
+  private expectedBinding(orderRef: string, orderAmountMsat: string, input: NativeLightningTerms) {
+    orderReference(orderRef); quantity(orderAmountMsat);
+    const terms = termsSnapshot(input), payload = JSON.stringify(terms);
+    if (terms.merchantOrigin !== this.identity.merchantOrigin || terms.receiver !== this.identity.receiver || terms.network !== this.identity.network || terms.amountMsat !== orderAmountMsat) throw new Error("Order terms differ from trusted identity or price");
+    return { terms, payload };
+  }
 
   /** Explicit trusted backend registration, after issuance, before buyer exposure.
    * Order price is independently authoritative, never a browser-supplied amount.
    */
   bindOrder(orderRef: string, orderAmountMsat: string, input: NativeLightningTerms): Readonly<BoundOrderStatus> {
-    orderReference(orderRef); quantity(orderAmountMsat);
-    const terms = termsSnapshot(input), payload = JSON.stringify(terms);
-    if (terms.merchantOrigin !== this.identity.merchantOrigin || terms.receiver !== this.identity.receiver || terms.network !== this.identity.network || terms.amountMsat !== orderAmountMsat) throw new Error("Order terms differ from trusted identity or price");
+    const { terms, payload } = this.expectedBinding(orderRef, orderAmountMsat, input);
     return this.db.transaction(() => {
       const exists = this.db.query("SELECT order_ref FROM orders WHERE order_ref=?").get(orderRef);
       if (exists) {
@@ -156,6 +160,17 @@ export class LightningAcceptanceConsumer {
       this.db.query("INSERT INTO orders VALUES (?,?,?,?,?,?)").run(orderRef, orderAmountMsat, terms.intentId, terms.attemptId, terms.paymentHash, payload);
       return this.status(orderRef, null);
     }).immediate();
+  }
+
+  /** Read-only full-term assertion. Missing state never creates a binding. */
+  existingBinding(orderRef: string, orderAmountMsat: string, input: NativeLightningTerms): Readonly<BoundOrderStatus> | null {
+    const { payload } = this.expectedBinding(orderRef, orderAmountMsat, input);
+    return this.db.transaction(() => {
+      if (!this.db.query("SELECT order_ref FROM orders WHERE order_ref=?").get(orderRef)) return null;
+      const { row, accepted } = this.readOrder(orderRef);
+      if (row.amount_msat !== orderAmountMsat || row.terms !== payload) throw new Error("Existing order binding differs from expected terms");
+      return this.status(orderRef, accepted);
+    }).deferred();
   }
 
   getOrder(orderRef: string): Readonly<BoundOrderStatus> {
