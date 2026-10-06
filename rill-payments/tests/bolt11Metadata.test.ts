@@ -1,0 +1,87 @@
+import { expect, test } from "bun:test";
+import { secp256k1 } from "@noble/curves/secp256k1.js";
+import { sha256 } from "@noble/hashes/sha2.js";
+import { hexToBytes } from "@noble/hashes/utils.js";
+import { bech32 } from "@scure/base";
+import { decodeBolt11, invoiceBinding, invoiceMetadataBinding } from "../src/bolt11";
+import { receiver, testInvoice } from "./helpers";
+
+const encoder = new TextEncoder();
+const tag = (type: number, words: number[]) => [type, Math.floor(words.length / 32), words.length % 32, ...words];
+const metadataTag = (metadata: string) => tag(23, bech32.toWords(sha256(encoder.encode(metadata))));
+
+// Genuine signed payloads, with explicit payee pin so signature corruption
+// cannot merely recover a different signer. The key is a public test fixture.
+function invoice(tags: number[][], corruptSignature = false): string {
+  const base = bech32.decode(testInvoice("metadata") as `${string}1${string}`, 2048);
+  const original = base.words.slice(7, -104), retained: number[] = [];
+  for (let i = 0; i < original.length;) {
+    const type = original[i]!, length = original[i + 1]! * 32 + original[i + 2]!;
+    if (type !== 13) retained.push(...original.slice(i, i + 3 + length));
+    i += 3 + length;
+  }
+  const data = [...base.words.slice(0, 7), ...retained, ...tag(19, bech32.toWords(hexToBytes(receiver))), ...tags.flat()];
+  const bitLength = data.length * 5, byteLength = Math.ceil(bitLength / 8);
+  const packed = data.reduce((bits, word) => (bits << 5n) | BigInt(word), 0n) << BigInt(byteLength * 8 - bitLength);
+  const digest = sha256(new Uint8Array([...encoder.encode(base.prefix), ...hexToBytes(packed.toString(16).padStart(byteLength * 2, "0"))]));
+  const secret = new Uint8Array(32); secret[31] = 1;
+  const signed = secp256k1.sign(digest, secret, { prehash: false, format: "recovered" });
+  const signature = new Uint8Array([...signed.slice(1), signed[0]!]);
+  if (corruptSignature) signature.fill(0);
+  return bech32.encode(base.prefix, [...data, ...bech32.toWords(signature)], 2048);
+}
+
+test("strict metadata mode authenticates exact UTF-8 and preserves all seven binding fields", () => {
+  const metadata = '[["text/plain","Receipt \u00e9"]]', signed = invoice([metadataTag(metadata)]);
+  expect(invoiceMetadataBinding(signed, "regtest", metadata)).toEqual(invoiceBinding(signed, "regtest"));
+  expect(Object.keys(invoiceMetadataBinding(signed, "regtest", metadata))).toEqual([
+    "bolt11_sha256", "payment_hash", "amount_msat", "payee_compressed_pubkey", "created_at", "expires_at", "min_final_cltv_delta",
+  ]);
+  expect(Object.keys(decodeBolt11(signed))).not.toContain("metadataHash");
+  for (const changed of [metadata + " ", metadata.replace("\u00e9", "e\u0301"), JSON.stringify(JSON.parse(metadata), null, 2)]) {
+    expect(() => invoiceMetadataBinding(signed, "regtest", changed)).toThrow("hash differs");
+  }
+});
+
+test("wrong network and explicit-payee invalid signature still follow existing admission", () => {
+  const metadata = "exact";
+  expect(() => invoiceMetadataBinding(invoice([metadataTag(metadata)]), "mainnet", metadata)).toThrow("selected network");
+  expect(() => invoiceMetadataBinding(invoice([metadataTag(metadata)], true), "regtest", metadata)).toThrow("signature invalid");
+  const unknownFeature = invoice([metadataTag(metadata), tag(5, [1, 0, 16, 8, 0])]);
+  expect(() => invoiceMetadataBinding(unknownFeature, "regtest", metadata)).toThrow("feature");
+  expect(() => invoiceBinding(unknownFeature, "regtest")).toThrow("feature");
+});
+
+test("ambiguous, missing, malformed and noncanonical description tags refuse only metadata mode", () => {
+  const metadata = "exact", valid = metadataTag(metadata), padding = bech32.toWords(sha256(encoder.encode(metadata)));
+  padding[51] = padding[51]! | 1;
+  const unsupported = [[], [tag(13, [])], [valid, tag(13, [])], [valid, valid],
+    [tag(23, [1]), valid], [valid, tag(23, [1])], [tag(23, [])], [tag(23, padding)]];
+  for (const tags of unsupported) {
+    const signed = invoice(tags), ordinary = invoiceBinding(signed, "regtest");
+    expect(ordinary.payee_compressed_pubkey).toBe(receiver);
+    expect(() => invoiceMetadataBinding(signed, "regtest", metadata)).toThrow("description tags");
+    expect(invoiceBinding(signed, "regtest")).toEqual(ordinary);
+  }
+});
+
+test("unknown invoice tags remain benign under the explicit metadata profile", () => {
+  const metadata = "exact", signed = invoice([tag(31, [1, 2]), metadataTag(metadata)]);
+  expect(invoiceMetadataBinding(signed, "regtest", metadata)).toEqual(invoiceBinding(signed, "regtest"));
+});
+
+test("metadata byte bounds, lone surrogates, BOM and exact empty hash are explicit", () => {
+  for (const metadata of ["", "a".repeat(16384), "\u00e9".repeat(8192), "\ufeffexact", "\ud834\udd1e".repeat(4096)]) {
+    const signed = invoice([metadataTag(metadata)]);
+    expect(invoiceMetadataBinding(signed, "regtest", metadata)).toEqual(invoiceBinding(signed, "regtest"));
+  }
+  for (const metadata of ["a".repeat(16385), "\u00e9".repeat(8193), "\ud800", "\udc00", "a\ud800b", null as unknown as string]) {
+    expect(() => invoiceMetadataBinding(invoice([metadataTag("exact")]), "regtest", metadata)).toThrow("metadata");
+  }
+});
+
+test("ordinary modern unhashed invoice acceptance remains unchanged", () => {
+  const signed = testInvoice("modern-lnurl");
+  expect(invoiceBinding(signed, "regtest").payee_compressed_pubkey).toBe(receiver);
+  expect(() => invoiceMetadataBinding(signed, "regtest", "metadata")).toThrow("description tags");
+});

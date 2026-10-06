@@ -142,6 +142,10 @@ interface Fields {
   minFinalCltv: number | null;
   features: Set<number>;
   blindedPaths: boolean;
+  metadataHash: string | null;
+  metadataHashCount: number;
+  metadataHashCanonical: boolean;
+  hasDescription: boolean;
 }
 
 function parseFields(words: readonly number[]): Fields {
@@ -153,6 +157,10 @@ function parseFields(words: readonly number[]): Fields {
     minFinalCltv: null,
     features: new Set(),
     blindedPaths: false,
+    metadataHash: null,
+    metadataHashCount: 0,
+    metadataHashCanonical: false,
+    hasDescription: false,
   };
   let index = 0;
   while (index < words.length) {
@@ -162,6 +170,16 @@ function parseFields(words: readonly number[]): Fields {
     const value = words.slice(index + 3, index + 3 + length);
     if (value.length !== length) throw new InvoiceRejectedError("tagged field truncated");
     index += 3 + length;
+    // Private facts for the explicit metadata-bound profile only. Ordinary
+    // readers keep their original policy and public decoded/binding shapes.
+    if (type === 13) fields.hasDescription = true;
+    if (type === 23) {
+      fields.metadataHashCount++;
+      if (length === HASH_WORDS && fields.metadataHash === null) {
+        fields.metadataHash = bytesToHex(wordsToBytes(value, false).slice(0, 32));
+        fields.metadataHashCanonical = (value[HASH_WORDS - 1]! & 15) === 0;
+      }
+    }
     // A reader skips a field of unexpected length; the first valid one wins.
     if (type === 1 && length === HASH_WORDS && fields.paymentHash === null) {
       fields.paymentHash = bytesToHex(wordsToBytes(value, false).slice(0, 32));
@@ -246,4 +264,23 @@ export function invoiceBinding(invoice: string, networkName: string): InvoiceBin
     expires_at: decoded.timestamp + decoded.expirySeconds,
     min_final_cltv_delta: decoded.minFinalCltvDelta,
   };
+}
+
+/** Explicit strict hash-bound profile, not a requirement of current LNURL-pay.
+ * The signature authenticates invoice contents, not an independently expected
+ * merchant identity, order, amount, expiry or settlement. Callers pin those.
+ */
+export function invoiceMetadataBinding(invoice: string, networkName: string, metadata: string): InvoiceBinding {
+  if (typeof metadata !== "string" || metadata.length > 16384) throw new InvoiceRejectedError("metadata size or type unsupported");
+  const encoded = encoder.encode(metadata);
+  if (encoded.length > 16384 || new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(encoded) !== metadata) throw new InvoiceRejectedError("metadata UTF-8 unsupported");
+  // This authenticates the full original payload using the unchanged admission
+  // policy. Re-reading its private tag facts does not authenticate another invoice.
+  const binding = invoiceBinding(invoice, networkName);
+  const decoded = bech32.decode(invoice as `${string}1${string}`, MAX_INVOICE_CHARS);
+  const fields = parseFields(decoded.words.slice(7, -SIGNATURE_WORDS));
+  if (fields.metadataHashCount !== 1 || fields.metadataHash === null || !fields.metadataHashCanonical || fields.hasDescription) throw new InvoiceRejectedError("metadata description tags unsupported");
+  // Hash exact UTF-8 bytes, without Unicode normalization or JSON reserialization.
+  if (fields.metadataHash !== bytesToHex(sha256(encoded))) throw new InvoiceRejectedError("metadata hash differs");
+  return binding;
 }

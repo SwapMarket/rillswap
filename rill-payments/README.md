@@ -21,6 +21,24 @@ bun test
 Canonical schemas and public fixtures live in `rill-docs/`. Generated validators
 are checked in and use no runtime schema compilation in browser consumers.
 
+## Explicit invoice metadata binding
+
+`@rillswap/payments/bolt11` exports `invoiceMetadataBinding(invoice, network,
+metadata)` for an optional strict hash-bound invoice profile. It uses the
+unchanged invoice admission policy, requires exactly one canonical `h` tag and
+no `d` tag, and hashes the exact original metadata UTF-8 bytes. Whitespace,
+Unicode normalization and JSON reserialization change that hash. Metadata must
+be well-formed Unicode and at most 16 KiB encoded; malformed or duplicate hash
+tags are refused only by this explicit helper. Its seven-field binding shape
+and ordinary `decodeBolt11`/`invoiceBinding` behavior remain unchanged.
+
+Current [LUD-06](https://github.com/lnurl/luds/blob/913c49e5b65081473eed7889eee5f806dd30f049/06.md)
+no longer mandates metadata hash binding. This helper is not universal LNURL-pay
+compliance or the default for current Lightning Address services. It performs
+no HTTP request or invoice issuance. Signature authentication and a metadata
+match do not independently establish the expected merchant/order/amount,
+current expiry, custody or settlement. Those checks remain the caller's duty.
+
 ## Merchant ledger
 
 Import `MerchantLedger` from `@rillswap/payments/merchant` in Bun. Provision
