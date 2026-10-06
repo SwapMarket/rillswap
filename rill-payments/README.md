@@ -92,6 +92,39 @@ the trusted payee pin from descriptor metadata or the returned invoice itself.
 BOLT11 uses `tb` for both testnet3 and testnet4, so that encoding cannot distinguish
 those networks; independently configured rail identity remains necessary.
 
+`requestLnurlPayInvoice(descriptor, expected, approvedOrigins, clock, transport?)`
+is a separate, explicitly invoked acquisition utility. Its expectation omits
+`now`: the trusted clock supplies fresh Unix seconds before invocation and after
+the response. It validates independent pins and approved receiver/callback
+origins before one callback GET, adding the canonical requested amount. The same
+bounded HTTP policy applies. A separate 10-second elapsed transport budget
+includes response validation; invoice minimum expiry is not an order deadline.
+The return value is only the frozen validated invoice result described above.
+Existing query escapes and duplicate non-amount values retain their bytes when
+the amount is appended. That does not establish compatibility with a callback
+signature covering the complete URL; actual provider conformance is required.
+The response clock sample precedes signature validation, not the return instant.
+Consumers must independently recheck freshness before any separately authorized
+payment; this utility does not grant payment permission.
+
+`LnurlInvoiceAcquisitionError.state` distinguishes `not_requested` (transport
+was never invoked) from `issuance_unknown` (every failure after invocation,
+including remote errors, timeout, malformed response or mismatched invoice).
+Neither state grants retry permission. A callback may have issued an invoice
+even when no valid response arrives. Error messages contain no callback
+capabilities, remote reasons or causes. Trusted transports must not retry,
+redirect or delegate requests internally.
+
+The guarantee is one transport invocation **per explicit call**, not once per
+order. There is no automatic discovery, invoice refresh, payment, reconciliation
+or recovery. Do not call again to clear an unknown outcome or replace a funded
+invoice. This utility is deliberately not wired into `InvoiceIssuer`, checkout
+dispatch or merchant polling: their recoverable same-invoice contract requires
+durable original-operation recording, provider-backed invoice correlation and
+an independent settlement observer. A local marker alone cannot recover an
+unknown remote invoice. Existing installations gain no startup, migration or
+automatic network behavior; production integration remains disabled.
+
 ## Merchant ledger
 
 Import `MerchantLedger` from `@rillswap/payments/merchant` in Bun. Provision

@@ -83,3 +83,33 @@ test("browser LNURL validation pins signed contents without invoice retrieval or
   expect(await page.evaluate(() => window.checkoutCalls())).toBe(0);
   expect(requests.every((url) => new URL(url).origin === "http://127.0.0.1:8798")).toBe(true);
 });
+
+test("explicit browser acquisition makes one invoice request without payment or automatic retry", async ({ context }, info) => {
+  const origin = "https://receiver.example", seen: { url: string; headers: Record<string, string> }[] = [];
+  await context.addCookies([{ name: "callbackSecret", value: "PRIVATE_COOKIE", url: origin, secure: true, sameSite: "None" }]);
+  const page = await context.newPage(); await page.goto("/?lnurl=1&case=" + encodeURIComponent(info.testId)); await page.waitForFunction(() => window.checkoutReady);
+  const fixture = await page.evaluate(() => window.lnurlFixture);
+  await context.route(origin + "/**", async (route) => {
+    const request = route.request(); seen.push({ url: request.url(), headers: await request.allHeaders() });
+    expect(request.method()).toBe("GET"); expect(new URL(request.url()).pathname).toBe("/invoice");
+    expect(new URL(request.url()).searchParams.get("amount")).toBe("1000000");
+    await route.fulfill({ status: 200, contentType: "application/json", headers: { "Access-Control-Allow-Origin": "*" },
+      body: seen.length === 1 ? JSON.stringify({ pr: fixture.invoice, routes: [] }) : JSON.stringify({ status: "ERROR", reason: "PRIVATE_REASON" }) });
+  });
+  const result = await page.evaluate(async (origin) => {
+    const fixture = window.lnurlFixture;
+    const descriptor = { version: "lnurl-pay-request/1" as const, lightningAddress: "buyer@receiver.example", receiverOrigin: origin,
+      callback: origin + "/invoice?k1=PRIVATE_CALLBACK", metadata: fixture.metadata, description: "Receiver", minSendableMsat: "1", maxSendableMsat: "1000000" };
+    const pins = { networkName: "regtest", amountMsat: "1000000", payee: fixture.receiver, minExpiresAt: 2000, metadataHashPolicy: "not_required" as const };
+    const invoice = await window.requestLnurlPayInvoice(descriptor, pins, [origin], () => 1000);
+    // This second explicit call is intentionally separate, never a library retry.
+    let state = "accepted";
+    try { await window.requestLnurlPayInvoice(descriptor, pins, [origin], () => 1000); }
+    catch (error) { state = (error as Error & { state: string }).state; }
+    return { original: invoice.invoice === fixture.invoice, state, publicFields: Object.keys(invoice) };
+  }, origin);
+  expect(result).toEqual({ original: true, state: "issuance_unknown", publicFields: ["invoice", "binding", "metadataHashPolicy"] });
+  expect(seen.length).toBe(2);
+  for (const request of seen) for (const name of ["cookie", "authorization", "referer"]) expect(request.headers[name]).toBeUndefined();
+  expect(await page.evaluate(() => window.checkoutCalls())).toBe(0);
+});

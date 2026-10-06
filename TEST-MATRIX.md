@@ -188,6 +188,7 @@ checkout or multichain conformance has passed. Offline `rill-payments` and
 | M54 | Optional strict invoice metadata binding | Authenticated exact UTF-8 hash and canonical single-h/no-d profile, bounded metadata and unchanged ordinary readers/seven-field binding; not a current universal LNURL requirement, merchant identity proof, invoice issuance or settlement |
 | M55 | Trusted Lightning Address descriptor discovery | Explicit receiver/callback origins, one bounded GET, no credentials/referrer/redirects, ambiguous JSON and unsafe metadata/ranges refused; browser/default transport and abort cleanup coverage, no callback invoice retrieval or automatic funding authority |
 | M56 | Pure LNURL invoice-response validation | Independent payee/amount/network/lifetime pins, explicit ordinary or strict hash policy, unchanged seven-field binding and ignored extensions; browser and signed-fixture coverage, not order authorization, recoverable issuance or receipt proof |
+| M57 | Explicit LNURL invoice acquisition | Zero transport calls on invalid preflight, one per explicit callback request, fresh clocks and bounded elapsed/HTTP budget, immutable pins and sanitized unknown issuance after any invoked failure; no merchant issuer, retry, payment or recovery integration |
 
 ## Test evidence and accounting
 
