@@ -1,4 +1,5 @@
 import { MAX_MSAT } from "./contract";
+import { INVOICE_CURRENCY, invoiceBinding, invoiceMetadataBinding, type InvoiceBinding } from "./bolt11";
 
 /** Trusted transport owns DNS/egress and must honor abort through body reads.
  * Descriptor callbacks can contain sensitive capabilities; never log them.
@@ -13,6 +14,19 @@ export interface LnurlPayDescriptor {
   readonly description: string;
   readonly minSendableMsat: string;
   readonly maxSendableMsat: string;
+}
+export interface LnurlInvoiceExpectation {
+  readonly networkName: string;
+  readonly amountMsat: string;
+  readonly payee: string;
+  readonly now: number;
+  readonly minExpiresAt: number;
+  readonly metadataHashPolicy: "not_required" | "strict_hash";
+}
+export interface LnurlPayInvoice {
+  readonly invoice: string;
+  readonly binding: Readonly<InvoiceBinding>;
+  readonly metadataHashPolicy: LnurlInvoiceExpectation["metadataHashPolicy"];
 }
 function publicDns(host: string): boolean {
   return host.length <= 253 && /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/.test(host) &&
@@ -128,5 +142,42 @@ export async function discoverLightningAddress(lightningAddress: string, approve
       callback: callback.href, metadata: value.metadata, description: plain[0][1], minSendableMsat: minimum.toString(), maxSendableMsat: maximum.toString() });
   } catch {
     throw new Error("LNURL discovery is unresolved");
+  }
+}
+
+function positiveMsat(value: unknown): bigint {
+  if (typeof value !== "string" || !/^[1-9][0-9]{0,18}$/.test(value) || BigInt(value) > MAX_MSAT) throw new Error("Invalid LNURL amount");
+  return BigInt(value);
+}
+/** Authenticate supplied invoice contents against independent trusted pins.
+ * No request, issuance recovery, order authorization, payment or acceptance.
+ * BOLT11 cannot distinguish testnet3/testnet4 (both use currency `tb`).
+ */
+export function validateLnurlPayInvoice(descriptor: LnurlPayDescriptor, response: unknown, expected: LnurlInvoiceExpectation): Readonly<LnurlPayInvoice> {
+  try {
+    if (!descriptor || !expected) throw new Error("Missing LNURL invoice context");
+    // Capture only consumed scalar facts, not extension values or changing
+    // getter-backed policies. No caller-owned records survive in the result.
+    expected = { networkName: expected.networkName, amountMsat: expected.amountMsat, payee: expected.payee,
+      now: expected.now, minExpiresAt: expected.minExpiresAt, metadataHashPolicy: expected.metadataHashPolicy };
+    const facts = { version: descriptor.version, metadata: descriptor.metadata, minSendableMsat: descriptor.minSendableMsat, maxSendableMsat: descriptor.maxSendableMsat };
+    if (facts.version !== "lnurl-pay-request/1" ||
+        typeof expected.networkName !== "string" || !Object.hasOwn(INVOICE_CURRENCY, expected.networkName) ||
+        typeof expected.payee !== "string" || !/^(02|03)[0-9a-f]{64}$/.test(expected.payee) ||
+        !Number.isSafeInteger(expected.now) || expected.now < 0 || !Number.isSafeInteger(expected.minExpiresAt) || expected.minExpiresAt <= expected.now ||
+        (expected.metadataHashPolicy !== "not_required" && expected.metadataHashPolicy !== "strict_hash")) throw new Error("Invalid LNURL invoice expectations");
+    const amount = positiveMsat(expected.amountMsat), minimum = positiveMsat(facts.minSendableMsat), maximum = positiveMsat(facts.maxSendableMsat);
+    if (minimum > maximum || maximum > BigInt(Number.MAX_SAFE_INTEGER) || amount % 1000n !== 0n || amount < minimum || amount > maximum ||
+        typeof facts.metadata !== "string" || facts.metadata.length > 16384 || new TextEncoder().encode(facts.metadata).length > 16384 || !wellFormedText(facts.metadata)) throw new Error("LNURL invoice exceeds descriptor profile");
+    if (!response || typeof response !== "object" || Array.isArray(response)) throw new Error("Invalid LNURL invoice response");
+    const data = response as Record<string, unknown>, invoice = data.pr, routes = data.routes;
+    if (data.status === "ERROR" || typeof invoice !== "string" || !Array.isArray(routes) || routes.length !== 0) throw new Error("Unsupported LNURL invoice response");
+    const binding = expected.metadataHashPolicy === "strict_hash" ? invoiceMetadataBinding(invoice, expected.networkName, facts.metadata) : invoiceBinding(invoice, expected.networkName);
+    if (binding.amount_msat !== amount.toString() || binding.payee_compressed_pubkey !== expected.payee || binding.created_at > expected.now ||
+        binding.expires_at <= expected.now || binding.expires_at < expected.minExpiresAt) throw new Error("LNURL invoice differs from trusted expectations");
+    // Never read or retain verify/successAction or other extension values.
+    return Object.freeze({ invoice, binding: Object.freeze(binding), metadataHashPolicy: expected.metadataHashPolicy });
+  } catch {
+    throw new Error("LNURL invoice response is unresolved");
   }
 }

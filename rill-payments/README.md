@@ -75,6 +75,23 @@ authorization, independent payee/amount/network/expiry validation and an explici
 hash-profile choice. It does not establish recoverable merchant issuance or
 receipt verification; funded invoices must not be silently replaced.
 
+`validateLnurlPayInvoice(descriptor, response, expected)` is a separate pure
+validator. Independently trusted expectations pin the compressed payee key,
+whole-satoshi amount, network, current time, minimum expiry and explicit
+`not_required` or `strict_hash` metadata policy. The ordinary policy accepts
+modern unhashed invoices; strict mode uses the optional exact-byte helper above.
+Requested amounts must fit the descriptor's advertised range. The invoice must
+not be future-created or expired, and its expiry may equal the required minimum.
+Missing/nonempty response `routes` and service errors are refused. Verification
+and success-action extensions are neither inspected nor returned.
+
+The frozen result retains only the original invoice, its seven-field binding
+and the chosen hash policy. Matching contents do not authenticate the order or
+establish recoverable issuance, payment permission or settlement. Never derive
+the trusted payee pin from descriptor metadata or the returned invoice itself.
+BOLT11 uses `tb` for both testnet3 and testnet4, so that encoding cannot distinguish
+those networks; independently configured rail identity remains necessary.
+
 ## Merchant ledger
 
 Import `MerchantLedger` from `@rillswap/payments/merchant` in Bun. Provision

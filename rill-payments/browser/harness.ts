@@ -1,6 +1,6 @@
 import { createCheckout, indexedDbCheckoutStore } from "../src/sdk";
 import { mountTracking } from "../src/tracking";
-import { discoverLightningAddress } from "../src/lnurlPay";
+import { discoverLightningAddress, validateLnurlPayInvoice } from "../src/lnurlPay";
 import { invoiceBinding } from "../src/bolt11";
 import { receiver, testInvoice } from "../tests/helpers";
 import { createNativeSandboxCheckout, type NativeSandboxCheckpoint } from "../src/nativeSdk";
@@ -9,10 +9,16 @@ import { Wallet } from "ethers";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 
-declare global { interface Window { checkoutPay(): Promise<string>; checkoutCalls(): number; checkoutReady: boolean; discoverLightningAddress: typeof discoverLightningAddress } }
+declare global { interface Window { checkoutPay(): Promise<string>; checkoutCalls(): number; checkoutReady: boolean;
+  discoverLightningAddress: typeof discoverLightningAddress; validateLnurlPayInvoice: typeof validateLnurlPayInvoice;
+  lnurlFixture: { receiver: string; invoice: string; hashedInvoice: string; metadata: string } } }
 window.discoverLightningAddress = discoverLightningAddress;
+window.validateLnurlPayInvoice = validateLnurlPayInvoice;
 
 const invoice = testInvoice("browser_fixture"); const binding = invoiceBinding(invoice, "regtest");
+const lnurlMetadata = '[["text/plain","Receiver"],["text/identifier","buyer@receiver.example"]]';
+window.lnurlFixture = { receiver, invoice, metadata: lnurlMetadata,
+  hashedInvoice: testInvoice("browser_hash", "1000000", 1000, 2000, "bcrt", undefined, lnurlMetadata) };
 const terms = { version: "checkout/0.1" as const, policyVersion: "native-lightning/1" as const, merchantOrigin: "https://merchant.example",
   intentId: "browser_intent_0001", attemptId: "browser_attempt_001", receiver, network: "regtest" as const,
   amountMsat: binding.amount_msat, paymentHash: binding.payment_hash, expiresAt: 2000, buyerExtraMsat: "0" };

@@ -61,3 +61,25 @@ test("browser LNURL discovery omits capabilities and never retrieves an invoice"
   }, origin);
   expect(emptyUrl).toBe("LNURL discovery is unresolved");
 });
+
+test("browser LNURL validation pins signed contents without invoice retrieval or payment", async ({ context }, info) => {
+  const requests: string[] = []; context.on("request", (request) => requests.push(request.url()));
+  const page = await context.newPage(); await page.goto("/?case=" + encodeURIComponent(info.testId)); await page.waitForFunction(() => window.checkoutReady);
+  const result = await page.evaluate(() => {
+    const fixture = window.lnurlFixture;
+    const descriptor = { version: "lnurl-pay-request/1" as const, lightningAddress: "buyer@receiver.example", receiverOrigin: "https://receiver.example",
+      callback: "https://receiver.example/invoice", metadata: fixture.metadata, description: "Receiver", minSendableMsat: "1", maxSendableMsat: "1000000" };
+    const expected = { networkName: "regtest", amountMsat: "1000000", payee: fixture.receiver, now: 1000, minExpiresAt: 2000, metadataHashPolicy: "not_required" as const };
+    const modern = window.validateLnurlPayInvoice(descriptor, { pr: fixture.invoice, routes: [] }, expected);
+    const strict = window.validateLnurlPayInvoice(descriptor, { pr: fixture.hashedInvoice, routes: [] }, { ...expected, metadataHashPolicy: "strict_hash" });
+    let mismatch = "accepted";
+    try { window.validateLnurlPayInvoice(descriptor, { pr: fixture.invoice, routes: [] }, { ...expected, amountMsat: "999000" }); }
+    catch (error) { mismatch = (error as Error).message; }
+    return { modernPolicy: modern.metadataHashPolicy, strictPolicy: strict.metadataHashPolicy, mismatch,
+      frozen: Object.isFrozen(modern) && Object.isFrozen(modern.binding) && Object.isFrozen(strict.binding),
+      original: modern.invoice === fixture.invoice && strict.invoice === fixture.hashedInvoice, fields: Object.keys(modern.binding).length };
+  });
+  expect(result).toEqual({ modernPolicy: "not_required", strictPolicy: "strict_hash", mismatch: "LNURL invoice response is unresolved", frozen: true, original: true, fields: 7 });
+  expect(await page.evaluate(() => window.checkoutCalls())).toBe(0);
+  expect(requests.every((url) => new URL(url).origin === "http://127.0.0.1:8798")).toBe(true);
+});
