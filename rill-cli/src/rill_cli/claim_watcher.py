@@ -152,7 +152,9 @@ class ClaimWatcher:
                 self._check_authority(deadline)
                 confirmed = self._confirmations(attempt.txid)
                 self._check_authority(deadline)
-                if confirmed:
+                # Negative wallet confirmations mean conflict, not success.
+                # Malformed callbacks confer no evidence; check older attempts.
+                if type(confirmed) is int and confirmed > 0:
                     return "claim_confirmed", attempt.txid
             return None if view is None else ("outpoint_spent_elsewhere", None)
         if self._start is None:

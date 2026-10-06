@@ -150,6 +150,16 @@ private. The existing block-height signing and rebroadcast rules are unchanged.
 Clock and permission collaborators must be trusted, prompt local observations;
 arbitrary callbacks cannot provide atomic time-and-revocation guarantees.
 Operational reporting can follow an expired submission to preserve evidence.
+Confirmation success requires an exact positive integer. Negative Core wallet
+confirmations indicate a conflict, not success; zero, unknown, booleans, integer
+subclasses and other malformed callback values confer no confirmation evidence.
+Every recorded attempt is still checked newest-first, so a conflicted replacement
+cannot hide an older confirmed claim. Without positive evidence, an unavailable
+outpoint view waits and a spent view retains the existing spent-elsewhere outcome.
+Positive depth one remains supported; this correction does not resolve the
+separate signed settlement-depth policy or authorize merchant liability release.
+Existing installations receive only corrected live-observation classification,
+with no migration, automatic recovery or renewed signing/submission rights.
 The reverse dispatcher supplies this authority to sizing signatures, claim
 signing, and watching. Startup recovery publication and settlement workers are
 shielded and owned until their actual completion. Cancellation stops new work;

@@ -8,10 +8,13 @@ from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from unittest.mock import Mock
 
 import pytest
 from rill_core.wire.types import NetworkIdentity
 
+from rill_cli.claim_watcher import ClaimAttempt, ClaimWatcher
+from rill_cli.refund_watcher import ChainView
 from rill_cli.wallet_rpc import WALLET_EFFECTS, WalletRpc, WalletRpcError, _sats
 
 if TYPE_CHECKING:
@@ -366,3 +369,32 @@ def test_chain_only_spend_view_and_wallet_depth(
     assert wallet.wallet_confirmations("52" * 32) == 3
     assert calls[-1]["path"].startswith("/wallet/")
     assert wallet.wallet_confirmations("53" * 32) is None  # another transaction answered
+
+
+@pytest.mark.parametrize("depth", [-1, -3, 1])
+def test_wallet_confirmation_depth_is_not_promoted_by_watcher_truthiness(
+    core: tuple[WalletRpc, list[dict[str, Any]]], answers: dict[str, Any], depth: int
+) -> None:
+    """Actual wallet HTTP adapter, simulated Core responses, no funded conflict."""
+    wallet, calls = core
+    txid = "52" * 32
+    answers["gettransaction"] = {"txid": txid, "confirmations": depth}
+    assert wallet.wallet_confirmations(txid) == depth
+    sign = Mock(side_effect=AssertionError("observation must not sign"))
+    submit = Mock(side_effect=AssertionError("observation must not submit"))
+    watcher = ClaimWatcher(
+        initial_fee_sat=300,
+        max_fee_sat=3300,
+        deadline_height=110,
+        chain=lambda: ChainView(105, unspent_on_chain=False),
+        confirmations=wallet.wallet_confirmations,
+        sign=sign,
+        submit=submit,
+    )
+    watcher.attempts.append(ClaimAttempt(txid, b"recorded-placeholder", 300, 150, 100))
+    expected = ("claim_confirmed", txid) if depth > 0 else ("outpoint_spent_elsewhere", None)
+    assert watcher.step() == expected
+    assert calls[-1]["path"].startswith("/wallet/")
+    assert calls[-1]["params"] == [txid]
+    sign.assert_not_called()
+    submit.assert_not_called()
