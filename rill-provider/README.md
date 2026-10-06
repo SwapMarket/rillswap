@@ -1859,6 +1859,19 @@ to the merchant journal's spendable-capacity input**. These RPCs cannot reveal
 all uncommitted updates or commitment-fee buffers, guarantee route bandwidth,
 or back immediately payable refund promises.
 
+The separate pinned pending-accounting case observes one supported private channel
+while a single 1,000,000-msat outgoing hold remains committed and IN_FLIGHT. It
+compares the classified local/reserve/outgoing floors with actual channel fields,
+requires complete coverage and zero incoming floor, then preserves the original
+single cancellation and terminal checks. Newly added reads use a test-local bound
+sampled immediately before the original send and fit within its unchanged
+30-second request limit. This does not reconstruct or renew server authority.
+Channel-level metadata and invoice HTLC metadata remain separate: positive channel
+coverage does not relax the existing invoice-observer refusal. Stable tips and
+matching samples do not establish atomicity, all liabilities or remaining
+inventory. No credit, eligibility, SDK invocation, spendable-capacity adapter,
+production funding or upgrade/startup behavior is added.
+
 `observe_completed_payment(hash, expected_amount_msat)` requires payment-level
 `SUCCEEDED` and reconciles successful shard recipient amounts and settled route
 fees with exact reported value/fees. Failed attempts contribute neither settled
