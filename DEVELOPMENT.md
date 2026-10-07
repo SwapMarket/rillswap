@@ -2,9 +2,10 @@
 
 A complete local regtest stack: Bitcoin Core, three LND nodes, a Nostr relay,
 an auto-miner, a maker (liquidity provider) for each swap direction, a user
-toolbox with the `rill` CLI, the browser swap page, and a demo shop backed by
-the rill-payments merchant service. Everything runs in
-Docker Compose and is driven by one script, `dev/devctl`.
+toolbox with the `rill` CLI, the browser swap page, a local Anvil EVM chain
+with two fake stablecoins (fUSDC, fUSDT), and a demo shop backed by the
+rill-payments merchant services. Everything runs in Docker Compose and is
+driven by one script, `dev/devctl`.
 
 All data is disposable regtest data with fixed, public credentials. Never
 point any of it at real funds.
@@ -21,7 +22,7 @@ point any of it at real funds.
 ```sh
 dev/devctl up        # build the image, start everything, wait for bootstrap
 dev/devctl info      # maker keys, relay URL, height, balances
-dev/devctl smoke     # both swap directions and two shop purchases, end to end
+dev/devctl smoke     # both swap directions and a shop purchase per payment method
 ```
 
 The first `up` takes a few minutes (image build). Later runs reuse the image and
@@ -31,13 +32,15 @@ all chain/wallet/maker state. `dev/devctl help` lists every command.
 | --- | --- |
 | Browser swap page | http://127.0.0.1:5273/swap.html |
 | Demo shop | http://127.0.0.1:8090/ |
+| Anvil JSON-RPC (chain id 31337) | http://127.0.0.1:8545 |
 | Nostr relay (from the host/browser) | ws://127.0.0.1:7777 |
 | Nostr relay (inside the stack) | ws://relay:8080 |
 
-Override host ports with `RILL_DEV_WEB_PORT`, `RILL_DEV_SHOP_PORT` and
-`RILL_DEV_RELAY_PORT`, and the
-auto-miner interval with `RILL_DEV_BLOCK_SECONDS` (default 10, `0` disables),
-for example `RILL_DEV_WEB_PORT=8090 dev/devctl up`.
+Override host ports with `RILL_DEV_WEB_PORT`, `RILL_DEV_SHOP_PORT`,
+`RILL_DEV_RELAY_PORT` and `RILL_DEV_ANVIL_PORT`, the Bitcoin auto-miner
+interval with `RILL_DEV_BLOCK_SECONDS` (default 10, `0` disables), and the
+Anvil block interval with `RILL_DEV_ANVIL_BLOCK_SECONDS` (default 2), for
+example `RILL_DEV_WEB_PORT=8091 dev/devctl up`.
 
 ## What runs
 
@@ -53,7 +56,8 @@ for example `RILL_DEV_WEB_PORT=8090 dev/devctl up`.
 | `tools` | User toolbox. `devctl swap`, `devctl rill`, `devctl shell` run here. |
 | `web` | Builds `rill-web` (rebuilding on change) and serves `dist/`. |
 | `merchant` | `rill-payments` merchant API (`bun src/cli.ts serve`) on `lnd-merchant`. |
-| `shop` | Demo storefront ([`rill-payments/examples/demo-shop`](rill-payments/examples/demo-shop)). |
+| `anvil` | Foundry Anvil 1.8.4, chain id 31337, standard test mnemonic, state kept across restarts. |
+| `shop` | Demo storefront ([`rill-payments/examples/demo-shop`](rill-payments/examples/demo-shop)), plus the fUSDC/fUSDT receipt services. |
 
 `bootstrap` checks before acting at every step, so it is safe to rerun and it
 completes an interrupted attempt. It creates the wallets, mines to 150 blocks,
@@ -70,7 +74,15 @@ ledger on first start). Results land in the `state` volume:
 /state/user/swaps/<time>-<dir>/  recovery files from `devctl swap`
 /state/merchant/                 merchant config, keys, admin token, ledger
 /state/shop/orders.json          demo shop orders
+/state/shop/native/              stablecoin keys; per token config.json, ledger
 ```
+
+The shop sets up the stablecoins itself on first start: it deploys
+`DevStablecoin` twice from Anvil account 0, mints one million of each to the
+buyer (account 1), records each token in `/state/shop/native/<token>/config.json`
+and provisions its receipt ledger. Shop revenue goes to account 2. If the Anvil
+chain no longer matches those records, the shop logs it and disables the token
+rails rather than redeploying: `dev/devctl reset`.
 
 Rill clients only accept Core and LND on numeric loopback, so each Rill
 container forwards `127.0.0.1:18443` to `bitcoind` and `127.0.0.1:10009` to its
@@ -158,8 +170,16 @@ against the Ed25519 key the shop pinned from the merchant's event key.
   from the Core `user` wallet and the BTC to LN maker pays the shop's invoice.
   The browser swap page works too: paste the shop invoice instead of the one
   from `web-inputs`.
+- **fUSDC / fUSDT:** `dev/devctl pay-token <order-id>` (1 token = 1 USD). This
+  uses the rill-payments native sandbox receipt rail: the buyer signs an
+  EIP-712 binding for the order and its next nonce, the merchant reserves it,
+  the buyer sends exactly that ERC20 `transfer`, and after 6 confirmations
+  (about 12 s) the merchant records a signed receipt that the shop verifies.
+  A plain wallet transfer without the binding is never accepted, so MetaMask
+  alone cannot pay; it can still watch balances on `http://127.0.0.1:8545`.
 
-`dev/devctl shop-smoke` buys once with each method and checks the signed
+`dev/devctl shop-smoke` buys once over Lightning and once via a swap, and
+`dev/devctl token-smoke` once with each token; both check the signed
 acceptance. The merchant API itself is reachable only inside the stack
 (`merchant:8788`, forwarded to the CLI's loopback listener), so
 `dev/devctl shell` plus `curl` with the token in `/state/merchant/admin.token`
@@ -192,6 +212,10 @@ dev/devctl lncli merchant listinvoices
 dev/devctl lncli user addinvoice --amt 1000
 dev/devctl invoice 1000 --node maker
 dev/devctl pay <bolt11>
+dev/devctl cast block-number                           # Foundry cast on Anvil
+dev/devctl cast call <token> "balanceOf(address)(uint256)" <address>
+dev/devctl cast send <token> "mint(address,uint256)" <address> 1000000000 \
+    --private-key <anvil key>                           # fake-token faucet
 dev/devctl shell                       # bash with rill, rill-provider, devtool
 ```
 
@@ -204,7 +228,10 @@ installed editable from it. After editing:
 - CLI code: nothing (each `rill` run starts fresh)
 - `rill-web/src`, `swap.html`, `index.html`: the `web` service rebuilds; reload
   the page
-- `rill-payments/examples/demo-shop`: the shop restarts itself (`bun --watch`)
+- `rill-payments/examples/demo-shop`: the shop restarts itself (`bun --watch`);
+  after editing `DevStablecoin.sol`, run
+  `bun examples/demo-shop/generate-stablecoin.ts` in `rill-payments` and
+  reset the stack (deployed tokens are pinned by runtime code hash)
 - `rill-payments/src`: `dev/devctl restart merchant shop`
 - `dev/devtool.py`: nothing for commands; `dev/devctl up` reruns bootstrap
 - dependencies, native crypto, `dev/entrypoint.sh`, `dev/Dockerfile`, or
@@ -218,7 +245,7 @@ dev/devctl reset    # delete every volume (asks first); next `up` starts fresh
 ```
 
 Volumes belong to the `rillswap-dev` Compose project: `bitcoind`, `lnd-maker`,
-`lnd-user`, `lnd-merchant`, `relay`, `state`. Reset them together. A partial reset (for
+`lnd-user`, `lnd-merchant`, `anvil`, `relay`, `state`. Reset them together. A partial reset (for
 example only `bitcoind`) leaves channels and stores pointing at a chain that no
 longer exists.
 
@@ -236,8 +263,14 @@ credentials devtool and the cookie use). Run it with any Python that has
   containers. Set `"dns": ["1.1.1.1", "9.9.9.9"]` in
   `~/.config/docker/daemon.json` (rootless) or `/etc/docker/daemon.json`, then
   restart Docker.
-- **Port already in use:** set `RILL_DEV_WEB_PORT` or `RILL_DEV_RELAY_PORT`.
+- **Port already in use:** set the matching `RILL_DEV_*_PORT` variable.
 - **A maker exits at start:** `dev/devctl logs maker-<direction>`. If its store
   or config is broken, `dev/devctl reset`.
 - **Bootstrap fails:** `dev/devctl logs bootstrap`, fix, then `dev/devctl up`
   again. It resumes where it stopped.
+- **A token order stays `waiting` after an Anvil restart:** Anvil keeps blocks
+  but not historical state across restarts, so a payment that was in flight
+  during the restart cannot be verified. Place a new order.
+- **Anvil account keys:** the standard test mnemonic
+  (`test test ... junk`), for example
+  `dev/devctl cast wallet private-key --mnemonic "test test test test test test test test test test test junk" --mnemonic-index 1`.
