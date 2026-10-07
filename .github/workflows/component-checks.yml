@@ -26,6 +26,7 @@ jobs:
         run: |
           bun run check:schemas
           bun run check:sandbox-fixture
+          bun examples/demo-shop/generate-stablecoin.ts --check
           bun run typecheck
           bun run test
           bun run build:sdk
