@@ -38,7 +38,10 @@ swaps (as the user, against the local makers)
   swap ln-to-btc [sat] [rill flags...]   Lightning -> on-chain
   web-inputs [sat]    all values for the swap.html form (fresh invoice)
   shop-smoke          buy from the demo shop over Lightning and via a swap
-  smoke               both swap directions plus shop orders; fails on error
+  pay-token ORDER     pay a demo shop fUSDC/fUSDT order from the Anvil buyer
+  token-smoke         buy from the demo shop with fUSDC and fUSDT
+  cast ARGS           Foundry cast against the Anvil chain
+  smoke               both swap directions plus all shop payment methods
 
 makers
   maker-swaps <btc-to-ln|ln-to-btc> [flags]   list the maker's swap records
@@ -61,6 +64,7 @@ case "$cmd" in
         echo
         echo "web:   http://127.0.0.1:${RILL_DEV_WEB_PORT:-5273}/swap.html"
         echo "shop:  http://127.0.0.1:${RILL_DEV_SHOP_PORT:-8090}/"
+        echo "anvil: http://127.0.0.1:${RILL_DEV_ANVIL_PORT:-8545} (chain id 31337)"
         echo "relay: ws://127.0.0.1:${RILL_DEV_RELAY_PORT:-7777}"
         ;;
     down) compose down "$@" ;;
@@ -80,8 +84,19 @@ case "$cmd" in
         devtool swap btc-to-ln 50000
         devtool swap ln-to-btc 50000
         devtool shop-smoke
+        "$0" token-smoke
         devtool balances
-        echo "smoke: both swap directions and both shop payment methods completed"
+        echo "smoke: both swap directions and all four shop payment methods completed"
+        ;;
+    pay-token)
+        compose exec -T shop bun pay-token.ts "${1:?usage: devctl pay-token <order-id>}"
+        ;;
+    token-smoke)
+        compose exec -T shop bun pay-token.ts --new fusdc
+        compose exec -T shop bun pay-token.ts --new fusdt
+        ;;
+    cast)
+        compose exec $(tty_flag) -e ETH_RPC_URL=http://127.0.0.1:8545 anvil cast "$@"
         ;;
     maker-swaps)
         direction=${1:?usage: devctl maker-swaps <btc-to-ln|ln-to-btc> [inspect-swaps flags]}

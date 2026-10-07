@@ -88,6 +88,36 @@ services:
     volumes:
       - lnd-merchant:/root/.lnd
 
+  # Local EVM chain for the fake stablecoins (fUSDC, fUSDT). Chain id 31337,
+  # the standard Anvil test mnemonic, a block every 2 s, and state persisted
+  # across restarts (block history survives; historical state does not).
+  # A restored chain resumes from its last saved block time, so the clock is
+  # moved to wall time at start: the shop's receipt rail compares the two.
+  # SIGTERM is forwarded so Anvil saves its state on stop.
+  anvil:
+    image: ghcr.io/foundry-rs/foundry@sha256:f69e1b8d1dda17d89227a4d0513b1d86f93ece430dea8d87aaea643da3607d3e # v1.8.4
+    user: root
+    command:
+      - |
+        anvil --host 0.0.0.0 --chain-id 31337 --hardfork prague \
+          --block-time ${RILL_DEV_ANVIL_BLOCK_SECONDS:-2} --accounts 10 --balance 10000 \
+          --base-fee 0 --gas-price 0 --disable-min-priority-fee \
+          --state /data/state.json --state-interval 10 &
+        pid=$$!
+        trap 'kill -TERM $$pid' TERM INT
+        until cast block-number -r http://127.0.0.1:8545 >/dev/null 2>&1; do sleep 0.5; done
+        cast rpc anvil_setTime "$$(date +%s)" -r http://127.0.0.1:8545 >/dev/null
+        wait $$pid
+        wait $$pid
+    volumes:
+      - anvil:/data
+    ports:
+      - 127.0.0.1:${RILL_DEV_ANVIL_PORT:-8545}:8545
+    healthcheck:
+      test: [CMD, cast, block-number, -r, http://127.0.0.1:8545]
+      interval: 2s
+      retries: 30
+
   relay:
     image: scsibug/nostr-rs-relay@sha256:48d54c2d2781577cf3ed2951112f0953dc2c5e7c9d2ea20c64e8c0fa37d16e4d
     restart: unless-stopped
@@ -180,6 +210,7 @@ services:
     command: [bun, --watch, server.ts]
     environment:
       RILL_DEV_MERCHANT_API: http://merchant:8788
+      RILL_DEV_ANVIL_RPC: http://anvil:8545
       RILL_DEV_WEB_PORT: ${RILL_DEV_WEB_PORT:-5273}
     ports:
       - 127.0.0.1:${RILL_DEV_SHOP_PORT:-8090}:8090
@@ -190,6 +221,8 @@ services:
     depends_on:
       merchant:
         condition: service_started
+      anvil:
+        condition: service_healthy
 
   web:
     <<: *rill
@@ -217,5 +250,6 @@ volumes:
   lnd-maker:
   lnd-user:
   lnd-merchant:
+  anvil:
   relay:
   state:
