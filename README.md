@@ -17,6 +17,10 @@ This is one Git repository containing seven components:
 | `rill-web/` | Browser preview and disconnected recovery container export |
 | `rill-payments/` | Experimental checkout SDK, merchant ledger and shared policy |
 
+For a complete local regtest environment (Core, LND, relay, makers for both
+swap directions, the CLI and the browser swap page) in Docker Compose, see
+[`DEVELOPMENT.md`](DEVELOPMENT.md): `dev/devctl up`.
+
 Each component retains its own dependency lock, local development setup, and
 README. The pinned provider integration lock is a **historical** snapshot, not
 conformance evidence for later components. The default tests do not exercise
