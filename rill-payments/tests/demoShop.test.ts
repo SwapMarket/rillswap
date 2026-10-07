@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { findAcceptance, priceSat } from "../examples/demo-shop/checkout";
+import { tokenBaseUnits } from "../examples/demo-shop/native";
 import { signAcceptance } from "../src/server";
 import type { AcceptanceEvent } from "../src/merchant";
 
@@ -23,6 +24,11 @@ describe("demo shop", () => {
   test("prices USD at the fixed demo rate in whole sats", () => {
     expect(priceSat(200)).toBe(2_000);
     expect(priceSat(12_000)).toBe(120_000);
+  });
+
+  test("prices fake stablecoins at 1 USD in 6-decimal base units", () => {
+    expect(tokenBaseUnits(200)).toBe("2000000");
+    expect(tokenBaseUnits(12_000)).toBe("120000000");
   });
 
   test("accepts only a pinned-key signature for this intent and amount", () => {
