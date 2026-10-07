@@ -393,3 +393,31 @@ jobs:
         run: |
           tmp/ci-venv/bin/python -m pytest -q tests/test_wallet_history_pinned.py \
             --basetemp=tmp/pytest-ci-wallet-history
+
+  dev-stack:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+      - name: Check the dev stack's static invariants
+        run: |
+          docker compose -f dev/compose.yaml config -q
+          python -m pip install httpx==0.28.1 pytest==9.1.1
+          python -m pytest -q dev/tests
+
+  dev-stack-smoke:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Start the regtest dev stack
+        run: dev/devctl up
+      - name: Swap in both directions through the real relay
+        run: dev/devctl smoke
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose -f dev/compose.yaml logs --tail=200
