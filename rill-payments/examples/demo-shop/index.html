@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rill demo shop (regtest)</title>
+<style>
+  body { font: 15px/1.45 system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; color: #1d2433; }
+  h1 small { font-size: .5em; color: #b4472d; font-weight: 600; margin-left: .5rem; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; }
+  .card, .panel { border: 1px solid #d8dde6; border-radius: 10px; padding: 1rem; background: #fff; }
+  .price { font-size: 1.3rem; font-weight: 600; } .muted { color: #667085; font-size: .9em; }
+  button { font: inherit; padding: .45rem .9rem; border-radius: 8px; border: 1px solid #2f5bea; background: #2f5bea; color: #fff; cursor: pointer; }
+  button.secondary { background: #fff; color: #2f5bea; }
+  label.rail { display: block; margin: .3rem 0; }
+  textarea, pre { width: 100%; box-sizing: border-box; font: 12px/1.4 ui-monospace, monospace; background: #f5f7fa; border: 1px solid #d8dde6; border-radius: 6px; padding: .5rem; white-space: pre-wrap; word-break: break-all; }
+  textarea { height: 6rem; }
+  .status { font-weight: 600; } .paid { color: #12804a; } .waiting { color: #b07400; } .reconciliation { color: #b42318; }
+  .panel { margin-top: 1.5rem; } table { width: 100%; border-collapse: collapse; } td, th { text-align: left; padding: .3rem; border-bottom: 1px solid #eef0f4; }
+</style>
+</head>
+<body>
+<h1>Rill demo shop <small>REGTEST, fake money</small></h1>
+<p class="muted" id="rate"></p>
+
+<div class="grid" id="products"></div>
+
+<div class="panel" id="checkout" hidden>
+  <h2 id="checkout-title"></h2>
+  <div id="rails"></div>
+  <p><button id="place">Place order</button> <button class="secondary" id="cancel">Cancel</button></p>
+</div>
+
+<div class="panel" id="order" hidden>
+  <h2>Order <span id="order-id"></span>: <span class="status" id="order-status"></span></h2>
+  <p id="order-summary"></p>
+  <div id="order-pay"></div>
+  <div id="order-acceptance"></div>
+</div>
+
+<div class="panel">
+  <h2>Orders</h2>
+  <table><thead><tr><th>Order</th><th>Item</th><th>Method</th><th>Amount</th><th>Status</th></tr></thead><tbody id="history"></tbody></table>
+</div>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const esc = (text) => String(text).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+const catalog = await (await fetch("/api/catalog")).json();
+let selected = null;
+let polling = null;
+
+$("rate").textContent = `Demo rate: 1 BTC = ${catalog.demoUsdPerBtc.toLocaleString()} USD. ` +
+  `Signed acceptances are checked against the pinned merchant key ${catalog.acceptanceKey.slice(0, 16)}...`;
+
+for (const product of catalog.products) {
+  const card = document.createElement("div");
+  card.className = "card";
+  card.innerHTML = `<h3>${esc(product.name)}</h3><div class="price">$${(product.usdCents / 100).toFixed(2)}</div>
+    <div class="muted">${product.sat.toLocaleString()} sat</div><p><button>Buy</button></p>`;
+  card.querySelector("button").onclick = () => choose(product);
+  $("products").append(card);
+}
+
+function choose(product) {
+  selected = product;
+  $("checkout-title").textContent = `Pay for ${product.name}`;
+  $("rails").innerHTML = Object.entries(catalog.rails).map(([id, rail], index) =>
+    `<label class="rail"><input type="radio" name="rail" value="${id}" ${index === 0 ? "checked" : ""}> ${esc(rail.label)}</label>`).join("");
+  $("checkout").hidden = false;
+  $("checkout").scrollIntoView({ behavior: "smooth" });
+}
+$("cancel").onclick = () => { $("checkout").hidden = true; };
+$("place").onclick = async () => {
+  const rail = document.querySelector("input[name=rail]:checked").value;
+  const response = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ productId: selected.id, rail }) });
+  const order = await response.json();
+  if (!response.ok) return alert(order.error);
+  $("checkout").hidden = true;
+  show(order);
+};
+
+function instructions(order) {
+  const invoice = order.invoice ?? "";
+  const copy = `<p><button class="secondary" id="copy">Copy invoice</button></p>`;
+  if (order.rail === "lightning") {
+    return `<p>Pay this Lightning invoice with any regtest wallet, or from the dev user node:</p>
+      <textarea readonly>${esc(invoice)}</textarea>${copy}
+      <pre>dev/devctl pay ${esc(invoice)}</pre>`;
+  }
+  return `<p>Pay with on-chain BTC: a RillSwap maker pays this invoice once your on-chain funding confirms.</p>
+    <textarea readonly>${esc(invoice)}</textarea>${copy}
+    <p>From the CLI (Core <code>user</code> wallet funds the swap):</p>
+    <pre>dev/devctl swap btc-to-ln ${esc(invoice)}</pre>
+    <p>Or in the browser: open <a href="${esc(catalog.swapPage)}" target="_blank">the swap page</a>, paste this
+    invoice, and take the other fields from <code>dev/devctl web-inputs</code>.</p>`;
+}
+
+function show(order) {
+  $("order").hidden = false;
+  $("order-id").textContent = order.id;
+  $("order-summary").textContent = `${order.productName}, $${(order.usdCents / 100).toFixed(2)} = ` +
+    `${order.amountSat.toLocaleString()} sat via ${catalog.rails[order.rail].label}`;
+  $("order-pay").innerHTML = order.status === "waiting" ? instructions(order) : "";
+  $("copy")?.addEventListener("click", () => navigator.clipboard.writeText(order.invoice));
+  render(order);
+  clearInterval(polling);
+  polling = setInterval(async () => render(await (await fetch(`/api/orders/${order.id}`)).json()), 2000);
+  $("order").scrollIntoView({ behavior: "smooth" });
+}
+
+function render(order) {
+  const status = $("order-status");
+  status.textContent = order.status;
+  status.className = `status ${order.status}`;
+  if (order.status !== "waiting") { $("order-pay").innerHTML = ""; clearInterval(polling); }
+  $("order-acceptance").innerHTML = order.acceptance
+    ? `<p class="paid">Payment accepted. Merchant signature verified (Ed25519, pinned key).</p>
+       <pre>event        ${esc(order.acceptance.eventId)}\npayment hash ${esc(order.acceptance.paymentHash)}\naccepted at  ${new Date(order.acceptance.acceptedAt * 1000).toISOString()}</pre>`
+    : order.status === "paid" ? `<p class="waiting">Paid, waiting for a verifiable signed acceptance...</p>` : "";
+  void history();
+}
+
+async function history() {
+  const list = await (await fetch("/api/orders")).json();
+  $("history").innerHTML = list.map((order) => `<tr data-id="${order.id}"><td><a href="#">${order.id}</a></td>
+    <td>${esc(order.productName)}</td><td>${esc(catalog.rails[order.rail]?.label ?? order.rail)}</td>
+    <td>${order.amountSat.toLocaleString()} sat</td><td class="${order.status}">${order.status}</td></tr>`).join("");
+  for (const row of $("history").querySelectorAll("tr")) {
+    row.querySelector("a").onclick = async (event) => {
+      event.preventDefault();
+      show(await (await fetch(`/api/orders/${row.dataset.id}`)).json());
+    };
+  }
+}
+void history();
+</script>
+</body>
+</html>
