@@ -1,0 +1,22 @@
+# nostr-rs-relay configuration for the local regtest stack.
+# Rill gift wraps are backdated by up to two days and application events can
+# reach 128 KiB, so keep generous size limits and no old-event cutoff.
+[info]
+relay_url = "ws://127.0.0.1:7777/"
+name = "rillswap-dev"
+description = "Disposable local relay for the RillSwap regtest stack"
+
+[database]
+data_directory = "/usr/src/app/db"
+
+[network]
+address = "0.0.0.0"
+port = 8080
+
+[options]
+reject_future_seconds = 1800
+
+[limits]
+max_event_bytes = 1048576
+max_ws_message_bytes = 2097152
+max_ws_frame_bytes = 2097152

@@ -1,0 +1,176 @@
+# RillSwap regtest development stack. Use dev/devctl rather than calling
+# docker compose directly; see DEVELOPMENT.md. Everything here is disposable
+# regtest data with fixed, public credentials. Never point it at real funds.
+name: rillswap-dev
+
+x-rill: &rill
+  image: rillswap-dev:local
+  build:
+    context: ..
+    dockerfile: dev/Dockerfile
+  volumes:
+    - ..:/src:ro
+    - state:/state
+  restart: unless-stopped
+
+x-lnd: &lnd
+  image: lightninglabs/lnd@sha256:60fca3f409cf3d500db1d15c9965678a4b5a60758ff30863d52b02529c18be8b
+  restart: unless-stopped
+  depends_on:
+    bitcoind:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "lncli", "--network=regtest", "getinfo"]
+    interval: 3s
+    timeout: 10s
+    retries: 40
+  entrypoint:
+    - lnd
+    - --bitcoin.active
+    - --bitcoin.regtest
+    - --bitcoin.node=bitcoind
+    - --bitcoind.rpchost=bitcoind:18443
+    - --bitcoind.rpcuser=rill
+    - --bitcoind.rpcpass=rill-dev-regtest
+    - --bitcoind.rpcpolling
+    - --bitcoind.blockpollinginterval=1s
+    - --bitcoind.txpollinginterval=1s
+    - --rpclisten=0.0.0.0:10009
+    - --restlisten=0.0.0.0:8080
+    - --listen=0.0.0.0:9735
+    - --tlsextraip=127.0.0.1
+    - --noseedbackup
+    - --nobootstrap
+    - --trickledelay=50
+    - --maxpendingchannels=10
+
+services:
+  bitcoind:
+    image: bitcoin/bitcoin@sha256:49b55ea5c949a9ceff50786ee678d53f2728a4daa40a8139e3ee20243d24f281
+    restart: unless-stopped
+    command:
+      - -regtest=1
+      - -server=1
+      - -txindex=1
+      - -listen=0
+      - -dnsseed=0
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=0.0.0.0/0
+      - -fallbackfee=0.0002
+      - -printtoconsole=1
+      # rill / rill-dev-regtest (LND, devtool)
+      - -rpcauth=rill:5c1d0f2b7a9e4c3d8b6a1f0e2d3c4b5a$$e3f520d46a50046466e4cba52393284d9e84c6d693c4a5e35c9a8447424dd3d2
+      # __cookie__ / rill-dev-regtest-cookie: a static cookie for Rill clients
+      - -rpcauth=__cookie__:9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d$$a7f9835b158cc878c3a5d0c408ee19f9b64d5c1f510e01eb8e4b7b963194ead9
+    volumes:
+      - bitcoind:/home/bitcoin/.bitcoin
+    healthcheck:
+      test: ["CMD", "bitcoin-cli", "-regtest", "-rpcuser=rill", "-rpcpassword=rill-dev-regtest", "getblockchaininfo"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  lnd-maker:
+    <<: *lnd
+    command: [--alias=maker, --tlsextradomain=lnd-maker]
+    volumes:
+      - lnd-maker:/root/.lnd
+
+  lnd-user:
+    <<: *lnd
+    command: [--alias=user, --tlsextradomain=lnd-user]
+    volumes:
+      - lnd-user:/root/.lnd
+
+  relay:
+    image: scsibug/nostr-rs-relay@sha256:48d54c2d2781577cf3ed2951112f0953dc2c5e7c9d2ea20c64e8c0fa37d16e4d
+    restart: unless-stopped
+    volumes:
+      - ./relay.toml:/usr/src/app/config.toml:ro
+      - relay:/usr/src/app/db
+    ports:
+      - 127.0.0.1:${RILL_DEV_RELAY_PORT:-7777}:8080
+
+  bootstrap:
+    <<: *rill
+    restart: "no"
+    command: [python, /src/dev/devtool.py, bootstrap]
+    environment:
+      RILL_DEV_RELAY_HOST: ws://127.0.0.1:${RILL_DEV_RELAY_PORT:-7777}
+    volumes:
+      - ..:/src:ro
+      - state:/state
+      - lnd-maker:/lnd/maker:ro
+      - lnd-user:/lnd/user:ro
+    depends_on:
+      lnd-maker:
+        condition: service_healthy
+      lnd-user:
+        condition: service_healthy
+      relay:
+        condition: service_started
+
+  miner:
+    <<: *rill
+    command: [python, /src/dev/devtool.py, mine-loop]
+    environment:
+      RILL_DEV_BLOCK_SECONDS: ${RILL_DEV_BLOCK_SECONDS:-10}
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+
+  maker-btc-to-ln:
+    <<: *rill
+    command: [rill-provider, serve, --config, /state/makers/btc-to-ln/provider.json]
+    environment:
+      RILL_FORWARD: 18443=bitcoind:18443 10009=lnd-maker:10009
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+
+  maker-ln-to-btc:
+    <<: *rill
+    command: [rill-provider, serve, --config, /state/makers/ln-to-btc/provider.json]
+    environment:
+      RILL_FORWARD: 18443=bitcoind:18443 10009=lnd-maker:10009
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+
+  # Interactive user shell: `devctl swap`, `devctl rill ...`, etc. run here.
+  tools:
+    <<: *rill
+    command: [sleep, infinity]
+    environment:
+      RILL_FORWARD: 18443=bitcoind:18443 10009=lnd-user:10009
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+
+  web:
+    <<: *rill
+    working_dir: /src/rill-web
+    # The swap page's CSP and dependencies need the production bundle, so
+    # build once, rebuild on change, and serve dist/ (refresh after edits).
+    command:
+      - sh
+      - -c
+      - >-
+        bun x --bun vite build &&
+        (bun x --bun vite build --watch >/tmp/watch.log 2>&1 &) &&
+        exec bun x --bun vite preview --host 0.0.0.0 --port 5173 --strictPort
+    volumes:
+      - ../rill-web/src:/src/rill-web/src:ro
+      - ../rill-web/index.html:/src/rill-web/index.html:ro
+      - ../rill-web/swap.html:/src/rill-web/swap.html:ro
+      - ../rill-web/vite.config.ts:/src/rill-web/vite.config.ts:ro
+      - ../rill-web/tsconfig.json:/src/rill-web/tsconfig.json:ro
+    ports:
+      - 127.0.0.1:${RILL_DEV_WEB_PORT:-5273}:5173
+
+volumes:
+  bitcoind:
+  lnd-maker:
+  lnd-user:
+  relay:
+  state:

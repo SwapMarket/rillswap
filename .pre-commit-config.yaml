@@ -31,3 +31,17 @@ repos:
         entry: ruff format --check --force-exclude
         types_or: [python, pyi]
         files: ^(rill-provider|rill-cli)/
+      - id: ruff-check-dev
+        name: ruff check (dev stack; ruff 0.16.8)
+        language: python
+        additional_dependencies: [ruff==0.16.8]
+        entry: ruff check --force-exclude
+        types_or: [python, pyi]
+        files: ^dev/
+      - id: ruff-format-dev
+        name: ruff format --check (dev stack; ruff 0.16.8)
+        language: python
+        additional_dependencies: [ruff==0.16.8]
+        entry: ruff format --check --force-exclude
+        types_or: [python, pyi]
+        files: ^dev/

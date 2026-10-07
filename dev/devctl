@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Host-side entry point for the RillSwap regtest dev stack. See DEVELOPMENT.md.
+set -euo pipefail
+
+DEV_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+compose() { docker compose -f "$DEV_DIR/compose.yaml" "$@"; }
+tty_flag() { if [ -t 0 ] && [ -t 1 ]; then echo ""; else echo "-T"; fi; }
+in_tools() { compose exec $(tty_flag) tools "$@"; }
+devtool() { in_tools python /src/dev/devtool.py "$@"; }
+
+usage() {
+    cat <<'EOF'
+usage: dev/devctl <command> [args]
+
+stack
+  up                  build if needed, start everything, wait for bootstrap
+  down                stop containers (keeps chain, wallets and maker state)
+  reset               stop and delete ALL dev state (asks for confirmation)
+  build               rebuild the dev image (after dependency changes)
+  status              container status
+  logs [svc...]       follow logs (e.g. logs maker-btc-to-ln)
+  restart <svc...>    restart services (e.g. after editing provider code)
+
+chain and wallets
+  info [--json]       maker keys, relay URLs, height, balances
+  balances            Core user/maker wallets and LND nodes
+  mine [n]            mine n blocks now (default 1)
+  miner pause|resume|status
+  address [--wallet user|maker|miner]
+  invoice <sat> [--node user|maker]
+  pay <bolt11> [--node user|maker]
+  fund-psbt <address> <btc>  finalized PSBT from the Core user wallet
+  sign-psbt <psbt> [--hex]   sign/finalize a PSBT with the Core user wallet
+  broadcast <rawtx>
+
+swaps (as the user, against the local makers)
+  swap btc-to-ln [sat] [rill flags...]   on-chain -> Lightning
+  swap ln-to-btc [sat] [rill flags...]   Lightning -> on-chain
+  web-inputs [sat]    all values for the swap.html form (fresh invoice)
+  smoke               run both swap directions and fail on error
+
+makers
+  maker-swaps <btc-to-ln|ln-to-btc> [flags]   list the maker's swap records
+                      (pauses that maker for a few seconds)
+
+raw tools
+  shell               bash in the tools container (rill CLI, devtool)
+  rill <args...>      run the rill CLI in the tools container
+  bitcoin-cli <args...>
+  lncli <maker|user> <args...>
+EOF
+}
+
+cmd=${1:-help}
+shift || true
+case "$cmd" in
+    up)
+        compose up -d --build "$@"
+        devtool info
+        echo
+        echo "web:   http://127.0.0.1:${RILL_DEV_WEB_PORT:-5273}/swap.html"
+        echo "relay: ws://127.0.0.1:${RILL_DEV_RELAY_PORT:-7777}"
+        ;;
+    down) compose down "$@" ;;
+    reset)
+        read -r -p "Delete all rillswap-dev volumes (chain, wallets, maker stores)? [y/N] " answer
+        [ "$answer" = "y" ] || exit 1
+        compose down -v --remove-orphans
+        ;;
+    build) compose build "$@" ;;
+    status) compose ps -a "$@" ;;
+    logs) compose logs -f --tail=100 "$@" ;;
+    restart) compose restart "$@" ;;
+    info | balances | mine | miner | address | invoice | pay | sign-psbt | fund-psbt | web-inputs | broadcast | swap)
+        devtool "$cmd" "$@"
+        ;;
+    smoke)
+        devtool swap btc-to-ln 50000
+        devtool swap ln-to-btc 50000
+        devtool balances
+        echo "smoke: both swap directions completed"
+        ;;
+    maker-swaps)
+        direction=${1:?usage: devctl maker-swaps <btc-to-ln|ln-to-btc> [inspect-swaps flags]}
+        shift
+        # inspect-swaps takes the store owner lock, so pause that maker meanwhile.
+        compose stop "maker-$direction" >/dev/null 2>&1
+        trap 'compose start "maker-$direction" >/dev/null 2>&1' EXIT
+        compose run --rm --no-deps -T "maker-$direction" rill-provider inspect-swaps \
+            --config "/state/makers/$direction/provider.json" "$@" 2> >(grep -v -E 'Container|httpx' >&2)
+        ;;
+    shell) in_tools bash ;;
+    rill) in_tools rill "$@" ;;
+    bitcoin-cli)
+        compose exec $(tty_flag) bitcoind bitcoin-cli -regtest -rpcuser=rill -rpcpassword=rill-dev-regtest "$@"
+        ;;
+    lncli)
+        node=${1:?usage: devctl lncli <maker|user> <args...>}
+        shift
+        compose exec $(tty_flag) "lnd-$node" lncli --network=regtest "$@"
+        ;;
+    help | -h | --help) usage ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac
