@@ -82,6 +82,12 @@ services:
     volumes:
       - lnd-user:/root/.lnd
 
+  lnd-merchant:
+    <<: *lnd
+    command: [--alias=merchant, --tlsextradomain=lnd-merchant]
+    volumes:
+      - lnd-merchant:/root/.lnd
+
   relay:
     image: scsibug/nostr-rs-relay@sha256:48d54c2d2781577cf3ed2951112f0953dc2c5e7c9d2ea20c64e8c0fa37d16e4d
     restart: unless-stopped
@@ -102,10 +108,13 @@ services:
       - state:/state
       - lnd-maker:/lnd/maker:ro
       - lnd-user:/lnd/user:ro
+      - lnd-merchant:/lnd/merchant:ro
     depends_on:
       lnd-maker:
         condition: service_healthy
       lnd-user:
+        condition: service_healthy
+      lnd-merchant:
         condition: service_healthy
       relay:
         condition: service_started
@@ -147,6 +156,41 @@ services:
       bootstrap:
         condition: service_completed_successfully
 
+  # rill-payments merchant API. The CLI binds 127.0.0.1:8787 only, so socat
+  # exposes it to the stack as merchant:8788 (never published to the host).
+  merchant:
+    <<: *rill
+    command: [sh, /src/dev/merchant.sh]
+    environment:
+      RILL_FORWARD: 8080=lnd-merchant:8080
+      RILL_EXPOSE: 8788=127.0.0.1:8787
+    volumes:
+      - ../dev:/src/dev:ro
+      - ../rill-payments/src:/src/rill-payments/src:ro
+      - state:/state
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+
+  # Demo storefront. Its backend owns the merchant admin token; the browser
+  # only talks to the shop.
+  shop:
+    <<: *rill
+    working_dir: /src/rill-payments/examples/demo-shop
+    command: [bun, --watch, server.ts]
+    environment:
+      RILL_DEV_MERCHANT_API: http://merchant:8788
+      RILL_DEV_WEB_PORT: ${RILL_DEV_WEB_PORT:-5273}
+    ports:
+      - 127.0.0.1:${RILL_DEV_SHOP_PORT:-8090}:8090
+    volumes:
+      - ../rill-payments/src:/src/rill-payments/src:ro
+      - ../rill-payments/examples:/src/rill-payments/examples:ro
+      - state:/state
+    depends_on:
+      merchant:
+        condition: service_started
+
   web:
     <<: *rill
     working_dir: /src/rill-web
@@ -172,5 +216,6 @@ volumes:
   bitcoind:
   lnd-maker:
   lnd-user:
+  lnd-merchant:
   relay:
   state:

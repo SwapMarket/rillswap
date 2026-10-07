@@ -12,6 +12,7 @@ import argparse
 import base64
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -37,7 +38,14 @@ LOCAL_LND_PORT = 10009
 RELAY_INTERNAL = os.environ.get("RILL_DEV_RELAY_INTERNAL", "ws://relay:8080")
 RELAY_HOST = os.environ.get("RILL_DEV_RELAY_HOST", "ws://127.0.0.1:7777")
 
-LND_NODES = ("maker", "user")
+LND_NODES = ("maker", "user", "merchant")
+FUNDED_LND = ("maker", "user")
+# maker -> user: BTC->LN payouts to the user. user -> maker: the user pays the
+# maker's LN->BTC hold invoices. maker -> merchant: payments to the shop.
+CHANNELS = (("maker", "user"), ("user", "maker"), ("maker", "merchant"))
+MERCHANT_ORIGIN = "https://shop.rillswap.test"
+MERCHANT_DIR = STATE / "merchant"
+SHOP_URL = os.environ.get("RILL_DEV_SHOP_INTERNAL", "http://shop:8090")
 DIRECTIONS = ("btc-to-ln", "ln-to-btc")
 CHANNEL_SAT = 5_000_000
 LND_FUND_BTC = 10
@@ -140,7 +148,20 @@ class Lnd:
         return self.post("/v1/invoices", {"value": str(sat), "memo": memo})["payment_request"]
 
     def pay(self, bolt11: str) -> dict[str, Any]:
-        return self.post("/v1/channels/transactions", {"payment_request": bolt11})
+        """Pay via routerrpc SendPaymentV2 (a stream of payment updates)."""
+        body = {"payment_request": bolt11, "timeout_seconds": 60, "fee_limit_sat": "1000"}
+        last: dict[str, Any] = {}
+        with self.client.stream("POST", "/v2/router/send", json=body) as response:
+            for line in response.iter_lines():
+                if not line.strip():
+                    continue
+                update = json.loads(line)
+                if "error" in update:
+                    raise SystemExit(f"lnd-{self.node} payment error: {update['error']}")
+                last = update.get("result", update)
+                if last.get("status") in ("SUCCEEDED", "FAILED"):
+                    break
+        return last
 
 
 def copy_lnd_credentials(node: str) -> None:
@@ -202,7 +223,8 @@ def ensure_chain_and_funds(lnds: dict[str, Lnd]) -> None:
         mine(MATURE_HEIGHT - height)
     funded = False
     miner = Core("miner")
-    for node, lnd in lnds.items():
+    for node in FUNDED_LND:
+        lnd = lnds[node]
         # total_balance includes unconfirmed change from a pending channel open.
         if int(lnd.get("/v1/balance/blockchain").get("total_balance", 0)) < 100_000_000:
             log(f"funding lnd-{node} with {LND_FUND_BTC} BTC")
@@ -217,7 +239,8 @@ def ensure_chain_and_funds(lnds: dict[str, Lnd]) -> None:
     if funded:
         mine(6)
     wait_lnd_synced(list(lnds.values()))
-    for node, lnd in lnds.items():
+    for node in FUNDED_LND:
+        lnd = lnds[node]
         wait_for(f"lnd-{node} confirmed funds", lambda lnd=lnd: lnd.onchain_sat() > 0, timeout=60)
 
 
@@ -236,27 +259,30 @@ def has_channel(local: Lnd, remote_pubkey: str) -> bool:
     return False
 
 
-def ensure_channels(lnds: dict[str, Lnd]) -> None:
-    maker, user = lnds["maker"], lnds["user"]
-    pubkeys = {node: lnd.pubkey() for node, lnd in lnds.items()}
-    peers = {peer["pub_key"] for peer in user.get("/v1/peers").get("peers", [])}
-    if pubkeys["maker"] not in peers:
-        user.client.post(
+def ensure_peer(local: Lnd, remote_pubkey: str, remote_node: str) -> None:
+    def connected() -> bool:
+        return any(p["pub_key"] == remote_pubkey for p in local.get("/v1/peers").get("peers", []))
+
+    if not connected():
+        local.client.post(
             "/v1/peers",
-            json={"addr": {"pubkey": pubkeys["maker"], "host": "lnd-maker:9735"}, "perm": True},
+            json={
+                "addr": {"pubkey": remote_pubkey, "host": f"lnd-{remote_node}:9735"},
+                "perm": True,
+            },
         )
-        wait_for(
-            "peer connection",
-            lambda: any(
-                p["pub_key"] == pubkeys["maker"] for p in user.get("/v1/peers").get("peers", [])
-            ),
-        )
+        wait_for(f"peer lnd-{remote_node}", connected)
+
+
+def ensure_channels(lnds: dict[str, Lnd]) -> None:
+    pubkeys = {node: lnd.pubkey() for node, lnd in lnds.items()}
     opened = False
-    # maker -> user gives the maker outbound liquidity for BTC->LN payouts;
-    # user -> maker lets the user pay the maker's LN->BTC hold invoices.
-    for local, remote in (("maker", "user"), ("user", "maker")):
+    for local, remote in CHANNELS:
         if has_channel(lnds[local], pubkeys[remote]):
             continue
+        ensure_peer(lnds[local], pubkeys[remote], remote)
+        # LND refuses to open channels while it lags behind the chain tip.
+        wait_lnd_synced(list(lnds.values()))
         log(f"opening {CHANNEL_SAT} sat channel {local} -> {remote}")
         lnds[local].post(
             "/v1/channels",
@@ -266,14 +292,23 @@ def ensure_channels(lnds: dict[str, Lnd]) -> None:
                 "sat_per_vbyte": "2",
             },
         )
+        # Confirm the funding change, so a second channel from the same node
+        # can spend it (LND only funds from confirmed outputs).
+        mine(1)
         opened = True
-    if opened or maker.pending_open() or user.pending_open():
+    if opened or any(lnd.pending_open() for lnd in lnds.values()):
         mine(6)
-    wait_for(
-        "active channels",
-        lambda: sum(1 for c in maker.channels() if c.get("active")) >= 2,
-        timeout=120,
-    )
+
+    def all_active() -> bool:
+        for local, remote in CHANNELS:
+            if not any(
+                c["remote_pubkey"] == pubkeys[remote] and c.get("initiator") and c.get("active")
+                for c in lnds[local].channels()
+            ):
+                return False
+        return True
+
+    wait_for("active channels", all_active, timeout=120)
 
 
 def provision_maker(direction: str, xonly_by_direction: dict[str, str]) -> None:
@@ -392,12 +427,58 @@ def provision_user() -> None:
         private_write(home / "age.recipient", f"{identity.to_public()}\n", 0o644)
 
 
+def provision_merchant(lnd: Lnd) -> None:
+    """Files for `bun src/cli.ts provision|serve` (rill-payments merchant CLI).
+
+    Keys, token and config are created once; the merchant container provisions
+    its ledger itself on first start. The CLI requires absolute paths and
+    private single-link regular files.
+    """
+    home = MERCHANT_DIR
+    (home / "ledger").mkdir(parents=True, exist_ok=True)
+    home.chmod(0o700)
+    (home / "ledger").chmod(0o700)
+    private_write(home / "tls.cert", (STATE / "lnd/merchant/tls.cert").read_bytes(), 0o644)
+    for name in ("issuance.key", "status.key", "event.key"):
+        if not (home / name).exists():
+            private_write(home / name, secrets.token_bytes(32))
+    if not (home / "admin.token").exists():
+        private_write(home / "admin.token", secrets.token_urlsafe(48))
+    if not (home / "invoice.macaroon").exists():
+        baked = lnd.post(
+            "/v1/macaroon",
+            {
+                "permissions": [
+                    {"entity": "info", "action": "read"},
+                    {"entity": "invoices", "action": "read"},
+                    {"entity": "invoices", "action": "write"},
+                ]
+            },
+        )
+        private_write(home / "invoice.macaroon", bytes.fromhex(baked["macaroon"]))
+    if not (home / "config.json").exists():
+        config = {
+            "origin": MERCHANT_ORIGIN,
+            "receiver": lnd.pubkey(),
+            "endpoint": "https://127.0.0.1:8080/",
+            "ledgerPath": str(home / "ledger/merchant.sqlite"),
+            "certificatePath": str(home / "tls.cert"),
+            "macaroonPath": str(home / "invoice.macaroon"),
+            "issuanceKeyPath": str(home / "issuance.key"),
+            "statusKeyPath": str(home / "status.key"),
+            "eventKeyPath": str(home / "event.key"),
+            "adminTokenPath": str(home / "admin.token"),
+        }
+        private_write(home / "config.json", json.dumps(config, indent=1) + "\n")
+
+
 def write_info(lnds: dict[str, Lnd], makers: dict[str, str]) -> dict[str, Any]:
     info = {
         "makers": makers,
         "relay": {"containers": RELAY_INTERNAL, "host": RELAY_HOST},
         "lnd_pubkeys": {node: lnd.pubkey() for node, lnd in lnds.items()},
         "user_age_recipient": (STATE / "user/age.recipient").read_text().strip(),
+        "merchant": {"origin": MERCHANT_ORIGIN, "lnd_pubkey": lnds["merchant"].pubkey()},
         "network": network_identity(),
     }
     private_write(STATE / "info.json", json.dumps(info, indent=1) + "\n", 0o644)
@@ -417,6 +498,7 @@ def cmd_bootstrap(_: argparse.Namespace) -> None:
     for direction in DIRECTIONS:
         provision_maker(direction, makers)
     provision_user()
+    provision_merchant(lnds["merchant"])
     write_info(lnds, makers)
     log(f"bootstrap complete at height {Core()('getblockcount')}")
 
@@ -512,9 +594,10 @@ def cmd_invoice(args: argparse.Namespace) -> None:
 
 def cmd_pay(args: argparse.Namespace) -> None:
     result = Lnd(args.node).pay(args.bolt11)
-    if result.get("payment_error"):
-        raise SystemExit(f"payment failed: {result['payment_error']}")
-    print("paid, preimage " + base64.b64decode(result["payment_preimage"]).hex())
+    if result.get("status") != "SUCCEEDED":
+        reason = result.get("failure_reason", "no final status")
+        raise SystemExit(f"payment failed: {result.get('status')} {reason}")
+    print(f"paid, preimage {result['payment_preimage']}, fee {result.get('fee_sat', '0')} sat")
 
 
 def cmd_address(args: argparse.Namespace) -> None:
@@ -602,16 +685,52 @@ def cmd_swap(args: argparse.Namespace) -> None:
         "--settle-timeout",
         str(args.settle_timeout),
     ]
+    target = str(args.target)
     if args.direction == "btc-to-ln":
-        bolt11 = Lnd("user").add_invoice(args.sat, "rill dev swap")
-        log(f"user invoice for {args.sat} sat: {bolt11}")
+        if target.startswith("lnbcrt"):
+            bolt11 = target  # e.g. a shop invoice
+        else:
+            bolt11 = Lnd("user").add_invoice(int(target), "rill dev swap")
+            log(f"user invoice for {target} sat: {bolt11}")
         command += ["--invoice", bolt11]
+    elif target.startswith("lnbcrt"):
+        raise SystemExit("ln-to-btc takes a payout amount in sat, not an invoice")
     else:
-        command += ["--payout-sat", str(args.sat)]
+        command += ["--payout-sat", str(int(target))]
     command += args.extra
     log(f"recovery files in {work}")
     log("running: " + " ".join(command))
     raise SystemExit(subprocess.run(command, check=False).returncode)
+
+
+def shop(method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    response = httpx.request(method, SHOP_URL + path, json=body, timeout=30)
+    response.raise_for_status()
+    return response.json()
+
+
+def cmd_shop_smoke(_: argparse.Namespace) -> None:
+    """Buy from the demo shop over Lightning and via a btc-to-ln swap."""
+    for rail in ("lightning", "btc-swap"):
+        order = shop("POST", "/api/orders", {"productId": "stickers", "rail": rail})
+        log(f"shop order {order['id']} ({rail}, {order['amountSat']} sat)")
+        if rail == "lightning":
+            result = Lnd("user").pay(order["invoice"])
+            if result.get("status") != "SUCCEEDED":
+                raise SystemExit(f"shop payment failed: {result}")
+        else:
+            code = subprocess.run(
+                [sys.executable, __file__, "swap", "btc-to-ln", order["invoice"]], check=False
+            ).returncode
+            if code:
+                raise SystemExit(f"swap for shop order failed with exit {code}")
+        accepted = wait_for(
+            f"signed acceptance for order {order['id']}",
+            lambda order=order: shop("GET", f"/api/orders/{order['id']}")["acceptance"],
+            timeout=60,
+            interval=2,
+        )
+        log(f"order {order['id']} paid, acceptance {accepted['eventId']} verified")
 
 
 def main() -> None:
@@ -647,9 +766,12 @@ def main() -> None:
     p.add_argument("sat", type=int, nargs="?", default=50_000)
     p = sub.add_parser("broadcast", help="broadcast a raw transaction hex")
     p.add_argument("tx")
+    sub.add_parser("shop-smoke", help="buy from the demo shop (Lightning and on-chain swap)")
     p = sub.add_parser("swap", help="run a user swap against the local maker")
     p.add_argument("direction", choices=DIRECTIONS)
-    p.add_argument("sat", type=int, nargs="?", default=50_000)
+    p.add_argument(
+        "target", nargs="?", default="50000", help="amount in sat, or (btc-to-ln) a BOLT11 to pay"
+    )
     p.add_argument("--max-fee", type=int, default=2000, help="max success fee in sat")
     p.add_argument("--settle-timeout", type=int, default=600)
     p.add_argument("extra", nargs=argparse.REMAINDER, help="extra `rill swap` flags")
@@ -669,6 +791,7 @@ def main() -> None:
         "web-inputs": cmd_web_inputs,
         "broadcast": cmd_broadcast,
         "swap": cmd_swap,
+        "shop-smoke": cmd_shop_smoke,
     }
     handlers[args.command](args)
 

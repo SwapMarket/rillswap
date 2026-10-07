@@ -10,4 +10,12 @@ for entry in ${RILL_FORWARD:-}; do
     socat "TCP-LISTEN:${local_port},bind=127.0.0.1,fork,reuseaddr" "TCP:${target}" &
 done
 
+# RILL_EXPOSE publishes loopback-only services (e.g. the merchant API) to the
+# compose network: space-separated PORT=127.0.0.1:TARGET_PORT entries.
+for entry in ${RILL_EXPOSE:-}; do
+    port=${entry%%=*}
+    target=${entry#*=}
+    socat "TCP-LISTEN:${port},fork,reuseaddr" "TCP:${target}" &
+done
+
 exec "$@"
