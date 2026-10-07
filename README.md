@@ -18,7 +18,8 @@ This is one Git repository containing seven components:
 | `rill-payments/` | Experimental checkout SDK, merchant ledger and shared policy |
 
 For a complete local regtest environment (Core, LND, relay, makers for both
-swap directions, the CLI and the browser swap page) in Docker Compose, see
+swap directions, the CLI, the browser swap page and a demo shop) in Docker
+Compose, see
 [`DEVELOPMENT.md`](DEVELOPMENT.md): `dev/devctl up`.
 
 Each component retains its own dependency lock, local development setup, and

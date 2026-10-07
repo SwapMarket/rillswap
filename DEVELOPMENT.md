@@ -1,8 +1,9 @@
 # Development environment
 
-A complete local regtest stack: Bitcoin Core, two LND nodes, a Nostr relay, an
-auto-miner, a maker (liquidity provider) for each swap direction, a user
-toolbox with the `rill` CLI, and the browser swap page. Everything runs in
+A complete local regtest stack: Bitcoin Core, three LND nodes, a Nostr relay,
+an auto-miner, a maker (liquidity provider) for each swap direction, a user
+toolbox with the `rill` CLI, the browser swap page, and a demo shop backed by
+the rill-payments merchant service. Everything runs in
 Docker Compose and is driven by one script, `dev/devctl`.
 
 All data is disposable regtest data with fixed, public credentials. Never
@@ -20,7 +21,7 @@ point any of it at real funds.
 ```sh
 dev/devctl up        # build the image, start everything, wait for bootstrap
 dev/devctl info      # maker keys, relay URL, height, balances
-dev/devctl smoke     # one swap in each direction, end to end
+dev/devctl smoke     # both swap directions and two shop purchases, end to end
 ```
 
 The first `up` takes a few minutes (image build). Later runs reuse the image and
@@ -29,10 +30,12 @@ all chain/wallet/maker state. `dev/devctl help` lists every command.
 | What | Where |
 | --- | --- |
 | Browser swap page | http://127.0.0.1:5273/swap.html |
+| Demo shop | http://127.0.0.1:8090/ |
 | Nostr relay (from the host/browser) | ws://127.0.0.1:7777 |
 | Nostr relay (inside the stack) | ws://relay:8080 |
 
-Override host ports with `RILL_DEV_WEB_PORT` and `RILL_DEV_RELAY_PORT`, and the
+Override host ports with `RILL_DEV_WEB_PORT`, `RILL_DEV_SHOP_PORT` and
+`RILL_DEV_RELAY_PORT`, and the
 auto-miner interval with `RILL_DEV_BLOCK_SECONDS` (default 10, `0` disables),
 for example `RILL_DEV_WEB_PORT=8090 dev/devctl up`.
 
@@ -41,7 +44,7 @@ for example `RILL_DEV_WEB_PORT=8090 dev/devctl up`.
 | Service | Role |
 | --- | --- |
 | `bitcoind` | Bitcoin Core v30 regtest, `txindex=1`. Wallets: `miner`, `user`, `maker`. |
-| `lnd-maker`, `lnd-user` | LND nodes. Two 5,000,000 sat channels: maker to user and user to maker. |
+| `lnd-maker`, `lnd-user`, `lnd-merchant` | LND nodes. 5,000,000 sat channels: maker to user, user to maker, maker to merchant. |
 | `relay` | `nostr-rs-relay`, the only channel between makers and users. |
 | `bootstrap` | One-shot, idempotent setup (below). Reruns on every `up`. |
 | `miner` | Mines one block every `RILL_DEV_BLOCK_SECONDS`. |
@@ -49,18 +52,24 @@ for example `RILL_DEV_WEB_PORT=8090 dev/devctl up`.
 | `maker-ln-to-btc` | `rill-provider serve`: takes a Lightning hold payment, pays on-chain BTC. |
 | `tools` | User toolbox. `devctl swap`, `devctl rill`, `devctl shell` run here. |
 | `web` | Builds `rill-web` (rebuilding on change) and serves `dist/`. |
+| `merchant` | `rill-payments` merchant API (`bun src/cli.ts serve`) on `lnd-merchant`. |
+| `shop` | Demo storefront ([`rill-payments/examples/demo-shop`](rill-payments/examples/demo-shop)). |
 
 `bootstrap` checks before acting at every step, so it is safe to rerun and it
 completes an interrupted attempt. It creates the wallets, mines to 150 blocks,
 funds both LND nodes and the `user`/`maker` Core wallets (10 BTC each), opens
 the channels, provisions one maker identity, custody key, config and store per
-direction, and writes the user's age key. Results land in the `state` volume:
+direction, writes the user's age key, and prepares the merchant's keys, admin
+token, scoped invoice macaroon and config (the merchant provisions its own
+ledger on first start). Results land in the `state` volume:
 
 ```
 /state/info.json                 maker keys, relay URLs, LND pubkeys
 /state/makers/<direction>/       provider.json, identity, custody key, store
 /state/user/                     age.key, network.json, Core/LND credentials
 /state/user/swaps/<time>-<dir>/  recovery files from `devctl swap`
+/state/merchant/                 merchant config, keys, admin token, ledger
+/state/shop/orders.json          demo shop orders
 ```
 
 Rill clients only accept Core and LND on numeric loopback, so each Rill
@@ -134,6 +143,28 @@ The browser recovery files are encrypted to the user's age key, which lives in
 the stack. To decrypt or use them with `rill recover`, copy the key out:
 `docker compose -f dev/compose.yaml cp tools:/state/user/age.key tmp/`.
 
+## Paying in the demo shop
+
+Open http://127.0.0.1:8090/, pick a product, pick a payment method and place
+the order. Prices are in USD at a fixed demo rate (1 BTC = 100,000 USD). The
+shop backend creates the merchant intent and invoice with its admin token; the
+browser only talks to the shop. The order page polls its status and, once the
+merchant accepts the payment, verifies the merchant's signed acceptance
+against the Ed25519 key the shop pinned from the merchant's event key.
+
+- **Lightning:** `dev/devctl pay <invoice>` pays from `lnd-user`, routed
+  user to maker to merchant.
+- **Bitcoin on-chain:** `dev/devctl swap btc-to-ln <invoice>` funds a swap
+  from the Core `user` wallet and the BTC to LN maker pays the shop's invoice.
+  The browser swap page works too: paste the shop invoice instead of the one
+  from `web-inputs`.
+
+`dev/devctl shop-smoke` buys once with each method and checks the signed
+acceptance. The merchant API itself is reachable only inside the stack
+(`merchant:8788`, forwarded to the CLI's loopback listener), so
+`dev/devctl shell` plus `curl` with the token in `/state/merchant/admin.token`
+is the way to call it by hand.
+
 ## Mining, timeouts and refunds
 
 ```sh
@@ -157,6 +188,7 @@ stack-specific values are: network `/state/user/network.json`, crypto library
 ```sh
 dev/devctl bitcoin-cli -rpcwallet=user getbalances
 dev/devctl lncli maker listchannels
+dev/devctl lncli merchant listinvoices
 dev/devctl lncli user addinvoice --amt 1000
 dev/devctl invoice 1000 --node maker
 dev/devctl pay <bolt11>
@@ -172,9 +204,11 @@ installed editable from it. After editing:
 - CLI code: nothing (each `rill` run starts fresh)
 - `rill-web/src`, `swap.html`, `index.html`: the `web` service rebuilds; reload
   the page
+- `rill-payments/examples/demo-shop`: the shop restarts itself (`bun --watch`)
+- `rill-payments/src`: `dev/devctl restart merchant shop`
 - `dev/devtool.py`: nothing for commands; `dev/devctl up` reruns bootstrap
-- dependencies, native crypto, `rill-payments` (bundled into the web image),
-  or `dev/Dockerfile`: `dev/devctl build && dev/devctl up`
+- dependencies, native crypto, `dev/entrypoint.sh`, `dev/Dockerfile`, or
+  `rill-payments` code the web page imports: `dev/devctl build && dev/devctl up`
 
 ## Stopping and resetting
 
@@ -184,7 +218,7 @@ dev/devctl reset    # delete every volume (asks first); next `up` starts fresh
 ```
 
 Volumes belong to the `rillswap-dev` Compose project: `bitcoind`, `lnd-maker`,
-`lnd-user`, `relay`, `state`. Reset them together. A partial reset (for
+`lnd-user`, `lnd-merchant`, `relay`, `state`. Reset them together. A partial reset (for
 example only `bitcoind`) leaves channels and stores pointing at a chain that no
 longer exists.
 
