@@ -23,9 +23,9 @@ stack
 
 chain and wallets
   info [--json]       maker keys, relay URLs, height, balances
-  balances            Core user/maker wallets and LND nodes
+  balances            Core user/maker wallets, LND nodes, Monero wallets
   mine [n]            mine n blocks now (default 1)
-  miner pause|resume|status
+  miner pause|resume|status   (Bitcoin and Monero auto-mining)
   address [--wallet user|maker|miner]
   invoice <sat> [--node user|maker]
   pay <bolt11> [--node user|maker]
@@ -39,6 +39,9 @@ swaps (as the user, against the local makers)
   web-inputs [sat]    all values for the swap.html form (fresh invoice)
   shop-smoke          buy from the demo shop over Lightning and via a swap
   pay-token ORDER     pay a demo shop fUSDC/fUSDT order from the Anvil buyer
+  pay-xmr ORDER [--parts N]
+                      pay a demo shop Monero order from the buyer wallet
+  xmr-smoke           buy from the demo shop with Monero (single and split payment)
   token-smoke         buy from the demo shop with fUSDC and fUSDT
   cast ARGS           Foundry cast against the Anvil chain
   smoke               both swap directions plus all shop payment methods
@@ -77,7 +80,7 @@ case "$cmd" in
     status) compose ps -a "$@" ;;
     logs) compose logs -f --tail=100 "$@" ;;
     restart) compose restart "$@" ;;
-    info | balances | mine | miner | address | invoice | pay | sign-psbt | fund-psbt | web-inputs | broadcast | swap | shop-smoke)
+    info | balances | mine | miner | address | invoice | pay | sign-psbt | fund-psbt | web-inputs | broadcast | swap | shop-smoke | pay-xmr | xmr-smoke)
         devtool "$cmd" "$@"
         ;;
     smoke)
@@ -85,8 +88,9 @@ case "$cmd" in
         devtool swap ln-to-btc 50000
         devtool shop-smoke
         "$0" token-smoke
+        devtool xmr-smoke
         devtool balances
-        echo "smoke: both swap directions and all four shop payment methods completed"
+        echo "smoke: both swap directions and all five shop payment methods completed"
         ;;
     pay-token)
         compose exec -T shop bun pay-token.ts "${1:?usage: devctl pay-token <order-id>}"

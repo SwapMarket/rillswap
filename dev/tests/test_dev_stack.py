@@ -72,3 +72,70 @@ def test_has_channel_counts_open_and_pending_local_initiator():
     assert devtool.has_channel(FakeLnd([], pending), remote)
     remote_pending = [{"channel": {"remote_node_pub": remote, "initiator": "INITIATOR_REMOTE"}}]
     assert not devtool.has_channel(FakeLnd([], remote_pending), remote)
+
+
+def compose_service(name: str) -> str:
+    match = re.search(rf"^  {name}:\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)", COMPOSE, re.M | re.S)
+    assert match, name
+    return match.group(1)
+
+
+def test_monero_chain_persists_and_wallet_rpc_stays_private():
+    monerod = compose_service("monerod")
+    # Without --keep-fakechain monerod deletes the regtest chain at every start.
+    for flag in ("--regtest", "--keep-fakechain", "--offline", "--fixed-difficulty=1"):
+        assert flag in monerod
+    wallet = COMPOSE.split("x-monero-wallet: &monero-wallet", 1)[1].split("\nx-", 1)[0]
+    assert "--disable-rpc-login" in wallet
+    for name in ("monerod", "monero-wallet-merchant", "monero-wallet-buyer"):
+        assert "ports:" not in compose_service(name)
+        assert "ports:" not in wallet
+
+
+def test_monero_wallet_reopens_after_wallet_rpc_restart(monkeypatch):
+    devtool = load_devtool()
+    calls = []
+    opened = {"wallet": False}
+
+    def raw(self, method, **params):
+        calls.append(method)
+        if method == "open_wallet":
+            opened["wallet"] = True
+            return {}
+        if not opened["wallet"]:
+            raise devtool.RpcError(-13, "No wallet file")
+        return {"height": 5}
+
+    monkeypatch.setattr(devtool.MoneroWallet, "raw", raw)
+    assert devtool.MoneroWallet("merchant")("get_height") == {"height": 5}
+    assert calls == ["get_height", "open_wallet", "get_height"]
+    monkeypatch.setattr(
+        devtool.MoneroWallet,
+        "raw",
+        lambda self, method, **params: (_ for _ in ()).throw(devtool.RpcError(-1, "other")),
+    )
+    with pytest.raises(devtool.RpcError):
+        devtool.MoneroWallet("merchant")("get_height")
+
+
+def test_monero_wallet_created_only_in_an_empty_volume(tmp_path, monkeypatch):
+    devtool = load_devtool()
+    calls = []
+    monkeypatch.setattr(devtool, "MONERO_WALLET_DIRS", tmp_path / "wallets")
+    monkeypatch.setattr(devtool, "STATE", tmp_path / "state")
+    monkeypatch.setattr(
+        devtool.MoneroWallet, "raw", lambda self, method, **params: calls.append(method) or {}
+    )
+    with pytest.raises(SystemExit, match="not mounted"):
+        devtool.ensure_monero_wallet("merchant")
+    (tmp_path / "wallets/merchant").mkdir(parents=True)
+    devtool.ensure_monero_wallet("merchant")
+    assert calls == ["create_wallet"]
+    (tmp_path / "wallets/merchant/merchant.keys").write_text("")
+    devtool.ensure_monero_wallet("merchant")
+    assert calls[-1] == "open_wallet"
+    (tmp_path / "wallets/merchant/merchant.keys").unlink()
+    (tmp_path / "state/shop/monero").mkdir(parents=True)
+    (tmp_path / "state/shop/monero/ledger.sqlite-wal").write_text("")
+    with pytest.raises(SystemExit, match="shop's Monero state"):
+        devtool.ensure_monero_wallet("merchant")

@@ -13,6 +13,34 @@ x-rill: &rill
     - state:/state
   restart: unless-stopped
 
+# monero-wallet-rpc: one open wallet per process, so merchant and buyer each
+# get their own. RPC stays inside the stack (no login, never published).
+x-monero-wallet: &monero-wallet
+  image: rillswap-dev-monero:local
+  restart: unless-stopped
+  depends_on:
+    monerod:
+      condition: service_healthy
+  healthcheck:
+    test: [CMD, curl, -fsS, -d, '{"jsonrpc":"2.0","id":0,"method":"get_version"}', http://127.0.0.1:18082/json_rpc]
+    interval: 2s
+    retries: 30
+  command:
+    - monero-wallet-rpc
+    - --wallet-dir=/wallets
+    - --rpc-bind-ip=0.0.0.0
+    - --rpc-bind-port=18082
+    - --confirm-external-bind
+    - --disable-rpc-login
+    - --rpc-ssl=disabled
+    - --daemon-address=monerod:18081
+    - --daemon-ssl=disabled
+    - --trusted-daemon
+    # Regtest starts at the newest hard fork (v16) from height 1, which the
+    # wallet otherwise rejects as a mainnet daemon running old software.
+    - --allow-mismatched-daemon-version
+    - --non-interactive
+
 x-lnd: &lnd
   image: lightninglabs/lnd@sha256:60fca3f409cf3d500db1d15c9965678a4b5a60758ff30863d52b02529c18be8b
   restart: unless-stopped
@@ -118,6 +146,45 @@ services:
       interval: 2s
       retries: 30
 
+  # Monero v0.18.5.3 private chain: regtest (mainnet address format), fixed
+  # difficulty, no peers. --keep-fakechain keeps the chain across restarts
+  # (without it monerod deletes it at start). The miner adds blocks.
+  monerod:
+    image: rillswap-dev-monero:local
+    build: monero
+    restart: unless-stopped
+    command:
+      - monerod
+      - --regtest
+      - --keep-fakechain
+      - --fixed-difficulty=1
+      - --offline
+      - --no-igd
+      - --non-interactive
+      - --data-dir=/data
+      - --rpc-bind-ip=0.0.0.0
+      - --rpc-bind-port=18081
+      - --confirm-external-bind
+      - --rpc-ssl=disabled
+      - --disable-dns-checkpoints
+      - --check-updates=disabled
+    volumes:
+      - monerod:/data
+    healthcheck:
+      test: [CMD, curl, -fsS, http://127.0.0.1:18081/get_height]
+      interval: 2s
+      retries: 30
+
+  monero-wallet-merchant:
+    <<: *monero-wallet
+    volumes:
+      - monero-merchant:/wallets
+
+  monero-wallet-buyer:
+    <<: *monero-wallet
+    volumes:
+      - monero-buyer:/wallets
+
   relay:
     image: scsibug/nostr-rs-relay@sha256:48d54c2d2781577cf3ed2951112f0953dc2c5e7c9d2ea20c64e8c0fa37d16e4d
     restart: unless-stopped
@@ -139,12 +206,18 @@ services:
       - lnd-maker:/lnd/maker:ro
       - lnd-user:/lnd/user:ro
       - lnd-merchant:/lnd/merchant:ro
+      - monero-merchant:/monero-wallets/merchant:ro
+      - monero-buyer:/monero-wallets/buyer:ro
     depends_on:
       lnd-maker:
         condition: service_healthy
       lnd-user:
         condition: service_healthy
       lnd-merchant:
+        condition: service_healthy
+      monero-wallet-merchant:
+        condition: service_healthy
+      monero-wallet-buyer:
         condition: service_healthy
       relay:
         condition: service_started
@@ -154,6 +227,7 @@ services:
     command: [python, /src/dev/devtool.py, mine-loop]
     environment:
       RILL_DEV_BLOCK_SECONDS: ${RILL_DEV_BLOCK_SECONDS:-10}
+      RILL_DEV_MONERO_BLOCK_SECONDS: ${RILL_DEV_MONERO_BLOCK_SECONDS:-2}
     depends_on:
       bootstrap:
         condition: service_completed_successfully
@@ -211,6 +285,8 @@ services:
     environment:
       RILL_DEV_MERCHANT_API: http://merchant:8788
       RILL_DEV_ANVIL_RPC: http://anvil:8545
+      RILL_DEV_MONERO_WALLET_RPC: http://monero-wallet-merchant:18082
+      RILL_DEV_MONEROD_RPC: http://monerod:18081
       RILL_DEV_WEB_PORT: ${RILL_DEV_WEB_PORT:-5273}
     ports:
       - 127.0.0.1:${RILL_DEV_SHOP_PORT:-8090}:8090
@@ -251,5 +327,8 @@ volumes:
   lnd-user:
   lnd-merchant:
   anvil:
+  monerod:
+  monero-merchant:
+  monero-buyer:
   relay:
   state:

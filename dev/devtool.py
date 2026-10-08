@@ -16,6 +16,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,13 @@ CHANNEL_SAT = 5_000_000
 LND_FUND_BTC = 10
 CORE_FUND_BTC = 10
 MATURE_HEIGHT = 150
+MONEROD_URL = "http://monerod:18081"
+MONERO_WALLETS = ("merchant", "buyer")
+MONERO_WALLET_DIRS = Path(os.environ.get("RILL_DEV_MONERO_WALLETS", "/monero-wallets"))
+# 100 coinbase outputs give the buyer spendable funds (60-block unlock) and
+# enough decoys for ring size 16, as in upstream's wallet transfer tests.
+MONERO_MATURE_HEIGHT = 130
+PICONERO = 10**12
 
 
 def log(message: str) -> None:
@@ -162,6 +170,110 @@ class Lnd:
                 if last.get("status") in ("SUCCEEDED", "FAILED"):
                     break
         return last
+
+
+class MoneroDaemon:
+    def __call__(self, method: str, **params: Any) -> Any:
+        response = httpx.post(
+            f"{MONEROD_URL}/json_rpc",
+            json={"jsonrpc": "2.0", "id": 0, "method": method, "params": params},
+            timeout=60,
+        )
+        response.raise_for_status()
+        body = response.json()
+        if "error" in body:
+            raise RpcError(body["error"]["code"], body["error"]["message"])
+        return body["result"]
+
+    def height(self) -> int:
+        return int(self("get_info")["height"])
+
+    def mine(self, blocks: int, address: str) -> int:
+        return int(
+            self("generateblocks", amount_of_blocks=blocks, wallet_address=address)["height"]
+        )
+
+
+class MoneroWallet:
+    """monero-wallet-rpc for one wallet (the dev wallets have no password)."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.url = f"http://monero-wallet-{name}:18082/json_rpc"
+
+    def raw(self, method: str, **params: Any) -> Any:
+        response = httpx.post(
+            self.url,
+            json={"jsonrpc": "2.0", "id": 0, "method": method, "params": params},
+            timeout=120,
+        )
+        response.raise_for_status()
+        body = response.json()
+        if "error" in body:
+            raise RpcError(body["error"]["code"], body["error"]["message"])
+        return body["result"]
+
+    def __call__(self, method: str, **params: Any) -> Any:
+        try:
+            return self.raw(method, **params)
+        except RpcError as error:
+            if error.code != -13:  # no wallet open (e.g. wallet-rpc restarted)
+                raise
+        self.raw("open_wallet", filename=self.name, password="")
+        return self.raw(method, **params)
+
+    def address(self) -> str:
+        return self("get_address", account_index=0)["address"]
+
+    def balance(self) -> dict[str, float]:
+        self("refresh")
+        result = self("get_balance", account_index=0)
+        return {
+            "balance_xmr": result["balance"] / PICONERO,
+            "unlocked_xmr": result["unlocked_balance"] / PICONERO,
+        }
+
+
+def ensure_monero_wallet(name: str) -> MoneroWallet:
+    """Open the wallet; create it only in an empty wallet volume (read-only mounted here)."""
+    wallet = MoneroWallet(name)
+    directory = MONERO_WALLET_DIRS / name
+    if not directory.is_dir():
+        raise SystemExit(
+            f"{directory} is not mounted; cannot tell whether the {name} wallet exists"
+        )
+    if any(directory.iterdir()):
+        wallet.raw("open_wallet", filename=name, password="")  # never replaced, even if broken
+        return wallet
+    # An empty merchant volume next to existing shop Monero state means the
+    # wallet was lost, not that this is a fresh stack: never replace it.
+    shop_state = STATE / "shop/monero"
+    if name == "merchant" and shop_state.is_dir() and any(shop_state.iterdir()):
+        raise SystemExit("Monero merchant wallet missing but the shop's Monero state exists; reset")
+    log(f"creating Monero wallet {name}")
+    wallet.raw("create_wallet", filename=name, password="", language="English")
+    return wallet
+
+
+def ensure_monero() -> dict[str, str]:
+    daemon = MoneroDaemon()
+    wait_for("monerod", lambda: daemon.height() > 0)
+    wallets = {name: ensure_monero_wallet(name) for name in MONERO_WALLETS}
+    addresses = {name: wallet.address() for name, wallet in wallets.items()}
+    height = daemon.height()
+    if height < MONERO_MATURE_HEIGHT:
+        log(f"mining {MONERO_MATURE_HEIGHT - height} Monero blocks to the buyer")
+        daemon.mine(MONERO_MATURE_HEIGHT - height, addresses["buyer"])
+    for name, wallet in wallets.items():
+        try:
+            wallet("refresh")
+        except RpcError as error:
+            # e.g. "reorg exceeds maximum allowed depth" after the chain volume was wiped
+            raise SystemExit(
+                f"Monero {name} wallet does not match the chain ({error}); reset"
+            ) from error
+        wallet("store")
+    return addresses
 
 
 def copy_lnd_credentials(node: str) -> None:
@@ -472,13 +584,16 @@ def provision_merchant(lnd: Lnd) -> None:
         private_write(home / "config.json", json.dumps(config, indent=1) + "\n")
 
 
-def write_info(lnds: dict[str, Lnd], makers: dict[str, str]) -> dict[str, Any]:
+def write_info(
+    lnds: dict[str, Lnd], makers: dict[str, str], monero: dict[str, str]
+) -> dict[str, Any]:
     info = {
         "makers": makers,
         "relay": {"containers": RELAY_INTERNAL, "host": RELAY_HOST},
         "lnd_pubkeys": {node: lnd.pubkey() for node, lnd in lnds.items()},
         "user_age_recipient": (STATE / "user/age.recipient").read_text().strip(),
         "merchant": {"origin": MERCHANT_ORIGIN, "lnd_pubkey": lnds["merchant"].pubkey()},
+        "monero_addresses": monero,
         "network": network_identity(),
     }
     private_write(STATE / "info.json", json.dumps(info, indent=1) + "\n", 0o644)
@@ -499,17 +614,37 @@ def cmd_bootstrap(_: argparse.Namespace) -> None:
         provision_maker(direction, makers)
     provision_user()
     provision_merchant(lnds["merchant"])
-    write_info(lnds, makers)
+    monero = ensure_monero()
+    write_info(lnds, makers, monero)
     log(f"bootstrap complete at height {Core()('getblockcount')}")
 
 
 # --- miner -------------------------------------------------------------------
 
 
+def monero_mine_loop(interval: float, paused: Path) -> None:
+    daemon = MoneroDaemon()
+    address = load_info()["monero_addresses"]["buyer"]
+    while True:
+        time.sleep(interval)
+        if paused.exists():
+            continue
+        try:
+            daemon.mine(1, address)
+        except (httpx.HTTPError, RpcError) as error:
+            log(f"Monero mining failed: {error}")
+
+
 def cmd_mine_loop(_: argparse.Namespace) -> None:
     interval = float(os.environ.get("RILL_DEV_BLOCK_SECONDS", "10"))
+    monero_interval = float(os.environ.get("RILL_DEV_MONERO_BLOCK_SECONDS", "2"))
     paused = STATE / "miner.paused"
     log(f"auto-mining one block every {interval:g}s (0 disables; pause with `devctl miner pause`)")
+    if monero_interval > 0:
+        log(f"auto-mining one Monero block every {monero_interval:g}s to the buyer")
+        threading.Thread(
+            target=monero_mine_loop, args=(monero_interval, paused), daemon=True
+        ).start()
     while True:
         time.sleep(interval if interval > 0 else 60)
         if interval <= 0 or paused.exists():
@@ -563,6 +698,8 @@ def balances() -> dict[str, Any]:
         }
     for node in LND_NODES:
         result[f"lnd:{node}"] = lnd_summary(node)
+    for name in MONERO_WALLETS:
+        result[f"monero:{name}"] = MoneroWallet(name).balance()
     return result
 
 
@@ -575,6 +712,7 @@ def cmd_info(args: argparse.Namespace) -> None:
         print(json.dumps(info, indent=1))
         return
     print(f"height          {info['height']} (auto-miner {info['auto_miner']})")
+    print(f"monero height   {MoneroDaemon().height()}")
     print(f"relay (host)    {info['relay']['host']}")
     print(f"relay (stack)   {info['relay']['containers']}")
     for direction, xonly in info["makers"].items():
@@ -733,6 +871,43 @@ def cmd_shop_smoke(_: argparse.Namespace) -> None:
         log(f"order {order['id']} paid, acceptance {accepted['eventId']} verified")
 
 
+def cmd_pay_xmr(args: argparse.Namespace) -> None:
+    """Pay a demo shop Monero order from the buyer wallet, optionally in parts."""
+    order = shop("GET", f"/api/orders/{args.order}")
+    if not order.get("monero"):
+        raise SystemExit(f"order {args.order} is not a Monero order")
+    terms = order["monero"]["terms"]
+    total = int(terms["amountAtomic"])
+    parts = [total // args.parts] * (args.parts - 1)
+    parts.append(total - sum(parts))
+    buyer = MoneroWallet("buyer")
+    buyer("refresh")
+    for amount in parts:
+        tx = buyer(
+            "transfer",
+            destinations=[{"address": terms["address"], "amount": amount}],
+            account_index=0,
+            priority=0,
+        )
+        log(f"sent {amount / PICONERO:.12g} XMR to order {args.order}: tx {tx['tx_hash']}")
+
+
+def cmd_xmr_smoke(_: argparse.Namespace) -> None:
+    """Buy from the demo shop with Monero: one payment, then one split in two transactions."""
+    for parts in (1, 2):
+        order = shop("POST", "/api/orders", {"productId": "stickers", "rail": "monero"})
+        log(f"shop order {order['id']} (monero, {order['amountLabel']}, {parts} tx)")
+        cmd_pay_xmr(argparse.Namespace(order=order["id"], parts=parts))
+        accepted = wait_for(
+            f"signed acceptance for order {order['id']}",
+            lambda order=order: shop("GET", f"/api/orders/{order['id']}")["acceptance"],
+            timeout=180,
+            interval=2,
+        )
+        log(f"order {order['id']} paid, acceptance {accepted['eventId']} verified")
+        log(f"evidence: {accepted['detail']}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="devtool", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -744,7 +919,7 @@ def main() -> None:
     p.add_argument("action", choices=["pause", "resume", "status"])
     p = sub.add_parser("info", help="maker keys, relay URLs, height and balances")
     p.add_argument("--json", action="store_true")
-    sub.add_parser("balances", help="user/maker Core wallets and LND nodes")
+    sub.add_parser("balances", help="Core wallets, LND nodes and Monero wallets")
     p = sub.add_parser("invoice", help="create a BOLT11 invoice")
     p.add_argument("sat", type=int)
     p.add_argument("--node", choices=LND_NODES, default="user")
@@ -767,6 +942,10 @@ def main() -> None:
     p = sub.add_parser("broadcast", help="broadcast a raw transaction hex")
     p.add_argument("tx")
     sub.add_parser("shop-smoke", help="buy from the demo shop (Lightning and on-chain swap)")
+    p = sub.add_parser("pay-xmr", help="pay a demo shop Monero order from the buyer wallet")
+    p.add_argument("order")
+    p.add_argument("--parts", type=int, default=1, help="split into this many transactions")
+    sub.add_parser("xmr-smoke", help="buy from the demo shop with Monero")
     p = sub.add_parser("swap", help="run a user swap against the local maker")
     p.add_argument("direction", choices=DIRECTIONS)
     p.add_argument(
@@ -792,6 +971,8 @@ def main() -> None:
         "broadcast": cmd_broadcast,
         "swap": cmd_swap,
         "shop-smoke": cmd_shop_smoke,
+        "pay-xmr": cmd_pay_xmr,
+        "xmr-smoke": cmd_xmr_smoke,
     }
     handlers[args.command](args)
 
