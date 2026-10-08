@@ -1,4 +1,7 @@
-// Pure demo-shop logic, kept apart from server.ts so it can be unit tested.
+// Demo-shop logic kept apart from server.ts (which starts services on import)
+// so it can be unit tested.
+import { existsSync, readdirSync, readFileSync, renameSync } from "node:fs";
+import { basename, dirname } from "node:path";
 import { verifyAcceptance, type SignedAcceptance } from "../../src/server";
 
 export const DEMO_USD_PER_BTC = 100_000;
@@ -22,4 +25,27 @@ export function findAcceptance(
     verifyAcceptance(envelope, pinnedKey) &&
     envelope.event.intentId === intentId &&
     envelope.event.amountMsat === String(amountSat * 1000));
+}
+
+/**
+ * Reads the order history file. An unreadable file is moved aside (so the next
+ * save cannot overwrite it), and while any moved-aside file remains the
+ * history counts as unknown, across restarts and later saves alike, until the
+ * stack is reset or that file is dealt with by hand.
+ */
+export function readOrderHistory<T>(file: string): { orders: T[]; known: boolean } {
+  let orders: T[] = [];
+  if (existsSync(file)) {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+      if (!Array.isArray(parsed)) throw new Error("not a JSON list");
+      orders = parsed as T[];
+    } catch (error) {
+      const aside = `${file}.unreadable-${Date.now()}`;
+      renameSync(file, aside);
+      console.error(`cannot read ${file} (${(error as Error).message}); moved it to ${aside}`);
+    }
+  }
+  const quarantined = existsSync(dirname(file)) && readdirSync(dirname(file)).some((name) => name.startsWith(`${basename(file)}.unreadable-`));
+  return { orders, known: !quarantined };
 }

@@ -7,12 +7,15 @@ import { randomBytes } from "node:crypto";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import type { SignedAcceptance } from "../../src/server";
-import { DEMO_USD_PER_BTC, findAcceptance, priceSat } from "./checkout";
+import { DEMO_USD_PER_BTC, findAcceptance, priceSat, readOrderHistory } from "./checkout";
 import { STABLECOINS, startStablecoins, tokenBaseUnits, type NativeCheckout, type StablecoinRail, type TokenRail } from "./native";
+import { DEMO_USD_PER_XMR, formatXmr, startMonero, xmrAtomic, type MoneroCheckout, type MoneroRail } from "./monero";
 
 const STATE = process.env.RILL_DEV_STATE ?? "/state";
 const MERCHANT_API = process.env.RILL_DEV_MERCHANT_API ?? "http://127.0.0.1:8787";
 const ANVIL_RPC = process.env.RILL_DEV_ANVIL_RPC ?? "http://127.0.0.1:8545";
+const MONERO_WALLET_RPC = process.env.RILL_DEV_MONERO_WALLET_RPC ?? "http://127.0.0.1:18082";
+const MONEROD_RPC = process.env.RILL_DEV_MONEROD_RPC ?? "http://127.0.0.1:18081";
 const PORT = Number(process.env.RILL_DEV_SHOP_LISTEN ?? 8090);
 const SWAP_PAGE = `http://127.0.0.1:${process.env.RILL_DEV_WEB_PORT ?? 5273}/swap.html`;
 const ORDERS_FILE = `${STATE}/shop/orders.json`;
@@ -26,7 +29,7 @@ const PRODUCTS = [
 ] as const;
 
 type LightningRail = "lightning" | "btc-swap";
-type Rail = LightningRail | StablecoinRail;
+type Rail = LightningRail | StablecoinRail | "monero";
 
 interface Order {
   id: string;
@@ -40,6 +43,9 @@ interface Order {
   intentId: string;
   invoice: string | null;
   native: NativeCheckout | null;
+  monero: MoneroCheckout | null;
+  /** Latest unconfirmed observation, for display only. */
+  progress: string | null;
   status: "waiting" | "paid" | "reconciliation";
   acceptance: { eventId: string; acceptedAt: number; publicKey: string; detail: string } | null;
 }
@@ -52,27 +58,32 @@ const tokenRails = await startStablecoins(STATE, ANVIL_RPC, ORIGIN).catch((error
   return [];
 });
 const tokens = new Map<StablecoinRail, TokenRail>(tokenRails.map((rail) => [rail.rail, rail]));
+const history = loadOrders();
+const orders: Map<string, Order> = new Map(history.orders.map((order) => [order.id, order]));
+const monero = await startMonero(STATE, { walletUrl: MONERO_WALLET_RPC, daemonUrl: MONEROD_RPC, origin: ORIGIN,
+  priorOrders: !history.known ? "unknown" : history.orders.some((order) => order.monero) ? "some" : "none" }).catch((error: Error): null => {
+  console.error(`Monero rail unavailable (wallet-rpc ${MONERO_WALLET_RPC}): ${error.message}`);
+  return null;
+});
 
 const RAILS: Record<Rail, { label: string; available: boolean }> = {
   lightning: { label: "Lightning (BTC)", available: true },
   "btc-swap": { label: "Bitcoin on-chain (via a RillSwap maker)", available: true },
   ...Object.fromEntries(STABLECOINS.map((spec) => [spec.rail, { label: `${spec.symbol} on Anvil (fake stablecoin)`, available: tokens.has(spec.rail) }])),
+  monero: { label: "Monero (local regtest chain)", available: monero !== null },
 } as Record<Rail, { label: string; available: boolean }>;
 
-const orders: Map<string, Order> = new Map(loadOrders().map((order) => [order.id, order]));
-
-function loadOrders(): Order[] {
-  try {
-    // Orders from before the stablecoin rails had no label, native or detail.
-    return (JSON.parse(readFileSync(ORDERS_FILE, "utf8")) as (Order & { acceptance: { paymentHash?: string } | null })[]).map((order) => ({
-      ...order,
-      amountLabel: order.amountLabel ?? `${order.amountSat?.toLocaleString("en-US")} sat`,
-      native: order.native ?? null,
-      acceptance: order.acceptance && { ...order.acceptance, detail: order.acceptance.detail ?? `payment hash ${order.acceptance.paymentHash}` },
-    }));
-  } catch {
-    return [];
-  }
+function loadOrders(): { orders: Order[]; known: boolean } {
+  const history = readOrderHistory<Order & { acceptance: { paymentHash?: string } | null }>(ORDERS_FILE);
+  // Older orders lack the label, native, monero, progress or detail fields.
+  return { known: history.known, orders: history.orders.map((order) => ({
+    ...order,
+    amountLabel: order.amountLabel ?? `${order.amountSat?.toLocaleString("en-US")} sat`,
+    native: order.native ?? null,
+    monero: order.monero ?? null,
+    progress: order.progress ?? null,
+    acceptance: order.acceptance && { ...order.acceptance, detail: order.acceptance.detail ?? `payment hash ${order.acceptance.paymentHash}` },
+  })) };
 }
 
 function saveOrders(): void {
@@ -99,7 +110,8 @@ async function createOrder(productId: string, rail: Rail): Promise<Order> {
   if (!product) throw new Error("unknown product");
   const id = randomBytes(8).toString("hex");
   const expiresAt = Math.floor(Date.now() / 1000) + ORDER_SECONDS;
-  const base = { id, productId, productName: product.name, rail, usdCents: product.usdCents, createdAt: Date.now(), acceptance: null };
+  const base = { id, productId, productName: product.name, rail, usdCents: product.usdCents, createdAt: Date.now(), acceptance: null,
+    native: null, monero: null, progress: null };
   let order: Order;
   const token = tokens.get(rail as StablecoinRail);
   if (token) {
@@ -107,6 +119,10 @@ async function createOrder(productId: string, rail: Rail): Promise<Order> {
     const native = await token.create(id, amount, expiresAt);
     order = { ...base, amountSat: null, amountLabel: `${(product.usdCents / 100).toFixed(2)} ${token.symbol}`,
       intentId: native.intentId, invoice: null, native, status: "waiting" };
+  } else if (rail === "monero" && monero) {
+    const checkout = await monero.create(id, xmrAtomic(product.usdCents), expiresAt);
+    order = { ...base, amountSat: null, amountLabel: `${formatXmr(checkout.terms.amountAtomic)} XMR`,
+      intentId: checkout.intentId, invoice: null, monero: checkout, status: "waiting" };
   } else if (rail === "lightning" || rail === "btc-swap") {
     const amountSat = priceSat(product.usdCents);
     const intent = await merchant("/v1/intents", {
@@ -116,7 +132,7 @@ async function createOrder(productId: string, rail: Rail): Promise<Order> {
     });
     const attempt = await merchant(`/v1/intents/${intent.json.id}/attempts`, { method: "POST", idempotencyKey: `${id}-attempt`, body: {} });
     order = { ...base, amountSat, amountLabel: `${amountSat.toLocaleString("en-US")} sat`, intentId: intent.json.id,
-      invoice: attempt.json.attempt?.invoice ?? null, native: null, status: attempt.json.status };
+      invoice: attempt.json.attempt?.invoice ?? null, status: attempt.json.status };
   } else {
     throw new Error("payment method unavailable");
   }
@@ -126,7 +142,8 @@ async function createOrder(productId: string, rail: Rail): Promise<Order> {
 }
 
 async function refresh(order: Order): Promise<Order> {
-  if (order.acceptance) return order;
+  // Monero acceptances stay watched: a reorg can later impair their evidence.
+  if (order.acceptance && !order.monero) return order;
   const token = order.native && tokens.get(order.rail as StablecoinRail);
   if (order.native && token) {
     const { view, verified } = await token.view(order.native);
@@ -135,6 +152,17 @@ async function refresh(order: Order): Promise<Order> {
       order.acceptance = { eventId: view.event.event.id, acceptedAt: view.event.event.recordedAt, publicKey: token.publicKey,
         detail: `tx ${view.event.event.receipt.transactionHash} (${view.event.event.receipt.timing}, local sandbox confirmations)` };
     }
+  } else if (order.monero && monero) {
+    const { view, verified } = await monero.view(order.monero);
+    order.status = view.status === "awaiting_funds" || view.status === "expired" ? "waiting" : view.status === "regtest_receipt_recorded" ? "paid" : "reconciliation";
+    if (verified && view.event && !order.acceptance) {
+      const receipts = view.event.event.receipts;
+      order.acceptance = { eventId: view.event.event.id, acceptedAt: view.event.event.recordedAt, publicKey: monero.publicKey,
+        detail: `${receipts.length} tx (${receipts.map((receipt) => receipt.txid.slice(0, 16)).join(", ")}...), ${view.terms.network.confirmations}+ local regtest confirmations` };
+    }
+    order.progress = view.status === "regtest_evidence_impaired" ? "evidence impaired: a paid transaction left the chain (reorg); acceptance kept"
+      : view.reconciliation ? `reconciliation: ${view.reconciliation}` : order.acceptance ? null : view.status === "expired" ? "expired; on-time payments still confirm"
+      : view.progress && view.progress.seenAtomic !== "0" ? `seen ${formatXmr(view.progress.seenAtomic)} XMR, ${formatXmr(view.progress.confirmedAtomic)} XMR with ${view.terms.network.confirmations} confirmations` : null;
   } else if (order.amountSat !== null) {
     const view = await merchant(`/v1/intents/${order.intentId}`);
     order.status = view.json.status;
@@ -168,6 +196,7 @@ Bun.serve({
           rails: RAILS,
           tokens: Object.fromEntries([...tokens.values()].map((token) => [token.rail, { symbol: token.symbol, address: token.token }])),
           demoUsdPerBtc: DEMO_USD_PER_BTC,
+          demoUsdPerXmr: DEMO_USD_PER_XMR,
           swapPage: SWAP_PAGE,
           acceptanceKey,
         });

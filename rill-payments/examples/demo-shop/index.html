@@ -50,7 +50,7 @@ const catalog = await (await fetch("/api/catalog")).json();
 let selected = null;
 let polling = null;
 
-$("rate").textContent = `Demo rates: 1 BTC = ${catalog.demoUsdPerBtc.toLocaleString()} USD, 1 fUSDC = 1 fUSDT = 1 USD. ` +
+$("rate").textContent = `Demo rates: 1 BTC = ${catalog.demoUsdPerBtc.toLocaleString()} USD, 1 fUSDC = 1 fUSDT = 1 USD, 1 XMR = ${catalog.demoUsdPerXmr} USD. ` +
   `Signed acceptances are checked against the pinned merchant key ${catalog.acceptanceKey.slice(0, 16)}...`;
 
 for (const product of catalog.products) {
@@ -83,6 +83,16 @@ $("place").onclick = async () => {
 };
 
 function instructions(order) {
+  if (order.monero) {
+    const terms = order.monero.terms;
+    return `<p>Send exactly ${esc(order.amountLabel)} on the local Monero regtest chain to this order's subaddress
+      (one or more transactions; more than the price, or anything after expiry, goes to manual reconciliation):</p>
+      <textarea readonly>${esc(terms.address)}</textarea>
+      <p>The dev buyer wallet (funded by the Monero miner) pays it with:</p>
+      <pre>dev/devctl pay-xmr ${esc(order.id)}</pre>
+      <p class="muted">${esc(terms.amountAtomic)} piconero, valid until ${new Date(terms.expiresAt * 1000).toISOString()}.
+      Acceptance needs ${terms.network.confirmations} confirmations (about ${terms.network.confirmations * 2} s with the dev miner).</p>`;
+  }
   if (order.native) {
     const terms = order.native.terms;
     return `<p>Pay ${esc(order.amountLabel)} on the local Anvil chain (chain id 31337). The merchant only accepts a
@@ -129,7 +139,9 @@ function render(order) {
   $("order-acceptance").innerHTML = order.acceptance
     ? `<p class="paid">Payment accepted. Merchant signature verified (Ed25519, pinned key).</p>
        <pre>event       ${esc(order.acceptance.eventId)}\nevidence    ${esc(order.acceptance.detail)}\naccepted at ${new Date(order.acceptance.acceptedAt * 1000).toISOString()}</pre>`
-    : order.status === "paid" ? `<p class="waiting">Paid, waiting for a verifiable signed acceptance...</p>` : "";
+    : order.status === "paid" ? `<p class="waiting">Paid, waiting for a verifiable signed acceptance...</p>`
+    : order.progress ? `<p class="muted">${esc(order.progress)}</p>` : "";
+  if (order.acceptance && order.progress) $("order-acceptance").innerHTML += `<p class="reconciliation">${esc(order.progress)}</p>`;
   void history();
 }
 
