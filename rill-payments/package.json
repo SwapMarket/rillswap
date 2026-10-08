@@ -21,6 +21,10 @@
     "./native-contract": "./src/nativeContract.ts",
     "./native-server": "./src/nativeServer.ts",
     "./native-sdk": "./src/nativeSdk.ts",
+    "./monero-rpc": "./src/moneroRpc.ts",
+    "./monero-contract": "./src/moneroContract.ts",
+    "./monero-ledger": "./src/moneroLedger.ts",
+    "./monero-server": "./src/moneroServer.ts",
     "./treasury": "./src/treasury.ts",
     "./layerzero": "./src/layerZero.ts",
     "./routing": "./src/routing.ts"

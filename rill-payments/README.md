@@ -1060,6 +1060,57 @@ the same hash without another broadcast. The browser fixture uses a wallet stub
 and does not establish browser-wallet private durability. Real wallet deployment,
 pricing, ecommerce hosting and production fulfillment remain separate gates.
 
+## Monero regtest receipt rail
+
+A separate, local-regtest-only Monero rail, used by the demo shop in the dev
+stack (`DEVELOPMENT.md`). Modules: `@rillswap/payments/monero-rpc` (minimal
+monerod and `monero-wallet-rpc` client), `monero-ledger`
+(`MoneroReceiptLedger`, `classifyMoneroPayment`), `monero-server`
+(`createMoneroRegtestService`) and `monero-contract` (terms, view, signed
+events, `verifyMoneroRegtestReceipt`). It has its own ledger file and keys; the
+Lightning merchant ledger, endpoints and CLI are unchanged.
+
+Regtest uses mainnet address formats, so the network is affirmed instead of
+inferred: the ledger config pins a `monero-regtest/1` profile (namespace,
+confirmations of at least 10, block-1 hash), the merchant origin and the wallet
+primary address. Before every allocation and observation the daemon must report
+`fakechain`, block 1 and the primary address must match, and the wallet must
+have scanned up to the daemon height; otherwise nothing changes. Mainnet,
+stagenet and testnet are not supported.
+
+| Endpoint | Authority | Exact JSON body |
+| - | - | - |
+| `POST /v1/monero-regtest/intents` | Merchant admin bearer, `Idempotency-Key` | `orderRef`, `amountAtomic` (piconero string), `expiresAt` |
+| `GET /v1/monero-regtest/intents/{intentId}` | Scoped read capability or admin | None |
+
+Each intent gets a fresh subaddress of account 0. Because `monero-wallet-rpc`
+forgets unstored subaddresses when it crashes, indices already in the ledger
+are skipped and the wallet is stored before the intent commits. Buyers never
+write: the host calls the service's `tick()` periodically. Each observation
+counts confirmed incoming transfers to the subaddress (`in`, enough
+confirmations, unlocked, no unlock time, no double spend), one receipt per
+transaction. Amounts are parsed losslessly as `bigint`.
+
+- Exactly the price in blocks timestamped in `[createdAt, expiresAt)`:
+  `regtest_receipt_recorded`, with an outbox acceptance and a signed
+  `monero-regtest-event/1` (scope `local_regtest_only`).
+- More than the price (including dust from anyone who knows the address), any
+  transfer outside the window, or a short sum after expiry with nothing
+  pending: `regtest_reconciliation` with reason `overpaid`, `late` or
+  `underpaid`. Reconciliation is terminal; later funds are not recorded.
+- Expiry alone decides nothing: on-time funds confirming after expiry are paid.
+  Evidence timestamped after the observation time defers the decision, so an
+  acceptance never predates the blocks it cites.
+- An exact confirmed sum is paid even if another transfer is still pending;
+  funds arriving after acceptance are not recorded (handle them out of band).
+- A paid receipt no longer backed by the same qualifying entry in a later
+  caught-up view (gone, re-mined in another block, or no longer meeting the
+  confirmation rules) is latched as `regtest_evidence_impaired`; the
+  acceptance and event are kept and never reissued.
+
+Verify events with a pinned key and the expected terms. They are local regtest
+evidence only, never a mainnet payment claim.
+
 ## Constrained treasury payout foundation
 
 `TreasuryTransferJournal` from `@rillswap/payments/treasury` is an explicitly
