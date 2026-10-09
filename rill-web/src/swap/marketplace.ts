@@ -5,7 +5,10 @@ import { ANNOUNCEMENT_KIND, MAX_DISCOVERY_EVENTS } from "./discovery";
 import { MAX_RELAYS } from "./config";
 import { RelayConnection, type RelayQueryResult } from "./relay";
 import { SwapError } from "./session";
+import { type PreparedReverseQuote, prepareReverseQuote, type ReverseSwapRequest } from "./reverseSwap";
 import { prepareSwap, type PreparedSwap, type SwapRequest } from "./swap";
+
+type AnnouncementProfile = Parameters<typeof verifyNostrProviderAnnouncement>[3];
 
 export const MAX_QUOTE_PROVIDERS = 8;
 
@@ -29,6 +32,7 @@ export function scanAnnouncements(
   observations: readonly RelayObservation[],
   network: SwapRequest["network"],
   identity?: string,
+  profile: AnnouncementProfile = "btc-to-ln/v1",
 ): ProviderDirectory {
   const warnings: string[] = [];
   const uniqueRaw = new Set<string>();
@@ -47,7 +51,7 @@ export function scanAnnouncements(
         const event = parseStrictEventJson(raw) as { pubkey?: unknown } | null;
         const author = identity ?? event?.pubkey;
         if (typeof author !== "string" || !/^[0-9a-f]{64}$/.test(author)) continue;
-        candidate = verifyNostrProviderAnnouncement(raw, author, network, "btc-to-ln/v1");
+        candidate = verifyNostrProviderAnnouncement(raw, author, network, profile);
       } catch { continue; }
       const slot = `${candidate.identityXOnlyKey}:${candidate.slot}`;
       const revision = `${slot}:${candidate.revision}`;
@@ -73,6 +77,7 @@ export function scanAnnouncements(
 
 export async function discoverMarketplace(
   urls: readonly string[], network: SwapRequest["network"], identity?: string, signal?: AbortSignal,
+  profile: AnnouncementProfile = "btc-to-ln/v1",
 ): Promise<ProviderDirectory> {
   if (urls.length === 0 || urls.length > MAX_RELAYS) throw new SwapError("Relay count invalid");
   const observations = await Promise.all(urls.map(async (url): Promise<RelayObservation> => {
@@ -88,11 +93,11 @@ export async function discoverMarketplace(
       return { url, result: { events: [], truncated: false, completion: "error" } };
     } finally { relay?.close(); }
   }));
-  return scanAnnouncements(observations, network, identity);
+  return scanAnnouncements(observations, network, identity, profile);
 }
 
-export interface LocatedQuote {
-  readonly prepared: PreparedSwap;
+export interface LocatedQuote<P extends { dispose(): void } = PreparedSwap> {
+  readonly prepared: P;
   readonly relayUrl: string;
   /** Close the owned transport and discard unused private quote state. */
   dispose(): void;
@@ -126,7 +131,38 @@ export function rankQuotes(quotes: readonly LocatedQuote[]): readonly LocatedQuo
 export async function quoteProviders(
   providers: readonly LocatedProvider[], request: Omit<SwapRequest, "identity">, signal?: AbortSignal,
 ): Promise<{ quotes: readonly LocatedQuote[]; failures: number }> {
-  const completed = new Set<LocatedQuote>();
+  const result = await fanOutQuotes(providers, (relay, provider) =>
+    prepareSwap(relay, { ...request, identity: provider.announcement.identityXOnlyKey }, () => {}, {
+      announcement: provider.rawAnnouncement, timeouts: { replyMs: 15_000, settleMs: 600_000 },
+    }), signal);
+  return { quotes: rankQuotes(result.quotes), failures: result.failures };
+}
+
+/** LN to BTC: the lowest hold invoice for the same payout wins. Quotes are not payable yet. */
+export async function quoteReverseProviders(
+  providers: readonly LocatedProvider[], request: Omit<ReverseSwapRequest, "identity">, signal?: AbortSignal,
+): Promise<{ quotes: readonly LocatedQuote<PreparedReverseQuote>[]; failures: number }> {
+  const result = await fanOutQuotes(providers, (relay, provider) =>
+    prepareReverseQuote(relay, { ...request, identity: provider.announcement.identityXOnlyKey },
+      { announcement: provider.rawAnnouncement }), signal);
+  return { quotes: rankReverseQuotes(result.quotes), failures: result.failures };
+}
+
+export function rankReverseQuotes(quotes: readonly LocatedQuote<PreparedReverseQuote>[]): readonly LocatedQuote<PreparedReverseQuote>[] {
+  return [...quotes].sort((a, b) => {
+    const left = a.prepared.quote, right = b.prepared.quote;
+    const difference = left.holdInvoiceSat - right.holdInvoiceSat;
+    return difference < 0n ? -1 : difference > 0n ? 1 :
+      `${left.providerIdentity}:${left.providerSlot}`.localeCompare(`${right.providerIdentity}:${right.providerSlot}`);
+  });
+}
+
+async function fanOutQuotes<P extends { dispose(): void }>(
+  providers: readonly LocatedProvider[],
+  prepare: (relay: RelayConnection, provider: LocatedProvider) => Promise<P>,
+  signal?: AbortSignal,
+): Promise<{ quotes: LocatedQuote<P>[]; failures: number }> {
+  const completed = new Set<LocatedQuote<P>>();
   const cancel = (): void => { for (const quote of completed) quote.dispose(); };
   signal?.addEventListener("abort", cancel, { once: true });
   try {
@@ -137,9 +173,7 @@ export async function quoteProviders(
       try {
         relay = await RelayConnection.open(url, 10_000, undefined, signal);
         signal?.throwIfAborted();
-        const prepared = await prepareSwap(relay, { ...request, identity: provider.announcement.identityXOnlyKey }, () => {}, {
-          announcement: provider.rawAnnouncement, timeouts: { replyMs: 15_000, settleMs: 600_000 },
-        });
+        const prepared = await prepare(relay, provider);
         const connection = relay;
         const quote = { prepared, relayUrl: url, dispose: () => { prepared.dispose(); connection.close(); } };
         if (signal?.aborted) { quote.dispose(); return null; }
@@ -149,8 +183,8 @@ export async function quoteProviders(
     }
     return null;
   }));
-  const quotes = results.filter((quote): quote is LocatedQuote => quote !== null);
+  const quotes = results.filter((quote): quote is LocatedQuote<P> => quote !== null);
   if (signal?.aborted) { cancel(); return { quotes: [], failures: results.length }; }
-  return { quotes: rankQuotes(quotes), failures: results.length - quotes.length };
+  return { quotes, failures: results.length - quotes.length };
   } finally { signal?.removeEventListener("abort", cancel); }
 }

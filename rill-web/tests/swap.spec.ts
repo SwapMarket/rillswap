@@ -27,8 +27,11 @@ test("direction flips between Bitcoin and Lightning, and stablecoins are visible
   await expect(page.locator("#swap-wallet-setup")).not.toBeVisible();
   await expect(page.locator("#swap-receive-address")).toBeVisible();
   await expect(page.locator("#swap-receive-amount")).toBeVisible();
-  await expect(page.locator("#swap-pair-note")).toHaveText("Lightning to Bitcoin quotes are coming soon.");
-  await expect(page.locator("#swap-start")).toBeDisabled();
+  await expect(page.locator("#swap-pair-note")).not.toBeVisible();
+  await expect(page.locator("#swap-start")).toBeEnabled();
+  // Invalid reverse input is refused locally, before any connection.
+  await page.locator("#swap-start").click();
+  await expect(page.locator("#swap-status")).toContainText("Enter the Bitcoin address");
 
   // Choosing the asset already on the other side swaps them.
   await page.locator("#swap-to").selectOption("ln");

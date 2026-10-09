@@ -123,11 +123,21 @@ this configuration does not authorize a funded mainnet release or publish it.
 
 The card's **You send / You receive** selectors and the switch button choose
 the pair. `src/swapPairs.ts` is the single table mapping display assets to
-protocol profiles: BTC to LN (`btc-to-ln/v1`) is quotable; LN to BTC
-(`ln-to-btc/v1`) shows its receive address and amount form but stays disabled
-until browser reverse quoting lands; USDT and USDC are listed in both
-directions as unavailable placeholders with no protocol profile. Unavailable
-pairs explain why and never connect anywhere.
+protocol profiles: BTC to LN (`btc-to-ln/v1`) is quotable and payable; LN to
+BTC (`ln-to-btc/v1`) currently returns price estimates only; USDT and USDC are
+listed in both directions as unavailable placeholders with no protocol
+profile. Unavailable pairs explain why and never connect anywhere.
+
+LN to BTC estimates (`src/swap/reverseSwap.ts`) send RS-004 *indicative*
+requests naming only the payout, over the same authenticated handshake as
+BTC to LN. No address, payment hash, key, or chain API request is involved,
+and nobody is committed. Offers must satisfy the RS-004 economics and the
+Settings limits (minimum claim fee reserve 500 sat, minimum provider refund
+delay 72 blocks, maximum Lightning hold 432 blocks, matching `rill swap
+reverse`); the lowest `hold_invoice_sat` wins. RS-004 requires the preimage
+to be durably saved before any *firm* request, so signed terms and the hold
+invoice (`checkReverseTermsOffer` in `src/swap/wire.ts`) are left to the
+upcoming payment step, after persistence.
 
 ### Automatic quote selection
 

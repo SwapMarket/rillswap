@@ -15,7 +15,8 @@ import { type FundingRequest, type SwapRequest } from "./swap/swap";
 import { mempoolApiForNetwork, relaysForNetwork, validateMempoolApi, validateRelays, type NetworkName } from "./swap/config";
 import { readChainTip } from "./swap/chainTip";
 import { BrowserRecoveryWallet } from "./browserRecoveryWallet";
-import { discoverMarketplace, eligibleProviders, quoteProviders, type LocatedQuote, MAX_QUOTE_PROVIDERS } from "./swap/marketplace";
+import { discoverMarketplace, eligibleProviders, quoteProviders, quoteReverseProviders, type LocatedQuote, MAX_QUOTE_PROVIDERS } from "./swap/marketplace";
+import type { PreparedReverseQuote, ReverseSwapRequest } from "./swap/reverseSwap";
 import { invoiceBinding } from "./swap/bolt11";
 import { quoteSelectionLabel, stoppedSwapAdvice } from "./swapUiStatus";
 import { ASSETS, type AssetId, routeFor } from "./swapPairs";
@@ -178,6 +179,12 @@ function mount(root: HTMLElement): void {
   const refundFee = field(limits, "swap-refund-fee", "Maximum refund fee (sat)", "5000");
   const delay = field(limits, "swap-delay", "Maximum refund delay (blocks)", "288",
     "If the provider never pays, your refund unlocks within this many blocks (288 is about two days).");
+  limits.append(node("p", "Lightning → Bitcoin", "swap-reverse-limits"));
+  const minReserve = field(limits, "swap-min-claim-reserve", "Minimum claim fee reserve (sat)", "500",
+    "On-chain fee budget the provider must lock for your claim.");
+  const minRefundDelay = field(limits, "swap-min-refund-delay", "Minimum time before provider refund (blocks)", "72");
+  const maxHold = field(limits, "swap-max-hold", "Maximum Lightning hold (blocks)", "432",
+    "How long your Lightning payment may stay pending (432 is about three days).");
   settings.append(limits);
   const notice = node("p", "", "swap-release-notice");
   notice.setAttribute("role", "note");
@@ -280,6 +287,99 @@ function mount(root: HTMLElement): void {
   updateNetwork();
 
   let busy = false;
+  /** LN to BTC: verified quotes only. Paying a hold invoice is not implemented, so nothing is committed. */
+  const reverseQuote = (name: NetworkName): void => {
+    let request: Omit<ReverseSwapRequest, "identity">;
+    let urls: readonly string[];
+    const pinned = identity.value.trim();
+    try {
+      urls = validateRelays(relay.value.trim(), name);
+      if (pinned && !/^[0-9a-f]{64}$/.test(pinned)) {
+        throw new Error("Provider identity must be 64 lowercase hex characters, or leave it empty for automatic selection");
+      }
+      if (!receiveAddress.value.trim()) throw new Error("Enter the Bitcoin address that should receive the payout");
+      // Checked now so mistakes surface early; it is not sent until you continue with a swap.
+      addressScript(receiveAddress.value, name);
+      request = {
+        network: NETWORKS[name],
+        payoutSat: positive(receiveAmount, "Amount to receive"),
+        limits: {
+          maxSuccessFeeSat: positive(successFee, "provider fee"),
+          minClaimFeeReserveSat: positive(minReserve, "claim fee reserve"),
+          maxClaimFeeSat: positive(claimFee, "claim fee"),
+          minRefundDelayBlocks: Number(positive(minRefundDelay, "refund delay")),
+          maxIncomingHtlcDelayBlocks: Number(positive(maxHold, "maximum hold")),
+        },
+      };
+      if (request.payoutSat === 0n) throw new Error("Amount to receive must be positive");
+    } catch (error) {
+      report(`refused: ${(error as Error).message}`);
+      return;
+    }
+    const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button")];
+    busy = true;
+    for (const control of controls) (control as HTMLInputElement).disabled = true;
+    settingsButton.disabled = true;
+    const cancellation = new AbortController();
+    let arrivals: readonly LocatedQuote<PreparedReverseQuote>[] = [];
+    const done = node("button", "Edit swap", "swap-edit");
+    done.type = "button";
+    const restore = (): void => {
+      busy = false;
+      for (const control of controls) (control as HTMLInputElement).disabled = false;
+      settingsButton.disabled = false;
+      updateNetwork();
+    };
+    done.onclick = () => {
+      cancellation.abort();
+      for (const quote of arrivals) quote.dispose();
+      panel.replaceChildren();
+      setStatus("Ready for a new quote", -1, "ready");
+      restore();
+    };
+    panel.replaceChildren(node("p", "Checking signed provider announcements across your relays..."), done);
+    setStatus("Finding available providers", 0);
+    void (async () => {
+      try {
+        const directory = await discoverMarketplace(urls, request.network, pinned || undefined, cancellation.signal, "ln-to-btc/v1");
+        for (const warning of directory.warnings) report(warning);
+        const eligible = eligibleProviders(directory.providers, request.payoutSat);
+        if (eligible.length === 0) throw new Error("No eligible Lightning to Bitcoin provider found. Try another relay or amount.");
+        setStatus("Comparing provider estimates", 1);
+        report(`Requesting up to ${MAX_QUOTE_PROVIDERS} eligible offers from ${eligible.length} announced providers`);
+        const result = await quoteReverseProviders(eligible, request, cancellation.signal);
+        arrivals = result.quotes;
+        if (cancellation.signal.aborted) return;
+        if (arrivals.length === 0) throw new Error("No provider returned acceptable terms. Nothing was paid.");
+        const quote = arrivals[0]!.prepared.quote;
+        const review = node("div", "", "swap-quote-review");
+        review.append(node("p", "Estimated price", "swap-quote-kind"), node("h2", `${quote.holdInvoiceSat.toLocaleString()} sat`),
+          node("p", `You pay this over Lightning (plus your wallet's routing fee) and receive ${quote.payoutSat.toLocaleString()} sat on-chain.`),
+          node("small", `Provider fee: ${quote.successFeeSat.toLocaleString()} sat. Claim fee reserve: ${quote.claimFeeReserveSat.toLocaleString()} sat. ` +
+            `Payout after ${quote.fundingConfirmations} confirmation${quote.fundingConfirmations === 1 ? "" : "s"} (about ${quote.fundingConfirmations * 10} min). ` +
+            `If the swap fails, your Lightning payment may stay pending for up to about ${quote.incomingHtlcExpiryDeltaBlocks} blocks. ` +
+            `Estimate expires ${new Date(quote.expiresAt * 1000).toLocaleTimeString()}.`),
+          node("p", `Lowest estimate among ${arrivals.length} responding provider${arrivals.length === 1 ? "" : "s"}.`, "swap-quote-selection"),
+          node("p", "Paying Lightning to Bitcoin swaps in the browser is coming next. Final signed terms are checked before any payment; " +
+            "nothing was paid and no address or payment hash was shared.", "swap-reverse-pending"));
+        if (directory.warnings.length || result.failures || eligible.length > MAX_QUOTE_PROVIDERS) {
+          review.append(node("small", "Some relays or providers did not return complete results. This is not a market-wide best-price guarantee."));
+        }
+        review.append(done);
+        panel.replaceChildren(review);
+        setStatus("Estimate ready. Payment is not available yet", 1);
+      } catch (error) {
+        if (!cancellation.signal.aborted) {
+          panel.replaceChildren(node("p", (error as Error).message, "swap-error"), done);
+          report(`stopped: ${(error as Error).message}`);
+        }
+      } finally {
+        // Quote-only: discard every offer's private state now.
+        for (const quote of arrivals) quote.dispose();
+        if (!cancellation.signal.aborted) restore();
+      }
+    })();
+  };
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     if (busy) return;
@@ -289,8 +389,12 @@ function mount(root: HTMLElement): void {
       return;
     }
     const route = routeFor(fromAsset.value, toAsset.value);
-    if (route.unavailable || route.profile !== "btc-to-ln/v1") {
+    if (route.unavailable || route.profile === null) {
       report(`refused: ${route.unavailable ?? "This pair cannot be quoted yet."}`);
+      return;
+    }
+    if (route.profile === "ln-to-btc/v1") {
+      reverseQuote(name);
       return;
     }
     let request: SwapRequest;

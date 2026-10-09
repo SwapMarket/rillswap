@@ -22,3 +22,14 @@ export const quoteProviders = async (_providers: unknown[], request: unknown) =>
     },
   })) };
 };
+export const quoteReverseProviders = async (_providers: unknown[], request: unknown) => {
+  window.uiFixture.requests.push(structuredClone(request));
+  return { failures: 0, quotes: ["6", "7"].map((id) => ({ relayUrl: "ws://127.0.0.1:7777/",
+    dispose: () => { window.uiFixture.disposed++; },
+    prepared: {
+      quote: { providerIdentity: id.repeat(64), payoutSat: 50_000n, holdInvoiceSat: BigInt(51_000 + Number(id)), successFeeSat: 500n,
+        claimFeeReserveSat: 500n, fundingConfirmations: 2, refundDelayBlocks: 144, incomingHtlcExpiryDeltaBlocks: 288, expiresAt: Math.floor(Date.now() / 1000) + 3600 },
+      dispose: () => { window.uiFixture.disposed++; },
+    },
+  })) };
+};

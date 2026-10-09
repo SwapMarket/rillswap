@@ -38,7 +38,7 @@ const PROFILES: Partial<Record<`${AssetId}>${AssetId}`, ProfileId>> = {
 };
 
 /** Profiles whose browser quote flow exists in this build. */
-const QUOTABLE: ReadonlySet<ProfileId> = new Set(["btc-to-ln/v1"]);
+const QUOTABLE: ReadonlySet<ProfileId> = new Set(["btc-to-ln/v1", "ln-to-btc/v1"]);
 
 export function asset(id: string): Asset {
   const found = ASSETS.find((item) => item.id === id);

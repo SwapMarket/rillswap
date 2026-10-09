@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
 import { ASSETS, routeFor } from "../src/swapPairs";
 
-test("only Bitcoin to Lightning is quotable; the reverse profile is mapped but not yet offered", () => {
+test("both Bitcoin and Lightning directions map to their protocol profiles and are quotable", () => {
   const forward = routeFor("btc", "ln");
   expect(forward).toMatchObject({ profile: "btc-to-ln/v1", unavailable: null, title: "Bitcoin in. Lightning out." });
   const reverse = routeFor("ln", "btc");
   expect(reverse.profile).toBe("ln-to-btc/v1");
-  expect(reverse.unavailable).toBe("Lightning to Bitcoin quotes are coming soon.");
+  expect(reverse.unavailable).toBeNull();
   expect(reverse.title).toBe("Lightning in. Bitcoin out.");
 });
 

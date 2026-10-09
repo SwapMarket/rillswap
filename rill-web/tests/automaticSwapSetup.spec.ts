@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import regtest from "../src/networks/regtest-rillswap-e2e-v1.json" with { type: "json" };
 import { testInvoice } from "../../rill-payments/tests/helpers";
+import { scriptAddress } from "../src/swap/address";
 
 const PAGE = "http://127.0.0.1:18765/test-only/swap.html";
 const API = "http://127.0.0.1:8091/api";
@@ -163,4 +164,29 @@ test("canceling the pending final wallet check prevents execution and stale UI",
   await expect(page.locator("#swap-status")).toContainText("Ready for a new quote");
   await expect(page.locator("#swap-start")).toBeEnabled();
   expect(await page.evaluate(() => window.uiFixture.executed)).toBe(0);
+});
+
+test("Lightning to Bitcoin shows the lowest hold-invoice estimate, shares no address or hash, and discards every offer", async ({ page }) => {
+  const tips = await mockTip(page);
+  await page.goto(PAGE);
+  await page.getByRole("button", { name: "Switch direction" }).click();
+  await page.locator("#swap-receive-amount").fill("50000");
+  await page.locator("#swap-receive-address").fill(scriptAddress(`0014${"11".repeat(20)}`, "regtest"));
+  await page.locator("#swap-start").click();
+  await expect(page.locator("#swap-quote-review h2")).toHaveText("51,006 sat");
+  await expect(page.locator("#swap-quote-review")).toContainText("receive 50,000 sat on-chain");
+  await expect(page.locator("#swap-quote-review")).toContainText("Estimated price");
+  await expect(page.locator("#swap-quote-review")).toContainText("Payout after 2 confirmations (about 20 min)");
+  await expect(page.locator("#swap-quote-review")).toContainText("pending for up to about 288 blocks");
+  await expect(page.locator("#swap-reverse-pending")).toContainText("no address or payment hash was shared");
+  await expect(page.locator("#swap-quote-accept")).toHaveCount(0);
+  expect(tips).toEqual([]); // estimates need no chain height
+  const fixture = await page.evaluate(() => ({ requests: window.uiFixture.requests, disposed: window.uiFixture.disposed }));
+  expect(fixture.disposed).toBe(2); // each of the two offers, once
+  const request = fixture.requests[0] as Record<string, unknown> & { payoutSat: bigint;
+    limits: { minRefundDelayBlocks: number; maxIncomingHtlcDelayBlocks: number; minClaimFeeReserveSat: bigint } };
+  expect(request.payoutSat).toBe(50_000n);
+  expect(Object.keys(request).sort()).toEqual(["limits", "network", "payoutSat"]);
+  expect(request.limits).toMatchObject({ minRefundDelayBlocks: 72, maxIncomingHtlcDelayBlocks: 432, minClaimFeeReserveSat: 500n });
+  await expect(page.locator("#swap-start")).toBeEnabled();
 });
