@@ -69,6 +69,7 @@ case "$cmd" in
         echo "shop:  http://127.0.0.1:${RILL_DEV_SHOP_PORT:-8090}/"
         echo "anvil: http://127.0.0.1:${RILL_DEV_ANVIL_PORT:-8545} (chain id 31337)"
         echo "relay: ws://127.0.0.1:${RILL_DEV_RELAY_PORT:-7777}"
+        echo "chain: http://127.0.0.1:${RILL_DEV_CHAIN_PORT:-8091}/api (read-only regtest)"
         ;;
     down) compose down "$@" ;;
     reset)

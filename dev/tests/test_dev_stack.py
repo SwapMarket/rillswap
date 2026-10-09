@@ -50,6 +50,20 @@ def test_static_cookie_matches_rpcauth():
     assert matches(user, password)
 
 
+def test_chain_reader_is_whitelisted_loopback_only_and_stateless():
+    assert matches("rill-chain", "rill-dev-chain-regtest")
+    assert "-rpcwhitelist=rill-chain:getblockchaininfo,getblockhash" in COMPOSE
+    assert "-rpcwhitelistdefault=0" in COMPOSE
+    service = compose_service("chain")
+    assert "127.0.0.1:${RILL_DEV_CHAIN_PORT:-8091}:8091" in service
+    assert "./chain_api.py:/src/dev/chain_api.py:ro" in service
+    assert "state:/state" not in service and "<<: *rill" not in service
+    assert (
+        "VITE_RILLSWAP_MEMPOOL_API: http://127.0.0.1:${RILL_DEV_CHAIN_PORT:-8091}/api"
+        in compose_service("web")
+    )
+
+
 def test_has_channel_counts_open_and_pending_local_initiator():
     devtool = load_devtool()
 

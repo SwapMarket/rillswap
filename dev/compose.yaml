@@ -90,6 +90,10 @@ services:
       - -rpcauth=rill:5c1d0f2b7a9e4c3d8b6a1f0e2d3c4b5a$$e3f520d46a50046466e4cba52393284d9e84c6d693c4a5e35c9a8447424dd3d2
       # __cookie__ / rill-dev-regtest-cookie: a static cookie for Rill clients
       - -rpcauth=__cookie__:9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d$$a7f9835b158cc878c3a5d0c408ee19f9b64d5c1f510e01eb8e4b7b963194ead9
+      # Chain observations only; introducing this reader must not restrict existing clients.
+      - -rpcauth=rill-chain:571483e8a4d64c1cab99d7893c619cc8$$152bd5aa8a0d5d6e54f8a3673c4f324c5e77127374637cd7953f52ee086983f0
+      - -rpcwhitelist=rill-chain:getblockchaininfo,getblockhash
+      - -rpcwhitelistdefault=0
     volumes:
       - bitcoind:/home/bitcoin/.bitcoin
     healthcheck:
@@ -300,12 +304,31 @@ services:
       anvil:
         condition: service_healthy
 
+  chain:
+    image: rillswap-dev:local
+    build:
+      context: ..
+      dockerfile: dev/Dockerfile
+    restart: unless-stopped
+    command: [python, /src/dev/chain_api.py]
+    environment:
+      RILL_DEV_CHAIN_PORT: ${RILL_DEV_CHAIN_PORT:-8091}
+      RILL_DEV_WEB_PORT: ${RILL_DEV_WEB_PORT:-5273}
+    volumes:
+      - ./chain_api.py:/src/dev/chain_api.py:ro
+    ports:
+      - 127.0.0.1:${RILL_DEV_CHAIN_PORT:-8091}:8091
+    depends_on:
+      bitcoind:
+        condition: service_healthy
+
   web:
     <<: *rill
     working_dir: /src/rill-web
     environment:
       VITE_RILLSWAP_NETWORK: regtest
       VITE_RILLSWAP_RELAY: ws://127.0.0.1:${RILL_DEV_RELAY_PORT:-7777}
+      VITE_RILLSWAP_MEMPOOL_API: http://127.0.0.1:${RILL_DEV_CHAIN_PORT:-8091}/api
     # The swap page's CSP and dependencies need the production bundle, so
     # build once, rebuild on change, and serve dist/ (refresh after edits).
     command:
