@@ -125,6 +125,53 @@ Provider-advertised endpoints are never automatically contacted. Existing
 manual `runSwap` callers retain their prepare-and-execute behavior, and no
 persisted state or journal schema changes.
 
+### Browser recovery wallet primitives
+
+`src/browserRecoveryWallet.ts` provides a browser-stored recovery identity,
+matching-backup checks, and atomic refund-address allocation. The swap form's
+automatic defaults are being integrated separately; these primitives do not
+enable mainnet swaps or constitute a complete browser refund flow.
+
+The v1 identity uses a 128-bit, 12-word English BIP39 mnemonic, NFKD
+normalization, and an empty passphrase. It stores one validated record in
+IndexedDB database `rillswap-browser-wallet-v1`, containing the identity,
+next-unused address counters, and matching-backup verification status. Keys
+are **not encrypted at rest**. Same-origin scripts and anyone with access to
+browser storage can access them. URL paths, including `/signet/`, are not
+storage security boundaries.
+
+Refund destinations are P2WPKH. Paths are `m/84'/0'/0'/0/index` on mainnet,
+`m/84'/1'/0'/0/index` on signet, `m/84'/1'/1'/0/index` on testnet4, and
+`m/84'/1'/2'/0/index` on regtest. Allocation commits before returning an
+address, never rolls back on cancellation, and stops at index exhaustion.
+Skipped BIP32 children are refused rather than silently relabeled. Restoring
+old browser state or using a cloned mnemonic on another device can reuse
+indices; atomic transactions only coordinate this browser's origin-local
+storage.
+
+The age X25519 encryption identity is derived independently with
+HKDF-SHA256: BIP39 seed as input, UTF-8 salt
+`RillSwap/browser-recovery/v1`, UTF-8 info `age-x25519/v1`, and 32 output bytes.
+The output is encoded as a native `AGE-SECRET-KEY-1...` identity. Neither
+deployment URL nor an unversioned derivation setting affects these keys.
+
+The JSON recovery-key backup is `{format: "rillswap-browser-recovery",
+version: 1, scheme: "bip84-rillswap-v1", mnemonic: "..."}`. A matching check
+does not replace the active identity or restore unknown counter history.
+**This key backup is not enough to recover a swap:** retain the encrypted
+per-swap recovery documents too, because contract secrets are independently
+random. Verification proves a matching key, not backup durability or swap
+recoverability.
+
+Previous versions stored no browser wallet identity. First use under the new
+API creates one on genuinely absent state, without scanning, resuming, or
+funding anything. Existing swaps keep their original keys and destinations.
+Valid records are reused; partial, malformed, unreadable, and unsupported
+records are preserved and block initialization. No memory-only replacement
+or implicit migration occurs. Complete storage loss is indistinguishable from
+first use, so a newly created identity does not restore earlier swaps. Keep
+the original backup files and do not clear browser storage while funds remain.
+
 There is no chain backend in the browser. The user enters the current block
 height; it sets the refund-height ceiling (`tip + max refund delay`) and the
 recovery scan birthday, so a wrong height can only lengthen the user's own

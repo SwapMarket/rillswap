@@ -2,8 +2,8 @@
 import { Encrypter } from "age-encryption";
 import canonicalize from "canonicalize";
 
-const MAX_PLAINTEXT_BYTES = 128 * 1024;
-const MAX_CIPHERTEXT_BYTES = 256 * 1024;
+export const MAX_RECOVERY_PLAINTEXT_BYTES = 128 * 1024;
+export const MAX_RECOVERY_CIPHERTEXT_BYTES = 256 * 1024;
 // Native age X25519 is Bech32 HRP "age" plus exactly 32 key bytes. Other
 // valid age1-prefixed recipients (P-256 tags and hybrid/PQ) are not RS-007 v1.
 const X25519_RECIPIENT = /^age1[023456789acdefghjklmnpqrstuvwxyz]{58}$/;
@@ -30,7 +30,7 @@ export async function encryptCanonicalRecoveryForRecipient(
   try {
     if (!(canonicalPlaintext instanceof Uint8Array) ||
         canonicalPlaintext.byteLength === 0 ||
-        canonicalPlaintext.byteLength > MAX_PLAINTEXT_BYTES ||
+        canonicalPlaintext.byteLength > MAX_RECOVERY_PLAINTEXT_BYTES ||
         typeof selectedAgeRecipient !== "string" ||
         !X25519_RECIPIENT.test(selectedAgeRecipient)) {
       throw new RecoveryAgeContainerRefusedError();
@@ -54,7 +54,7 @@ export async function encryptCanonicalRecoveryForRecipient(
     encrypter.addRecipient(selectedAgeRecipient);
     const ciphertext = await encrypter.encrypt(plaintext);
     if (!(ciphertext instanceof Uint8Array) ||
-        ciphertext.byteLength === 0 || ciphertext.byteLength > MAX_CIPHERTEXT_BYTES) {
+        ciphertext.byteLength === 0 || ciphertext.byteLength > MAX_RECOVERY_CIPHERTEXT_BYTES) {
       throw new RecoveryAgeContainerRefusedError();
     }
     return ciphertext;

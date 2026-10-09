@@ -19,3 +19,9 @@ writeFileSync(
   '<!doctype html><script type="module">import { reserveCooperation } from "./cooperationJournal.js";' +
     "window.reserveCooperation = reserveCooperation; window.journalReady = true;</script>",
 );
+
+const wallet = await Bun.build({ entrypoints: ["src/browserRecoveryWallet.ts"], outdir: "tmp/preview/test-only", target: "browser", format: "esm" });
+if (!wallet.success) throw new AggregateError(wallet.logs, "wallet test bundle failed");
+writeFileSync("tmp/preview/test-only/wallet.html", '<!doctype html><script type="module">' +
+  'import { BrowserRecoveryWallet, WALLET_DATABASE } from "./browserRecoveryWallet.js";' +
+  "window.walletApi = { BrowserRecoveryWallet, WALLET_DATABASE }; window.walletReady = true;</script>");
