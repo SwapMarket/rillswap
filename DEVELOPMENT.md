@@ -36,13 +36,26 @@ all chain/wallet/maker state. `dev/devctl help` lists every command.
 | Anvil JSON-RPC (chain id 31337) | http://127.0.0.1:8545 |
 | Nostr relay (from the host/browser) | ws://127.0.0.1:7777 |
 | Nostr relay (inside the stack) | ws://relay:8080 |
+| Read-only regtest chain API | http://127.0.0.1:8091/api |
 
 Override host ports with `RILL_DEV_WEB_PORT`, `RILL_DEV_SHOP_PORT`,
-`RILL_DEV_RELAY_PORT` and `RILL_DEV_ANVIL_PORT`, the Bitcoin auto-miner
+`RILL_DEV_RELAY_PORT`, `RILL_DEV_CHAIN_PORT`, and `RILL_DEV_ANVIL_PORT`, the Bitcoin auto-miner
 interval with `RILL_DEV_BLOCK_SECONDS` (default 10, `0` disables), and the
 Anvil block interval with `RILL_DEV_ANVIL_BLOCK_SECONDS` (default 2), and the
 Monero block interval with `RILL_DEV_MONERO_BLOCK_SECONDS` (default 2), for
-example `RILL_DEV_WEB_PORT=8091 dev/devctl up`.
+example `RILL_DEV_WEB_PORT=9273 RILL_DEV_CHAIN_PORT=9091 dev/devctl up`.
+
+The chain adapter exposes only three Esplora-compatible GET routes for genesis,
+tip height, and tip hash. It holds no swap state or keys and never mines,
+repairs, scans, or calls wallet RPC. Host and browser Origin checks follow the
+configured local ports. Its dedicated Core reader is whitelisted, but the
+shared dev network and public privileged credentials are not container
+compromise isolation. Apply updated Core flags and service configuration with
+`docker compose -f dev/compose.yaml up -d --build bitcoind chain web`, not
+`dev/devctl restart`. Existing volumes and wallets are retained; do not reset.
+After building the dev image, reproduce reader authorization on an isolated
+disposable node with `RILLSWAP_TEST_CHAIN_AUTH=1 pytest dev/tests/test_chain_core_auth.py`.
+This check does not mount or change existing chain volumes.
 
 ## What runs
 
@@ -145,17 +158,18 @@ so you can rerun or vary it with `dev/devctl rill ...` or inside
 ## Swapping as a user (browser)
 
 The page at http://127.0.0.1:5273/swap.html runs BTC to LN entirely in the
-browser. It never touches a wallet or node, so `devctl` stands in for your
-wallet.
+browser. It derives its own recovery wallet locally and reads height through
+the narrow regtest adapter; `devctl` still stands in for your funding wallet.
 
-1. `dev/devctl web-inputs 50000` prints every form value: network `regtest`,
-   relay `ws://127.0.0.1:7777`, the BTC to LN maker key, a fresh user invoice,
-   a refund address, the current height and the user's age recipient. The local
-   page already defaults to regtest and the local relay. Paste the invoice on
-   the main card and expand **Wallet & recovery setup** for the remaining
-   fields. The provider is discovered automatically; optionally pin the maker
-   key in **Settings**. Click **Get quote**, review the verified price, then
-   **Use this quote**.
+1. `dev/devctl web-inputs 50000` prints a fresh user invoice and optional manual
+   overrides. The local page already defaults to regtest, its relay, a
+   browser-stored recovery key, derived refund address, and local height API.
+   Paste only the invoice, approve the named API, and click **Get quote**.
+   Download `rillswap-recovery-key.json`, then choose the saved file to check
+   it before **Use this quote** becomes available. The provider is selected
+   automatically; optionally pin the maker key in **Settings**. For conventional
+   wallet refunds while browser spending remains incomplete, use the printed
+   refund address under **Recovery key & advanced overrides**.
    Keep the fee caps at their defaults in Settings.
 2. Download the terms recovery file, then click **I saved the file**.
 3. The page shows a contract address and an exact BTC amount. Run
@@ -170,8 +184,11 @@ Use 127.0.0.1, not `localhost`: the page's CSP allows loopback relays, and
 another local server may own `localhost` on IPv6. The page caps prompts with
 timeouts, so do not leave a step waiting for minutes.
 
-The browser recovery files are encrypted to the user's age key, which lives in
-the stack. To decrypt or use them with `rill recover`, copy the key out:
+Default recovery files are encrypted to the browser-derived age identity.
+Download the optional `rillswap-recovery.age-key` from the recovery details
+for CLI recovery until browser refunds are complete. The JSON mnemonic file
+does not replace the encrypted per-swap files. If you explicitly overrode the
+recipient with the printed dev key, copy that key instead:
 `docker compose -f dev/compose.yaml cp tools:/state/user/age.key tmp/`.
 
 ## Paying in the demo shop

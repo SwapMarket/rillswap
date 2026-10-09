@@ -20,9 +20,14 @@ test("the swap page defaults to blocked mainnet and connects to nothing before s
   await expect(page.locator("#swap-log")).not.toBeVisible();
   await page.locator("#swap-wallet-setup summary").click();
   await expect(page.locator("#swap-prerequisites")).toContainText("PSBT");
-  await expect(page.getByText("age-keygen -o rillswap-recovery.key", { exact: false })).toBeVisible();
+  await expect(page.locator("#swap-wallet-status")).toContainText("New browser recovery key created");
+  await expect(page.getByRole("link", { name: "Download rillswap-recovery-key.json" })).toBeVisible();
+  await expect(page.locator("#swap-refund")).toHaveValue("");
+  await expect(page.locator("#swap-tip")).toHaveValue("");
+  await expect(page.locator("#swap-age")).toHaveValue("");
   const csp = await page.locator("meta[http-equiv='Content-Security-Policy']").getAttribute("content");
-  expect(csp).toContain("connect-src 'self' wss: ws://127.0.0.1:* ws://localhost:*;");
+  expect(csp).toContain("connect-src 'self' wss: ws://127.0.0.1:* ws://localhost:* https://mempool.space https://blockstream.info");
+  expect(csp).not.toMatch(/\shttps:(?:\s|;)/);
   expect(csp).toContain("script-src 'self' 'wasm-unsafe-eval';");
   for (const url of requests) expect(new URL(url).host).toBe("127.0.0.1:18765");
   expect(sockets).toEqual([]);

@@ -5,6 +5,7 @@ export type NetworkName = typeof NETWORK_NAMES[number];
 export interface SwapDefaults {
   readonly network: NetworkName;
   readonly relays: readonly string[];
+  readonly mempoolApi: string;
 }
 
 export const MAX_RELAYS = 4;
@@ -25,6 +26,23 @@ export function validateRelays(input: string, network: NetworkName): readonly st
   return Object.freeze(urls);
 }
 
+export function validateMempoolApi(value: string, network: NetworkName): string {
+  const url = new URL(value);
+  const local = url.hostname === "127.0.0.1" || url.hostname === "localhost";
+  if (url.username || url.password || url.search || url.hash ||
+      (url.protocol !== "https:" && !(network === "regtest" && local && url.protocol === "http:"))) {
+    throw new Error("Use an HTTPS mempool API, or an explicit loopback HTTP API for regtest");
+  }
+  return url.href.replace(/\/$/, "");
+}
+
+const MEMPOOL_APIS: Record<NetworkName, string> = {
+  mainnet: "https://mempool.space/api",
+  signet: "https://mempool.space/signet/api",
+  testnet4: "https://mempool.space/testnet4/api",
+  regtest: "http://127.0.0.1:8091/api",
+};
+
 export function resolveSwapDefaults(env: Record<string, string | undefined>): SwapDefaults {
   const network = env.VITE_RILLSWAP_NETWORK ?? "mainnet";
   if (!(NETWORK_NAMES as readonly string[]).includes(network)) {
@@ -38,9 +56,13 @@ export function resolveSwapDefaults(env: Record<string, string | undefined>): Sw
     network: name,
     relays: validateRelays(env.VITE_RILLSWAP_RELAYS ?? env.VITE_RILLSWAP_RELAY ??
       (name === "regtest" ? "ws://127.0.0.1:7777" : "wss://relay.damus.io wss://nos.lol wss://relay.primal.net"), name),
+    mempoolApi: validateMempoolApi(env.VITE_RILLSWAP_MEMPOOL_API ?? MEMPOOL_APIS[name], name),
   };
 }
 
 export const relaysForNetwork = (network: NetworkName, deployment?: SwapDefaults): readonly string[] =>
   deployment?.network === network ? deployment.relays :
     resolveSwapDefaults({ VITE_RILLSWAP_NETWORK: network }).relays;
+
+export const mempoolApiForNetwork = (network: NetworkName, deployment?: SwapDefaults): string =>
+  deployment?.network === network ? deployment.mempoolApi : MEMPOOL_APIS[network];

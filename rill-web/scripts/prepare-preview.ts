@@ -1,4 +1,4 @@
-import { cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 
 // Copy identical dist bytes to root and a repository subpath for loopback tests.
 rmSync("tmp/preview", { recursive: true, force: true });
@@ -25,3 +25,15 @@ if (!wallet.success) throw new AggregateError(wallet.logs, "wallet test bundle f
 writeFileSync("tmp/preview/test-only/wallet.html", '<!doctype html><script type="module">' +
   'import { BrowserRecoveryWallet, WALLET_DATABASE } from "./browserRecoveryWallet.js";' +
   "window.walletApi = { BrowserRecoveryWallet, WALLET_DATABASE }; window.walletReady = true;</script>");
+
+// Test only orchestration, never protocol authentication, with real wallet/tip/UI code.
+const ui = await Bun.build({ entrypoints: ["src/swapUi.ts"], outdir: "tmp/preview/test-only", target: "browser", format: "esm",
+  define: { __SWAP_DEFAULTS__: JSON.stringify({ network: "regtest", relays: ["ws://127.0.0.1:7777/"], mempoolApi: "http://127.0.0.1:8091/api" }) },
+  plugins: [{ name: "test-only-ui", setup(build) {
+    build.onLoad({ filter: /\/src\/swap\/marketplace\.ts$/ }, () => ({ contents: readFileSync("tests/fixtures/swapUiMarketplace.ts", "utf8"), loader: "ts" }));
+    build.onLoad({ filter: /\/src\/swap\/browserCosigner\.ts$/ }, () => ({ contents: "export const browserCosigner = {};", loader: "ts" }));
+  } }],
+});
+if (!ui.success) throw new AggregateError(ui.logs, "UI test bundle failed");
+writeFileSync("tmp/preview/test-only/swap.html", readFileSync("dist/swap.html", "utf8")
+  .replace(/src="\.\/assets\/[^"]+"/, 'src="./swapUi.js"').replaceAll("./assets/", "/assets/"));

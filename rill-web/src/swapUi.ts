@@ -1,6 +1,7 @@
 /**
  * Experimental browser BTC to LN client page. Everything sensitive stays in
- * this tab's memory; the user's own wallet funds and broadcasts, and the
+ * contract secrets stay in this tab; the recovery root is stored locally.
+ * The user's own wallet funds and broadcasts, and the
  * user's own downloads hold the age-encrypted recovery files.
  */
 import "./swap.css";
@@ -11,7 +12,9 @@ import testnet4 from "./networks/testnet4.json";
 import { addressScript, scriptAddress } from "./swap/address";
 import { browserCosigner } from "./swap/browserCosigner";
 import { type FundingRequest, type SwapRequest } from "./swap/swap";
-import { relaysForNetwork, validateRelays, type NetworkName } from "./swap/config";
+import { mempoolApiForNetwork, relaysForNetwork, validateMempoolApi, validateRelays, type NetworkName } from "./swap/config";
+import { readChainTip } from "./swap/chainTip";
+import { BrowserRecoveryWallet } from "./browserRecoveryWallet";
 import { discoverMarketplace, eligibleProviders, quoteProviders, type LocatedQuote, MAX_QUOTE_PROVIDERS } from "./swap/marketplace";
 import { invoiceBinding } from "./swap/bolt11";
 import { quoteSelectionLabel, stoppedSwapAdvice } from "./swapUiStatus";
@@ -99,6 +102,8 @@ function mount(root: HTMLElement): void {
   relay.spellcheck = false;
   settings.append(relayLabel, relay, node("small",
     "Up to four relays. Connect only when you request a quote. Each operator sees your IP and transport metadata."));
+  const chainApi = field(settings, "swap-chain-api", "Mempool API", __SWAP_DEFAULTS__.mempoolApi,
+    "Trusted height observations, not independent chain verification. Custom origins need a deployment CSP allowance.");
   const identity = field(settings, "swap-provider", "Provider identity", "",
     "Automatic by default. Optionally pin a provider's 64-character public identity key.");
   identity.placeholder = "Automatic (lowest verified provider price)";
@@ -106,16 +111,23 @@ function mount(root: HTMLElement): void {
   const invoice = field(form, "swap-invoice", "Lightning invoice to pay (BOLT11)");
   invoice.placeholder = "Paste your Lightning invoice";
   const setup = node("details", "", "swap-wallet-setup");
-  setup.append(node("summary", "Wallet & recovery setup"),
+  setup.append(node("summary", "Recovery key & advanced overrides"),
     node("p", "This experimental flow needs a wallet that can sign a PSBT without broadcasting it, " +
-      "a refund address, and an age key for encrypted backups.", "swap-prerequisites"));
-  const refund = field(setup, "swap-refund", "Your refund address (P2WPKH or P2TR)", "",
-    "Use a fresh Receive address from your own wallet, on the selected network.");
-  const tip = field(setup, "swap-tip", "Current block height", "", "From a block explorer or your node; " +
-    "it caps how long your funds can be locked.");
-  const age = field(setup, "swap-age", "Recovery encryption key (age1...)", "",
-    "Run age-keygen -o rillswap-recovery.key and paste the public age1... key. " +
-    "Keep the private key safe: it is required to open your backups.");
+      "but creates your recovery key and refund address automatically.", "swap-prerequisites"));
+  const walletStatus = node("p", "Preparing your browser recovery key...", "swap-wallet-status");
+  const walletActions = node("div", "", "swap-wallet-actions");
+  setup.append(walletStatus, walletActions, node("small", "Stored unencrypted in this browser. Same-origin scripts can read it. " +
+    "Keep both the key backup and each encrypted swap recovery file. Clearing storage can lose access to refunds."));
+  const refund = field(setup, "swap-refund", "Refund address override (optional)", "",
+    "Leave empty for a fresh address derived from your browser recovery key. Otherwise use your own wallet's P2WPKH or P2TR address.");
+  const tip = field(setup, "swap-tip", "Block height override (optional)", "", "Leave empty to fetch the height from the configured mempool API.");
+  const age = field(setup, "swap-age", "Recovery encryption recipient override (optional, age1...)", "",
+    "Leave empty for the browser key. An override requires keeping its corresponding private age key yourself.");
+  const consentLabel = node("label");
+  const chainConsent = node("input", "", "swap-chain-consent");
+  chainConsent.type = "checkbox";
+  const consentText = node("span", "", "swap-chain-disclosure");
+  consentLabel.append(chainConsent, consentText);
   const limits = node("details");
   limits.append(node("summary", "Fee & timeout limits"));
   limits.append(node("p", "These are caps, not charges: the swap stops before funding if the " +
@@ -132,10 +144,10 @@ function mount(root: HTMLElement): void {
   const start = node("button", "Get quote", "swap-start");
   start.type = "submit";
   start.className = "primary";
-  form.append(setup, notice, start, node("small", "Requesting quotes shares this invoice with responding providers."));
+  form.append(setup, consentLabel, notice, start, node("small", "Requesting quotes shares this invoice with responding providers."));
   const safety = node("details", "", "swap-safety");
   safety.append(node("summary", "Before using this preview"),
-    node("p", "Unaudited and experimental. Use fake-money test networks only. Keys live in this tab; " +
+    node("p", "Unaudited and experimental. Use fake-money test networks only. Contract secrets live in this tab; " +
       "keep it open until the swap finishes."),
     node("p", "Browser recovery is not implemented yet. Save the encrypted recovery file before funding. " +
       "If the provider does not pay, refund after the lock height with rill recover watch-refund --chain-only " +
@@ -172,6 +184,21 @@ function mount(root: HTMLElement): void {
     else if (line.includes("broadcast; waiting")) setStatus("Waiting for the Lightning payment", 3);
     else if (line.startsWith("refused:") || line.startsWith("stopped:")) setStatus(line.replace(/^[^:]+: /, ""), -1, "error");
   };
+  const walletPromise = BrowserRecoveryWallet.open();
+  // Register failure handling immediately so blocked storage never becomes an unhandled rejection.
+  void walletPromise.then(async (wallet) => {
+    await walletBackupControls(walletActions, wallet, walletStatus);
+    offerDownload(walletActions, (await wallet.recoveryKey()).file, "rillswap-recovery.age-key");
+    walletStatus.textContent = wallet.newlyCreated
+      ? "New browser recovery key created. It does not restore earlier swaps. Download and check your backup before funding."
+      : "Using your existing browser recovery key.";
+  }).catch((error: Error) => { walletStatus.textContent = error.message; });
+  const updateDisclosure = (): void => {
+    consentText.textContent = `Allow ${chainApi.value.trim()} to observe my IP when fetching block height for this quote. ` +
+      "No keys, invoices, or addresses are sent to this API.";
+  };
+  chainApi.oninput = () => { chainConsent.checked = false; updateDisclosure(); };
+  updateDisclosure();
   const updateNetwork = (): void => {
     const main = network.value === "mainnet";
     badge.textContent = main ? "Mainnet · preview" : `${network.value} · test funds`;
@@ -183,12 +210,18 @@ function mount(root: HTMLElement): void {
   };
   network.onchange = () => {
     relay.value = relaysForNetwork(network.value as NetworkName, __SWAP_DEFAULTS__).join("\n");
+    chainApi.value = mempoolApiForNetwork(network.value as NetworkName, __SWAP_DEFAULTS__);
+    chainConsent.checked = false;
+    refund.value = tip.value = age.value = "";
+    updateDisclosure();
     updateNetwork();
   };
   updateNetwork();
 
+  let busy = false;
   form.addEventListener("submit", (event) => {
     event.preventDefault();
+    if (busy) return;
     const name = network.value as NetworkName;
     if (name === "mainnet") {
       report("refused: Mainnet swaps are blocked until release safety checks are complete.");
@@ -196,8 +229,12 @@ function mount(root: HTMLElement): void {
     }
     let request: SwapRequest;
     let urls: readonly string[];
+    let api: string;
+    const automaticTip = !tip.value.trim();
+    const needsWallet = !refund.value.trim() || !age.value.trim();
     try {
       urls = validateRelays(relay.value.trim(), name);
+      api = validateMempoolApi(chainApi.value.trim(), name);
       if (identity.value.trim() && !/^[0-9a-f]{64}$/.test(identity.value.trim())) {
         throw new Error("Provider identity must be 64 lowercase hex characters, or leave it empty for automatic selection");
       }
@@ -205,8 +242,8 @@ function mount(root: HTMLElement): void {
         identity: identity.value.trim(),
         network: NETWORKS[name],
         invoice: invoice.value.trim(),
-        refundScript: addressScript(refund.value, name),
-        tipHeight: Number(positive(tip, "block height")),
+        refundScript: refund.value.trim() ? addressScript(refund.value, name) : "",
+        tipHeight: tip.value.trim() ? Number(positive(tip, "block height")) : 0,
         ageRecipient: age.value.trim(),
         limits: {
           maxSuccessFeeSat: positive(successFee, "provider fee"),
@@ -217,12 +254,17 @@ function mount(root: HTMLElement): void {
         },
       };
       invoiceBinding(request.invoice, name);
+      if (tip.value.trim() && (!Number.isSafeInteger(request.tipHeight) || request.tipHeight >= 500_000_000)) {
+        throw new Error("Block height override is invalid");
+      }
+      if (automaticTip && !chainConsent.checked) throw new Error("Approve the named mempool API before requesting a block height");
     } catch (error) {
       setup.open = true;
       report(`refused: ${(error as Error).message}`);
       return;
     }
     const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button")];
+    busy = true;
     for (const input of controls) {
       (input as HTMLInputElement).disabled = true;
     }
@@ -237,6 +279,7 @@ function mount(root: HTMLElement): void {
     const cancel = node("button", "Edit swap", "swap-edit");
     cancel.type = "button";
     const restore = (): void => {
+      busy = false;
       for (const control of controls) (control as HTMLInputElement).disabled = false;
       settingsButton.disabled = false;
       updateNetwork();
@@ -256,6 +299,28 @@ function mount(root: HTMLElement): void {
     setStatus("Finding available providers", 0);
     void (async () => {
       try {
+        let wallet: BrowserRecoveryWallet | undefined;
+        let walletFingerprint: string | undefined;
+        if (needsWallet) {
+          wallet = await walletPromise;
+          if (cancelled) return;
+          const info = await wallet.info();
+          walletFingerprint = info.fingerprint;
+          if (cancelled) return;
+          if (!request.refundScript) {
+            const allocation = await wallet.allocateRefund(name);
+            request = { ...request, refundScript: allocation.script, refundAllocation: allocation };
+          }
+          if (!request.ageRecipient) request = { ...request, ageRecipient: info.recipient };
+        }
+        if (cancelled) return;
+        if (automaticTip) {
+          setStatus("Fetching block height from your approved API", 0);
+          const observed = await readChainTip(api, { name, genesis_hash: request.network.genesis_hash as string }, { signal: cancellation.signal });
+          request = { ...request, tipHeight: observed.height };
+          report(`Trusted chain API observed block ${observed.height} (${observed.hash})`);
+        }
+        if (cancelled) return;
         const directory = await discoverMarketplace(urls, request.network, request.identity || undefined, cancellation.signal);
         if (cancelled) return;
         for (const warning of directory.warnings) report(warning);
@@ -281,6 +346,8 @@ function mount(root: HTMLElement): void {
         };
         showQuote();
         review.append(quoteSummary, priceClaim, node("small", "Signatures authenticate offers, not provider reputation."));
+        if (request.refundAllocation) review.append(node("small", "Refunds pay your derived browser-wallet address. " +
+          "Browser refunding and spending are not implemented yet. Test funds only; use an external refund-address override if needed."));
         if (directory.warnings.length || result.failures || eligible.length > MAX_QUOTE_PROVIDERS) {
           review.append(node("small", "Some relays or providers did not return complete results. This is not a market-wide best-price guarantee."));
         }
@@ -299,19 +366,43 @@ function mount(root: HTMLElement): void {
         }
         const accept = node("button", "Use this quote", "swap-quote-accept");
         accept.type = "button";
+        if (wallet) {
+          const backupPanel = node("section", "", "swap-quote-backup");
+          review.append(backupPanel);
+          const refreshBackupGate = async (): Promise<void> => {
+            const info = await wallet!.info();
+            if (info.fingerprint !== walletFingerprint) throw new Error("Recovery identity changed. Request a fresh quote.");
+            accept.disabled = !info.backupVerified;
+          };
+          await refreshBackupGate();
+          if (cancelled) return;
+          await walletBackupControls(backupPanel, wallet, undefined, refreshBackupGate);
+          if (cancelled) return;
+        }
         review.append(offers, accept, cancel);
         panel.replaceChildren(review);
         setStatus("Quote ready. Review before continuing", 1);
-        const accepted = await new Promise<boolean>((resolve) => {
-          accept.onclick = () => resolve(true);
-          cancelReview = () => resolve(false);
+        const accepted = await new Promise<LocatedQuote | null>((resolve) => {
+          accept.onclick = () => {
+            for (const option of offers.querySelectorAll("input")) option.disabled = true;
+            accept.disabled = true;
+            resolve(selected);
+          };
+          cancelReview = () => resolve(null);
         });
         if (!accepted || cancelled) return;
-        if (Date.now() / 1000 >= selected.prepared.quote.expiresAt) throw new Error("Quote expired. Request a fresh quote.");
+        if (wallet) {
+          const info = await wallet.info();
+          if (!info.backupVerified || info.fingerprint !== walletFingerprint) {
+            throw new Error("A matching recovery-key backup must be verified before accepting this quote");
+          }
+        }
+        if (cancelled) return;
+        if (Date.now() / 1000 >= accepted.prepared.quote.expiresAt) throw new Error("Quote expired. Request a fresh quote.");
         executing = true;
-        for (const quote of arrivals) if (quote !== selected) quote.dispose();
-        arrivals = [selected];
-        const paid = await run(selected, name, panel, report);
+        for (const quote of arrivals) if (quote !== accepted) quote.dispose();
+        arrivals = [accepted];
+        const paid = await run(accepted, name, panel, report);
         if (paid) setStatus("Lightning invoice paid", 4, "success");
       } catch (error) {
         if (!cancelled) {
@@ -325,6 +416,30 @@ function mount(root: HTMLElement): void {
       }
     })();
   });
+}
+
+/** A key download is not verification, and a key backup cannot replace per-swap files. */
+async function walletBackupControls(
+  panel: HTMLElement, wallet: BrowserRecoveryWallet, status?: HTMLElement,
+  verified?: () => Promise<void>,
+): Promise<void> {
+  const message = status ?? node("p", "Download your recovery key, then choose the saved file to check it.");
+  if (!status) panel.append(message);
+  offerDownload(panel, await wallet.exportBackup(), "rillswap-recovery-key.json");
+  const label = node("label", "Check an existing recovery-key backup");
+  const upload = node("input");
+  upload.type = "file";
+  upload.accept = ".json,application/json";
+  label.append(upload); panel.append(label);
+  upload.onchange = () => {
+    void (async () => {
+      const file = upload.files?.[0];
+      if (!file || file.size > 4096) throw new Error("Choose a recovery-key JSON backup smaller than 4 KiB");
+      await wallet.verifyBackup(await file.text());
+      await verified?.();
+      message.textContent = "Matching key backup checked. Keep it private and save every encrypted per-swap recovery file too.";
+    })().catch((error: Error) => { message.textContent = error.message; });
+  };
 }
 
 function offerDownload(panel: HTMLElement, file: Uint8Array, name: string): void {

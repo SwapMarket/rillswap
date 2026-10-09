@@ -3,12 +3,14 @@ import { mock } from "bun:test";
 import { receiver, testInvoice } from "../../../rill-payments/tests/helpers";
 import type { CheckoutCheckpoint } from "@rillswap/payments/sdk";
 import type { MerchantSwapOptions } from "../../src/swap/merchantCheckout";
+import type { SwapRequest } from "../../src/swap/swap";
 
 const scenario = process.argv[2]; let now = 1200, shared = 0, broadcasts = 0;
 const recoveryStages: string[] = []; let checkpoint: CheckoutCheckpoint | null = null;
 const messages: string[] = [];
 const sessionSecrets: Uint8Array[] = [];
 let recoveryBirthday = -1;
+const recoveryExtensions: unknown[] = [];
 const terms = { terms_expiry: 5000, refund_lock_height: 200, max_funding_fee_sat: "10",
   economics: { contract_amount_sat: "1040", success_fee_sat: "10" } };
 class FixtureSession {
@@ -33,11 +35,13 @@ mock.module("../../src/swap/hashes", () => ({ clientAcceptanceHash: () => new Ui
 mock.module("../../src/swap/funding", () => ({ authorizeFundingPsbt: () => ({ txid: "7".repeat(64), raw: "fixture transaction" }),
   fundingBinding: () => ({ funding_attempt_id: "9".repeat(64) }) }));
 mock.module("../../src/swap/taproot", () => ({ reconstructTaprootContract: () => ({ script_pubkey: "5120" + "1".repeat(64) }) }));
-mock.module("../../src/swap/recovery", () => ({ encryptRecovery: async (record: { birthday: number }) => {
+mock.module("../../src/swap/recovery", () => ({ encryptRecovery: async (record: { birthday: number; extensions?: unknown }) => {
+  recoveryExtensions.push(structuredClone(record.extensions));
   recoveryBirthday = record.birthday; return new Uint8Array([1]);
 } }));
 mock.module("../../src/swap/cooperative", () => ({ COOPERATIVE_RESERVATION_EXTENSION: "fixture", settle: async () => ({
-  cooperation: "abandoned", claimTxid: null, preimage: "private fixture preimage", reservation: null }) }));
+  cooperation: "abandoned", claimTxid: null, preimage: "private fixture preimage",
+  reservation: scenario === "prepare_wallet_reserved" ? { recordedAt: now, proposal: "fixture proposal", signature_hash: "fixture hash" } : null }) }));
 const { executeMerchantSwap } = await import("../../src/swap/merchantCheckout");
 const { invoiceBinding } = await import("../../src/swap/bolt11");
 const invoice = testInvoice("actual_runner_sequence", "1000000", 1000, 6000); const binding = invoiceBinding(invoice, "regtest");
@@ -58,7 +62,9 @@ const options: MerchantSwapOptions = {
 };
 if (scenario?.startsWith("prepare_")) {
   const { prepareSwap } = await import("../../src/swap/swap");
-  const request = { ...options.request, invoice, checkoutExpiresAt: 3000 };
+  const request: SwapRequest = { ...options.request, invoice, checkoutExpiresAt: 3000,
+    ...(scenario?.startsWith("prepare_wallet") ? { refundAllocation: { version: 1, scheme: "bip84-rillswap-v1",
+      identityFingerprint: "a".repeat(64), network: "regtest", index: 7, path: "m/84'/1'/2'/0/7", script: "fixture", address: "fixture" } } : {}) };
   const prepared = await prepareSwap(options.relay, request, () => {}, { clock: () => now * 1000 });
   const before = { accepted: messages.includes("terms_accept"), shared, recovery: recoveryStages.length };
   const hooks = { ...options.hooks, saveRecovery: async (_file: Uint8Array, stage: "terms" | "funded") => {
@@ -80,12 +86,15 @@ if (scenario?.startsWith("prepare_")) {
     try { await prepared.execute(hooks); } catch { refused = true; }
     await first;
   } else if (scenario === "prepare_mutation") {
-    request.tipHeight = 900;
+    (request as { tipHeight: number }).tipHeight = 900;
+    await prepared.execute(hooks);
+  } else if (scenario?.startsWith("prepare_wallet")) {
+    (request.refundAllocation as { index: number }).index = 999;
     await prepared.execute(hooks);
   } else {
     try { await prepared.execute(hooks); } catch { refused = true; }
   }
-  console.log(JSON.stringify({ before, refused, activeSignerPreserved, recoveryBirthday,
+  console.log(JSON.stringify({ before, refused, activeSignerPreserved, recoveryBirthday, recoveryExtensions,
     quoteFrozen: Object.isFrozen(prepared.quote), secretsWiped: sessionSecrets.every((secret) => secret.every((byte) => byte === 0)),
     accepted: messages.includes("terms_accept"), shared, recoveryStages, broadcasts }));
 } else {

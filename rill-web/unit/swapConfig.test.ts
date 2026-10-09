@@ -3,7 +3,7 @@ import { NETWORK_NAMES, relaysForNetwork, resolveSwapDefaults, validateRelay, va
 
 describe("explicit deployment defaults", () => {
   test("unconfigured public builds select mainnet with an encrypted relay", () => {
-    expect(resolveSwapDefaults({})).toEqual({ network: "mainnet", relays: ["wss://relay.damus.io/", "wss://nos.lol/", "wss://relay.primal.net/"] });
+    expect(resolveSwapDefaults({})).toEqual({ network: "mainnet", relays: ["wss://relay.damus.io/", "wss://nos.lol/", "wss://relay.primal.net/"], mempoolApi: "https://mempool.space/api" });
   });
   test("supports every declared network without hostname inference", () => {
     for (const network of NETWORK_NAMES) {

@@ -56,6 +56,8 @@ export interface SwapRequest {
   readonly refundScript: string;
   readonly tipHeight: number;
   readonly ageRecipient: string;
+  /** Public wallet derivation hints only, never signing authority. */
+  readonly refundAllocation?: import("../browserRecoveryWallet").RefundAllocation;
   readonly limits: UserLimits;
   /** A merchant checkout can expire earlier than the invoice. */
   readonly checkoutExpiresAt?: number;
@@ -208,7 +210,10 @@ export async function prepareSwap(
   report: SwapHooks["report"],
   options: PreparationOptions = {},
 ): Promise<PreparedSwap> {
-  request = { ...request, network: structuredClone(request.network), limits: { ...request.limits } };
+  request = { ...request, network: structuredClone(request.network), limits: { ...request.limits },
+    ...(request.refundAllocation === undefined ? {} : { refundAllocation: structuredClone(request.refundAllocation) }) };
+  if (request.refundAllocation && (request.refundAllocation.script !== request.refundScript ||
+      request.refundAllocation.network !== request.network.name)) throw new SwapError("refund wallet metadata does not match destination");
   const timeouts = { ...(options.timeouts ?? { replyMs: 60_000, settleMs: 600_000 }) };
   const clock = options.clock ?? Date.now;
   const seconds = (): number => Math.floor(clock() / 1000);
@@ -301,6 +306,7 @@ export async function prepareSwap(
             network, profile: PROFILE, init, accept, acceptSignature, offer, acceptanceSignature,
             clientSessionKey: session.key, contractSecret: contract.secret,
             birthday: request.tipHeight, createdAt, updatedAt: createdAt, funding: [], preimage: null,
+            extensions: request.refundAllocation ? { "rillswap/browser-refund-wallet": request.refundAllocation } : {},
           };
           await hooks.saveRecovery(await encryptRecovery(record, request.ageRecipient), "terms");
           hooks.report("recovery file saved (terms, no funding yet)");
@@ -353,11 +359,11 @@ export async function prepareSwap(
             // A reservation is dated when journaled, before its proposal deadline.
             updatedAt: Math.max(funded.updatedAt, reserved?.recordedAt ?? seconds()),
             preimage: settled.preimage,
-            extensions: reserved === null ? {} : {
+            extensions: { ...funded.extensions, ...(reserved === null ? {} : {
               [COOPERATIVE_RESERVATION_EXTENSION]: {
                 version: 1, proposal: reserved.proposal, signature_hash: reserved.signature_hash,
               },
-            },
+            }) },
           };
           return {
             sessionId: session.sessionId, contractHash, fundingTxid: funding.txid,

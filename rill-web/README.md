@@ -72,6 +72,12 @@ technical activity. Public builds default to **mainnet preview**, with the
 start action disabled and an independent runtime refusal before any relay
 connection. Select a test network in Settings to use the experimental flow.
 Loading the page or changing settings does not contact a relay.
+It creates or reuses an origin-local recovery key without network access.
+Refund addresses and encryption recipients are automatic; height is fetched
+only after approving the named chain API and requesting a quote. Advanced
+overrides remain under the recovery details. A matching key-backup check is
+required before accepting a quote using either browser-wallet default. The
+separate encrypted per-swap backup gates are unchanged.
 
 Deployment defaults are validated at build time:
 
@@ -90,6 +96,18 @@ build. Switching networks resets the relay preset instead of retaining a
 local deployment endpoint. Relay settings are public, not wallet credentials.
 Relay operators can see IP and transport metadata; encrypted swap messages do
 not hide that metadata. A relay preset is not an endorsement of providers.
+
+`VITE_RILLSWAP_MEMPOOL_API` configures an Esplora-compatible chain API. Defaults
+are `https://mempool.space/api`, `/signet/api`, or `/testnet4/api` on that
+origin, and `http://127.0.0.1:8091/api` on regtest. Switching networks resets
+the preset and consent. Requests omit credentials and referrers, refuse
+redirects, and bound response size and duration. They check genesis and a
+stable sampled tip, not independent canonical-chain validity or a signet
+challenge. The operator sees your IP, not keys, invoices, or refund addresses.
+The swap CSP admits only mempool.space, blockstream.info, explicit loopback
+port 8091, and the build-configured API origin. A runtime endpoint on another
+origin requires rebuilding with its `VITE_RILLSWAP_MEMPOOL_API` allowance;
+there is no HTTPS wildcard. The separate preview page still cannot connect.
 
 `dev/devctl` explicitly builds the browser with regtest/local-relay defaults.
 An older public installation reloading an unconfigured build now opens the
@@ -125,12 +143,12 @@ Provider-advertised endpoints are never automatically contacted. Existing
 manual `runSwap` callers retain their prepare-and-execute behavior, and no
 persisted state or journal schema changes.
 
-### Browser recovery wallet primitives
+### Browser recovery wallet
 
 `src/browserRecoveryWallet.ts` provides a browser-stored recovery identity,
-matching-backup checks, and atomic refund-address allocation. The swap form's
-automatic defaults are being integrated separately; these primitives do not
-enable mainnet swaps or constitute a complete browser refund flow.
+matching-backup checks, and atomic refund-address allocation. The swap form
+uses these defaults without manual key or address input. This does not enable
+mainnet swaps or constitute a complete browser refund or wallet-spending flow.
 
 The v1 identity uses a 128-bit, 12-word English BIP39 mnemonic, NFKD
 normalization, and an empty passphrase. It stores one validated record in
@@ -148,6 +166,14 @@ Skipped BIP32 children are refused rather than silently relabeled. Restoring
 old browser state or using a cloned mnemonic on another device can reuse
 indices; atomic transactions only coordinate this browser's origin-local
 storage.
+
+Encrypted per-swap files include the optional public
+`rillswap/browser-refund-wallet` extension with the exact version, scheme,
+identity fingerprint, network, index, path, destination script, and address.
+It survives funded and paid exports, including cooperative reservations.
+These are derivation hints, not signed authority: recovery must derive and
+compare against the signed `client_destination_script`. Manual destination
+overrides omit the extension. Existing recovery files remain unchanged.
 
 The age X25519 encryption identity is derived independently with
 HKDF-SHA256: BIP39 seed as input, UTF-8 salt
@@ -172,17 +198,17 @@ or implicit migration occurs. Complete storage loss is indistinguishable from
 first use, so a newly created identity does not restore earlier swaps. Keep
 the original backup files and do not clear browser storage while funds remain.
 
-There is no chain backend in the browser. The user enters the current block
-height; it sets the refund-height ceiling (`tip + max refund delay`) and the
-recovery scan birthday, so a wrong height can only lengthen the user's own
-lock or make offers fail. Keys exist only in the tab's memory. The terms
+The observed or explicitly overridden block height sets the refund-height
+ceiling (`tip + max refund delay`) and the recovery scan birthday. A wrong
+height can lengthen the lock or make offers fail. Contract secrets exist only
+in the tab's memory; the separate wallet root is persisted locally. The terms
 recovery file must be downloaded before accepting terms, and the funded one
 before the funding binding is sent and before broadcast. If the provider does
 not pay, refund from the funded recovery file after the refund height (see
-"Refunding a stopped swap" below); the browser does not refund. The only thing stored in the
-browser is the cooperation journal below, which never grants anything, so an
-upgrade or reload reads, migrates, or resumes nothing; an interrupted swap
-continues only through the downloaded recovery file.
+"Refunding a stopped swap" below); browser refund construction and spending
+are not implemented yet. Until they are, an external refund-address override
+is preferable if you need refunds in a conventional wallet. No upgrade or
+reload resumes a swap; retain the original downloaded recovery files.
 
 ### Refunding a stopped swap
 
@@ -190,6 +216,11 @@ You need `rill-cli` (see its README), a synced Bitcoin Core node for the same
 network, the funded recovery file, its age key, and the funding attempt ID that
 the page printed (`attempt <ID> revision 0`). After the refund block shown by
 the page, run (it waits for that block if started earlier):
+
+For the default browser identity, download the optional
+`rillswap-recovery.age-key` from the recovery details and pass it as
+`--identity` below. The JSON mnemonic backup is not a native age identity
+file. If you overrode the recipient, use that recipient's original private key.
 
 ```sh
 mkdir -m 700 refund-attempts
@@ -202,7 +233,8 @@ rill recover watch-refund --chain-only --network signet.json \
 ```
 
 `--network` is the trusted network file (`rill-docs/networks/signet.json`). The
-refund pays the refund address you entered. `rill recover sign-refund` with
+refund pays the signed destination (your derived browser-wallet address or
+the external override), never an arbitrary replacement. `rill recover sign-refund` with
 `--output refund.tx` instead writes the signed transaction without sending it.
 `--chain-only` means the refund relies on the contract alone: it is sent only
 after the refund block while the provider has not claimed. If the invoice is
