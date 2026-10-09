@@ -18,6 +18,7 @@ import { BrowserRecoveryWallet } from "./browserRecoveryWallet";
 import { discoverMarketplace, eligibleProviders, quoteProviders, type LocatedQuote, MAX_QUOTE_PROVIDERS } from "./swap/marketplace";
 import { invoiceBinding } from "./swap/bolt11";
 import { quoteSelectionLabel, stoppedSwapAdvice } from "./swapUiStatus";
+import { ASSETS, type AssetId, routeFor } from "./swapPairs";
 
 const NETWORKS = { mainnet, signet, testnet4, regtest } as const;
 
@@ -69,9 +70,9 @@ function mount(root: HTMLElement): void {
   header.append(brand, badge);
   const intro = node("div");
   intro.className = "swap-intro";
-  intro.append(node("p", "BITCOIN. WITHOUT THE DETOUR.", "swap-eyebrow"),
-    node("h1", "Bitcoin in. Lightning out."),
-    node("p", "Pay a Lightning invoice from your Bitcoin wallet. No account. Your keys stay with you."));
+  const heroTitle = node("h1");
+  const heroTagline = node("p");
+  intro.append(node("p", "BITCOIN. WITHOUT THE DETOUR.", "swap-eyebrow"), heroTitle, heroTagline);
   const card = node("section", "", "swap-card");
   const cardHead = node("div");
   cardHead.className = "card-heading";
@@ -107,9 +108,39 @@ function mount(root: HTMLElement): void {
   const identity = field(settings, "swap-provider", "Provider identity", "",
     "Automatic by default. Optionally pin a provider's 64-character public identity key.");
   identity.placeholder = "Automatic (lowest verified provider price)";
-  form.append(node("div", "BTC → Lightning", "swap-direction"));
-  const invoice = field(form, "swap-invoice", "Lightning invoice to pay (BOLT11)");
+  const pair = node("div", "", "swap-pair");
+  const pairSide = (id: string, caption: string, value: AssetId): HTMLSelectElement => {
+    const box = node("label");
+    box.htmlFor = id;
+    const select = node("select", "", id);
+    for (const item of ASSETS) {
+      select.append(Object.assign(node("option", item.unavailable ? `${item.symbol} · soon` : item.symbol),
+        { value: item.id, title: item.name }));
+    }
+    select.value = value;
+    box.append(node("span", caption), select);
+    pair.append(box);
+    return select;
+  };
+  const fromAsset = pairSide("swap-from", "You send", "btc");
+  const flip = node("button", "⇄", "swap-flip");
+  flip.type = "button";
+  flip.title = flip.ariaLabel = "Switch direction";
+  pair.append(flip);
+  const toAsset = pairSide("swap-to", "You receive", "ln");
+  const pairNote = node("p", "", "swap-pair-note");
+  pairNote.setAttribute("role", "note");
+  form.append(pair, pairNote);
+  const invoiceBox = node("div");
+  const invoice = field(invoiceBox, "swap-invoice", "Lightning invoice to pay (BOLT11)");
   invoice.placeholder = "Paste your Lightning invoice";
+  const receiveBox = node("div");
+  const receiveAddress = field(receiveBox, "swap-receive-address", "Bitcoin address to receive");
+  receiveAddress.placeholder = "bc1... (your wallet)";
+  const receiveAmount = field(receiveBox, "swap-receive-amount", "Amount to receive (sat)");
+  receiveAmount.inputMode = "numeric";
+  receiveAmount.placeholder = "50000";
+  form.append(invoiceBox, receiveBox);
   const setup = node("details", "", "swap-wallet-setup");
   setup.append(node("summary", "Recovery key & advanced overrides"),
     node("p", "This experimental flow needs a wallet that can sign a PSBT without broadcasting it, " +
@@ -211,12 +242,33 @@ function mount(root: HTMLElement): void {
   updateDisclosure();
   const updateNetwork = (): void => {
     const main = network.value === "mainnet";
+    const route = routeFor(fromAsset.value, toAsset.value);
     badge.textContent = main ? "Mainnet · preview" : `${network.value} · test funds`;
     notice.textContent = main
       ? "Mainnet swaps are blocked until release safety checks are complete. Choose a test network in Settings."
       : "Experimental preview. Test funds only. Review wallet and recovery setup before continuing.";
-    start.disabled = main;
-    start.textContent = main ? "Mainnet swaps unavailable" : "Get quote";
+    heroTitle.textContent = route.title;
+    heroTagline.textContent = route.tagline;
+    pairNote.textContent = route.unavailable ?? "";
+    pairNote.hidden = !route.unavailable;
+    invoiceBox.hidden = route.profile !== "btc-to-ln/v1";
+    setup.hidden = route.profile !== "btc-to-ln/v1";
+    receiveBox.hidden = route.profile !== "ln-to-btc/v1";
+    start.disabled = main || route.unavailable !== null;
+    start.textContent = main ? "Mainnet swaps unavailable" : route.unavailable ? "Pair unavailable" : "Get quote";
+  };
+  const changePair = (changed: HTMLSelectElement, other: HTMLSelectElement, previous: string): void => {
+    // Picking the asset already on the other side swaps the two, like a flip.
+    if (changed.value === other.value) other.value = previous;
+    updateNetwork();
+  };
+  let lastFrom = fromAsset.value, lastTo = toAsset.value;
+  fromAsset.onchange = () => { changePair(fromAsset, toAsset, lastFrom); lastFrom = fromAsset.value; lastTo = toAsset.value; };
+  toAsset.onchange = () => { changePair(toAsset, fromAsset, lastTo); lastFrom = fromAsset.value; lastTo = toAsset.value; };
+  flip.onclick = () => {
+    [fromAsset.value, toAsset.value] = [toAsset.value, fromAsset.value];
+    lastFrom = fromAsset.value; lastTo = toAsset.value;
+    updateNetwork();
   };
   network.onchange = () => {
     relay.value = relaysForNetwork(network.value as NetworkName, __SWAP_DEFAULTS__).join("\n");
@@ -234,6 +286,11 @@ function mount(root: HTMLElement): void {
     const name = network.value as NetworkName;
     if (name === "mainnet") {
       report("refused: Mainnet swaps are blocked until release safety checks are complete.");
+      return;
+    }
+    const route = routeFor(fromAsset.value, toAsset.value);
+    if (route.unavailable || route.profile !== "btc-to-ln/v1") {
+      report(`refused: ${route.unavailable ?? "This pair cannot be quoted yet."}`);
       return;
     }
     let request: SwapRequest;

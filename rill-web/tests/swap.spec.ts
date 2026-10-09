@@ -4,6 +4,52 @@ import { scriptAddress } from "../src/swap/address";
 
 const SWAP = "http://127.0.0.1:18765/swap.html";
 
+test("direction flips between Bitcoin and Lightning, and stablecoins are visible but unavailable", async ({ page }) => {
+  const requests: string[] = [], sockets: string[] = [];
+  page.on("request", (request) => requests.push(request.url()));
+  page.on("websocket", (socket) => sockets.push(socket.url()));
+  await page.goto(SWAP);
+  await page.locator("#swap-settings-toggle").click();
+  await page.locator("#swap-network").selectOption("regtest");
+  await page.locator("#swap-settings-close").click();
+  await expect(page.locator("#swap-from")).toHaveValue("btc");
+  await expect(page.locator("#swap-to")).toHaveValue("ln");
+  await expect(page.locator("#swap-invoice")).toBeVisible();
+  await expect(page.locator("#swap-receive-address")).not.toBeVisible();
+  await expect(page.locator("#swap-pair-note")).not.toBeVisible();
+  await expect(page.locator("#swap-start")).toBeEnabled();
+
+  await page.getByRole("button", { name: "Switch direction" }).click();
+  await expect(page.locator("#swap-from")).toHaveValue("ln");
+  await expect(page.locator("#swap-to")).toHaveValue("btc");
+  await expect(page.getByRole("heading", { name: "Lightning in. Bitcoin out." })).toBeVisible();
+  await expect(page.locator("#swap-invoice")).not.toBeVisible();
+  await expect(page.locator("#swap-wallet-setup")).not.toBeVisible();
+  await expect(page.locator("#swap-receive-address")).toBeVisible();
+  await expect(page.locator("#swap-receive-amount")).toBeVisible();
+  await expect(page.locator("#swap-pair-note")).toHaveText("Lightning to Bitcoin quotes are coming soon.");
+  await expect(page.locator("#swap-start")).toBeDisabled();
+
+  // Choosing the asset already on the other side swaps them.
+  await page.locator("#swap-to").selectOption("ln");
+  await expect(page.locator("#swap-from")).toHaveValue("btc");
+  await expect(page.getByRole("heading", { name: "Bitcoin in. Lightning out." })).toBeVisible();
+
+  await page.locator("#swap-to").selectOption("usdt");
+  await expect(page.locator("#swap-to option[value=usdt]")).toHaveText("USDT · soon");
+  await expect(page.locator("#swap-pair-note")).toHaveText("Stablecoin swaps are not supported yet.");
+  await expect(page.locator("#swap-start")).toHaveText("Pair unavailable");
+  await expect(page.locator("#swap-start")).toBeDisabled();
+  await page.locator("#swap-from").selectOption("usdc");
+  await expect(page.locator("#swap-pair-note")).toHaveText("Stablecoin swaps are not supported yet.");
+
+  await page.locator("#swap-from").selectOption("btc");
+  await page.locator("#swap-to").selectOption("ln");
+  await expect(page.locator("#swap-start")).toBeEnabled();
+  for (const url of requests) expect(new URL(url).host).toBe("127.0.0.1:18765");
+  expect(sockets).toEqual([]);
+});
+
 test("the swap page defaults to blocked mainnet and connects to nothing before start", async ({ page }) => {
   const requests: string[] = [];
   page.on("request", (request) => requests.push(request.url()));

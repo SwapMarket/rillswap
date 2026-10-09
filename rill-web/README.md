@@ -119,6 +119,16 @@ records are migrated, and no swap or background work is resumed. The relative
 Vite asset base supports static hosting under a repository or signet subpath;
 this configuration does not authorize a funded mainnet release or publish it.
 
+### Swap direction and assets
+
+The card's **You send / You receive** selectors and the switch button choose
+the pair. `src/swapPairs.ts` is the single table mapping display assets to
+protocol profiles: BTC to LN (`btc-to-ln/v1`) is quotable; LN to BTC
+(`ln-to-btc/v1`) shows its receive address and amount form but stays disabled
+until browser reverse quoting lands; USDT and USDC are listed in both
+directions as unavailable placeholders with no protocol profile. Unavailable
+pairs explain why and never connect anywhere.
+
 ### Automatic quote selection
 
 Leave the provider identity empty for automatic discovery, or pin it in
