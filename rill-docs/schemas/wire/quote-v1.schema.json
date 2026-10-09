@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://spec.rillswap.invalid/schemas/wire/quote-v1.schema.json",
-  "title": "RillSwap BTC to LN quote, firm request, terms offer, and error payloads v1",
+  "title": "RillSwap BTC to LN (RS-003) and LN to BTC (RS-004) quote, firm request, terms offer, and error payloads v1",
   "$defs": {
     "sats": { "$ref": "common-v1.schema.json#/$defs/decimalSats" },
     "positiveSats": {
@@ -64,11 +64,107 @@
         "extensions": { "$ref": "common-v1.schema.json#/$defs/extensions" }
       }
     },
+    "reverseLimits": {
+      "description": "RS-004 LN to BTC client bounds; the client is the claimant.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_success_fee_sat",
+        "min_claim_fee_reserve_sat",
+        "max_claim_fee_sat",
+        "min_refund_lock_height",
+        "max_incoming_htlc_expiry_height"
+      ],
+      "properties": {
+        "max_success_fee_sat": { "$ref": "#/$defs/sats" },
+        "min_claim_fee_reserve_sat": { "$ref": "#/$defs/sats" },
+        "max_claim_fee_sat": { "$ref": "#/$defs/sats" },
+        "min_refund_lock_height": { "$ref": "#/$defs/blockHeight" },
+        "max_incoming_htlc_expiry_height": { "$ref": "#/$defs/blockHeight" }
+      }
+    },
+    "reverseIndicativeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "mode", "nominal_payout_sat", "extensions"],
+      "properties": {
+        "kind": { "const": "ln-to-btc" },
+        "mode": { "const": "indicative" },
+        "nominal_payout_sat": { "$ref": "#/$defs/positiveSats" },
+        "extensions": { "$ref": "common-v1.schema.json#/$defs/extensions" }
+      }
+    },
+    "reverseFirmRequest": {
+      "description": "RS-004 LN to BTC firm request. Semantic rules, such as a version-1 destination script, remain normative in RS-004.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "mode",
+        "nominal_payout_sat",
+        "payment_hash",
+        "client_contract_compressed_key",
+        "recovery_authorization_xonly_key",
+        "client_destination_script",
+        "limits",
+        "extensions"
+      ],
+      "properties": {
+        "kind": { "const": "ln-to-btc" },
+        "mode": { "const": "firm" },
+        "nominal_payout_sat": { "$ref": "#/$defs/positiveSats" },
+        "payment_hash": { "$ref": "common-v1.schema.json#/$defs/hex32" },
+        "client_contract_compressed_key": { "$ref": "common-v1.schema.json#/$defs/hex33" },
+        "recovery_authorization_xonly_key": { "$ref": "common-v1.schema.json#/$defs/hex32" },
+        "client_destination_script": { "$ref": "common-v1.schema.json#/$defs/scriptHex" },
+        "limits": { "$ref": "#/$defs/reverseLimits" },
+        "extensions": { "$ref": "common-v1.schema.json#/$defs/extensions" }
+      }
+    },
     "quoteRequest": {
       "oneOf": [
         { "$ref": "#/$defs/indicativeRequest" },
-        { "$ref": "#/$defs/firmRequest" }
+        { "$ref": "#/$defs/firmRequest" },
+        { "$ref": "#/$defs/reverseIndicativeRequest" },
+        { "$ref": "#/$defs/reverseFirmRequest" }
       ]
+    },
+    "reverseQuoteOffer": {
+      "description": "RS-004 indicative LN to BTC quote. The incoming expiry delta must exceed the refund delay (RS-004).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "indicative",
+        "economics",
+        "funding_confirmations",
+        "settlement_confirmations",
+        "refund_resolution_confirmations",
+        "reference_height",
+        "refund_delay_blocks",
+        "incoming_htlc_expiry_delta_blocks",
+        "max_funding_fee_sat",
+        "max_claim_fee_sat",
+        "max_refund_fee_sat",
+        "expires_at",
+        "extensions"
+      ],
+      "properties": {
+        "kind": { "const": "ln-to-btc" },
+        "indicative": { "const": true },
+        "economics": { "$ref": "contract-terms-v1.schema.json#/$defs/lnToBtcEconomics" },
+        "funding_confirmations": { "$ref": "common-v1.schema.json#/$defs/positiveCount" },
+        "settlement_confirmations": { "$ref": "common-v1.schema.json#/$defs/positiveCount" },
+        "refund_resolution_confirmations": { "$ref": "common-v1.schema.json#/$defs/positiveCount" },
+        "reference_height": { "$ref": "#/$defs/blockHeight" },
+        "refund_delay_blocks": { "$ref": "common-v1.schema.json#/$defs/positiveCount" },
+        "incoming_htlc_expiry_delta_blocks": { "$ref": "common-v1.schema.json#/$defs/positiveCount" },
+        "max_funding_fee_sat": { "$ref": "#/$defs/sats" },
+        "max_claim_fee_sat": { "$ref": "#/$defs/sats" },
+        "max_refund_fee_sat": { "$ref": "#/$defs/sats" },
+        "expires_at": { "$ref": "common-v1.schema.json#/$defs/exactInteger" },
+        "extensions": { "$ref": "common-v1.schema.json#/$defs/extensions" }
+      }
     },
     "quoteOffer": {
       "type": "object",
@@ -123,6 +219,30 @@
       "properties": {
         "terms": { "$ref": "#/$defs/providerTerms" },
         "provider_terms_signature": { "$ref": "common-v1.schema.json#/$defs/signature64" }
+      }
+    },
+    "reverseTermsOffer": {
+      "description": "RS-004 LN to BTC terms offer. The decoded hold invoice must equal the signed invoice_binding (RS-004).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["terms", "provider_terms_signature", "hold_invoice"],
+      "properties": {
+        "terms": {
+          "allOf": [
+            { "$ref": "#/$defs/providerTerms" },
+            {
+              "type": "object",
+              "properties": {
+                "contract_terms": {
+                  "type": "object",
+                  "properties": { "profile_id": { "const": "ln-to-btc/v1" } }
+                }
+              }
+            }
+          ]
+        },
+        "provider_terms_signature": { "$ref": "common-v1.schema.json#/$defs/signature64" },
+        "hold_invoice": { "type": "string", "pattern": "^ln[a-z0-9]{1,2046}$" }
       }
     },
     "error": {

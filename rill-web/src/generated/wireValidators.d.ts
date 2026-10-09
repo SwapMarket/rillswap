@@ -4,6 +4,8 @@ export declare const validateEnvelope: Validator;
 export declare const validateHandshakeAcceptPayload: Validator;
 export declare const validateFirmQuoteRequest: Validator;
 export declare const validateTermsOffer: Validator;
+export declare const validateReverseFirmQuoteRequest: Validator;
+export declare const validateReverseTermsOffer: Validator;
 export declare const validateQuoteError: Validator;
 export declare const validateContractTerms: Validator;
 export declare const validateFundingBinding: Validator;
