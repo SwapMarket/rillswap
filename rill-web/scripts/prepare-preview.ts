@@ -37,3 +37,11 @@ const ui = await Bun.build({ entrypoints: ["src/swapUi.ts"], outdir: "tmp/previe
 if (!ui.success) throw new AggregateError(ui.logs, "UI test bundle failed");
 writeFileSync("tmp/preview/test-only/swap.html", readFileSync("dist/swap.html", "utf8")
   .replace(/src="\.\/assets\/[^"]+"/, 'src="./swapUi.js"').replaceAll("./assets/", "/assets/"));
+
+const recoveryAdmission = await Bun.build({ entrypoints: ["src/recoveryDocument.ts"], outdir: "tmp/preview/test-only", target: "browser", format: "esm" });
+if (!recoveryAdmission.success) throw new AggregateError(recoveryAdmission.logs, "recovery admission test bundle failed");
+const admissionCsp = "default-src 'none'; script-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'";
+writeFileSync("tmp/preview/test-only/recovery-admission.html", `<!doctype html><meta http-equiv="Content-Security-Policy" content="${admissionCsp}">` +
+  '<script type="module" src="./recovery-admission-harness.js"></script>');
+writeFileSync("tmp/preview/test-only/recovery-admission-harness.js", 'import { parseRecoveryPlaintext } from "./recoveryDocument.js";' +
+  'window.parseRecoveryPlaintext = parseRecoveryPlaintext; window.recoveryAdmissionReady = true;');
