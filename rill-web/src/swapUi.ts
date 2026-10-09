@@ -123,11 +123,20 @@ function mount(root: HTMLElement): void {
   const tip = field(setup, "swap-tip", "Block height override (optional)", "", "Leave empty to fetch the height from the configured mempool API.");
   const age = field(setup, "swap-age", "Recovery encryption recipient override (optional, age1...)", "",
     "Leave empty for the browser key. An override requires keeping its corresponding private age key yourself.");
-  const consentLabel = node("label");
-  const chainConsent = node("input", "", "swap-chain-consent");
-  chainConsent.type = "checkbox";
-  const consentText = node("span", "", "swap-chain-disclosure");
-  consentLabel.append(chainConsent, consentText);
+  const privacy = node("details", "", "swap-privacy");
+  const chainDisclosure = node("p", "", "swap-chain-disclosure");
+  const relayDisclosure = node("p", "", "swap-relay-disclosure");
+  privacy.append(node("summary", "Privacy & terms"),
+    node("p", "Requesting a quote authorizes the configured connections for this attempt. " +
+      "Nothing connects on page load or when you change settings."),
+    chainDisclosure, relayDisclosure,
+    node("p", "Responding providers receive your Lightning invoice. Encrypted messages do not hide transport metadata. " +
+      "Signatures authenticate offers, not provider reputation."),
+    node("p", "Recovery keys and files are not uploaded. The recovery root is stored unencrypted in this browser, " +
+      "where same-origin scripts can access it. Keep private backups and every encrypted per-swap recovery file. " +
+      "Clearing browser storage can lose access to refunds."),
+    node("p", "Unaudited experimental software, test funds only. New mainnet swaps remain blocked. " +
+      "A quote is not a funding commitment; review it and verify your key backup before continuing."));
   const limits = node("details");
   limits.append(node("summary", "Fee & timeout limits"));
   limits.append(node("p", "These are caps, not charges: the swap stops before funding if the " +
@@ -144,7 +153,7 @@ function mount(root: HTMLElement): void {
   const start = node("button", "Get quote", "swap-start");
   start.type = "submit";
   start.className = "primary";
-  form.append(setup, consentLabel, notice, start, node("small", "Requesting quotes shares this invoice with responding providers."));
+  form.append(setup, notice, start);
   const safety = node("details", "", "swap-safety");
   safety.append(node("summary", "Before using this preview"),
     node("p", "Unaudited and experimental. Use fake-money test networks only. Contract secrets live in this tab; " +
@@ -164,7 +173,7 @@ function mount(root: HTMLElement): void {
   diagnostics.append(node("summary", "Technical activity"));
   const log = node("pre", "", "swap-log");
   diagnostics.append(log);
-  card.append(cardHead, form, progress, panel, safety, diagnostics);
+  card.append(cardHead, form, progress, panel, privacy, safety, diagnostics);
   const footer = node("footer", "Provider-neutral · No account · Locally verified");
   root.replaceChildren(header, intro, card, footer, settings);
   const setStatus = (text: string, step: number, state = "working"): void => {
@@ -194,10 +203,11 @@ function mount(root: HTMLElement): void {
       : "Using your existing browser recovery key.";
   }).catch((error: Error) => { walletStatus.textContent = error.message; });
   const updateDisclosure = (): void => {
-    consentText.textContent = `Allow ${chainApi.value.trim()} to observe my IP when fetching block height for this quote. ` +
-      "No keys, invoices, or addresses are sent to this API.";
+    chainDisclosure.textContent = `Chain API: ${chainApi.value.trim()}. When automatic height is used, this operator sees your IP, ` +
+      "but receives no keys, invoices, or addresses. Its observations are trusted, not independent chain verification.";
+    relayDisclosure.textContent = `Nostr relays: ${relay.value.trim().split(/\s+/).join(", ")}. Operators see your IP and transport metadata.`;
   };
-  chainApi.oninput = () => { chainConsent.checked = false; updateDisclosure(); };
+  chainApi.oninput = relay.oninput = updateDisclosure;
   updateDisclosure();
   const updateNetwork = (): void => {
     const main = network.value === "mainnet";
@@ -211,7 +221,6 @@ function mount(root: HTMLElement): void {
   network.onchange = () => {
     relay.value = relaysForNetwork(network.value as NetworkName, __SWAP_DEFAULTS__).join("\n");
     chainApi.value = mempoolApiForNetwork(network.value as NetworkName, __SWAP_DEFAULTS__);
-    chainConsent.checked = false;
     refund.value = tip.value = age.value = "";
     updateDisclosure();
     updateNetwork();
@@ -257,7 +266,6 @@ function mount(root: HTMLElement): void {
       if (tip.value.trim() && (!Number.isSafeInteger(request.tipHeight) || request.tipHeight >= 500_000_000)) {
         throw new Error("Block height override is invalid");
       }
-      if (automaticTip && !chainConsent.checked) throw new Error("Approve the named mempool API before requesting a block height");
     } catch (error) {
       setup.open = true;
       report(`refused: ${(error as Error).message}`);
@@ -315,7 +323,7 @@ function mount(root: HTMLElement): void {
         }
         if (cancelled) return;
         if (automaticTip) {
-          setStatus("Fetching block height from your approved API", 0);
+          setStatus("Fetching block height from your configured API", 0);
           const observed = await readChainTip(api, { name, genesis_hash: request.network.genesis_hash as string }, { signal: cancellation.signal });
           request = { ...request, tipHeight: observed.height };
           report(`Trusted chain API observed block ${observed.height} (${observed.hash})`);

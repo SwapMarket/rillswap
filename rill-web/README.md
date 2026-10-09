@@ -74,7 +74,10 @@ connection. Select a test network in Settings to use the experimental flow.
 Loading the page or changing settings does not contact a relay.
 It creates or reuses an origin-local recovery key without network access.
 Refund addresses and encryption recipients are automatic; height is fetched
-only after approving the named chain API and requesting a quote. Advanced
+only when requesting a quote. The collapsed **Privacy & terms** section
+explains the configured connections, IP visibility, invoice disclosure,
+and browser-key storage. Requesting a quote authorizes that attempt's
+connections, not later background work or legal acceptance. Advanced
 overrides remain under the recovery details. A matching key-backup check is
 required before accepting a quote using either browser-wallet default. The
 separate encrypted per-swap backup gates are unchanged.
@@ -100,7 +103,7 @@ not hide that metadata. A relay preset is not an endorsement of providers.
 `VITE_RILLSWAP_MEMPOOL_API` configures an Esplora-compatible chain API. Defaults
 are `https://mempool.space/api`, `/signet/api`, or `/testnet4/api` on that
 origin, and `http://127.0.0.1:8091/api` on regtest. Switching networks resets
-the preset and consent. Requests omit credentials and referrers, refuse
+the preset and updates the disclosure. Requests omit credentials and referrers, refuse
 redirects, and bound response size and duration. They check genesis and a
 stable sampled tip, not independent canonical-chain validity or a signet
 challenge. The operator sees your IP, not keys, invoices, or refund addresses.

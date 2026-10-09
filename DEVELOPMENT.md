@@ -164,7 +164,8 @@ the narrow regtest adapter; `devctl` still stands in for your funding wallet.
 1. `dev/devctl web-inputs 50000` prints a fresh user invoice and optional manual
    overrides. The local page already defaults to regtest, its relay, a
    browser-stored recovery key, derived refund address, and local height API.
-   Paste only the invoice, approve the named API, and click **Get quote**.
+   Paste only the invoice and click **Get quote**. Connection and key-storage
+   basics are under **Privacy & terms**, without a separate API warning.
    Download `rillswap-recovery-key.json`, then choose the saved file to check
    it before **Use this quote** becomes available. The provider is selected
    automatically; optionally pin the maker key in **Settings**. For conventional

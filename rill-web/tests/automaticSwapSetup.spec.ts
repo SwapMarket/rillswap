@@ -7,7 +7,7 @@ const API = "http://127.0.0.1:8091/api";
 
 async function verifiedQuote(page: Page): Promise<void> {
   await mockTip(page);
-  await page.goto(PAGE); await invoice(page); await page.locator("#swap-chain-consent").check();
+  await page.goto(PAGE); await invoice(page);
   await page.locator("#swap-start").click();
   await expect(page.locator("#swap-quote-accept")).toBeDisabled();
   await page.evaluate(async () => {
@@ -51,15 +51,17 @@ async function mockTip(page: Page, genesis = regtest.genesis_hash): Promise<stri
   return requests;
 }
 
-test("defaults generate a refund address and key, fetch an approved tip, and block execution until a matching backup check", async ({ page }, info) => {
+test("defaults fetch a tip on quote action and block execution until a matching backup check", async ({ page }, info) => {
   const requests = await mockTip(page);
   await page.goto(PAGE);
+  expect(requests).toEqual([]);
+  await expect(page.locator("#swap-chain-consent")).toHaveCount(0);
+  await expect(page.locator("#swap-chain-disclosure")).not.toBeVisible();
+  await page.locator("#swap-privacy summary").click();
+  await expect(page.locator("#swap-chain-disclosure")).toContainText(API);
+  expect(requests).toEqual([]);
+  await page.locator("#swap-privacy summary").click();
   await invoice(page);
-  expect(requests).toEqual([]);
-  await page.locator("#swap-start").click();
-  await expect(page.locator("#swap-status")).toContainText("Approve the named mempool API");
-  expect(requests).toEqual([]);
-  await page.locator("#swap-chain-consent").check();
   await page.locator("#swap-start").click();
   await expect(page.locator("#swap-quote-accept")).toBeDisabled();
   expect(requests).toHaveLength(5);
@@ -94,7 +96,7 @@ test("defaults generate a refund address and key, fetch an approved tip, and blo
 
 test("wrong chain identity prevents quote preparation", async ({ page }) => {
   await mockTip(page, "f".repeat(64));
-  await page.goto(PAGE); await invoice(page); await page.locator("#swap-chain-consent").check();
+  await page.goto(PAGE); await invoice(page);
   await page.locator("#swap-start").click();
   await expect(page.locator("#swap-status")).toContainText("genesis does not match");
   expect(await page.evaluate(() => window.uiFixture.requests)).toEqual([]);
@@ -109,7 +111,7 @@ test("canceling automatic setup never shows a late quote or reuses the allocated
     await route.fulfill({ body: path.endsWith("/0") ? regtest.genesis_hash : path.endsWith("/height") ? "100" : "a".repeat(64),
       headers: { "Access-Control-Allow-Origin": "http://127.0.0.1:18765" } });
   });
-  await page.goto(PAGE); await invoice(page); await page.locator("#swap-chain-consent").check();
+  await page.goto(PAGE); await invoice(page);
   await page.locator("#swap-start").click();
   await expect.poll(() => !!release).toBe(true);
   await page.locator("#swap-edit").click(); release!();

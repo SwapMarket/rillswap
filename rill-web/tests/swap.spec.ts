@@ -18,6 +18,11 @@ test("the swap page defaults to blocked mainnet and connects to nothing before s
   await expect(page.locator("#swap-success-fee")).not.toBeVisible();
   await expect(page.locator("#swap-provider")).not.toBeVisible();
   await expect(page.locator("#swap-log")).not.toBeVisible();
+  await expect(page.locator("#swap-chain-disclosure")).not.toBeVisible();
+  await expect(page.locator("#swap-chain-consent")).toHaveCount(0);
+  await page.locator("#swap-privacy summary").click();
+  await expect(page.locator("#swap-chain-disclosure")).toContainText("https://mempool.space/api");
+  await page.locator("#swap-privacy summary").click();
   await page.locator("#swap-wallet-setup summary").click();
   await expect(page.locator("#swap-prerequisites")).toContainText("PSBT");
   await expect(page.locator("#swap-wallet-status")).toContainText("New browser recovery key created");
@@ -90,11 +95,15 @@ test("settings are keyboard accessible and switching networks resets local relay
   await expect(page.getByRole("dialog")).toBeVisible();
   await page.locator("#swap-network").selectOption("regtest");
   await expect(page.locator("#swap-relay")).toHaveValue("ws://127.0.0.1:7777/");
+  await expect(page.locator("#swap-chain-api")).toHaveValue("http://127.0.0.1:8091/api");
   await page.locator("#swap-network").selectOption("signet");
   await expect(page.locator("#swap-relay")).toHaveValue("wss://relay.damus.io/\nwss://nos.lol/\nwss://relay.primal.net/");
+  await expect(page.locator("#swap-chain-api")).toHaveValue("https://mempool.space/signet/api");
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).not.toBeVisible();
   await expect(page.locator("#swap-start")).toBeEnabled();
+  await page.locator("#swap-privacy summary").click();
+  await expect(page.locator("#swap-chain-disclosure")).toContainText("https://mempool.space/signet/api");
   expect(sockets).toEqual([]);
 });
 
