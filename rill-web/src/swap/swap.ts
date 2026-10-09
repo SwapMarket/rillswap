@@ -8,36 +8,29 @@
  * wait for the preimage. No key or record leaves memory except through the
  * user's own downloads; refunds use `rill recover watch-refund --chain-only`.
  */
-import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
+import { schnorr } from "@noble/curves/secp256k1.js";
 import { bytesToHex, randomBytes } from "@noble/hashes/utils.js";
 
-import type { AnnouncementCandidate } from "../nostrProviderAnnouncement";
 import { invoiceBinding } from "./bolt11";
 import { COOPERATIVE_RESERVATION_EXTENSION, type Cosigner, settle } from "./cooperative";
 import { type AnnouncementSource, discoverProvider } from "./discovery";
 import { type AuthorizedFunding, authorizeFundingPsbt, type FundingBinding, fundingBinding } from "./funding";
-import { clientAcceptanceHash, epochBoundSessionId, fundingBindingHash, handshakeHash } from "./hashes";
+import { clientAcceptanceHash, fundingBindingHash } from "./hashes";
 import { encryptRecovery, type RecoveryParts } from "./recovery";
+import { handshake, newKeyPair } from "./handshake";
 import { type RelayLink, Session, SwapError } from "./session";
 import { verifyNostrProviderAnnouncement } from "../nostrProviderAnnouncement";
 import { reconstructTaprootContract } from "./taproot";
 import {
   type BtcToLnTerms,
-  checkHandshakeAccept,
   checkTermsOffer,
-  COOPERATIVE_CLAIM_FEATURE,
-  EPOCH_SESSION_EXTENSION,
-  EPOCH_SESSION_FEATURE,
   type FirmQuoteRequest,
-  type HandshakeInit,
   requireShape,
   type TermsOffer,
 } from "./wire";
 
 export const PROFILE = "btc-to-ln/v1";
 // The same selection rill-cli requests; the suite name is a label for NIP-59 delivery.
-const ENCRYPTION_SUITES = ["noise-xk-secp256k1-chachapoly-sha256/v1"];
-const CAPABILITIES = ["core/v1", "recovery/v1"];
 /** Seconds an invoice must stay valid at quote time (the provider needs time to pay). */
 const MIN_INVOICE_REMAINING_SECONDS = 600;
 
@@ -105,62 +98,8 @@ export interface SwapTimeouts {
   readonly settleMs: number;
 }
 
-interface Handshake {
-  readonly init: HandshakeInit;
-  readonly accept: ReturnType<typeof checkHandshakeAccept>;
-  readonly acceptSignature: string;
-  readonly transcript: string;
-}
 
-async function handshake(session: Session, provider: AnnouncementCandidate, identity: string): Promise<Handshake> {
-  const epoch = provider.advertisedEpochInboxKeys[0]!;
-  if (provider.requiresEpochBinding) {
-    session.sessionId = bytesToHex(epochBoundSessionId(session.network, identity, epoch, session.key));
-  }
-  const init: HandshakeInit = {
-    protocol: "rillswap",
-    wire_version: "1",
-    profile_id: PROFILE,
-    network_identity: session.network,
-    session_id: session.sessionId,
-    client_challenge: bytesToHex(randomBytes(32)),
-    client_session_xonly_key: session.key,
-    expected_provider_identity_xonly_key: identity,
-    requested_encryption_suites: ENCRYPTION_SUITES,
-    requested_capabilities: CAPABILITIES,
-    // Cooperative claims are mandatory; features are sorted like every signed list.
-    required_features: provider.requiresEpochBinding
-      ? [COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE]
-      : [COOPERATIVE_CLAIM_FEATURE],
-    extensions: provider.requiresEpochBinding ? { [EPOCH_SESSION_EXTENSION]: { epoch_inbox_xonly_key: epoch } } : {},
-  };
-  const request = session.envelope("handshake_init", init as unknown as Record<string, unknown>, { signed: false });
-  await session.listen();
-  await session.send(request, epoch);
-  const answer = await session.replyTo(request, "handshake_accept");
-  const accept = checkHandshakeAccept(answer.payload, init, answer.sender_session_key);
-  session.providerKey = answer.sender_session_key;
-  const transcript = bytesToHex(handshakeHash(init, accept));
-  const confirm = session.envelope(
-    "handshake_confirm",
-    {
-      handshake_hash: transcript,
-      session_id: session.sessionId,
-      client_session_xonly_key: session.key,
-      provider_session_xonly_key: session.providerKey,
-    },
-    { inReplyTo: answer.message_id },
-  );
-  await session.send(confirm, session.providerKey);
-  const signature = (answer.payload as { provider_identity_signature: string }).provider_identity_signature;
-  return { init, accept, acceptSignature: signature, transcript };
-}
 
-function newKeyPair(): { secret: Uint8Array; compressed: string; xonly: string } {
-  const secret = secp256k1.utils.randomSecretKey();
-  const compressed = bytesToHex(secp256k1.getPublicKey(secret, true));
-  return { secret, compressed, xonly: compressed.slice(2) };
-}
 
 const sign = (digest: Uint8Array, secret: Uint8Array): string => bytesToHex(schnorr.sign(digest, secret, randomBytes(32)));
 
