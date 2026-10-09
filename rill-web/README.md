@@ -215,6 +215,17 @@ reload resumes a swap; retain the original downloaded recovery files.
 
 ### Refunding a stopped swap
 
+`src/recoveryDocument.ts` currently provides a local, bounded plaintext
+admission building block. It requires fatal UTF-8 decoding, Core-compatible
+integer/string/member/depth limits, duplicate-free JSON, byte-exact JCS, and
+the authoritative closed RS-007 schema. Its deeply frozen result is explicitly
+**unverified** and contains secrets; it is not a redacted inspection report.
+Never log or persist it. Generated schema code is compiled at build time from
+`rill-docs`, not fetched or evaluated at runtime. This code does not verify
+signatures, contract-secret consistency, complete funding history, or
+cooperative reservations, and is not connected to UI imports, signing,
+scanning, or broadcast. Historical authentication is the next increment.
+
 You need `rill-cli` (see its README), a synced Bitcoin Core node for the same
 network, the funded recovery file, its age key, and the funding attempt ID that
 the page printed (`attempt <ID> revision 0`). After the refund block shown by

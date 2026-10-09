@@ -13,6 +13,7 @@ import fundingBindingSchema from "../src/schemas/wire/funding-binding-v1.schema.
 import handshakeSchema from "../src/schemas/wire/handshake-v1.schema.json";
 import quoteSchema from "../src/schemas/wire/quote-v1.schema.json";
 import settlementSchema from "../src/schemas/wire/settlement-v1.schema.json";
+import recoverySchema from "../../rill-docs/schemas/recovery/recovery-v1.schema.json";
 
 const ajv = new Ajv2020({ strict: true, code: { source: true, esm: true } });
 ajv.addSchema(commonSchema);
@@ -66,7 +67,22 @@ const wireOutput = "// Generated from vendored RS-001/RS-003 schemas. Run `bun r
   standaloneCode(wire, wireExports);
 const wirePath = resolve(import.meta.dir, "../src/generated/wireValidators.js");
 
-for (const [target, text] of [[path, output], [wirePath, wireOutput]] as const) {
+// The authoritative RS-007 schema has properties within allOf branches without
+// repeating a local object type. Isolate that strictTypes exception here; all
+// schema rules still apply, and the event/wire validator policies are unchanged.
+const recovery = new Ajv2020({ strict: true, strictTypes: false, code: { source: true, esm: true } });
+for (const schema of [commonSchema, contractTermsSchema, fundingBindingSchema, handshakeSchema, envelopeSchema, recoverySchema]) {
+  recovery.addSchema(schema);
+}
+if (!recovery.getSchema(recoverySchema.$id)) throw new Error("Required recovery schema failed to compile");
+const recoveryOutput = "// Generated from authoritative RS-007 schema. Run `bun run check:schemas`.\n" +
+  standaloneCode(recovery, { validateRecoveryPlaintext: recoverySchema.$id });
+const recoveryPath = resolve(import.meta.dir, "../src/generated/recoveryValidators.js");
+const recoveryTypesPath = resolve(import.meta.dir, "../src/generated/recoveryValidators.d.ts");
+const recoveryTypes = "/** Generated RS-007 shape validation, never cryptographic authorization. */\n" +
+  "export function validateRecoveryPlaintext(value: unknown): boolean;\n";
+
+for (const [target, text] of [[path, output], [wirePath, wireOutput], [recoveryPath, recoveryOutput], [recoveryTypesPath, recoveryTypes]] as const) {
   if (process.argv.includes("--check")) {
     if (readFileSync(target, "utf8") !== text) throw new Error(`Generated validators are stale: ${target}`);
   } else {

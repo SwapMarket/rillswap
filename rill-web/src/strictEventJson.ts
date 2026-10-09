@@ -1,4 +1,4 @@
-/** Bounded duplicate-safe JSON for raw NIP-01 event objects. No eval. */
+/** Bounded duplicate-safe JSON. Event and recovery admission have distinct profiles. No eval. */
 
 const encoder = new TextEncoder();
 
@@ -8,6 +8,15 @@ const encoder = new TextEncoder();
  * Root and each nested object/array count as one level, depth at most 16.
  */
 export function parseStrictEventJson(raw: string, maxBytes = 128 * 1024): unknown {
+  return parseBoundedJson(raw, maxBytes, false);
+}
+
+/** Core-compatible recovery bounds, but neither schema validation nor authentication. */
+export function parseStrictRecoveryJson(raw: string, maxBytes = 128 * 1024): unknown {
+  return parseBoundedJson(raw, maxBytes, true);
+}
+
+function parseBoundedJson(raw: string, maxBytes: number, recovery: boolean): unknown {
   if (typeof raw !== "string" || raw.length === 0 || raw.length > maxBytes) {
     throw new Error("NIP-01 event refused");
   }
@@ -23,12 +32,15 @@ export function parseStrictEventJson(raw: string, maxBytes = 128 * 1024): unknow
       if (raw[pos] === "\\") {
         pos += 2;
       } else if (raw[pos++] === '"') {
-        return JSON.parse(raw.slice(start, pos)) as string;
+        const value = JSON.parse(raw.slice(start, pos)) as string;
+        if (recovery && encoder.encode(value).length > 16 * 1024) throw new Error("Recovery JSON refused");
+        return value;
       }
     }
     throw new Error("NIP-01 event refused");
   };
   const scan = (depth: number): void => {
+    if (recovery && depth > 16) throw new Error("Recovery JSON refused");
     skip();
     const start = pos;
     if (raw[pos] === "{") {
@@ -40,6 +52,7 @@ export function parseStrictEventJson(raw: string, maxBytes = 128 * 1024): unknow
       if (raw[pos] === "}") { pos++; return; }
       while (pos < raw.length) {
         skip();
+        if (recovery && depth + 1 > 16) throw new Error("Recovery JSON refused");
         const name = quoted();
         if (names.has(name) || ++count > 128) throw new Error("NIP-01 event refused");
         names.add(name);
@@ -70,10 +83,17 @@ export function parseStrictEventJson(raw: string, maxBytes = 128 * 1024): unknow
       // to delimit scalar tokens and reject unbounded numeric work.
       while (pos < raw.length && !/[\t\n\r ,\]}]/.test(raw[pos]!)) pos++;
       if (pos === start || pos - start > 32) throw new Error("NIP-01 event refused");
+      if (recovery) {
+        const token = raw.slice(start, pos);
+        if (!["true", "false", "null"].includes(token) &&
+            (!/^-?(0|[1-9][0-9]*)$/.test(token) || !Number.isSafeInteger(Number(token)))) {
+          throw new Error("Recovery JSON refused");
+        }
+      }
     }
     if (pos === start) throw new Error("NIP-01 event refused");
   };
-  scan(1);
+  scan(recovery ? 0 : 1);
   skip();
   if (pos !== raw.length) throw new Error("NIP-01 event refused");
   // Reject lone surrogate code units, including escaped forms, rather than
