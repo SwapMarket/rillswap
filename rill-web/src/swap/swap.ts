@@ -19,6 +19,7 @@ import { type AuthorizedFunding, authorizeFundingPsbt, type FundingBinding, fund
 import { clientAcceptanceHash, epochBoundSessionId, fundingBindingHash, handshakeHash } from "./hashes";
 import { encryptRecovery, type RecoveryParts } from "./recovery";
 import { type RelayLink, Session, SwapError } from "./session";
+import { verifyNostrProviderAnnouncement } from "../nostrProviderAnnouncement";
 import { reconstructTaprootContract } from "./taproot";
 import {
   type BtcToLnTerms,
@@ -176,7 +177,208 @@ function checkRequest(request: SwapRequest, now: number): ReturnType<typeof invo
   return binding;
 }
 
-/** Run one swap over `relay`; throws SwapError with a refund hint once funded. */
+export interface PreparedQuote {
+  readonly providerIdentity: string;
+  readonly providerSlot: string;
+  readonly contractHash: string;
+  readonly contractAmountSat: bigint;
+  readonly successFeeSat: bigint;
+  readonly refundLockHeight: number;
+  readonly expiresAt: number;
+}
+
+/** Holds one exact authenticated offer. Preparation does not accept or fund it. */
+export interface PreparedSwap {
+  readonly quote: PreparedQuote;
+  execute(hooks: SwapHooks): Promise<SwapOutcome>;
+  /** Discards an unused offer; never interrupts execution or rolls back funding. */
+  dispose(): void;
+}
+
+interface PreparationOptions {
+  readonly timeouts?: SwapTimeouts;
+  readonly clock?: () => number;
+  /** Reverified here, preserving the exact directory-selected slot/revision. */
+  readonly announcement?: string;
+}
+
+export async function prepareSwap(
+  relay: RelayLink & AnnouncementSource,
+  request: SwapRequest,
+  report: SwapHooks["report"],
+  options: PreparationOptions = {},
+): Promise<PreparedSwap> {
+  request = { ...request, network: structuredClone(request.network), limits: { ...request.limits } };
+  const timeouts = { ...(options.timeouts ?? { replyMs: 60_000, settleMs: 600_000 }) };
+  const clock = options.clock ?? Date.now;
+  const seconds = (): number => Math.floor(clock() / 1000);
+  const invoice = checkRequest(request, seconds());
+  const checkoutExpiry = request.checkoutExpiresAt ?? invoice.expires_at;
+  if (!Number.isSafeInteger(checkoutExpiry) || checkoutExpiry <= seconds()) throw new SwapError("checkout expiry invalid");
+  const { identity, network } = request;
+  const provider = options.announcement === undefined
+    ? await discoverProvider(relay, identity, network, PROFILE)
+    : verifyNostrProviderAnnouncement(options.announcement, identity, network, PROFILE);
+  report(`provider found (revision ${provider.revision})`);
+  const session = new Session(relay, network, PROFILE, timeouts.replyMs, clock);
+  let contractSecret: Uint8Array | null = null;
+  try {
+    const { init, accept, acceptSignature, transcript } = await handshake(session, provider, identity);
+    const providerKey = session.providerKey!;
+    report(`session ${session.sessionId.slice(0, 16)} confirmed`);
+
+    const contract = newKeyPair();
+    contractSecret = contract.secret;
+    const recoveryKey = newKeyPair(); // authorization key; its secret is never needed
+    recoveryKey.secret.fill(0);
+    const limits = request.limits;
+    const quote: FirmQuoteRequest = {
+      kind: "btc-to-ln",
+      mode: "firm",
+      lightning_principal_sat: (BigInt(invoice.amount_msat) / 1000n).toString(),
+      invoice: request.invoice,
+      client_contract_compressed_key: contract.compressed,
+      recovery_authorization_xonly_key: recoveryKey.xonly,
+      client_destination_script: request.refundScript,
+      limits: {
+        max_success_fee_sat: limits.maxSuccessFeeSat.toString(),
+        max_funding_fee_sat: limits.maxFundingFeeSat.toString(),
+        max_claim_fee_sat: limits.maxClaimFeeSat.toString(),
+        max_refund_fee_sat: limits.maxRefundFeeSat.toString(),
+        max_refund_lock_height: request.tipHeight + limits.maxRefundDelayBlocks,
+      },
+      extensions: {},
+    };
+    requireShape("validateFirmQuoteRequest", quote);
+    const quoteEnvelope = session.envelope("quote_request", quote as unknown as Record<string, unknown>);
+    await session.send(quoteEnvelope, providerKey);
+    const answer = await session.replyTo(quoteEnvelope, "terms_offer");
+    const terms: BtcToLnTerms = checkTermsOffer(answer.payload, {
+      request: quote,
+      invoiceBinding: invoice,
+      transcript,
+      envelopeContractHash: answer.contract_hash,
+      identity,
+      network,
+      now: seconds(),
+    });
+    if (terms.refund_lock_height <= request.tipHeight) throw new SwapError("offered refund height is already reached");
+    const offer = answer.payload as unknown as TermsOffer;
+    const contractHash = offer.terms.contract_hash;
+    const economics = terms.economics;
+    report(`terms: fund ${economics.contract_amount_sat} sat, refund after block ${terms.refund_lock_height}`);
+
+    let state: "ready" | "executing" | "disposed" | "done" = "ready";
+    const release = (): void => { session.secret.fill(0); contract.secret.fill(0); };
+    return Object.freeze({
+      quote: Object.freeze({
+        providerIdentity: identity,
+        providerSlot: provider.slot,
+        contractHash,
+        contractAmountSat: BigInt(economics.contract_amount_sat),
+        successFeeSat: BigInt(economics.success_fee_sat),
+        refundLockHeight: terms.refund_lock_height,
+        expiresAt: Math.min(terms.terms_expiry, invoice.expires_at, checkoutExpiry),
+      }),
+      dispose: () => {
+        if (state === "ready") { state = "disposed"; release(); }
+      },
+      execute: async (hooks: SwapHooks): Promise<SwapOutcome> => {
+        if (state !== "ready") throw new SwapError("quote is already used or discarded; request a fresh quote");
+        state = "executing";
+        try {
+          assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry);
+          const acceptance = {
+            contract_hash: contractHash,
+            handshake_hash: transcript,
+            session_id: session.sessionId,
+            client_session_xonly_key: session.key,
+            provider_session_xonly_key: providerKey,
+          };
+          const acceptanceSignature = sign(clientAcceptanceHash(acceptance), session.secret);
+          const createdAt = seconds();
+          const record: RecoveryParts = {
+            network, profile: PROFILE, init, accept, acceptSignature, offer, acceptanceSignature,
+            clientSessionKey: session.key, contractSecret: contract.secret,
+            birthday: request.tipHeight, createdAt, updatedAt: createdAt, funding: [], preimage: null,
+          };
+          await hooks.saveRecovery(await encryptRecovery(record, request.ageRecipient), "terms");
+          hooks.report("recovery file saved (terms, no funding yet)");
+          assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry);
+          const accepted = session.envelope(
+            "terms_accept",
+            { acceptance, client_acceptance_signature: acceptanceSignature },
+            { inReplyTo: answer.message_id, contract: contractHash },
+          );
+          await session.send(accepted, providerKey,
+            () => assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry));
+          await session.replyTo(accepted, "ack");
+
+          const funding = await authorizeUserFunding(terms, hooks);
+          assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry);
+          const binding = fundingBinding(contractHash, funding, bytesToHex(randomBytes(32)), seconds());
+          const bindingSignature = sign(fundingBindingHash(binding), session.secret);
+          const funded = { ...record, updatedAt: seconds(), funding: [{ binding, signature: bindingSignature }] };
+          await hooks.saveRecovery(await encryptRecovery(funded, request.ageRecipient), "funded");
+          hooks.report(`funded recovery file saved (funding ${funding.txid}, attempt ${binding.funding_attempt_id} revision 0)`);
+          const bound = session.envelope(
+            "funding_binding",
+            { binding, funding_binding_signature: bindingSignature, funding_transaction: funding.raw },
+            { contract: contractHash },
+          );
+          // Sharing a signed transaction can commit funds before a broadcast acknowledgment.
+          await hooks.beforeFundingCommit?.(funding.txid, terms.terms_expiry);
+          assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry);
+          await session.send(bound, providerKey,
+            () => assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry));
+          await session.replyTo(bound, "ack");
+          assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry);
+          await hooks.broadcast(funding.raw, funding.txid);
+          hooks.report(`funding ${funding.txid} broadcast; waiting for the provider to pay`);
+          const hint =
+            `funds are committed; after block ${terms.refund_lock_height} refund with rill-cli and your own ` +
+            `Bitcoin Core: \`rill recover watch-refund --chain-only --funding-attempt-id ${binding.funding_attempt_id} ` +
+            "--binding-revision 0` on the funded recovery file (see the rill-web README for the full command)";
+          const settled = await settle(
+            { session, providerKey, terms, contractHash, binding, contractSecret: contract.secret,
+              tipHeight: request.tipHeight, settleMs: timeouts.settleMs, cosigner: hooks.cosigner, report: hooks.report },
+            hint,
+          );
+          hooks.report(settled.cooperation === "verified"
+            ? `cooperative key-path claim ${settled.claimTxid} verified; the provider claims privately`
+            : "cooperation skipped; the provider claims with the preimage");
+          const reserved = settled.reservation;
+          const paid: RecoveryParts = {
+            ...funded,
+            // A reservation is dated when journaled, before its proposal deadline.
+            updatedAt: Math.max(funded.updatedAt, reserved?.recordedAt ?? seconds()),
+            preimage: settled.preimage,
+            extensions: reserved === null ? {} : {
+              [COOPERATIVE_RESERVATION_EXTENSION]: {
+                version: 1, proposal: reserved.proposal, signature_hash: reserved.signature_hash,
+              },
+            },
+          };
+          return {
+            sessionId: session.sessionId, contractHash, fundingTxid: funding.txid,
+            preimage: settled.preimage, refundLockHeight: terms.refund_lock_height,
+            cooperation: settled.cooperation, claimTxid: settled.claimTxid,
+            paidRecovery: await encryptRecovery(paid, request.ageRecipient),
+          };
+        } finally {
+          state = "done";
+          release();
+        }
+      },
+    });
+  } catch (error) {
+    session.secret.fill(0);
+    contractSecret?.fill(0);
+    throw error;
+  }
+}
+
+/** Compatibility entrypoint: prepares and immediately executes one pinned-provider swap. */
 export async function runSwap(
   relay: RelayLink & AnnouncementSource,
   request: SwapRequest,
@@ -184,162 +386,8 @@ export async function runSwap(
   timeouts: SwapTimeouts = { replyMs: 60_000, settleMs: 600_000 },
   clock: () => number = Date.now,
 ): Promise<SwapOutcome> {
-  const seconds = (): number => Math.floor(clock() / 1000);
-  const invoice = checkRequest(request, seconds());
-  const checkoutExpiry = request.checkoutExpiresAt ?? invoice.expires_at;
-  if (!Number.isSafeInteger(checkoutExpiry) || checkoutExpiry <= seconds()) throw new SwapError("checkout expiry invalid");
-  const { identity, network } = request;
-  const provider = await discoverProvider(relay, identity, network, PROFILE);
-  hooks.report(`provider found (revision ${provider.revision})`);
-  const session = new Session(relay, network, PROFILE, timeouts.replyMs, clock);
-  const { init, accept, acceptSignature, transcript } = await handshake(session, provider, identity);
-  const providerKey = session.providerKey!;
-  hooks.report(`session ${session.sessionId.slice(0, 16)} confirmed`);
-
-  const contract = newKeyPair();
-  const recoveryKey = newKeyPair(); // authorization key; its secret is never needed
-  const limits = request.limits;
-  const quote: FirmQuoteRequest = {
-    kind: "btc-to-ln",
-    mode: "firm",
-    lightning_principal_sat: (BigInt(invoice.amount_msat) / 1000n).toString(),
-    invoice: request.invoice,
-    client_contract_compressed_key: contract.compressed,
-    recovery_authorization_xonly_key: recoveryKey.xonly,
-    client_destination_script: request.refundScript,
-    limits: {
-      max_success_fee_sat: limits.maxSuccessFeeSat.toString(),
-      max_funding_fee_sat: limits.maxFundingFeeSat.toString(),
-      max_claim_fee_sat: limits.maxClaimFeeSat.toString(),
-      max_refund_fee_sat: limits.maxRefundFeeSat.toString(),
-      max_refund_lock_height: request.tipHeight + limits.maxRefundDelayBlocks,
-    },
-    extensions: {},
-  };
-  requireShape("validateFirmQuoteRequest", quote);
-  const quoteEnvelope = session.envelope("quote_request", quote as unknown as Record<string, unknown>);
-  await session.send(quoteEnvelope, providerKey);
-  const answer = await session.replyTo(quoteEnvelope, "terms_offer");
-  const terms: BtcToLnTerms = checkTermsOffer(answer.payload, {
-    request: quote,
-    invoiceBinding: invoice,
-    transcript,
-    envelopeContractHash: answer.contract_hash,
-    identity,
-    network,
-    now: seconds(),
-  });
-  if (terms.refund_lock_height <= request.tipHeight) throw new SwapError("offered refund height is already reached");
-  const offer = answer.payload as unknown as TermsOffer;
-  const contractHash = offer.terms.contract_hash;
-  const economics = terms.economics;
-  hooks.report(`terms: fund ${economics.contract_amount_sat} sat, refund after block ${terms.refund_lock_height}`);
-
-  const acceptance = {
-    contract_hash: contractHash,
-    handshake_hash: transcript,
-    session_id: session.sessionId,
-    client_session_xonly_key: session.key,
-    provider_session_xonly_key: providerKey,
-  };
-  const acceptanceSignature = sign(clientAcceptanceHash(acceptance), session.secret);
-  const createdAt = seconds();
-  const record: RecoveryParts = {
-    network,
-    profile: PROFILE,
-    init,
-    accept,
-    acceptSignature,
-    offer,
-    acceptanceSignature,
-    clientSessionKey: session.key,
-    contractSecret: contract.secret,
-    birthday: request.tipHeight,
-    createdAt,
-    updatedAt: createdAt,
-    funding: [],
-    preimage: null,
-  };
-  await hooks.saveRecovery(await encryptRecovery(record, request.ageRecipient), "terms");
-  hooks.report("recovery file saved (terms, no funding yet)");
-  assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry);
-  const accepted = session.envelope(
-    "terms_accept",
-    { acceptance, client_acceptance_signature: acceptanceSignature },
-    { inReplyTo: answer.message_id, contract: contractHash },
-  );
-  await session.send(accepted, providerKey);
-  await session.replyTo(accepted, "ack");
-
-  const funding = await authorizeUserFunding(terms, hooks);
-  assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry);
-  const binding = fundingBinding(contractHash, funding, bytesToHex(randomBytes(32)), seconds());
-  const bindingSignature = sign(fundingBindingHash(binding), session.secret);
-  const funded = { ...record, updatedAt: seconds(), funding: [{ binding, signature: bindingSignature }] };
-  await hooks.saveRecovery(await encryptRecovery(funded, request.ageRecipient), "funded");
-  hooks.report(`funded recovery file saved (funding ${funding.txid}, attempt ${binding.funding_attempt_id} revision 0)`);
-  const bound = session.envelope(
-    "funding_binding",
-    { binding, funding_binding_signature: bindingSignature, funding_transaction: funding.raw },
-    { contract: contractHash },
-  );
-  // Publishing a signed transaction to the provider can commit funds even if
-  // the customer's later broadcast callback never runs.
-  await hooks.beforeFundingCommit?.(funding.txid, terms.terms_expiry);
-  assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry);
-  await session.send(bound, providerKey, () => assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry));
-  await session.replyTo(bound, "ack");
-  assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry);
-  await hooks.broadcast(funding.raw, funding.txid);
-  hooks.report(`funding ${funding.txid} broadcast; waiting for the provider to pay`);
-  const hint =
-    `funds are committed; after block ${terms.refund_lock_height} refund with rill-cli and your own ` +
-    `Bitcoin Core: \`rill recover watch-refund --chain-only --funding-attempt-id ${binding.funding_attempt_id} ` +
-    "--binding-revision 0` on the funded recovery file (see the rill-web README for the full command)";
-  const settled = await settle(
-    {
-      session,
-      providerKey,
-      terms,
-      contractHash,
-      binding,
-      contractSecret: contract.secret,
-      tipHeight: request.tipHeight,
-      settleMs: timeouts.settleMs,
-      cosigner: hooks.cosigner,
-      report: hooks.report,
-    },
-    hint,
-  );
-  hooks.report(
-    settled.cooperation === "verified"
-      ? `cooperative key-path claim ${settled.claimTxid} verified; the provider claims privately`
-      : "cooperation skipped; the provider claims with the preimage",
-  );
-  const reserved = settled.reservation;
-  const paid: RecoveryParts = {
-    ...funded,
-    // A reservation is dated when it was journaled, before its proposal deadline.
-    updatedAt: Math.max(funded.updatedAt, reserved?.recordedAt ?? seconds()),
-    preimage: settled.preimage,
-    extensions: reserved === null ? {} : {
-      [COOPERATIVE_RESERVATION_EXTENSION]: {
-        version: 1,
-        proposal: reserved.proposal,
-        signature_hash: reserved.signature_hash,
-      },
-    },
-  };
-  return {
-    sessionId: session.sessionId,
-    contractHash,
-    fundingTxid: funding.txid,
-    preimage: settled.preimage,
-    refundLockHeight: terms.refund_lock_height,
-    cooperation: settled.cooperation,
-    claimTxid: settled.claimTxid,
-    paidRecovery: await encryptRecovery(paid, request.ageRecipient),
-  };
+  const prepared = await prepareSwap(relay, request, hooks.report, { timeouts, clock });
+  return prepared.execute(hooks);
 }
 
 const MAX_FUNDING_ATTEMPTS = 5;

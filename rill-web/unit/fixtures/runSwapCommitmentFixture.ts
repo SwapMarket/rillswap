@@ -6,14 +6,17 @@ import type { MerchantSwapOptions } from "../../src/swap/merchantCheckout";
 
 const scenario = process.argv[2]; let now = 1200, shared = 0, broadcasts = 0;
 const recoveryStages: string[] = []; let checkpoint: CheckoutCheckpoint | null = null;
+const messages: string[] = [];
+const sessionSecrets: Uint8Array[] = [];
+let recoveryBirthday = -1;
 const terms = { terms_expiry: 5000, refund_lock_height: 200, max_funding_fee_sat: "10",
   economics: { contract_amount_sat: "1040", success_fee_sat: "10" } };
 class FixtureSession {
   sessionId = "5".repeat(64); key = receiver.slice(2); providerKey = "8".repeat(64);
-  secret = new Uint8Array(32); constructor() { this.secret[31] = 1; }
+  secret = new Uint8Array(32); constructor() { this.secret[31] = 1; sessionSecrets.push(this.secret); }
   envelope(kind: string, payload: unknown) { return { kind, payload, message_id: kind }; }
   async listen() {}
-  async send(message: { kind: string }) { if (message.kind === "funding_binding") { shared++;
+  async send(message: { kind: string }) { messages.push(message.kind); if (message.kind === "funding_binding") { shared++;
     if (scenario === "transport_after_share") throw new Error("response lost after provider received signed transaction"); } }
   async replyTo(message: { kind: string }, kind: string) {
     if (message.kind === "funding_binding" && scenario === "ack_delay") now = 3000;
@@ -30,7 +33,9 @@ mock.module("../../src/swap/hashes", () => ({ clientAcceptanceHash: () => new Ui
 mock.module("../../src/swap/funding", () => ({ authorizeFundingPsbt: () => ({ txid: "7".repeat(64), raw: "fixture transaction" }),
   fundingBinding: () => ({ funding_attempt_id: "9".repeat(64) }) }));
 mock.module("../../src/swap/taproot", () => ({ reconstructTaprootContract: () => ({ script_pubkey: "5120" + "1".repeat(64) }) }));
-mock.module("../../src/swap/recovery", () => ({ encryptRecovery: async () => new Uint8Array([1]) }));
+mock.module("../../src/swap/recovery", () => ({ encryptRecovery: async (record: { birthday: number }) => {
+  recoveryBirthday = record.birthday; return new Uint8Array([1]);
+} }));
 mock.module("../../src/swap/cooperative", () => ({ COOPERATIVE_RESERVATION_EXTENSION: "fixture", settle: async () => ({
   cooperation: "abandoned", claimTxid: null, preimage: "private fixture preimage", reservation: null }) }));
 const { executeMerchantSwap } = await import("../../src/swap/merchantCheckout");
@@ -51,7 +56,41 @@ const options: MerchantSwapOptions = {
   savePayerRecovery: async (_file, stage) => { recoveryStages.push(stage); if (scenario === "funded_recovery_delay" && stage === "funded") now = 3000; return "wallet:" + stage; },
   now: () => now,
 };
+if (scenario?.startsWith("prepare_")) {
+  const { prepareSwap } = await import("../../src/swap/swap");
+  const request = { ...options.request, invoice, checkoutExpiresAt: 3000 };
+  const prepared = await prepareSwap(options.relay, request, () => {}, { clock: () => now * 1000 });
+  const before = { accepted: messages.includes("terms_accept"), shared, recovery: recoveryStages.length };
+  const hooks = { ...options.hooks, saveRecovery: async (_file: Uint8Array, stage: "terms" | "funded") => {
+    recoveryStages.push(stage);
+    if (scenario === "prepare_callback_error") throw new Error("backup failed");
+  } };
+  let refused = false, activeSignerPreserved = true;
+  if (scenario === "prepare_only") prepared.dispose();
+  else if (scenario === "prepare_disposed") {
+    prepared.dispose(); prepared.dispose();
+    try { await prepared.execute(hooks); } catch { refused = true; }
+  } else if (scenario === "prepare_expired") {
+    now = 3000;
+    try { await prepared.execute(hooks); } catch { refused = true; }
+  } else if (scenario === "prepare_concurrent") {
+    const first = prepared.execute(hooks);
+    prepared.dispose();
+    activeSignerPreserved = sessionSecrets.at(-1)!.some((byte) => byte !== 0);
+    try { await prepared.execute(hooks); } catch { refused = true; }
+    await first;
+  } else if (scenario === "prepare_mutation") {
+    request.tipHeight = 900;
+    await prepared.execute(hooks);
+  } else {
+    try { await prepared.execute(hooks); } catch { refused = true; }
+  }
+  console.log(JSON.stringify({ before, refused, activeSignerPreserved, recoveryBirthday,
+    quoteFrozen: Object.isFrozen(prepared.quote), secretsWiped: sessionSecrets.every((secret) => secret.every((byte) => byte === 0)),
+    accepted: messages.includes("terms_accept"), shared, recoveryStages, broadcasts }));
+} else {
 let failed = false; try { await executeMerchantSwap(options); } catch { failed = true; }
 now = 1200; let redispatchRefused = false;
 try { await executeMerchantSwap(options); } catch (error) { redispatchRefused = (error as Error).message.includes("already dispatched"); }
 console.log(JSON.stringify({ failed, shared, broadcasts, recoveryStages, checkpoint, redispatchRefused }));
+}

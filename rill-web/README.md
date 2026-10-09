@@ -41,8 +41,9 @@ memory for this tab only. Never enter secrets or send funds to this preview.
 and regtest; mainnet is refused until release acceptance). `src/swap/` ports
 rill-cli's `run_swap`:
 
-- provider discovery on one relay (highest valid kind-39417 revision;
-  equivocation or a flood of more than 256 events is refused), the RS-001
+- bounded provider discovery across up to four configured relays (highest valid
+  kind-39417 revision per provider slot; same-revision equivocation and a flood
+  of more than 256 combined distinct events are refused), the RS-001
   handshake (epoch-bound when the signed announcement requires it), signed
   envelopes, and strict NIP-59 receive rules ported from rill-provider;
 - BOLT11 decoding and rill-provider's invoice admission policy (the browser
@@ -79,8 +80,11 @@ VITE_RILLSWAP_NETWORK=signet bun run build
 ```
 
 Supported values are `mainnet` (the unconfigured default), `signet`, `testnet4`,
-and `regtest`. `VITE_RILLSWAP_RELAY` optionally sets the relay. Public defaults
-use `wss://relay.damus.io`; regtest uses `ws://127.0.0.1:7777`. Plaintext relays
+and `regtest`. `VITE_RILLSWAP_RELAYS` optionally sets a whitespace- or
+comma-separated relay list. The older single-relay `VITE_RILLSWAP_RELAY`
+setting still works; specifying both fails the build. Public defaults use
+`wss://relay.damus.io`, `wss://nos.lol`, and `wss://relay.primal.net`; regtest
+uses `ws://127.0.0.1:7777`. Plaintext relays
 are restricted to loopback on regtest, and malformed configuration fails the
 build. Switching networks resets the relay preset instead of retaining a
 local deployment endpoint. Relay settings are public, not wallet credentials.
@@ -93,6 +97,33 @@ blocked mainnet preview instead of signet. No stored settings or journal
 records are migrated, and no swap or background work is resumed. The relative
 Vite asset base supports static hosting under a repository or signet subpath;
 this configuration does not authorize a funded mainnet release or publish it.
+
+### Automatic quote selection
+
+Leave the provider identity empty for automatic discovery, or pin it in
+Settings. **Get quote** queries the configured relays, filters authenticated
+announcements by amount, and requests up to eight firm offers on separate
+single-relay sessions. Indicative fees order the bounded shortlist; only
+locally verified signed terms determine the displayed winner. The winner has
+the lowest contract amount among those responding offers (ties use identity
+and slot). Wallet network fees are additional and are not estimated here.
+Unpinned identities are self-authenticated, not approved or reputation-rated;
+identities and slots can be created by one operator. There is no global
+best-price or independent-provider guarantee.
+
+The quote screen offers manual selection under provider details. **Use this
+quote** executes that exact displayed offer on its original session. Preparing
+a quote does not accept terms, export recovery, request funding, or share a
+signed transaction. Editing discards the quotes and closes their transports;
+unused offers expire without funding. After execution starts there is no
+automatic switch to another provider. Expiry and funding checks remain active
+through recovery saves and every acceptance/funding publish attempt.
+
+Quote requests disclose the invoice to the queried providers. Partial relay
+results and failed providers are disclosed, not treated as complete discovery.
+Provider-advertised endpoints are never automatically contacted. Existing
+manual `runSwap` callers retain their prepare-and-execute behavior, and no
+persisted state or journal schema changes.
 
 There is no chain backend in the browser. The user enters the current block
 height; it sets the refund-height ceiling (`tip + max refund delay`) and the

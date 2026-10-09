@@ -33,12 +33,18 @@ export function checkRelayUrl(text: string): string {
 }
 
 type Waiter = () => void;
+export type QueryCompletion = "eose" | "timeout" | "closed" | "error" | "limit";
+export interface RelayQueryResult {
+  readonly events: string[];
+  readonly truncated: boolean;
+  readonly completion: QueryCompletion;
+}
 
 export class RelayConnection implements RelayLink {
   private readonly queue: string[] = [];
   private readonly waiters = new Set<Waiter>();
   private readonly acks = new Map<string, (ok: boolean) => void>();
-  private readonly queries = new Map<string, { events: string[]; done: () => void; limit: number }>();
+  private readonly queries = new Map<string, { events: string[]; done: (reason: QueryCompletion) => void; limit: number }>();
   private live: string | null = null;
   private closed = false;
 
@@ -47,25 +53,41 @@ export class RelayConnection implements RelayLink {
     socket.addEventListener("close", () => {
       this.closed = true;
       for (const resolve of this.acks.values()) resolve(false);
-      for (const query of this.queries.values()) query.done();
+      for (const query of this.queries.values()) query.done("closed");
       this.wake();
     });
   }
 
-  static open(url: string, timeoutMs = 10_000, factory = (target: string) => new WebSocket(target)):
+  static open(url: string, timeoutMs = 10_000, factory = (target: string) => new WebSocket(target), signal?: AbortSignal):
     Promise<RelayConnection> {
+    if (signal?.aborted) return Promise.reject(new DOMException("Quote search canceled", "AbortError"));
     const socket = factory(checkRelayUrl(url));
     return new Promise((resolve, reject) => {
+      let opened = false;
+      const abort = (): void => {
+        clearTimeout(timer);
+        reject(new DOMException("Quote search canceled", "AbortError"));
+        socket.close();
+      };
       const timer = setTimeout(() => {
         socket.close();
         reject(new RelayError("relay connection timed out"));
       }, timeoutMs);
+      signal?.addEventListener("abort", abort, { once: true });
+      socket.addEventListener("close", () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
+        if (!opened) reject(new RelayError("relay closed before connecting"));
+      });
       socket.addEventListener("open", () => {
         clearTimeout(timer);
+        if (signal?.aborted) { abort(); return; }
+        opened = true;
         resolve(new RelayConnection(socket));
       });
       socket.addEventListener("error", () => {
         clearTimeout(timer);
+        socket.close();
         reject(new RelayError("relay connection failed"));
       });
     });
@@ -97,13 +119,13 @@ export class RelayConnection implements RelayLink {
       const query = this.queries.get(first);
       if (query) {
         query.events.push(raw);
-        if (query.events.length > query.limit) query.done();
+        if (query.events.length > query.limit) query.done("limit");
       } else if (first === this.live && this.queue.length < MAX_QUEUE) {
         this.queue.push(raw);
         this.wake();
       }
     } else if ((type === "EOSE" || type === "CLOSED") && typeof first === "string") {
-      this.queries.get(first)?.done();
+      this.queries.get(first)?.done(type === "EOSE" ? "eose" : "closed");
     }
   }
 
@@ -159,23 +181,32 @@ export class RelayConnection implements RelayLink {
    * Stored events for `filter` until EOSE or the timeout. More than `limit`
    * events ends the query with `truncated` so a caller can refuse a flood.
    */
-  query(filter: Record<string, unknown>, limit: number, timeoutMs = 10_000):
+  async query(filter: Record<string, unknown>, limit: number, timeoutMs = 10_000):
     Promise<{ events: string[]; truncated: boolean }> {
+    const { events, truncated } = await this.queryDetailed(filter, limit, timeoutMs);
+    return { events, truncated };
+  }
+
+  /** Marketplace discovery also needs to distinguish partial and complete responses. */
+  queryDetailed(filter: Record<string, unknown>, limit: number, timeoutMs = 10_000):
+    Promise<RelayQueryResult> {
     const id = bytesToHex(randomBytes(8));
     return new Promise((resolve) => {
       const events: string[] = [];
-      const done = (): void => {
+      const done = (completion: QueryCompletion): void => {
         clearTimeout(timer);
         if (!this.queries.delete(id)) return;
-        if (!this.closed) this.socket.send(JSON.stringify(["CLOSE", id]));
-        resolve({ events: events.slice(0, limit), truncated: events.length > limit });
+        try {
+          if (!this.closed) this.socket.send(JSON.stringify(["CLOSE", id]));
+        } catch { /* Query evidence remains partial if the transport is lost. */ }
+        resolve({ events: events.slice(0, limit), truncated: events.length > limit, completion });
       };
-      const timer = setTimeout(done, timeoutMs);
+      const timer = setTimeout(() => done("timeout"), timeoutMs);
       this.queries.set(id, { events, done, limit });
       try {
         this.send(["REQ", id, filter]);
       } catch {
-        done();
+        done("error");
       }
     });
   }

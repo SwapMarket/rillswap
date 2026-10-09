@@ -9,11 +9,12 @@ import regtest from "./networks/regtest-rillswap-e2e-v1.json";
 import signet from "./networks/signet.json";
 import testnet4 from "./networks/testnet4.json";
 import { addressScript, scriptAddress } from "./swap/address";
-import { RelayConnection } from "./swap/relay";
 import { browserCosigner } from "./swap/browserCosigner";
-import { type FundingRequest, runSwap, type SwapRequest } from "./swap/swap";
-import { relayForNetwork, validateRelay, type NetworkName } from "./swap/config";
-import { stoppedSwapAdvice } from "./swapUiStatus";
+import { type FundingRequest, type SwapRequest } from "./swap/swap";
+import { relaysForNetwork, validateRelays, type NetworkName } from "./swap/config";
+import { discoverMarketplace, eligibleProviders, quoteProviders, type LocatedQuote, MAX_QUOTE_PROVIDERS } from "./swap/marketplace";
+import { invoiceBinding } from "./swap/bolt11";
+import { quoteSelectionLabel, stoppedSwapAdvice } from "./swapUiStatus";
 
 const NETWORKS = { mainnet, signet, testnet4, regtest } as const;
 
@@ -91,10 +92,16 @@ function mount(root: HTMLElement): void {
   for (const name of Object.keys(NETWORKS)) network.append(Object.assign(node("option", name), { value: name }));
   network.value = __SWAP_DEFAULTS__.network;
   settings.append(networkLabel, network);
-  const relay = field(settings, "swap-relay", "Nostr relay", __SWAP_DEFAULTS__.relay,
-    "Connect only when you start. Relay operators see your IP and transport metadata, even with encrypted messages.");
+  const relayLabel = node("label", "Nostr relays (one per line)");
+  const relay = node("textarea", "", "swap-relay");
+  relayLabel.htmlFor = relay.id;
+  relay.value = __SWAP_DEFAULTS__.relays.join("\n");
+  relay.spellcheck = false;
+  settings.append(relayLabel, relay, node("small",
+    "Up to four relays. Connect only when you request a quote. Each operator sees your IP and transport metadata."));
   const identity = field(settings, "swap-provider", "Provider identity", "",
-    "Manual provider selection: paste its 64-character public identity key. Automatic selection is not available yet.");
+    "Automatic by default. Optionally pin a provider's 64-character public identity key.");
+  identity.placeholder = "Automatic (lowest verified provider price)";
   form.append(node("div", "BTC → Lightning", "swap-direction"));
   const invoice = field(form, "swap-invoice", "Lightning invoice to pay (BOLT11)");
   invoice.placeholder = "Paste your Lightning invoice";
@@ -122,10 +129,10 @@ function mount(root: HTMLElement): void {
   settings.append(limits);
   const notice = node("p", "", "swap-release-notice");
   notice.setAttribute("role", "note");
-  const start = node("button", "Continue", "swap-start");
+  const start = node("button", "Get quote", "swap-start");
   start.type = "submit";
   start.className = "primary";
-  form.append(setup, notice, start);
+  form.append(setup, notice, start, node("small", "Requesting quotes shares this invoice with responding providers."));
   const safety = node("details", "", "swap-safety");
   safety.append(node("summary", "Before using this preview"),
     node("p", "Unaudited and experimental. Use fake-money test networks only. Keys live in this tab; " +
@@ -172,10 +179,10 @@ function mount(root: HTMLElement): void {
       ? "Mainnet swaps are blocked until release safety checks are complete. Choose a test network in Settings."
       : "Experimental preview. Test funds only. Review wallet and recovery setup before continuing.";
     start.disabled = main;
-    start.textContent = main ? "Mainnet swaps unavailable" : "Continue";
+    start.textContent = main ? "Mainnet swaps unavailable" : "Get quote";
   };
   network.onchange = () => {
-    relay.value = relayForNetwork(network.value as NetworkName, __SWAP_DEFAULTS__);
+    relay.value = relaysForNetwork(network.value as NetworkName, __SWAP_DEFAULTS__).join("\n");
     updateNetwork();
   };
   updateNetwork();
@@ -188,9 +195,12 @@ function mount(root: HTMLElement): void {
       return;
     }
     let request: SwapRequest;
-    let relayUrl: string;
+    let urls: readonly string[];
     try {
-      relayUrl = validateRelay(relay.value.trim(), name);
+      urls = validateRelays(relay.value.trim(), name);
+      if (identity.value.trim() && !/^[0-9a-f]{64}$/.test(identity.value.trim())) {
+        throw new Error("Provider identity must be 64 lowercase hex characters, or leave it empty for automatic selection");
+      }
       request = {
         identity: identity.value.trim(),
         network: NETWORKS[name],
@@ -206,22 +216,114 @@ function mount(root: HTMLElement): void {
           maxRefundDelayBlocks: Number(positive(delay, "refund delay")),
         },
       };
+      invoiceBinding(request.invoice, name);
     } catch (error) {
       setup.open = true;
       report(`refused: ${(error as Error).message}`);
       return;
     }
-    for (const input of [...form.elements, ...settings.querySelectorAll("input, select, button")]) {
+    const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button")];
+    for (const input of controls) {
       (input as HTMLInputElement).disabled = true;
     }
     settingsButton.disabled = true;
     const guard = (unload: BeforeUnloadEvent): void => unload.preventDefault();
     window.addEventListener("beforeunload", guard);
-    void run(relayUrl, name, request, panel, report).then((paid) => {
-      if (paid) setStatus("Lightning invoice paid", 4, "success");
-    }).finally(() => {
+    let cancelled = false;
+    const cancellation = new AbortController();
+    let executing = false;
+    let arrivals: readonly LocatedQuote[] = [];
+    let cancelReview: (() => void) | undefined;
+    const cancel = node("button", "Edit swap", "swap-edit");
+    cancel.type = "button";
+    const restore = (): void => {
+      for (const control of controls) (control as HTMLInputElement).disabled = false;
+      settingsButton.disabled = false;
+      updateNetwork();
       window.removeEventListener("beforeunload", guard);
-    });
+    };
+    cancel.onclick = () => {
+      if (executing) return;
+      cancelled = true;
+      cancellation.abort();
+      for (const quote of arrivals) quote.dispose();
+      cancelReview?.();
+      panel.replaceChildren();
+      setStatus("Ready for a new quote", -1, "ready");
+      restore();
+    };
+    panel.replaceChildren(node("p", "Checking signed provider announcements across your relays..."), cancel);
+    setStatus("Finding available providers", 0);
+    void (async () => {
+      try {
+        const directory = await discoverMarketplace(urls, request.network, request.identity || undefined, cancellation.signal);
+        if (cancelled) return;
+        for (const warning of directory.warnings) report(warning);
+        const binding = invoiceBinding(request.invoice, name);
+        const eligible = eligibleProviders(directory.providers, BigInt(binding.amount_msat) / 1000n);
+        if (eligible.length === 0) throw new Error("No eligible provider found. Try another relay or pin a provider in Settings.");
+        setStatus("Comparing verified provider quotes", 1);
+        report(`Requesting up to ${MAX_QUOTE_PROVIDERS} eligible offers from ${eligible.length} announced providers`);
+        const result = await quoteProviders(eligible, request, cancellation.signal);
+        arrivals = result.quotes;
+        if (cancelled) { for (const quote of arrivals) quote.dispose(); return; }
+        if (arrivals.length === 0) throw new Error("No provider returned acceptable terms. Nothing was accepted or funded.");
+        let selected = arrivals[0]!;
+        const review = node("div", "", "swap-quote-review");
+        const quoteSummary = node("div", "", "swap-quote-summary");
+        const priceClaim = node("p", "", "swap-quote-selection");
+        const showQuote = (): void => {
+          const quote = selected.prepared.quote;
+          priceClaim.textContent = quoteSelectionLabel(selected === arrivals[0], arrivals.length);
+          quoteSummary.replaceChildren(node("h2", `${quote.contractAmountSat.toLocaleString()} sat`),
+            node("p", `Provider fee: ${quote.successFeeSat.toLocaleString()} sat. Your wallet's network fee is extra.`),
+            node("small", `Refund after block ${quote.refundLockHeight}. Offer expires ${new Date(quote.expiresAt * 1000).toLocaleTimeString()}.`));
+        };
+        showQuote();
+        review.append(quoteSummary, priceClaim, node("small", "Signatures authenticate offers, not provider reputation."));
+        if (directory.warnings.length || result.failures || eligible.length > MAX_QUOTE_PROVIDERS) {
+          review.append(node("small", "Some relays or providers did not return complete results. This is not a market-wide best-price guarantee."));
+        }
+        const offers = node("details");
+        offers.append(node("summary", "Provider details & manual selection"));
+        for (const [index, quote] of arrivals.entries()) {
+          const label = node("label");
+          const option = node("input");
+          option.type = "radio";
+          option.name = "verified-provider";
+          option.checked = index === 0;
+          option.onchange = () => { selected = quote; showQuote(); };
+          label.append(option, node("span", `${quote.prepared.quote.contractAmountSat} sat · ${quote.prepared.quote.providerIdentity.slice(0, 12)}…`),
+            node("small", `Transport: ${quote.relayUrl}; identity: ${quote.prepared.quote.providerIdentity}`));
+          offers.append(label);
+        }
+        const accept = node("button", "Use this quote", "swap-quote-accept");
+        accept.type = "button";
+        review.append(offers, accept, cancel);
+        panel.replaceChildren(review);
+        setStatus("Quote ready. Review before continuing", 1);
+        const accepted = await new Promise<boolean>((resolve) => {
+          accept.onclick = () => resolve(true);
+          cancelReview = () => resolve(false);
+        });
+        if (!accepted || cancelled) return;
+        if (Date.now() / 1000 >= selected.prepared.quote.expiresAt) throw new Error("Quote expired. Request a fresh quote.");
+        executing = true;
+        for (const quote of arrivals) if (quote !== selected) quote.dispose();
+        arrivals = [selected];
+        const paid = await run(selected, name, panel, report);
+        if (paid) setStatus("Lightning invoice paid", 4, "success");
+      } catch (error) {
+        if (!cancelled) {
+          panel.replaceChildren(node("p", (error as Error).message, "swap-error"));
+          report(`stopped: ${(error as Error).message}`);
+        }
+      } finally {
+        for (const quote of arrivals) quote.dispose();
+        if (!executing && !cancelled) restore();
+        if (executing) window.removeEventListener("beforeunload", guard);
+      }
+    })();
   });
 }
 
@@ -260,18 +362,15 @@ function fundingPrompt(panel: HTMLElement, networkName: NetworkName, request: Fu
 }
 
 async function run(
-  relayUrl: string,
+  quote: LocatedQuote,
   networkName: NetworkName,
-  request: SwapRequest,
   panel: HTMLElement,
   report: (line: string) => void,
 ): Promise<boolean> {
-  let relay: RelayConnection | null = null;
   let fundsMayBeCommitted = false;
   try {
-    relay = await RelayConnection.open(relayUrl);
-    report("relay connected");
-    const outcome = await runSwap(relay, request, {
+    report(`Selected provider ${quote.prepared.quote.providerIdentity} via ${quote.relayUrl}`);
+    const outcome = await quote.prepared.execute({
       report,
       saveRecovery: async (file, stage) => {
         const name = `rillswap-${stage}-recovery-${Math.floor(Date.now() / 1000)}.age`;
@@ -321,7 +420,7 @@ async function run(
     report(`stopped: ${message}`);
     return false;
   } finally {
-    relay?.close();
+    quote.dispose();
   }
 }
 

@@ -7,3 +7,9 @@ export function stoppedSwapAdvice(fundsMayBeCommitted: boolean): string {
     : "This page has not shared your signed transaction. If you broadcast separately, do not fund again. " +
       "Otherwise, reload the page to start a new swap.";
 }
+
+export function quoteSelectionLabel(automaticLowest: boolean, count: number): string {
+  return automaticLowest
+    ? `Lowest verified provider price among ${count} responding offers.`
+    : `Manually selected provider (${count} verified offers available).`;
+}

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { stoppedSwapAdvice } from "../src/swapUiStatus";
+import { quoteSelectionLabel, stoppedSwapAdvice } from "../src/swapUiStatus";
 
 test("failure before sharing does not claim independently broadcast funds are uncommitted", () => {
   const advice = stoppedSwapAdvice(false);
@@ -14,4 +14,10 @@ test("failure after commitment but before broadcast directs the user to funded r
   expect(advice).toContain("funded recovery file");
   expect(advice).toContain("may already be broadcast");
   expect(advice).not.toContain("reload");
+});
+
+test("manual selection does not retain the automatic best-price claim", () => {
+  expect(quoteSelectionLabel(true, 2)).toContain("Lowest verified provider price");
+  expect(quoteSelectionLabel(false, 2)).toContain("Manually selected");
+  expect(quoteSelectionLabel(false, 2)).not.toContain("Lowest");
 });

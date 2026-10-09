@@ -4,8 +4,10 @@ export type NetworkName = typeof NETWORK_NAMES[number];
 
 export interface SwapDefaults {
   readonly network: NetworkName;
-  readonly relay: string;
+  readonly relays: readonly string[];
 }
+
+export const MAX_RELAYS = 4;
 
 export function validateRelay(value: string, network: NetworkName): string {
   const url = new URL(value);
@@ -17,19 +19,28 @@ export function validateRelay(value: string, network: NetworkName): string {
   return url.href;
 }
 
+export function validateRelays(input: string, network: NetworkName): readonly string[] {
+  const urls = [...new Set(input.split(/[\s,]+/).filter(Boolean).map((url) => validateRelay(url, network)))];
+  if (urls.length === 0 || urls.length > MAX_RELAYS) throw new Error(`Choose between 1 and ${MAX_RELAYS} relays`);
+  return Object.freeze(urls);
+}
+
 export function resolveSwapDefaults(env: Record<string, string | undefined>): SwapDefaults {
   const network = env.VITE_RILLSWAP_NETWORK ?? "mainnet";
   if (!(NETWORK_NAMES as readonly string[]).includes(network)) {
     throw new Error("VITE_RILLSWAP_NETWORK must be mainnet, signet, testnet4, or regtest");
   }
   const name = network as NetworkName;
+  if (env.VITE_RILLSWAP_RELAY !== undefined && env.VITE_RILLSWAP_RELAYS !== undefined) {
+    throw new Error("Set VITE_RILLSWAP_RELAYS or VITE_RILLSWAP_RELAY, not both");
+  }
   return {
     network: name,
-    relay: validateRelay(env.VITE_RILLSWAP_RELAY ??
-      (name === "regtest" ? "ws://127.0.0.1:7777" : "wss://relay.damus.io"), name),
+    relays: validateRelays(env.VITE_RILLSWAP_RELAYS ?? env.VITE_RILLSWAP_RELAY ??
+      (name === "regtest" ? "ws://127.0.0.1:7777" : "wss://relay.damus.io wss://nos.lol wss://relay.primal.net"), name),
   };
 }
 
-export const relayForNetwork = (network: NetworkName, deployment?: SwapDefaults): string =>
-  deployment?.network === network ? deployment.relay :
-    resolveSwapDefaults({ VITE_RILLSWAP_NETWORK: network }).relay;
+export const relaysForNetwork = (network: NetworkName, deployment?: SwapDefaults): readonly string[] =>
+  deployment?.network === network ? deployment.relays :
+    resolveSwapDefaults({ VITE_RILLSWAP_NETWORK: network }).relays;

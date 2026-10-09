@@ -49,6 +49,21 @@ test("relay URLs must be wss unless loopback", () => {
 });
 
 describe("relay connection", () => {
+  test("canceling opening or connected relays closes their sockets", async () => {
+    const cancellation = new AbortController();
+    const socket = new FakeSocket();
+    const opening = RelayConnection.open("ws://localhost:7000", 1000, () => socket as unknown as WebSocket, cancellation.signal);
+    cancellation.abort();
+    await expect(opening).rejects.toThrow("canceled");
+    const activeCancellation = new AbortController();
+    const activeSocket = new FakeSocket();
+    const activeOpening = RelayConnection.open("ws://localhost:7000", 1000, () => activeSocket as unknown as WebSocket, activeCancellation.signal);
+    activeSocket.dispatchEvent(new Event("open"));
+    const relay = await activeOpening;
+    const waiting = relay.next(Date.now() + 1000);
+    activeCancellation.abort();
+    expect(await waiting).toBeNull();
+  });
   test("publish resolves on the relay's OK for that event", async () => {
     const { relay, socket } = await connect();
     const accepted = relay.publish({ id: "aa" } as NostrEvent);
@@ -95,6 +110,29 @@ describe("relay connection", () => {
     socket.deliver(["EVENT", second, { id: 1 }]);
     socket.deliver(["EVENT", second, { id: 2 }]);
     expect((await flood).truncated).toBe(true);
+  });
+  test("detailed queries distinguish EOSE, timeout, closure, and send failure", async () => {
+    const { relay, socket } = await connect();
+    const complete = relay.queryDetailed({}, 2);
+    const [, id] = socket.sent.at(-1) as [string, string];
+    socket.deliver(["EOSE", id]);
+    expect((await complete).completion).toBe("eose");
+    expect((await relay.queryDetailed({}, 2, 1)).completion).toBe("timeout");
+    const closed = relay.queryDetailed({}, 2);
+    socket.close();
+    expect((await closed).completion).toBe("closed");
+    expect((await relay.queryDetailed({}, 2)).completion).toBe("error");
+  });
+  test("detailed query overflow is explicit and its retained prefix cannot look complete", async () => {
+    const { relay, socket } = await connect();
+    const query = relay.queryDetailed({}, 1);
+    const [, id] = socket.sent.at(-1) as [string, string];
+    socket.deliver(["EVENT", id, { id: 1 }]);
+    socket.deliver(["EVENT", id, { id: 2 }]);
+    const result = await query;
+    expect(result.completion).toBe("limit");
+    expect(result.truncated).toBe(true);
+    relay.close();
   });
 });
 

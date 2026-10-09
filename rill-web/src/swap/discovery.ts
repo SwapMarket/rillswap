@@ -1,6 +1,4 @@
 /** Provider discovery over one relay (port of rill-cli live_swap.discover). */
-import canonicalize from "canonicalize";
-
 import { type AnnouncementCandidate, verifyNostrProviderAnnouncement } from "../nostrProviderAnnouncement";
 import { SwapError } from "./session";
 
@@ -12,10 +10,6 @@ export interface AnnouncementSource {
     Promise<{ events: string[]; truncated: boolean }>;
 }
 
-const comparable = (candidate: AnnouncementCandidate): string => {
-  const { outerEventId: _event, addressD: _address, ...signed } = candidate;
-  return canonicalize(signed)!;
-};
 
 /**
  * Select the highest valid revision the relay returned. A relay can withhold
@@ -36,6 +30,7 @@ export async function discoverProvider(
   );
   if (truncated) throw new SwapError("provider discovery event limit exceeded; nothing was committed");
   let best: AnnouncementCandidate | null = null;
+  const revisions = new Map<string, string>();
   for (const raw of events) {
     let found: AnnouncementCandidate;
     try {
@@ -43,9 +38,11 @@ export async function discoverProvider(
     } catch {
       continue;
     }
-    if (best !== null && found.revision === best.revision && comparable(found) !== comparable(best)) {
+    const key = `${found.slot}:${found.revision}`;
+    if (revisions.has(key) && revisions.get(key) !== found.advertisementJcs) {
       throw new SwapError("provider announced conflicting data at the same revision");
     }
+    revisions.set(key, found.advertisementJcs);
     if (best === null || found.revision > best.revision) best = found;
   }
   if (best === null) throw new SwapError("no valid provider announcement found; nothing was committed");

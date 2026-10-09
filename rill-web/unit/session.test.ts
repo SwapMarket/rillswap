@@ -4,6 +4,7 @@ import type { NostrEvent } from "nostr-tools";
 import regtest from "../src/networks/regtest-rillswap-e2e-v1.json";
 import signet from "../src/networks/signet.json";
 import { type Envelope, type RelayLink, Session, SwapError } from "../src/swap/session";
+import { assertFundingWindow } from "../src/swap/swap";
 
 class MemoryRelay implements RelayLink {
   readonly published: NostrEvent[] = [];
@@ -37,6 +38,17 @@ async function deliver(from: Session, to: Session, envelope: Envelope, relay: Me
 }
 
 describe("client session inbox", () => {
+  test("terms acceptance cannot retry publication after its deadline", async () => {
+    let now = 1999;
+    const relay = new MemoryRelay();
+    relay.publish = async (event) => { relay.published.push(event); now = 2000; return false; };
+    const client = new Session(relay, regtest, PROFILE);
+    const provider = new Session(new MemoryRelay(), regtest, PROFILE);
+    const envelope = client.envelope("terms_accept", { acceptance: {}, client_acceptance_signature: "00".repeat(64) });
+    await expect(client.send(envelope, provider.key, () => assertFundingWindow(2000, 2100, now)))
+      .rejects.toThrow("funding deadline exceeded");
+    expect(relay.published).toHaveLength(1);
+  });
   test("a commitment guard runs immediately before every relay retry", async () => {
     const relay = new MemoryRelay(); let now = 1999, checks = 0;
     relay.publish = async (event) => { relay.published.push(event); now = 2000; return false; };

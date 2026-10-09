@@ -44,6 +44,10 @@ export interface ManualProviderCandidate {
   readonly expiresAt: number;
   readonly advertisedEndpoints: readonly string[];
   readonly advertisedEpochInboxKeys: readonly string[];
+  /** Complete authenticated data for same-revision conflict checks. */
+  readonly advertisementJcs: string;
+  readonly amountBands: readonly Readonly<{ minimum_sat: string; maximum_sat: string }>[];
+  readonly indicativeFeePolicy: Readonly<{ base_sat: string; proportional_millionths: number }>;
 }
 
 export class ManualAdvertisementRefusedError extends Error {
@@ -137,6 +141,9 @@ export function verifyManualProviderAdvertisement(
       expiresAt: ad.expires_at,
       advertisedEndpoints: Object.freeze([...ad.transport_endpoints]),
       advertisedEpochInboxKeys: Object.freeze([...ad.epoch_inbox_xonly_keys]),
+      advertisementJcs: canonicalize(ad)!,
+      amountBands: Object.freeze(ad.amount_bands.map((band) => Object.freeze({ ...band }))),
+      indicativeFeePolicy: Object.freeze({ ...ad.indicative_fee_policy }),
     });
   } catch {
     // Do not leak untrusted input, signature details, or endpoint strings.
