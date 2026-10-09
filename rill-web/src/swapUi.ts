@@ -3,7 +3,8 @@
  * this tab's memory; the user's own wallet funds and broadcasts, and the
  * user's own downloads hold the age-encrypted recovery files.
  */
-import "./style.css";
+import "./swap.css";
+import mainnet from "./networks/mainnet.json";
 import regtest from "./networks/regtest-rillswap-e2e-v1.json";
 import signet from "./networks/signet.json";
 import testnet4 from "./networks/testnet4.json";
@@ -11,9 +12,10 @@ import { addressScript, scriptAddress } from "./swap/address";
 import { RelayConnection } from "./swap/relay";
 import { browserCosigner } from "./swap/browserCosigner";
 import { type FundingRequest, runSwap, type SwapRequest } from "./swap/swap";
+import { relayForNetwork, validateRelay, type NetworkName } from "./swap/config";
+import { stoppedSwapAdvice } from "./swapUiStatus";
 
-const NETWORKS = { signet, testnet4, regtest } as const;
-type NetworkName = keyof typeof NETWORKS;
+const NETWORKS = { mainnet, signet, testnet4, regtest } as const;
 
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, text = "", id?: string): HTMLElementTagNameMap[K] {
   const element = document.createElement(tag);
@@ -55,60 +57,140 @@ function waitForClick(panel: HTMLElement, label: string): Promise<void> {
 }
 
 function mount(root: HTMLElement): void {
-  root.replaceChildren(
-    node("h1", "Pay a Lightning invoice with on-chain BTC"),
-    node("p", "Experimental. Signet, testnet4, and regtest only; mainnet is refused until release acceptance. " +
-      "Keys live only in this tab. Keep it open until the swap finishes."),
-    node("p", "Before funding you download an age-encrypted recovery file. This page cannot refund you. If the " +
-      "provider does not pay, after the refund height run `rill recover watch-refund --chain-only` (from rill-cli, " +
-      "with your own Bitcoin Core node) on the funded recovery file; the page shows the exact attempt ID it needs.",
-      "swap-refund-intro"),
-    node("p", "Before you start, have: the provider's relay URL and identity key (ask the provider), a wallet that " +
-      "can sign a PSBT without broadcasting it (for example Sparrow or Bitcoin Core), and an age key for your " +
-      "recovery files.", "swap-prerequisites"),
-  );
+  const header = node("header");
+  const brand = node("a", "rill", "swap-brand");
+  brand.href = "./swap.html";
+  brand.setAttribute("aria-label", "RillSwap home");
+  const badge = node("span", "", "swap-network-badge");
+  header.append(brand, badge);
+  const intro = node("div");
+  intro.className = "swap-intro";
+  intro.append(node("p", "BITCOIN. WITHOUT THE DETOUR.", "swap-eyebrow"),
+    node("h1", "Bitcoin in. Lightning out."),
+    node("p", "Pay a Lightning invoice from your Bitcoin wallet. No account. Your keys stay with you."));
+  const card = node("section", "", "swap-card");
+  const cardHead = node("div");
+  cardHead.className = "card-heading";
+  const settingsButton = node("button", "Settings", "swap-settings-toggle");
+  settingsButton.type = "button";
+  settingsButton.setAttribute("aria-haspopup", "dialog");
+  cardHead.append(node("h2", "Swap Bitcoin"), settingsButton);
+  const settings = node("dialog", "", "swap-settings");
+  const settingsHead = node("div");
+  settingsHead.className = "card-heading";
+  const closeSettings = node("button", "Close", "swap-settings-close");
+  closeSettings.type = "button";
+  settingsHead.append(node("h2", "Swap settings"), closeSettings);
+  settings.append(settingsHead);
+  settingsButton.onclick = () => settings.showModal();
+  closeSettings.onclick = () => settings.close();
   const form = node("form", "", "swap-form");
   const networkLabel = node("label", "Network");
   const network = node("select", "", "swap-network");
   networkLabel.htmlFor = network.id;
   for (const name of Object.keys(NETWORKS)) network.append(Object.assign(node("option", name), { value: name }));
-  form.append(networkLabel, network);
-  const relay = field(form, "swap-relay", "Relay (wss://)", "", "The relay the provider announces on; " +
-    "the provider publishes it with its identity.");
-  const identity = field(form, "swap-provider", "Provider identity (x-only public key, hex)", "",
-    "64 hex characters, from the provider. The page checks its signed announcement on the relay.");
+  network.value = __SWAP_DEFAULTS__.network;
+  settings.append(networkLabel, network);
+  const relay = field(settings, "swap-relay", "Nostr relay", __SWAP_DEFAULTS__.relay,
+    "Connect only when you start. Relay operators see your IP and transport metadata, even with encrypted messages.");
+  const identity = field(settings, "swap-provider", "Provider identity", "",
+    "Manual provider selection: paste its 64-character public identity key. Automatic selection is not available yet.");
+  form.append(node("div", "BTC → Lightning", "swap-direction"));
   const invoice = field(form, "swap-invoice", "Lightning invoice to pay (BOLT11)");
-  const refund = field(form, "swap-refund", "Your refund address (P2WPKH or P2TR)", "",
-    "A fresh Receive address from your own wallet (tb1q... or tb1p... on signet and testnet4).");
-  const tip = field(form, "swap-tip", "Current block height", "", "From a block explorer or your node; " +
+  invoice.placeholder = "Paste your Lightning invoice";
+  const setup = node("details", "", "swap-wallet-setup");
+  setup.append(node("summary", "Wallet & recovery setup"),
+    node("p", "This experimental flow needs a wallet that can sign a PSBT without broadcasting it, " +
+      "a refund address, and an age key for encrypted backups.", "swap-prerequisites"));
+  const refund = field(setup, "swap-refund", "Your refund address (P2WPKH or P2TR)", "",
+    "Use a fresh Receive address from your own wallet, on the selected network.");
+  const tip = field(setup, "swap-tip", "Current block height", "", "From a block explorer or your node; " +
     "it caps how long your funds can be locked.");
-  const age = field(form, "swap-age", "Recovery file age recipient (age1...)", "",
-    "Install age (for example `apt install age` or `brew install age`), then in a terminal run " +
-    "`age-keygen -o rillswap-recovery.key` and paste the public key it prints (age1...). Keep that key " +
-    "file private and backed up: it is the only way to open your recovery files.");
-  form.append(node("p", "The limits below are caps, not charges: the swap stops before funding if the " +
+  const age = field(setup, "swap-age", "Recovery encryption key (age1...)", "",
+    "Run age-keygen -o rillswap-recovery.key and paste the public age1... key. " +
+    "Keep the private key safe: it is required to open your backups.");
+  const limits = node("details");
+  limits.append(node("summary", "Fee & timeout limits"));
+  limits.append(node("p", "These are caps, not charges: the swap stops before funding if the " +
     "provider's signed terms exceed any of them.", "swap-limits-hint"));
-  const successFee = field(form, "swap-success-fee", "Maximum provider fee (sat)", "2000");
-  const fundingFee = field(form, "swap-funding-fee", "Maximum funding fee (sat)", "5000");
-  const claimFee = field(form, "swap-claim-fee", "Maximum claim fee (sat)", "5000");
-  const refundFee = field(form, "swap-refund-fee", "Maximum refund fee (sat)", "5000");
-  const delay = field(form, "swap-delay", "Maximum refund delay (blocks)", "288",
+  const successFee = field(limits, "swap-success-fee", "Maximum provider fee (sat)", "2000");
+  const fundingFee = field(limits, "swap-funding-fee", "Maximum funding fee (sat)", "5000");
+  const claimFee = field(limits, "swap-claim-fee", "Maximum claim fee (sat)", "5000");
+  const refundFee = field(limits, "swap-refund-fee", "Maximum refund fee (sat)", "5000");
+  const delay = field(limits, "swap-delay", "Maximum refund delay (blocks)", "288",
     "If the provider never pays, your refund unlocks within this many blocks (288 is about two days).");
-  const start = node("button", "Start swap", "swap-start");
+  settings.append(limits);
+  const notice = node("p", "", "swap-release-notice");
+  notice.setAttribute("role", "note");
+  const start = node("button", "Continue", "swap-start");
   start.type = "submit";
-  form.append(start);
+  start.className = "primary";
+  form.append(setup, notice, start);
+  const safety = node("details", "", "swap-safety");
+  safety.append(node("summary", "Before using this preview"),
+    node("p", "Unaudited and experimental. Use fake-money test networks only. Keys live in this tab; " +
+      "keep it open until the swap finishes."),
+    node("p", "Browser recovery is not implemented yet. Save the encrypted recovery file before funding. " +
+      "If the provider does not pay, refund after the lock height with rill recover watch-refund --chain-only " +
+      "and your own Bitcoin Core node.", "swap-refund-intro"));
   const panel = node("div", "", "swap-panel");
+  panel.setAttribute("aria-live", "polite");
+  const progress = node("section", "", "swap-progress");
+  const status = node("p", "Ready when you are", "swap-status");
+  status.setAttribute("role", "status");
+  const steps = node("ol", "", "swap-steps");
+  for (const label of ["Connect", "Review", "Fund", "Paid"]) steps.append(node("li", label));
+  progress.append(status, steps);
+  const diagnostics = node("details", "", "swap-diagnostics");
+  diagnostics.append(node("summary", "Technical activity"));
   const log = node("pre", "", "swap-log");
-  root.append(form, panel, log);
+  diagnostics.append(log);
+  card.append(cardHead, form, progress, panel, safety, diagnostics);
+  const footer = node("footer", "Provider-neutral · No account · Locally verified");
+  root.replaceChildren(header, intro, card, footer, settings);
+  const setStatus = (text: string, step: number, state = "working"): void => {
+    status.textContent = text;
+    progress.dataset.state = state;
+    for (const [index, item] of [...steps.children].entries()) {
+      item.className = index < step ? "done" : index === step ? "current" : "";
+    }
+  };
   const report = (line: string): void => {
     log.textContent += `${line}\n`;
+    if (line.startsWith("relay connected")) setStatus("Finding your provider", 0);
+    else if (line.startsWith("provider found")) setStatus("Requesting verified terms", 1);
+    else if (line.startsWith("terms:")) setStatus("Review your swap and save recovery", 1);
+    else if (line.startsWith("recovery file saved")) setStatus("Ready to fund from your wallet", 2);
+    else if (line.startsWith("funded recovery")) setStatus("Save your funded recovery backup", 2);
+    else if (line.includes("broadcast; waiting")) setStatus("Waiting for the Lightning payment", 3);
+    else if (line.startsWith("refused:") || line.startsWith("stopped:")) setStatus(line.replace(/^[^:]+: /, ""), -1, "error");
   };
+  const updateNetwork = (): void => {
+    const main = network.value === "mainnet";
+    badge.textContent = main ? "Mainnet · preview" : `${network.value} · test funds`;
+    notice.textContent = main
+      ? "Mainnet swaps are blocked until release safety checks are complete. Choose a test network in Settings."
+      : "Experimental preview. Test funds only. Review wallet and recovery setup before continuing.";
+    start.disabled = main;
+    start.textContent = main ? "Mainnet swaps unavailable" : "Continue";
+  };
+  network.onchange = () => {
+    relay.value = relayForNetwork(network.value as NetworkName, __SWAP_DEFAULTS__);
+    updateNetwork();
+  };
+  updateNetwork();
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     const name = network.value as NetworkName;
+    if (name === "mainnet") {
+      report("refused: Mainnet swaps are blocked until release safety checks are complete.");
+      return;
+    }
     let request: SwapRequest;
+    let relayUrl: string;
     try {
+      relayUrl = validateRelay(relay.value.trim(), name);
       request = {
         identity: identity.value.trim(),
         network: NETWORKS[name],
@@ -125,13 +207,19 @@ function mount(root: HTMLElement): void {
         },
       };
     } catch (error) {
+      setup.open = true;
       report(`refused: ${(error as Error).message}`);
       return;
     }
-    for (const input of form.elements) (input as HTMLInputElement).disabled = true;
+    for (const input of [...form.elements, ...settings.querySelectorAll("input, select, button")]) {
+      (input as HTMLInputElement).disabled = true;
+    }
+    settingsButton.disabled = true;
     const guard = (unload: BeforeUnloadEvent): void => unload.preventDefault();
     window.addEventListener("beforeunload", guard);
-    void run(relay.value, name, request, panel, report).finally(() => {
+    void run(relayUrl, name, request, panel, report).then((paid) => {
+      if (paid) setStatus("Lightning invoice paid", 4, "success");
+    }).finally(() => {
       window.removeEventListener("beforeunload", guard);
     });
   });
@@ -177,9 +265,9 @@ async function run(
   request: SwapRequest,
   panel: HTMLElement,
   report: (line: string) => void,
-): Promise<void> {
+): Promise<boolean> {
   let relay: RelayConnection | null = null;
-  let broadcastShown = false;
+  let fundsMayBeCommitted = false;
   try {
     relay = await RelayConnection.open(relayUrl);
     report("relay connected");
@@ -195,6 +283,7 @@ async function run(
         await waitForClick(panel, "I saved the file");
       },
       fundingPsbt: (funding) => fundingPrompt(panel, networkName, funding),
+      beforeFundingCommit: async () => { fundsMayBeCommitted = true; },
       broadcast: async (raw, txid) => {
         panel.replaceChildren(
           node("h2", "Broadcast the funding transaction"),
@@ -204,7 +293,6 @@ async function run(
           node("p", "Most wallets broadcast a finalized PSBT or raw transaction from a Broadcast or Send " +
             "Transaction menu; with Bitcoin Core use sendrawtransaction."),
         );
-        broadcastShown = true;
         await waitForClick(panel, "I broadcast it");
         panel.replaceChildren(node("p", "Waiting for the provider to pay the invoice..."));
       },
@@ -221,18 +309,17 @@ async function run(
       node("p", "Optional: keep this paid recovery file as a record of the completed swap."),
     );
     offerDownload(panel, outcome.paidRecovery, `rillswap-paid-recovery-${Math.floor(Date.now() / 1000)}.age`);
+    return true;
   } catch (error) {
     const message = (error as Error).message;
-    const next = broadcastShown
-      ? "Do not fund this swap again. Keep the funded recovery file and its age key: if the invoice is " +
-        "not paid, the message above names the refund block and the `rill recover watch-refund` command."
-      : "Nothing was broadcast by this page, so no funds are committed. Reload the page to start a new swap.";
+    const next = stoppedSwapAdvice(fundsMayBeCommitted);
     panel.replaceChildren(
       node("h2", "Swap stopped"),
       node("p", message, "swap-error"),
       node("p", next, "swap-next-step"),
     );
     report(`stopped: ${message}`);
+    return false;
   } finally {
     relay?.close();
   }

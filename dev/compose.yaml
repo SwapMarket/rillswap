@@ -303,6 +303,9 @@ services:
   web:
     <<: *rill
     working_dir: /src/rill-web
+    environment:
+      VITE_RILLSWAP_NETWORK: regtest
+      VITE_RILLSWAP_RELAY: ws://127.0.0.1:${RILL_DEV_RELAY_PORT:-7777}
     # The swap page's CSP and dependencies need the production bundle, so
     # build once, rebuild on change, and serve dist/ (refresh after edits).
     command:

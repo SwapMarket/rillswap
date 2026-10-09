@@ -65,6 +65,35 @@ rill-cli's `run_swap`:
   MuSig2 code as the CLI and provider). It then verifies the provider's
   partial and the aggregate signature before its receipt.
 
+The swap page uses a compact card, a settings dialog for provider/network and
+fee caps, progressive wallet setup, a simple progress indicator, and collapsed
+technical activity. Public builds default to **mainnet preview**, with the
+start action disabled and an independent runtime refusal before any relay
+connection. Select a test network in Settings to use the experimental flow.
+Loading the page or changing settings does not contact a relay.
+
+Deployment defaults are validated at build time:
+
+```sh
+VITE_RILLSWAP_NETWORK=signet bun run build
+```
+
+Supported values are `mainnet` (the unconfigured default), `signet`, `testnet4`,
+and `regtest`. `VITE_RILLSWAP_RELAY` optionally sets the relay. Public defaults
+use `wss://relay.damus.io`; regtest uses `ws://127.0.0.1:7777`. Plaintext relays
+are restricted to loopback on regtest, and malformed configuration fails the
+build. Switching networks resets the relay preset instead of retaining a
+local deployment endpoint. Relay settings are public, not wallet credentials.
+Relay operators can see IP and transport metadata; encrypted swap messages do
+not hide that metadata. A relay preset is not an endorsement of providers.
+
+`dev/devctl` explicitly builds the browser with regtest/local-relay defaults.
+An older public installation reloading an unconfigured build now opens the
+blocked mainnet preview instead of signet. No stored settings or journal
+records are migrated, and no swap or background work is resumed. The relative
+Vite asset base supports static hosting under a repository or signet subpath;
+this configuration does not authorize a funded mainnet release or publish it.
+
 There is no chain backend in the browser. The user enters the current block
 height; it sets the refund-height ceiling (`tip + max refund delay`) and the
 recovery scan birthday, so a wrong height can only lengthen the user's own

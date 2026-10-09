@@ -150,8 +150,11 @@ wallet.
 
 1. `dev/devctl web-inputs 50000` prints every form value: network `regtest`,
    relay `ws://127.0.0.1:7777`, the BTC to LN maker key, a fresh user invoice,
-   a refund address, the current height and the user's age recipient. Paste
-   them in and click **Start swap**. Keep the limit defaults.
+   a refund address, the current height and the user's age recipient. The local
+   page already defaults to regtest and the local relay. Open **Settings** to
+   enter the maker key, paste the invoice on the main card, and expand
+   **Wallet & recovery setup** for the remaining fields. Click **Continue**.
+   Keep the fee caps at their defaults in Settings.
 2. Download the terms recovery file, then click **I saved the file**.
 3. The page shows a contract address and an exact BTC amount. Run
    `dev/devctl fund-psbt <address> <amount>` and paste the finalized PSBT it
