@@ -1,10 +1,13 @@
 /**
- * Offline RS-007 BTC to LN inspection and disconnected refund construction.
+ * Offline RS-007 inspection and disconnected forward refunds/reverse claims.
  * Inspection proves internal consistency under embedded signers, not provenance,
  * ownership, chain inclusion, unspent state, or authority to sign/broadcast.
- * The constructor produces broadcastable spending bytes. Future callers MUST
+ * Constructors produce broadcastable spending bytes. Reverse claim witnesses
+ * disclose the preimage. Future callers MUST
  * obtain explicit approval before signing/export, not only before broadcasting.
- * Return values and errors contain no secrets. Immutable parsed strings cannot
+ * Inspection reports and errors contain no secrets. Spending results contain
+ * authorized transaction bytes; fallback successors are secret-bearing bytes
+ * for local encryption only. Immutable parsed strings cannot
  * be guaranteed erased from browser memory. There are no live-time gates.
  */
 import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
@@ -26,7 +29,7 @@ import { reconstructTaprootContract, type TaprootContract } from "./swap/taproot
 import { MAX_TRANSACTION_BYTES, parseTransaction, serializeTransaction, type Transaction } from "./swap/transaction";
 import {
   COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_EXTENSION, EPOCH_SESSION_FEATURE, MAX_SATS, sats,
-  verifySchnorr, type BtcToLnTerms, type HandshakeAccept, type HandshakeInit,
+  verifySchnorr, type BtcToLnTerms, type LnToBtcTerms, type HandshakeAccept, type HandshakeInit,
 } from "./swap/wire";
 
 export interface RecoveryInspection {
@@ -51,9 +54,10 @@ export class RecoveryInspectionRefusedError extends Error {
   }
 }
 
-export interface RecoveryFundingBinding extends Omit<FundingBinding, "binding_revision" | "replaces_txid"> {
+export interface RecoveryFundingBinding extends Omit<FundingBinding, "binding_revision" | "replaces_txid" | "funder_role"> {
   readonly binding_revision: number;
   readonly replaces_txid: string | null;
+  readonly funder_role: "client" | "provider";
 }
 type HistoricalBinding = RecoveryFundingBinding;
 
@@ -64,7 +68,7 @@ interface RecoveryRecord {
   readonly contract_hash: string;
   readonly created_at: number;
   readonly updated_at: number;
-  readonly contract_terms: BtcToLnTerms;
+  readonly contract_terms: BtcToLnTerms | LnToBtcTerms;
   readonly verification_context: {
     readonly handshake_init: HandshakeInit;
     readonly handshake_accept: HandshakeAccept;
@@ -134,13 +138,24 @@ function checkHandshake(record: RecoveryRecord): void {
   }
 }
 
-function checkTerms(terms: BtcToLnTerms): void {
+function checkTerms(terms: BtcToLnTerms | LnToBtcTerms): void {
   // The parser already enforced the closed schema, including profile roles, networks, lists, and extensions.
-  require(terms.profile_id === "btc-to-ln/v1" && terms.economics.kind === "btc-to-ln" && terms.timing_policy.kind === "btc-to-ln");
-  require(terms.claimant === "provider" && terms.refund_party === "client");
-  const principal = sats(terms.economics.lightning_principal_sat, "principal", true);
-  const fee = sats(terms.economics.success_fee_sat, "success fee");
-  require(principal + fee === sats(terms.economics.contract_amount_sat, "contract amount", true));
+  let principal: bigint;
+  if (terms.profile_id === "btc-to-ln/v1") {
+    require(terms.economics.kind === "btc-to-ln" && terms.timing_policy.kind === "btc-to-ln" && terms.claimant === "provider" && terms.refund_party === "client");
+    principal = sats(terms.economics.lightning_principal_sat, "principal", true);
+    const fee = sats(terms.economics.success_fee_sat, "success fee");
+    require(principal + fee === sats(terms.economics.contract_amount_sat, "contract amount", true));
+    require(terms.timing_policy.max_outgoing_htlc_expiry_height + terms.timing_policy.learn_and_claim_blocks < terms.refund_lock_height + 1);
+  } else {
+    require(terms.profile_id === "ln-to-btc/v1" && terms.economics.kind === "ln-to-btc" && terms.timing_policy.kind === "ln-to-btc" && terms.claimant === "client" && terms.refund_party === "provider");
+    const e = terms.economics, value = sats(e.contract_amount_sat, "value", true), payout = sats(e.nominal_payout_sat, "payout", true),
+      reserve = sats(e.claim_fee_reserve_sat, "reserve"), fee = sats(e.success_fee_sat, "fee"), prepayment = sats(e.mining_prepayment_sat, "prepayment");
+    principal = sats(e.hold_invoice_sat, "hold", true);
+    // This browser supports no mining prepayment, historical or live.
+    require(prepayment === 0n && value === payout + reserve && value + fee <= MAX_SATS && principal === value + fee);
+    require(terms.refund_lock_height + 1 + terms.timing_policy.refund_and_ln_resolution_blocks < terms.timing_policy.min_incoming_htlc_expiry_height);
+  }
   for (const value of [terms.max_funding_fee_sat, terms.max_claim_fee_sat, terms.max_refund_fee_sat]) sats(value, "fee cap");
   for (const key of [terms.client_contract_compressed_key, terms.provider_contract_compressed_key, terms.invoice_binding.payee_compressed_pubkey]) curveKey(key, true);
   curveKey(terms.provider_identity_key);
@@ -148,7 +163,6 @@ function checkTerms(terms: BtcToLnTerms): void {
   const invoice = terms.invoice_binding;
   const msats = BigInt(invoice.amount_msat);
   require(msats > 0n && msats <= MAX_SATS * 1000n && msats === principal * 1000n && invoice.expires_at > invoice.created_at);
-  require(terms.timing_policy.max_outgoing_htlc_expiry_height + terms.timing_policy.learn_and_claim_blocks < terms.refund_lock_height + 1);
   const destination = /^(0014[0-9a-f]{40}|5120[0-9a-f]{64})$/;
   require(destination.test(terms.client_destination_script) && destination.test(terms.provider_destination_script));
 }
@@ -158,7 +172,7 @@ function checkHistory(record: RecoveryRecord): void {
   const seen = new Set<string>();
   for (const [revision, item] of history.entries()) {
     const binding = item.binding;
-    require(binding.contract_hash === record.contract_hash && binding.funder_role === "client" && binding.binding_revision === revision);
+    require(binding.contract_hash === record.contract_hash && binding.funder_role === (record.profile_id === "ln-to-btc/v1" ? "provider" : "client") && binding.binding_revision === revision);
     require(sats(binding.contract_value_sat, "funding value", true) === BigInt(record.contract_terms.economics.contract_amount_sat));
     require(binding.contract_script_pubkey === record.taproot_contract.script_pubkey);
     require(binding.contract_vout <= 0xffffffff && binding.lineage_anchor_vout <= 0xffffffff);
@@ -170,7 +184,8 @@ function checkHistory(record: RecoveryRecord): void {
       require(binding.replaces_txid === previous.funding_txid && binding.funding_attempt_id === previous.funding_attempt_id);
       require(binding.lineage_anchor_txid === previous.lineage_anchor_txid && binding.lineage_anchor_vout === previous.lineage_anchor_vout);
     }
-    verifySchnorr(record.verification_context.client_session_xonly_key, fundingBindingHash(binding), item.funder_session_signature, "funding");
+    verifySchnorr(record.profile_id === "ln-to-btc/v1" ? record.verification_context.provider_session_xonly_key : record.verification_context.client_session_xonly_key,
+      fundingBindingHash(binding), item.funder_session_signature, "funding");
   }
 }
 
@@ -212,7 +227,7 @@ function checkReservation(record: RecoveryRecord): void {
   for (const { binding } of record.funding_history) {
     let digest: string;
     try {
-      digest = bytesToHex(verifyCooperativeClaimProposal(hexToBytes(payload.unsigned_transaction as string), record.contract_terms, binding).signatureHash);
+      digest = bytesToHex(verifyCooperativeClaimProposal(hexToBytes(payload.unsigned_transaction as string), record.contract_terms as BtcToLnTerms, binding).signatureHash);
     } catch { continue; } // Another retained revision may be the proposal's original outpoint.
     require(digest === reservation.signature_hash);
     matches++;
@@ -221,7 +236,7 @@ function checkReservation(record: RecoveryRecord): void {
 }
 
 /** Private secret-bearing state. Every public operation authenticates its own input snapshot. */
-function authenticateRecovery(plaintext: Uint8Array, independentlySelectedNetwork: unknown): RecoveryRecord {
+function authenticateRecovery(plaintext: Uint8Array, independentlySelectedNetwork: unknown, profile: "btc-to-ln/v1" | "ln-to-btc/v1" = "btc-to-ln/v1"): RecoveryRecord {
   try {
     // Validate/snapshot the trust anchor; malformed or absent expectations never select a network for us.
     const network = JSON.parse(new TextDecoder().decode(jcs(independentlySelectedNetwork))) as unknown;
@@ -230,7 +245,7 @@ function authenticateRecovery(plaintext: Uint8Array, independentlySelectedNetwor
     const terms = record.contract_terms;
     const context = record.verification_context;
     const init = context.handshake_init, accept = context.handshake_accept;
-    require(record.profile_id === "btc-to-ln/v1" && init.profile_id === record.profile_id);
+    require(record.profile_id === profile && terms.profile_id === profile && init.profile_id === record.profile_id);
     require([record.network_identity, terms.network_identity, init.network_identity, accept.network_identity].every((item) => same(item, network)));
     checkHandshake(record);
     checkTerms(terms);
@@ -251,6 +266,7 @@ function authenticateRecovery(plaintext: Uint8Array, independentlySelectedNetwor
     require(record.fee_policy.max_claim_fee_sat === terms.max_claim_fee_sat && record.fee_policy.max_refund_fee_sat === terms.max_refund_fee_sat);
     const knowledge = record.monotonic_knowledge;
     require(knowledge.preimage_known === (knowledge.preimage !== null));
+    if (profile === "ln-to-btc/v1") require(knowledge.preimage_known);
     if (knowledge.preimage !== null) require(bytesToHex(sha256(hexToBytes(knowledge.preimage))) === terms.invoice_binding.payment_hash);
     // This authentication stage only derives the public point; it never signs.
     const secret = hexToBytes(record.user_secret.contract_secret_key);
@@ -259,8 +275,13 @@ function authenticateRecovery(plaintext: Uint8Array, independentlySelectedNetwor
     const reconstructed = reconstructTaprootContract(terms);
     require((Object.keys(reconstructed) as (keyof TaprootContract)[]).every((field) => record.taproot_contract[field] === reconstructed[field]));
     checkHistory(record);
-    require(!Object.hasOwn(record.extensions, "rillswap/reverse-claim-fallback") && !Object.hasOwn(record.extensions, "rillswap/reverse-preimage-disclosure"));
-    checkReservation(record);
+    if (profile === "btc-to-ln/v1") {
+      require(!Object.hasOwn(record.extensions, "rillswap/reverse-claim-fallback") && !Object.hasOwn(record.extensions, "rillswap/reverse-preimage-disclosure"));
+      checkReservation(record);
+    } else {
+      require(!Object.hasOwn(record.extensions, COOPERATIVE_RESERVATION_EXTENSION) && !Object.hasOwn(record.extensions, "rillswap/reverse-preimage-disclosure"));
+      if (Object.hasOwn(record.extensions, REVERSE_FALLBACK_EXTENSION)) checkReverseFallback(record);
+    }
     return record;
   } catch { /* Do not attach errors from parsers, crypto, or secret-bearing documents. */ }
   throw new RecoveryInspectionRefusedError();
@@ -386,7 +407,7 @@ const refundScriptBytes = (script: Uint8Array): Uint8Array => {
 };
 
 /** BIP341 DEFAULT script-path spend (ext_flag 1, input 0, no annex). */
-function refundSighash(binding: HistoricalBinding, contract: TaprootContract, output: Transaction["outputs"][number], lockHeight: number): Uint8Array {
+function scriptPathSighash(binding: HistoricalBinding, leafHash: string, output: Transaction["outputs"][number], lockHeight: number): Uint8Array {
   const prevout = concatBytes(hexToBytes(binding.funding_txid).reverse(), refundU32(binding.contract_vout));
   const message = concatBytes(
     Uint8Array.of(0x00), // hash_type DEFAULT
@@ -397,7 +418,7 @@ function refundSighash(binding: HistoricalBinding, contract: TaprootContract, ou
     sha256(concatBytes(refundU64(output.value), refundScriptBytes(output.script))),
     Uint8Array.of(0x02), // spend_type = ext_flag * 2 + annex_present
     refundU32(0),
-    hexToBytes(contract.refund_leaf_hash), Uint8Array.of(0x00), refundU32(0xffffffff),
+    hexToBytes(leafHash), Uint8Array.of(0x00), refundU32(0xffffffff),
   );
   return taggedHash("TapSighash", concatBytes(Uint8Array.of(0x00), message));
 }
@@ -413,7 +434,7 @@ function authorizedRefund(record: RecoveryRecord, binding: HistoricalBinding, ra
   require(bytesToHex(output.script) === terms.client_destination_script);
   const fee = BigInt(binding.contract_value_sat) - output.value;
   require(fee >= 0n && fee <= BigInt(terms.max_refund_fee_sat) && output.value >= (output.script.length === 22 ? 294n : 330n));
-  require(schnorr.verify(input.witness[0]!, refundSighash(binding, record.taproot_contract, output, terms.refund_lock_height), hexToBytes(terms.client_contract_compressed_key.slice(2))));
+   require(schnorr.verify(input.witness[0]!, scriptPathSighash(binding, record.taproot_contract.refund_leaf_hash, output, terms.refund_lock_height), hexToBytes(terms.client_contract_compressed_key.slice(2))));
   require(bytesToHex(serializeTransaction(parsed, true)) === bytesToHex(raw));
   const baseSize = serializeTransaction(parsed, false).length;
   return Object.freeze({ transactionHex: bytesToHex(raw), txid: parsed.txid, contractHash: record.contract_hash,
@@ -474,7 +495,7 @@ export function constructSelectedRecoveryRefund(
     const transaction = { version: 2, locktime: terms.refund_lock_height, outputs: [output], inputs: [
       { txid: binding.funding_txid, vout: binding.contract_vout, scriptSig: new Uint8Array(), sequence: 0xfffffffd, witness: [] as Uint8Array[] },
     ] };
-    const digest = refundSighash(binding, record.taproot_contract, output, terms.refund_lock_height);
+    const digest = scriptPathSighash(binding, record.taproot_contract.refund_leaf_hash, output, terms.refund_lock_height);
     secret = hexToBytes(record.user_secret.contract_secret_key);
     auxiliary = crypto.getRandomValues(new Uint8Array(32));
     const signature = schnorr.sign(digest, secret, auxiliary);
@@ -485,4 +506,140 @@ export function constructSelectedRecoveryRefund(
   } catch { /* Never expose document, signer, or parser errors or causes. */ }
   finally { secret?.fill(0); auxiliary?.fill(0); }
   throw new RecoveryRefundRefusedError();
+}
+
+export const REVERSE_FALLBACK_EXTENSION = "rillswap/reverse-claim-fallback";
+export interface ReverseRecoveryInspection {
+  readonly verification: "historical-static";
+  readonly networkName: string;
+  readonly profileId: "ln-to-btc/v1";
+  readonly contractHash: string;
+  readonly destinationScript: string;
+  readonly nominalPayoutSat: string;
+  readonly claimFeeReserveSat: string;
+  readonly maxClaimFeeSat: string;
+  readonly refundLockHeight: number;
+  readonly claimConfirmationBlocks: number;
+  readonly minFundingDepth: number;
+  readonly fundingHistory: readonly RecoveryFundingBinding[];
+  readonly fallbackTxid: string | null;
+}
+
+export function inspectReverseRecoveryPlaintext(plaintext: Uint8Array, independentlySelectedNetwork: unknown): ReverseRecoveryInspection {
+  const record = authenticateRecovery(plaintext, independentlySelectedNetwork, "ln-to-btc/v1"), terms = record.contract_terms as LnToBtcTerms;
+  const fallback = Object.hasOwn(record.extensions, REVERSE_FALLBACK_EXTENSION) ? checkReverseFallback(record) : null;
+  return Object.freeze({ verification: "historical-static", networkName: record.network_identity.name, profileId: "ln-to-btc/v1",
+    contractHash: record.contract_hash, destinationScript: terms.client_destination_script, nominalPayoutSat: terms.economics.nominal_payout_sat,
+    claimFeeReserveSat: terms.economics.claim_fee_reserve_sat, maxClaimFeeSat: terms.max_claim_fee_sat, refundLockHeight: terms.refund_lock_height,
+    claimConfirmationBlocks: terms.timing_policy.claim_confirmation_blocks, minFundingDepth: terms.funding_confirmations,
+    fundingHistory: Object.freeze(record.funding_history.map(({ binding }) => Object.freeze({ ...binding }))), fallbackTxid: fallback?.txid ?? null });
+}
+
+export interface SelectedReverseClaimInput extends SelectedRecoveryRefundInput {
+  /** Caller observation, not a chain proof. Fresh independent API consistency checks are mandatory. */
+  readonly confirmations: number;
+}
+export interface ConstructedReverseClaim extends Omit<ConstructedRecoveryRefund, "refundLockHeight"> {
+  readonly signatureHash: string;
+}
+export class ReverseClaimRefusedError extends Error {
+  constructor() { super("Reverse claim construction or verification refused"); this.name = "ReverseClaimRefusedError"; }
+}
+
+/** Exact locktime-zero claim leaf, never the refund leaf or cooperative key path. */
+function authorizedClaim(record: RecoveryRecord, binding: HistoricalBinding, raw: Uint8Array): ConstructedReverseClaim {
+  const terms = record.contract_terms as LnToBtcTerms, parsed = parseTransaction(raw);
+  require(terms.profile_id === "ln-to-btc/v1" && parsed.version === 2 && parsed.locktime === 0 && parsed.inputs.length === 1 && parsed.outputs.length === 1);
+  const input = parsed.inputs[0]!, output = parsed.outputs[0]!;
+  require(input.txid === binding.funding_txid && input.vout === binding.contract_vout && input.sequence === 0xfffffffd && input.scriptSig.length === 0);
+  require(input.witness.length === 4 && input.witness[0]!.length === 64 && input.witness[1]!.length === 32);
+  require(bytesToHex(input.witness[1]!) === record.monotonic_knowledge.preimage && bytesToHex(sha256(input.witness[1]!)) === terms.invoice_binding.payment_hash);
+  require(bytesToHex(input.witness[2]!) === record.taproot_contract.claim_script && bytesToHex(input.witness[3]!) === record.taproot_contract.claim_control_block);
+  require(bytesToHex(output.script) === terms.client_destination_script);
+  const fee = BigInt(binding.contract_value_sat) - output.value;
+  require(fee >= 0n && fee <= BigInt(terms.max_claim_fee_sat) && fee <= BigInt(terms.economics.claim_fee_reserve_sat) &&
+    output.value >= BigInt(terms.economics.nominal_payout_sat) && output.value >= (output.script.length === 22 ? 294n : 330n));
+  const signatureHash = scriptPathSighash(binding, record.taproot_contract.claim_leaf_hash, output, 0);
+  require(schnorr.verify(input.witness[0]!, signatureHash, hexToBytes(terms.client_contract_compressed_key.slice(2))));
+  require(bytesToHex(serializeTransaction(parsed, true)) === bytesToHex(raw));
+  const baseSize = serializeTransaction(parsed, false).length;
+  return Object.freeze({ transactionHex: bytesToHex(raw), txid: parsed.txid, contractHash: record.contract_hash,
+    fundingTxid: binding.funding_txid, fundingVout: binding.contract_vout, destinationScript: terms.client_destination_script,
+    feeSat: fee.toString(), outputValueSat: output.value.toString(), vsize: Math.ceil((baseSize * 3 + raw.length) / 4), signatureHash: bytesToHex(signatureHash) });
+}
+
+function checkReverseFallback(record: RecoveryRecord): ConstructedReverseClaim {
+  const fallback = record.extensions[REVERSE_FALLBACK_EXTENSION] as { version: number; funding_binding_hash: string; transaction: string };
+  require(fallback !== null && typeof fallback === "object" && Object.keys(fallback).length === 3 && fallback.version === 1);
+  const matches = record.funding_history.filter(({ binding }) => bytesToHex(fundingBindingHash(binding)) === fallback.funding_binding_hash);
+  require(matches.length === 1); return authorizedClaim(record, matches[0]!.binding, hexToBytes(fallback.transaction));
+}
+
+export function checkSelectedReverseFundingTransaction(plaintext: Uint8Array, independentlySelectedNetwork: unknown,
+  selection: RecoveryFundingSelection, rawFundingTransaction: Uint8Array): void {
+  try {
+    const chosen = { fundingAttemptId: selection.fundingAttemptId, bindingRevision: selection.bindingRevision };
+    require(rawFundingTransaction instanceof Uint8Array && rawFundingTransaction.length > 0 && rawFundingTransaction.length <= MAX_TRANSACTION_BYTES);
+    const raw = Uint8Array.from(rawFundingTransaction), record = authenticateRecovery(plaintext, independentlySelectedNetwork, "ln-to-btc/v1");
+    require(isSupportedRecoveryNetwork(record.network_identity)); checkFundingTransaction(raw, selectBinding(record, chosen)); return;
+  } catch { throw new RecoveryInspectionRefusedError(); }
+}
+
+/** Reauthorizes saved bytes without re-signing, inclusion/depth assertions, or exposure permission. */
+export function verifySelectedReverseClaim(plaintext: Uint8Array, independentlySelectedNetwork: unknown, selection: RecoveryFundingSelection,
+  rawFundingTransaction: Uint8Array, signedClaim: Uint8Array): ConstructedReverseClaim {
+  try {
+    const chosen = { fundingAttemptId: selection.fundingAttemptId, bindingRevision: selection.bindingRevision };
+    require(rawFundingTransaction instanceof Uint8Array && rawFundingTransaction.length > 0 && rawFundingTransaction.length <= MAX_TRANSACTION_BYTES);
+    require(signedClaim instanceof Uint8Array && signedClaim.length > 0 && signedClaim.length <= MAX_TRANSACTION_BYTES);
+    const raw = Uint8Array.from(rawFundingTransaction), signed = Uint8Array.from(signedClaim), record = authenticateRecovery(plaintext, independentlySelectedNetwork, "ln-to-btc/v1");
+    require(isSupportedRecoveryNetwork(record.network_identity)); const binding = selectBinding(record, chosen);
+    checkFundingTransaction(raw, binding); return authorizedClaim(record, binding, signed);
+  } catch { throw new ReverseClaimRefusedError(); }
+}
+
+/**
+ * Signs a preimage-revealing capability. Caller MUST approve destination/fee and
+ * freshly check actual unspent funding/depth/height BEFORE invocation. It must
+ * persist these exact bytes and separately authorize exposure before any export
+ * or broadcast. Observations below are bounded caller assertions, not proofs.
+ */
+export function constructSelectedReverseClaim(plaintext: Uint8Array, independentlySelectedNetwork: unknown, input: SelectedReverseClaimInput): ConstructedReverseClaim {
+  let secret: Uint8Array | undefined, auxiliary: Uint8Array | undefined;
+  try {
+    const { fundingAttemptId, bindingRevision, sampledTipHeight: tip, confirmations, feeSat, rawFundingTransaction } = input;
+    require(rawFundingTransaction instanceof Uint8Array && rawFundingTransaction.length > 0 && rawFundingTransaction.length <= MAX_TRANSACTION_BYTES);
+    const raw = Uint8Array.from(rawFundingTransaction), record = authenticateRecovery(plaintext, independentlySelectedNetwork, "ln-to-btc/v1");
+    require(isSupportedRecoveryNetwork(record.network_identity));
+    const binding = selectBinding(record, { fundingAttemptId, bindingRevision }), terms = record.contract_terms as LnToBtcTerms;
+    checkFundingTransaction(raw, binding);
+    require(Number.isSafeInteger(tip) && tip > 0 && tip < 500000000 && Number.isSafeInteger(confirmations) && confirmations >= terms.funding_confirmations && confirmations <= tip + 1);
+    require(tip + terms.timing_policy.claim_confirmation_blocks < terms.refund_lock_height + 1);
+    require(typeof feeSat === "bigint" && feeSat >= 0n && feeSat <= BigInt(terms.max_claim_fee_sat) && feeSat <= BigInt(terms.economics.claim_fee_reserve_sat));
+    const output = { value: BigInt(binding.contract_value_sat) - feeSat, script: hexToBytes(terms.client_destination_script) };
+    require(output.value >= BigInt(terms.economics.nominal_payout_sat) && output.value >= (output.script.length === 22 ? 294n : 330n));
+    const signatureHash = scriptPathSighash(binding, record.taproot_contract.claim_leaf_hash, output, 0);
+    secret = hexToBytes(record.user_secret.contract_secret_key); auxiliary = crypto.getRandomValues(new Uint8Array(32));
+    const signature = schnorr.sign(signatureHash, secret, auxiliary);
+    const transaction = { version: 2, locktime: 0, outputs: [output], inputs: [
+      { txid: binding.funding_txid, vout: binding.contract_vout, scriptSig: new Uint8Array(), sequence: 0xfffffffd,
+        witness: [signature, hexToBytes(record.monotonic_knowledge.preimage!), hexToBytes(record.taproot_contract.claim_script), hexToBytes(record.taproot_contract.claim_control_block)] },
+    ] };
+    return authorizedClaim(record, binding, serializeTransaction(transaction, true));
+  } catch { /* Discard secret-bearing signer, parser, or byte diagnostics. */ }
+  finally { secret?.fill(0); auxiliary?.fill(0); }
+  throw new ReverseClaimRefusedError();
+}
+
+/** Secret-bearing native RS-007 successor bytes, for local encryption only. Funded predecessor stays separately durable. */
+export function appendReverseClaimFallback(plaintext: Uint8Array, independentlySelectedNetwork: unknown, signedClaim: Uint8Array): Uint8Array {
+  try {
+    require(signedClaim instanceof Uint8Array && signedClaim.length > 0 && signedClaim.length <= MAX_TRANSACTION_BYTES);
+    const signed = Uint8Array.from(signedClaim), record = authenticateRecovery(plaintext, independentlySelectedNetwork, "ln-to-btc/v1");
+    require(isSupportedRecoveryNetwork(record.network_identity) && record.funding_history.length > 0 && !Object.hasOwn(record.extensions, REVERSE_FALLBACK_EXTENSION));
+    const latest = record.funding_history.at(-1)!.binding; authorizedClaim(record, latest, signed);
+    const document = { ...parseRecoveryPlaintext(plaintext).document, extensions: { ...record.extensions,
+      [REVERSE_FALLBACK_EXTENSION]: { version: 1, funding_binding_hash: bytesToHex(fundingBindingHash(latest)), transaction: bytesToHex(signed) } } };
+    const bytes = new TextEncoder().encode(new TextDecoder().decode(jcs(document))); authenticateRecovery(bytes, independentlySelectedNetwork, "ln-to-btc/v1"); return bytes;
+  } catch { throw new RecoveryInspectionRefusedError(); }
 }

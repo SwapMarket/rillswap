@@ -380,6 +380,34 @@ and scopes its baked macaroon to five RPCs. See `DEVELOPMENT.md` for explicit
 provisioning, credential risks, and read-only validation. No public build
 discovers it on load, and no current UI action dispatches through this module.
 
+Offline reverse recovery shares canonical admission, handshake/terms signatures,
+purpose-key checks and Taproot reconstruction with forward inspection. It
+requires the client's known preimage and provider-session-signed funding
+history. `constructSelectedReverseClaim` authenticates selected raw funding
+bytes and caller assertions of depth/height, then signs only the client claim
+leaf with locktime zero and witness `[signature, preimage, script, control]`.
+The resulting transaction is a preimage-disclosing capability, not permission
+to export or broadcast. Callers must approve destination/fee before signing,
+verify fresh unspent funding/chain evidence, and durably authorize exposure.
+Saved bytes are reauthorized without re-signing.
+
+`appendReverseClaimFallback` produces a native RS-007 successor from an already
+funded predecessor, retaining funding and knowledge unchanged. Keep both
+encrypted snapshots separately. Static inspection grants neither provenance,
+chain inclusion nor disclosure authority. Missing fallback proves nothing
+about prior exposure. No migration, storage repair or automatic recovery runs.
+
+The browser refuses mining prepayment, cooperative reservation/disclosure
+extensions in reverse records, and claim fees above the smaller of the signed
+claim cap and reserve. It requires the quoted nominal payout to remain intact.
+This last bound also applies to **historical fallback inspection**: an otherwise
+native-valid saved fallback that spends more than its reserve remains preserved
+but uninspectable here. Native recovery may accept it under its larger signed
+fee cap. This conservative browser policy protects new quoted payouts but can
+block higher-fee urgent historical claims; it is not full native acceptance
+parity. Differential tests classify native construction independently from
+browser results and separately validate funded/fallback successor ordering.
+
 After local inspection, **Check funding** explicitly connects to the API
 selected in Settings. It reopens and authenticates the selected file, checks
 the chosen revision's real transaction bytes locally, then repeats confirmed

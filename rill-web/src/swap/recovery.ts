@@ -1,5 +1,5 @@
 /**
- * RS-007 recovery document for a browser BTC to LN swap, byte-compatible
+ * RS-007 recovery document for either browser swap direction, byte-compatible
  * with rill-cli's `_recovery_document` so `rill recover inspect` and
  * `rill recover watch-refund` accept it. Encryption reuses the pinned
  * age X25519 container.
@@ -10,7 +10,7 @@ import canonicalize from "canonicalize";
 import { encryptCanonicalRecoveryForRecipient } from "../recoveryAgeContainer";
 import type { FundingBinding } from "./funding";
 import { reconstructTaprootContract } from "./taproot";
-import type { BtcToLnTerms, HandshakeAccept, HandshakeInit, TermsOffer } from "./wire";
+import type { HandshakeAccept, HandshakeInit, TermsOffer, ReverseTermsOffer } from "./wire";
 
 export interface RecoveryParts {
   readonly network: unknown;
@@ -18,21 +18,21 @@ export interface RecoveryParts {
   readonly init: HandshakeInit;
   readonly accept: HandshakeAccept;
   readonly acceptSignature: string;
-  readonly offer: TermsOffer;
+  readonly offer: TermsOffer | ReverseTermsOffer;
   readonly acceptanceSignature: string;
   readonly clientSessionKey: string;
   readonly contractSecret: Uint8Array;
   readonly birthday: number;
   readonly createdAt: number;
   readonly updatedAt: number;
-  readonly funding: readonly { readonly binding: FundingBinding; readonly signature: string }[];
+  readonly funding: readonly { readonly binding: Omit<FundingBinding, "funder_role"> & { readonly funder_role: "client" | "provider" }; readonly signature: string }[];
   readonly preimage: string | null;
   /** Recovery extensions, such as the cooperative reservation; empty by default. */
   readonly extensions?: Readonly<Record<string, unknown>>;
 }
 
 export function recoveryDocument(parts: RecoveryParts): Uint8Array {
-  const terms: BtcToLnTerms = parts.offer.terms.contract_terms;
+  const terms = parts.offer.terms.contract_terms;
   const text = canonicalize({
     format: "rillswap-recovery",
     format_version: "1-pre.1",
