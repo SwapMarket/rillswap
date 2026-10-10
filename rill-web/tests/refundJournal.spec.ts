@@ -23,7 +23,7 @@ test("explicit preparation survives reopening, snapshots caller inputs, and keep
     } finally { journal.close(); }
   }, saved);
   expect(loaded.record).toEqual(saved); expect(loaded.frozen).toBe(true);
-  expect(Object.keys(saved).sort()).toEqual(["api", "bindingRevision", "createdAt", "fundingAttemptId", "id", "networkIdentity", "rawFundingTransactionHex", "refund", "signedDigest", "state", "updatedAt"]);
+  expect(Object.keys(saved).sort()).toEqual(["api", "bindingRevision", "broadcastApi", "createdAt", "fundingAttemptId", "id", "networkIdentity", "rawFundingTransactionHex", "refund", "signedDigest", "state", "updatedAt"]);
 });
 
 test("two tabs create one immutable intent and only one atomic exposure winner", async ({ page, context }) => {

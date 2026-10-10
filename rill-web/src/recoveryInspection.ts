@@ -30,6 +30,8 @@ import {
 } from "./swap/wire";
 
 export interface RecoveryInspection {
+  readonly destinationScript: string;
+  readonly maxRefundFeeSat: string;
   readonly verification: "historical-static";
   readonly networkName: string;
   readonly profileId: "btc-to-ln/v1";
@@ -268,6 +270,7 @@ function authenticateRecovery(plaintext: Uint8Array, independentlySelectedNetwor
 export function inspectRecoveryPlaintext(plaintext: Uint8Array, independentlySelectedNetwork: unknown): RecoveryInspection {
   const record = authenticateRecovery(plaintext, independentlySelectedNetwork);
   return Object.freeze({ verification: "historical-static", networkName: record.network_identity.name,
+    destinationScript: record.contract_terms.client_destination_script, maxRefundFeeSat: record.contract_terms.max_refund_fee_sat,
     profileId: "btc-to-ln/v1", contractHash: record.contract_hash, refundLockHeight: record.contract_terms.refund_lock_height,
     firstRefundEligibleHeight: record.contract_terms.refund_lock_height + 1, recordedBindingCount: record.funding_history.length,
     fundingHistory: Object.freeze(record.funding_history.map(({ binding: b }) => Object.freeze({
@@ -399,6 +402,45 @@ function refundSighash(binding: HistoricalBinding, contract: TaprootContract, ou
   return taggedHash("TapSighash", concatBytes(Uint8Array.of(0x00), message));
 }
 
+/** Verify every spend byte and its signature against independently authenticated terms. */
+function authorizedRefund(record: RecoveryRecord, binding: HistoricalBinding, raw: Uint8Array): ConstructedRecoveryRefund {
+  const parsed = parseTransaction(raw), terms = record.contract_terms;
+  require(parsed.version === 2 && parsed.locktime === terms.refund_lock_height && parsed.inputs.length === 1 && parsed.outputs.length === 1);
+  const input = parsed.inputs[0]!, output = parsed.outputs[0]!;
+  require(input.txid === binding.funding_txid && input.vout === binding.contract_vout && input.sequence === 0xfffffffd && input.scriptSig.length === 0);
+  require(input.witness.length === 3 && input.witness[0]!.length === 64);
+  require(bytesToHex(input.witness[1]!) === record.taproot_contract.refund_script && bytesToHex(input.witness[2]!) === record.taproot_contract.refund_control_block);
+  require(bytesToHex(output.script) === terms.client_destination_script);
+  const fee = BigInt(binding.contract_value_sat) - output.value;
+  require(fee >= 0n && fee <= BigInt(terms.max_refund_fee_sat) && output.value >= (output.script.length === 22 ? 294n : 330n));
+  require(schnorr.verify(input.witness[0]!, refundSighash(binding, record.taproot_contract, output, terms.refund_lock_height), hexToBytes(terms.client_contract_compressed_key.slice(2))));
+  require(bytesToHex(serializeTransaction(parsed, true)) === bytesToHex(raw));
+  const baseSize = serializeTransaction(parsed, false).length;
+  return Object.freeze({ transactionHex: bytesToHex(raw), txid: parsed.txid, contractHash: record.contract_hash,
+    fundingTxid: binding.funding_txid, fundingVout: binding.contract_vout, destinationScript: terms.client_destination_script,
+    refundLockHeight: terms.refund_lock_height, feeSat: fee.toString(), outputValueSat: output.value.toString(),
+    vsize: Math.ceil((baseSize * 3 + raw.length) / 4) });
+}
+
+/** Reauthorize stored spending bytes, without signing or claiming current spendability. */
+export function verifySelectedRecoveryRefund(
+  plaintext: Uint8Array, independentlySelectedNetwork: unknown, selection: RecoveryFundingSelection,
+  rawFundingTransaction: Uint8Array, signedRefund: Uint8Array,
+): ConstructedRecoveryRefund {
+  try {
+    const chosen = { fundingAttemptId: selection.fundingAttemptId, bindingRevision: selection.bindingRevision };
+    require(rawFundingTransaction instanceof Uint8Array && rawFundingTransaction.length > 0 && rawFundingTransaction.length <= MAX_TRANSACTION_BYTES);
+    require(signedRefund instanceof Uint8Array && signedRefund.length > 0 && signedRefund.length <= MAX_TRANSACTION_BYTES);
+    const funding = Uint8Array.from(rawFundingTransaction), signed = Uint8Array.from(signedRefund);
+    const record = authenticateRecovery(plaintext, independentlySelectedNetwork);
+    require(isSupportedRecoveryNetwork(record.network_identity));
+    const binding = selectBinding(record, chosen);
+    checkFundingTransaction(funding, binding);
+    return authorizedRefund(record, binding, signed);
+  } catch { /* Discard all secret-bearing underlying causes. */ }
+  throw new RecoveryRefundRefusedError();
+}
+
 /**
  * Disconnected selected-outpoint BTC to LN refund construction. Reauthenticates
  * bytes and checks the raw funding transaction, never trusts an inspection
@@ -439,19 +481,7 @@ export function constructSelectedRecoveryRefund(
     require(signature.length === 64 && schnorr.verify(signature, digest, hexToBytes(terms.client_contract_compressed_key.slice(2))));
     transaction.inputs[0]!.witness = [signature, hexToBytes(record.taproot_contract.refund_script), hexToBytes(record.taproot_contract.refund_control_block)];
     const signed = serializeTransaction(transaction, true);
-    const parsed = parseTransaction(signed);
-    // Reauthorize every parsed byte, including exact witness shape, after signing.
-    require(parsed.version === 2 && parsed.locktime === transaction.locktime && parsed.inputs.length === 1 && parsed.outputs.length === 1);
-    const finalInput = parsed.inputs[0]!, finalOutput = parsed.outputs[0]!;
-    require(finalInput.txid === binding.funding_txid && finalInput.vout === binding.contract_vout && finalInput.sequence === 0xfffffffd && finalInput.scriptSig.length === 0);
-    require(finalInput.witness.length === 3 && finalInput.witness.every((item, index) => bytesToHex(item) === bytesToHex(transaction.inputs[0]!.witness[index]!)));
-    require(finalOutput.value === value && bytesToHex(finalOutput.script) === terms.client_destination_script);
-    require(bytesToHex(serializeTransaction(parsed, true)) === bytesToHex(signed));
-    const baseSize = serializeTransaction(parsed, false).length;
-    return Object.freeze({ transactionHex: bytesToHex(signed), txid: parsed.txid, contractHash: record.contract_hash,
-      fundingTxid: binding.funding_txid, fundingVout: binding.contract_vout, destinationScript: terms.client_destination_script,
-      refundLockHeight: terms.refund_lock_height, feeSat: feeSat.toString(), outputValueSat: value.toString(),
-      vsize: Math.ceil((baseSize * 3 + signed.length) / 4) });
+    return authorizedRefund(record, binding, signed);
   } catch { /* Never expose document, signer, or parser errors or causes. */ }
   finally { secret?.fill(0); auxiliary?.fill(0); }
   throw new RecoveryRefundRefusedError();

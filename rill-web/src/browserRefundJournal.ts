@@ -20,6 +20,7 @@ export type RefundSubmissionState = "prepared" | "submission-unknown" | "accepte
 export interface RefundJournalDraft {
   readonly networkIdentity: unknown;
   readonly api: string;
+  readonly broadcastApi: string;
   readonly fundingAttemptId: string;
   readonly bindingRevision: number;
   /** Public transaction bytes, retained for offline reauthorization, never UTXO proof. */
@@ -72,11 +73,14 @@ function recordId(network: unknown, txid: string, vout: number): string {
 
 /** Integrity checks only, not ownership, UTXO evidence, or signature authorization. */
 function draftSnapshot(value: unknown): RefundJournalDraft {
-  const draft = object(value, ["networkIdentity", "api", "fundingAttemptId", "bindingRevision", "rawFundingTransactionHex", "refund"]);
+  const draft = object(value, ["networkIdentity", "api", "broadcastApi", "fundingAttemptId", "bindingRevision", "rawFundingTransactionHex", "refund"]);
   const networkIdentity = snapshotNetwork(draft.networkIdentity);
   require(typeof draft.api === "string");
   const api = validateMempoolApi(draft.api as string, networkIdentity.name as NetworkName);
   require(api === draft.api);
+  require(typeof draft.broadcastApi === "string");
+  const broadcastApi = validateMempoolApi(draft.broadcastApi as string, networkIdentity.name as NetworkName);
+  require(broadcastApi === draft.broadcastApi);
   require(typeof draft.fundingAttemptId === "string" && HEX32.test(draft.fundingAttemptId));
   require(integer(draft.bindingRevision, 0, 63));
   const data = object(draft.refund, ["transactionHex", "txid", "contractHash", "fundingTxid", "fundingVout", "destinationScript", "refundLockHeight", "feeSat", "outputValueSat", "vsize"]);
@@ -104,13 +108,13 @@ function draftSnapshot(value: unknown): RefundJournalDraft {
     fundingTxid: data.fundingTxid as string, fundingVout: data.fundingVout as number, destinationScript,
     refundLockHeight: data.refundLockHeight as number, feeSat: data.feeSat as string, outputValueSat: data.outputValueSat as string,
     vsize: data.vsize as number });
-  return Object.freeze({ networkIdentity, api, fundingAttemptId: draft.fundingAttemptId as string, bindingRevision: draft.bindingRevision as number,
+  return Object.freeze({ networkIdentity, api, broadcastApi, fundingAttemptId: draft.fundingAttemptId as string, bindingRevision: draft.bindingRevision as number,
     rawFundingTransactionHex, refund });
 }
 
 function validateRecord(value: unknown): RefundJournalRecord {
-  const data = object(value, ["id", "signedDigest", "createdAt", "updatedAt", "state", "networkIdentity", "api", "fundingAttemptId", "bindingRevision", "rawFundingTransactionHex", "refund"]);
-  const draft = draftSnapshot({ networkIdentity: data.networkIdentity, api: data.api, fundingAttemptId: data.fundingAttemptId,
+  const data = object(value, ["id", "signedDigest", "createdAt", "updatedAt", "state", "networkIdentity", "api", "broadcastApi", "fundingAttemptId", "bindingRevision", "rawFundingTransactionHex", "refund"]);
+  const draft = draftSnapshot({ networkIdentity: data.networkIdentity, api: data.api, broadcastApi: data.broadcastApi, fundingAttemptId: data.fundingAttemptId,
     bindingRevision: data.bindingRevision, rawFundingTransactionHex: data.rawFundingTransactionHex, refund: data.refund });
   require(data.id === recordId(draft.networkIdentity, draft.refund.fundingTxid, draft.refund.fundingVout));
   require(data.signedDigest === bytesToHex(sha256(hexToBytes(draft.refund.transactionHex))));
@@ -121,7 +125,7 @@ function validateRecord(value: unknown): RefundJournalRecord {
 }
 
 function sameDraft(record: RefundJournalRecord, draft: RefundJournalDraft): boolean {
-  const project = (item: RefundJournalDraft) => ({ networkIdentity: item.networkIdentity, api: item.api, fundingAttemptId: item.fundingAttemptId,
+  const project = (item: RefundJournalDraft) => ({ networkIdentity: item.networkIdentity, api: item.api, broadcastApi: item.broadcastApi, fundingAttemptId: item.fundingAttemptId,
     bindingRevision: item.bindingRevision, rawFundingTransactionHex: item.rawFundingTransactionHex, refund: item.refund });
   return canonicalize(project(record)) === canonicalize(project(draft));
 }

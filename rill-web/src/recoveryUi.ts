@@ -1,15 +1,19 @@
-/** Explicit local recovery import. Never uploads, stores imports, signs, or broadcasts. */
+/** Explicit local recovery import and separately approved refund actions. Never uploads keys or imports. */
 import { MAX_RECOVERY_CIPHERTEXT_BYTES } from "./recoveryAgeContainer";
 import { decryptRecoveryContainer } from "./recoveryKeys";
 import { inspectRecoveryPlaintext, type RecoveryInspection } from "./recoveryInspection";
 import { observeRecoveryFunding } from "./recoveryFunding";
 import type { NetworkName } from "./swap/config";
+import { scriptAddress } from "./swap/address";
+import { prepareBrowserRefund, exportBrowserRefund, broadcastBrowserRefund } from "./browserRefund";
+import type { RefundJournalRecord } from "./browserRefundJournal";
 
 interface RecoveryUiOptions {
   /** Chosen by the user outside the file, including the complete chain identity. */
   readonly selectedNetwork: () => { readonly name: string; readonly identity: unknown };
   readonly browserIdentity: () => Promise<string>;
   readonly selectedChainApi: () => string;
+  readonly selectedBroadcastApi: () => string;
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, text = "", id?: string): HTMLElementTagNameMap[K] {
@@ -62,17 +66,41 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
   fundingResult.setAttribute("aria-live", "polite");
   fundingControls.append(revisionLabel, revision, element("p",
     "Check funding connects to the API selected in Settings for this attempt. It sends the selected public transaction ID, never your recovery file or key."), check, fundingResult);
+  const refundControls = element("section", "", "swap-refund-controls");
+  const destination = element("p", "", "swap-refund-destination");
+  const feeLabel = element("label", "Total refund transaction fee (sat)");
+  const fee = element("input", "", "swap-refund-fee"); fee.type = "number"; fee.min = "0"; fee.step = "1";
+  feeLabel.htmlFor = fee.id;
+  const amount = element("p", "", "swap-refund-amount");
+  const approval = element("input", "", "swap-refund-approve"); approval.type = "checkbox";
+  const approvalLabel = element("label", "I recognize this recovery file and control the refund address above. I approve the displayed destination and fee.");
+  approvalLabel.htmlFor = approval.id;
+  const prepare = element("button", "Approve and prepare refund", "swap-refund-prepare"); prepare.type = "button"; prepare.disabled = true;
+  const download = element("button", "Download signed transaction", "swap-refund-download"); download.type = "button"; download.hidden = true;
+  const broadcast = element("button", "Broadcast refund", "swap-refund-broadcast"); broadcast.type = "button"; broadcast.hidden = true;
+  const refundResult = element("section", "", "swap-refund-result"); refundResult.setAttribute("aria-live", "polite");
+  refundControls.append(element("h3", "Refund to the signed destination"), destination, feeLabel, fee, amount,
+    element("p", "An imported file cannot prove ownership of this address. Verify it in your wallet before approving. The signed destination cannot be changed."),
+    approval, approvalLabel, prepare, download, broadcast, refundResult);
+  fundingControls.append(refundControls);
   details.append(olderKey, inspect, result, fundingControls);
   let busy = false;
   let inspected: RecoveryInspection | undefined;
   let pendingInvalidated = false;
+  let prepared: RefundJournalRecord | undefined;
+  const invalidateRefund = (): void => { approval.checked = false; prepare.disabled = true; prepared = undefined; download.hidden = broadcast.hidden = true; refundResult.replaceChildren(); };
 
   const clear = (): void => {
+    pendingInvalidated = true; invalidateRefund();
     if (!busy) { result.replaceChildren(); fundingResult.replaceChildren(); fundingControls.hidden = true; inspected = undefined; }
   };
   file.onchange = keyFile.onchange = clear;
   const show = (report: RecoveryInspection): void => {
     inspected = report;
+    invalidateRefund();
+    destination.textContent = `Refund address: ${scriptAddress(report.destinationScript, report.networkName)}`;
+    fee.max = report.maxRefundFeeSat;
+    fee.value = (BigInt(report.maxRefundFeeSat) < 300n ? BigInt(report.maxRefundFeeSat) : 300n).toString();
     revision.replaceChildren(...report.fundingHistory.map((binding) => Object.assign(element("option",
       `Revision ${binding.binding_revision} · ${binding.funding_txid.slice(0, 12)}...`), { value: String(binding.binding_revision) })));
     revision.value = String(report.fundingHistory.at(-1)?.binding_revision ?? "");
@@ -84,7 +112,8 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
       element("p", `The signed refund lock is block ${report.refundLockHeight}. The first eligible block is ${report.firstRefundEligibleHeight}.`),
       element("p", "This verifies consistency with the file's embedded signers, not its provenance or your ownership of the refund address. " +
         "Funding, unspent state, and refund maturity have not been checked."),
-      element("p", "Browser refund signing and broadcasting are not available yet. Local inspection did not connect, sign, or broadcast."));
+      element("p", "Local inspection did not connect, sign, or broadcast. Refund signing requires separate approval below."));
+    updateAmount();
   };
   inspect.onclick = () => {
     if (busy) return;
@@ -121,7 +150,14 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
       }
     })();
   };
-  revision.onchange = () => fundingResult.replaceChildren();
+  const updateAmount = (): void => {
+    const binding = inspected?.fundingHistory.find((item) => String(item.binding_revision) === revision.value);
+    amount.textContent = binding && /^(0|[1-9][0-9]{0,15})$/.test(fee.value) ?
+      `Refund amount: ${(BigInt(binding.contract_value_sat) - BigInt(fee.value)).toString()} sat, minus no further provider fee. Signed fee cap: ${inspected!.maxRefundFeeSat} sat.` : "Choose a valid total fee.";
+  };
+  revision.onchange = () => { pendingInvalidated = true; fundingResult.replaceChildren(); invalidateRefund(); updateAmount(); };
+  fee.oninput = () => { pendingInvalidated = true; invalidateRefund(); updateAmount(); };
+  approval.onchange = () => { if (!approval.checked) pendingInvalidated = true; prepare.disabled = !approval.checked || busy; };
   check.onclick = () => {
     if (busy || !inspected) return;
     const selectedFile = file.files?.[0], selectedKey = keyFile.files?.[0];
@@ -151,7 +187,7 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
           element("p", observation.refundMatureAtObservedTip ? "The refund lock has passed at this observed tip." :
             `Waiting for a tip above block ${observation.refundLockHeight}. The refund lock has not passed yet.`),
           element("p", "Repeated API responses agree on confirmed, unspent funding. These are trusted observations, not independent chain proof or permission to sign."),
-          element("p", "Nothing was signed or broadcast. Browser refund actions are not available yet."));
+          element("p", "Nothing was signed or broadcast by this funding check. Refund signing requires separate approval."));
       } catch {
         fundingResult.replaceChildren(element("p", "Funding could not be verified for the current selection. Check the file, key, network, API, and revision, then try again. Nothing was signed or broadcast."));
       } finally {
@@ -160,5 +196,65 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
       }
     })();
   };
-  return { element: details, clearFundingObservation() { pendingInvalidated = true; fundingResult.replaceChildren(); } };
+  const refundAction = (action: "prepare" | "export" | "broadcast"): void => {
+    if (busy || !inspected || !approval.checked || (action !== "prepare" && !prepared)) return;
+    const selectedFile = file.files?.[0], selectedKey = keyFile.files?.[0], selectedRevision = revision.value, feeText = fee.value;
+    const selected = options.selectedNetwork(), network = structuredClone(selected.identity) as { name: NetworkName; genesis_hash: string };
+    const binding = inspected.fundingHistory.find((item) => String(item.binding_revision) === selectedRevision);
+    if (!selectedFile || !binding || selectedFile.size === 0 || selectedFile.size > MAX_RECOVERY_CIPHERTEXT_BYTES ||
+      (selectedKey && (selectedKey.size === 0 || selectedKey.size > 4096)) || !/^(0|[1-9][0-9]{0,15})$/.test(feeText)) return;
+    let api: string, broadcastApi: string;
+    try { api = options.selectedChainApi(); broadcastApi = options.selectedBroadcastApi(); }
+    catch { refundResult.replaceChildren(element("p", "Check your API settings before approving a refund.")); return; }
+    const saved = prepared;
+    pendingInvalidated = false; busy = true;
+    file.disabled = keyFile.disabled = inspect.disabled = check.disabled = revision.disabled = fee.disabled = approval.disabled = prepare.disabled = download.disabled = broadcast.disabled = true;
+    refundResult.replaceChildren(element("p", action === "prepare" ? "Checking funding and preparing your approved refund..." : "Rechecking the approved refund..."));
+    const assertCurrent = (): void => {
+      if (pendingInvalidated || !approval.checked || file.files?.[0] !== selectedFile || keyFile.files?.[0] !== selectedKey || revision.value !== selectedRevision || fee.value !== feeText ||
+        options.selectedNetwork().name !== selected.name || options.selectedChainApi() !== api || options.selectedBroadcastApi() !== broadcastApi) throw new Error("Approval changed");
+    };
+    void (async () => {
+      let plaintext: Uint8Array | undefined;
+      try {
+        const identity = selectedKey ? await selectedKey.text() : await options.browserIdentity();
+        plaintext = await decryptRecoveryContainer(new Uint8Array(await selectedFile.arrayBuffer()), identity);
+        assertCurrent();
+        const selection = { fundingAttemptId: binding.funding_attempt_id, bindingRevision: binding.binding_revision };
+        const approved = { assertCurrent, broadcastApi };
+        if (action === "prepare") {
+          const record = await prepareBrowserRefund(plaintext, network, selection, api, BigInt(feeText), approved);
+          assertCurrent(); prepared = record;
+          refundResult.replaceChildren(element("h3", record.state === "prepared" ? "Refund prepared and saved" : "Previously exposed refund loaded"),
+            element("p", `Transaction ID: ${record.refund.txid}`),
+            element("p", record.state === "prepared" ? "Nothing has been exported or broadcast. Downloading exposes these spending bytes and disables application broadcast." :
+              "This intent may already have been submitted. No automatic resend or replacement is permitted. You can download its identical signed bytes."));
+        } else if (action === "export") {
+          const record = await exportBrowserRefund(plaintext, network, selection, api, saved!, approved);
+          assertCurrent(); prepared = record;
+          const url = URL.createObjectURL(new Blob([record.refund.transactionHex + "\n"], { type: "text/plain" }));
+          const link = element("a"); link.href = url; link.download = `rillswap-refund-${record.refund.txid}.hex`; link.click();
+          setTimeout(() => URL.revokeObjectURL(url), 10000);
+          refundResult.replaceChildren(element("h3", "Signed transaction exported"), element("p", "It may be broadcast outside this page. Application resend is disabled; keep the identical transaction and original recovery backup."));
+        } else {
+          const outcome = await broadcastBrowserRefund(plaintext, network, selection, api, saved!, approved);
+          prepared = undefined;
+          refundResult.replaceChildren(element("h3", outcome.outcome === "accepted" ? "Refund accepted by the API" : "Refund submission outcome unknown"),
+            element("p", `Submitted selection: ${selected.name}, API ${broadcastApi}.`),
+            element("p", `Transaction ID: ${outcome.txid}`), element("p", outcome.outcome === "accepted" ? "Acceptance is not confirmation. Do not submit another refund for this output." :
+              "The transaction may have reached the network. It will not be retried. Load the saved intent to export identical bytes, never a replacement."));
+        }
+        download.hidden = !prepared; broadcast.hidden = prepared?.state !== "prepared";
+      } catch {
+        prepared = undefined; download.hidden = broadcast.hidden = true;
+        refundResult.replaceChildren(element("p", "Refund action could not be completed. No automatic retry or replacement will occur. A saved intent may be prepared, unknown, or accepted; approve and load it again to inspect its state."));
+      } finally {
+        plaintext?.fill(0); busy = false;
+        file.disabled = keyFile.disabled = inspect.disabled = check.disabled = revision.disabled = fee.disabled = approval.disabled = download.disabled = broadcast.disabled = false;
+        prepare.disabled = !approval.checked;
+      }
+    })();
+  };
+  prepare.onclick = () => refundAction("prepare"); download.onclick = () => refundAction("export"); broadcast.onclick = () => refundAction("broadcast");
+  return { element: details, clearFundingObservation() { pendingInvalidated = true; fundingResult.replaceChildren(); invalidateRefund(); } };
 }

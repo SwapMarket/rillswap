@@ -3,9 +3,9 @@ import canonicalize from "canonicalize";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { schnorr } from "@noble/curves/secp256k1.js";
 import {
-  constructSelectedRecoveryRefund, inspectRecoveryPlaintext, RecoveryRefundRefusedError, type SelectedRecoveryRefundInput,
+  constructSelectedRecoveryRefund, inspectRecoveryPlaintext, verifySelectedRecoveryRefund, RecoveryRefundRefusedError, type SelectedRecoveryRefundInput,
 } from "../src/recoveryInspection";
-import { parseTransaction } from "../src/swap/transaction";
+import { parseTransaction, serializeTransaction } from "../src/swap/transaction";
 import { recoveryRefundCases, refundCase, type RecoveryRefundCase } from "./fixtures/recoveryRefundCases";
 
 const plaintext = (c: RecoveryRefundCase): Uint8Array => new TextEncoder().encode(canonicalize(c.record)!);
@@ -110,4 +110,24 @@ test("refund results expose only allowlisted primitives and signing owns its sna
     for (const value of Object.values(result)) expect(["string", "number"].includes(typeof value)).toBe(true);
     expect(JSON.stringify(result)).not.toContain(item.record.user_secret.contract_secret_key);
   } finally { rng.mockRestore(); }
+});
+
+test("stored refunds are independently reauthorized without signing, randomness, or a current unspent claim", () => {
+  for (const item of recoveryRefundCases().filter((item) => item.accepted)) {
+    const document = plaintext(item), args = input(item), signed = constructSelectedRecoveryRefund(document, item.expectedNetwork, args);
+    const sign = spyOn(schnorr, "sign"), rng = spyOn(crypto, "getRandomValues");
+    try {
+      const checked = verifySelectedRecoveryRefund(document, item.expectedNetwork, args, args.rawFundingTransaction, hexToBytes(signed.transactionHex));
+      expect(checked).toEqual(signed); expect(sign).not.toHaveBeenCalled(); expect(rng).not.toHaveBeenCalled();
+      const parsed = parseTransaction(hexToBytes(signed.transactionHex));
+      const alternatives = [
+        { ...parsed, locktime: parsed.locktime - 1 },
+        { ...parsed, outputs: [{ ...parsed.outputs[0]!, value: parsed.outputs[0]!.value - 1n }] },
+        { ...parsed, inputs: [{ ...parsed.inputs[0]!, sequence: 0xffffffff }] },
+        { ...parsed, inputs: [{ ...parsed.inputs[0]!, witness: [new Uint8Array(64), ...parsed.inputs[0]!.witness.slice(1)] }] },
+        { ...parsed, outputs: [{ ...parsed.outputs[0]!, script: hexToBytes("0014" + "66".repeat(20)) }] },
+      ];
+      for (const altered of alternatives) expect(() => verifySelectedRecoveryRefund(document, item.expectedNetwork, args, args.rawFundingTransaction, serializeTransaction(altered, true))).toThrow(RecoveryRefundRefusedError);
+    } finally { sign.mockRestore(); rng.mockRestore(); }
+  }
 });

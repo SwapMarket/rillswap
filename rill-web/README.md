@@ -305,9 +305,10 @@ Its caller-supplied transaction and height do **not** prove inclusion, an
 unspent output, maturity, destination ownership, or permission to spend.
 Returned signed bytes are a **broadcastable spending capability**: a future
 real-funds caller must independently verify the chain and obtain explicit
-approval **before signing or export**, then recheck before broadcasting. There
-is no production caller, UI signing action, network request, persistence, or
-broadcast path yet. Missing/partial inputs never trigger automatic work.
+approval **before signing or export**, then recheck before broadcasting. The
+constructor itself has no network or storage side effects. The browser action
+layer described below owns explicit approval, observations, and durable intent.
+Missing/partial inputs never trigger automatic work.
 
 To compare the synthetic refund corpus's digest, signature, witness, exact
 transaction, txid, and vsize with Core's native implementation (public fixture
@@ -317,7 +318,9 @@ keys only, no chain access):
 RILLSWAP_TEST_RECOVERY_NATIVE=1 bun test unit/recoveryRefundNative.test.ts
 ```
 
-Actual browser refund signing integration and broadcasting remain unavailable.
+The recovery panel now supports explicit BTC to LN refund preparation,
+identical-byte download, and broadcast, including existing mainnet contracts.
+New mainnet funding remains blocked. Full LN to BTC execution is separate.
 
 After local inspection, **Check funding** explicitly connects to the API
 selected in Settings. It reopens and authenticates the selected file, checks
@@ -339,14 +342,14 @@ discards the result. A coherent immature observation displays a waiting state. T
 result is labeled **trusted API observation**, and `refundMatureAtObservedTip`
 means only that its reported tip is above the signed lock height. Agreement
 does not prove a canonical chain, a global mempool view, destination ownership,
-or permission to sign. No UI action signs or broadcasts yet.
+or permission to sign. A separate destination/fee approval is required to sign.
 
 The selected API sees your IP and the public funding transaction/output,
 which can reveal public addresses and amounts. It receives no keys, recovery
 files, or invoices. This is explained in collapsed **Privacy & terms**.
 Importing, page load, and Settings changes still make no connections.
 
-The disconnected `BrowserRefundJournal` stores immutable, public signed refund
+`BrowserRefundJournal` stores immutable, public signed refund
 intents in IndexedDB. Its states are `prepared`, `submission-unknown`, and
 `accepted` (API acceptance is not confirmation). Strict transaction durability,
 completion, and readback precede exposure. An atomic transition elects one
@@ -360,6 +363,31 @@ records or incompatible stores remain preserved and block the action. Storage
 durability is not protection against eviction, deletion, or another browser.
 Keep the original encrypted backups. Chromium fault/concurrency tests cover
 the journal, not a universal browser durability guarantee.
+
+Review the fixed signed destination and prefilled total fee, confirm ownership,
+then click **Approve and prepare refund**. Preparation reopens/authenticates the
+file and freshly checks mature, confirmed, unspent funding before signing.
+Saved plans are loaded and reauthorized, never re-signed or replaced. Fee and
+destination changes cannot replace an existing intent. No keys or plaintext
+imports are persisted in the refund journal.
+
+**Download signed transaction** rechecks a prepared plan and durably marks its
+exposure before starting the download. Export disables application broadcast,
+because someone else could already have broadcast those bytes. Unknown or
+accepted plans still permit explicit identical-byte download after reloading.
+**Broadcast refund** separately rechecks the prepared plan and wins an atomic
+durable UNKNOWN transition before one POST of signed transaction hex. Exact
+matching txid responses mark API acceptance, not chain confirmation. Response
+loss, HTTP errors, cancellation, or storage uncertainty never reset intent or
+authorize retry. Settings/approval changes across awaits block signing/exposure;
+after durable exposure they preserve UNKNOWN rather than rolling it back.
+
+The collapsed broadcast API setting defaults to the selected public explorer,
+or the separate loopback regtest adapter on port 8092. The read-only regtest
+adapter on 8091 remains read-only. Both deployment defaults are configurable
+through `VITE_RILLSWAP_MEMPOOL_API` and `VITE_RILLSWAP_BROADCAST_API`; custom
+origins need deployment CSP allowance. Browser POST availability/CORS depends
+on the operator; unavailable transport still permits approved signed export.
 
 You need `rill-cli` (see its README), a synced Bitcoin Core node for the same
 network, the funded recovery file, its age key, and the funding attempt ID that

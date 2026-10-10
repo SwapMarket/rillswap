@@ -6,6 +6,7 @@ export interface SwapDefaults {
   readonly network: NetworkName;
   readonly relays: readonly string[];
   readonly mempoolApi: string;
+  readonly broadcastApi: string;
 }
 
 export const MAX_RELAYS = 4;
@@ -57,6 +58,7 @@ export function resolveSwapDefaults(env: Record<string, string | undefined>): Sw
     relays: validateRelays(env.VITE_RILLSWAP_RELAYS ?? env.VITE_RILLSWAP_RELAY ??
       (name === "regtest" ? "ws://127.0.0.1:7777" : "wss://relay.damus.io wss://nos.lol wss://relay.primal.net"), name),
     mempoolApi: validateMempoolApi(env.VITE_RILLSWAP_MEMPOOL_API ?? MEMPOOL_APIS[name], name),
+    broadcastApi: validateMempoolApi(env.VITE_RILLSWAP_BROADCAST_API ?? (name === "regtest" ? "http://127.0.0.1:8092/api" : env.VITE_RILLSWAP_MEMPOOL_API ?? MEMPOOL_APIS[name]), name),
   };
 }
 

@@ -8,6 +8,8 @@ import { validateMempoolApi, type NetworkName } from "./swap/config";
 import { MAX_TRANSACTION_BYTES } from "./swap/transaction";
 
 export interface RecoveryFundingObservation {
+  /** Validated public bytes for a later, separately approved signing operation. Not UTXO proof. */
+  readonly rawFundingTransactionHex: string;
   readonly observation: "trusted-api";
   readonly networkName: string;
   readonly fundingTxid: string;
@@ -96,6 +98,7 @@ export async function observeRecoveryFunding(
     require(after.height === tip.height && after.hash === tip.hash);
     signal.throwIfAborted();
     return Object.freeze({ observation: "trusted-api", networkName: network.name,
+      rawFundingTransactionHex: rawHex!,
       fundingTxid: binding.funding_txid, fundingVout: binding.contract_vout,
       fundingBlockHeight: inclusion!.height, fundingBlockHash: inclusion!.hash,
       confirmations: tip.height - inclusion!.height + 1, tipHeight: tip.height, tipHash: tip.hash,

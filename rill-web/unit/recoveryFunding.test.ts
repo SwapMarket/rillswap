@@ -37,7 +37,7 @@ test("coherent observations return deeply immutable public metadata with no sign
   const mock = api(); const sign = spyOn(schnorr, "sign");
   try {
     const result = await mock.run();
-    expect(result).toEqual({ observation: "trusted-api", networkName: "regtest", fundingTxid: mock.item.record.funding_history[0]!.binding.funding_txid,
+    expect(result).toEqual({ observation: "trusted-api", networkName: "regtest", rawFundingTransactionHex: mock.item.fundingTxHex, fundingTxid: mock.item.record.funding_history[0]!.binding.funding_txid,
       fundingVout: 0, fundingBlockHeight: 1000, fundingBlockHash: "d".repeat(64), confirmations: 102,
       tipHeight: 1101, tipHash: "a".repeat(64), refundLockHeight: 1100, refundMatureAtObservedTip: true });
     expect(Object.isFrozen(result)).toBe(true); expect(sign).not.toHaveBeenCalled();

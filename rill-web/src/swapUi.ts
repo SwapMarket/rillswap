@@ -107,6 +107,8 @@ function mount(root: HTMLElement): void {
     "Up to four relays. Connect only when you request a quote. Each operator sees your IP and transport metadata."));
   const chainApi = field(settings, "swap-chain-api", "Mempool API", __SWAP_DEFAULTS__.mempoolApi,
     "Trusted height observations, not independent chain verification. Custom origins need a deployment CSP allowance.");
+  const broadcastApi = field(settings, "swap-broadcast-api", "Transaction broadcast API", __SWAP_DEFAULTS__.broadcastApi,
+    "Used only after explicit refund approval and a Broadcast refund click. Custom origins need a deployment CSP allowance.");
   const identity = field(settings, "swap-provider", "Provider identity", "",
     "Automatic by default. Optionally pin a provider's 64-character public identity key.");
   identity.placeholder = "Automatic (lowest verified provider price)";
@@ -241,6 +243,7 @@ function mount(root: HTMLElement): void {
       return key.identity;
     },
     selectedChainApi: () => validateMempoolApi(chainApi.value.trim(), network.value as NetworkName),
+    selectedBroadcastApi: () => validateMempoolApi(broadcastApi.value.trim(), network.value as NetworkName),
   });
   card.insertBefore(recovery.element, safety);
   // Register failure handling immediately so blocked storage never becomes an unhandled rejection.
@@ -256,9 +259,12 @@ function mount(root: HTMLElement): void {
       "and the selected public transaction ID and output for recovery checks, which can reveal their public addresses and amounts. " +
       "It receives no keys, recovery files, or invoices. " +
       "Its observations are trusted, not independent chain verification.";
+    chainDisclosure.textContent += ` Broadcast API: ${broadcastApi.value.trim()}. An explicit broadcast sends the signed transaction, revealing its public addresses and amounts, never recovery secrets. ` +
+      "Signed downloads can be broadcast by anyone who receives them. Approval is required before signing or exporting.";
     relayDisclosure.textContent = `Nostr relays: ${relay.value.trim().split(/\s+/).join(", ")}. Operators see your IP and transport metadata.`;
   };
   chainApi.oninput = () => { updateDisclosure(); recovery.clearFundingObservation(); };
+  broadcastApi.oninput = () => { updateDisclosure(); recovery.clearFundingObservation(); };
   relay.oninput = updateDisclosure;
   updateDisclosure();
   const updateNetwork = (): void => {
@@ -294,6 +300,8 @@ function mount(root: HTMLElement): void {
   network.onchange = () => {
     relay.value = relaysForNetwork(network.value as NetworkName, __SWAP_DEFAULTS__).join("\n");
     chainApi.value = mempoolApiForNetwork(network.value as NetworkName, __SWAP_DEFAULTS__);
+    broadcastApi.value = network.value === __SWAP_DEFAULTS__.network ? __SWAP_DEFAULTS__.broadcastApi :
+      (network.value === "regtest" ? "http://127.0.0.1:8092/api" : chainApi.value);
     refund.value = tip.value = age.value = "";
     updateDisclosure();
     updateNetwork();

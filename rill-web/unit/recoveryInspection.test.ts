@@ -24,7 +24,7 @@ for (const { name, record, accepted, expectedNetwork } of recoveryInspectionCase
 test("reports expose only allowlisted public metadata, with no raw or nested secret-bearing object", () => {
   const record = reservedRecord();
   const report = inspectRecoveryPlaintext(bytes(record), record.network_identity);
-  expect(Object.keys(report).sort()).toEqual(["contractHash", "firstRefundEligibleHeight", "fundingHistory", "networkName", "profileId", "recordedBindingCount", "refundLockHeight", "verification"]);
+  expect(Object.keys(report).sort()).toEqual(["contractHash", "destinationScript", "firstRefundEligibleHeight", "fundingHistory", "maxRefundFeeSat", "networkName", "profileId", "recordedBindingCount", "refundLockHeight", "verification"]);
   for (const [key, value] of Object.entries(report)) if (key !== "fundingHistory") expect(["string", "number"].includes(typeof value)).toBe(true);
   expect(Object.isFrozen(report.fundingHistory)).toBe(true);
   expect(Object.isFrozen(report.fundingHistory[0])).toBe(true);
