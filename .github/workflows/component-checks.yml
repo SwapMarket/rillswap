@@ -108,6 +108,8 @@ jobs:
         run: bunx playwright install --with-deps chromium
       - name: Check disconnected browser behavior
         run: bun run test
+      - name: Check assembled mainnet and signet Pages sites (no deployment)
+        run: bun run test:pages
       - name: Check ZIP and extracted Pages candidate match tested bytes (no deployment)
         run: |
           python3 scripts/test_release_bundle.py

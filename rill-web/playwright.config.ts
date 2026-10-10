@@ -2,6 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
   testDir: "tests",
+  testIgnore: "pages.spec.ts",
   fullyParallel: false,
   workers: 1,
   use: {

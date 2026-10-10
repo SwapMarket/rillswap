@@ -106,9 +106,11 @@ origin, and `http://127.0.0.1:8091/api` on regtest. Switching networks resets
 the preset and updates the disclosure. Requests omit credentials and referrers, refuse
 redirects, and bound response size and duration. They check genesis and a
 stable sampled tip, not independent canonical-chain validity or a signet
-challenge. The operator sees your IP, not keys, invoices, or refund addresses.
+challenge. Height reads reveal your IP; recovery funding reads also reveal the
+selected public transaction/output and therefore its public addresses/amounts.
+No keys, recovery files, or invoices are sent.
 The swap CSP admits only mempool.space, blockstream.info, explicit loopback
-port 8091, and the build-configured API origin. A runtime endpoint on another
+port 8091, and the build-configured chain/broadcast API origins. A runtime endpoint on another
 origin requires rebuilding with its `VITE_RILLSWAP_MEMPOOL_API` allowance;
 there is no HTTPS wildcard. The separate preview page still cannot connect.
 
@@ -118,6 +120,27 @@ blocked mainnet preview instead of signet. No stored settings or journal
 records are migrated, and no swap or background work is resumed. The relative
 Vite asset base supports static hosting under a repository or signet subpath;
 this configuration does not authorize a funded mainnet release or publish it.
+
+### Mainnet and signet Pages artifact
+
+```sh
+bun run build:pages
+bun run test:pages
+```
+
+The tested artifact is `tmp/pages/`: `/` opens the mainnet swap UI, `/signet/`
+opens the signet swap UI, and network links work under a repository subpath.
+The diagnostic page remains at `diagnostic.html` on each site. Relative assets
+and `.nojekyll` support GitHub Pages without a backend. Public builds discard
+local `VITE_RILLSWAP_*` overrides so regtest endpoints cannot leak into this
+artifact. Mainnet new funding stays blocked; existing refund actions remain
+explicitly approved. Neither site connects on load or network navigation.
+
+Enable GitHub Pages with **GitHub Actions** as its source, then manually run
+**Publish static RillSwap** (`.github/workflows/pages.yml`). That workflow tests
+the source and assembled sites before uploading/deploying. Local build/test
+commands never publish, and no deployment has been triggered by this work.
+`component-checks.yml` also tests the assembled artifact without publishing.
 
 ### Swap direction and assets
 
