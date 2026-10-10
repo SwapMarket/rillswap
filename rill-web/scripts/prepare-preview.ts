@@ -1,4 +1,5 @@
 import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { recoveryInspectionCases } from "../unit/fixtures/recoveryInspectionCases";
 
 // Copy identical dist bytes to root and a repository subpath for loopback tests.
 rmSync("tmp/preview", { recursive: true, force: true });
@@ -38,10 +39,14 @@ if (!ui.success) throw new AggregateError(ui.logs, "UI test bundle failed");
 writeFileSync("tmp/preview/test-only/swap.html", readFileSync("dist/swap.html", "utf8")
   .replace(/src="\.\/assets\/[^"]+"/, 'src="./swapUi.js"').replaceAll("./assets/", "/assets/"));
 
-const recoveryAdmission = await Bun.build({ entrypoints: ["src/recoveryDocument.ts"], outdir: "tmp/preview/test-only", target: "browser", format: "esm" });
+const recoveryAdmission = await Bun.build({ entrypoints: ["src/recoveryDocument.ts", "src/recoveryInspection.ts"], outdir: "tmp/preview/test-only", target: "browser", format: "esm" });
 if (!recoveryAdmission.success) throw new AggregateError(recoveryAdmission.logs, "recovery admission test bundle failed");
+// Generate the synthetic native-signature corpus in Bun, not Playwright's Node
+// runner (unbundled Ajv standalone output uses require for its static runtime).
+writeFileSync("tmp/preview/test-only/recovery-inspection-cases.json", JSON.stringify(recoveryInspectionCases()));
 const admissionCsp = "default-src 'none'; script-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'";
 writeFileSync("tmp/preview/test-only/recovery-admission.html", `<!doctype html><meta http-equiv="Content-Security-Policy" content="${admissionCsp}">` +
   '<script type="module" src="./recovery-admission-harness.js"></script>');
 writeFileSync("tmp/preview/test-only/recovery-admission-harness.js", 'import { parseRecoveryPlaintext } from "./recoveryDocument.js";' +
-  'window.parseRecoveryPlaintext = parseRecoveryPlaintext; window.recoveryAdmissionReady = true;');
+  'import { inspectRecoveryPlaintext } from "./recoveryInspection.js";' +
+  'window.parseRecoveryPlaintext = parseRecoveryPlaintext; window.inspectRecoveryPlaintext = inspectRecoveryPlaintext; window.recoveryAdmissionReady = true;');

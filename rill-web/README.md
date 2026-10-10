@@ -244,7 +244,39 @@ Never log or persist it. Generated schema code is compiled at build time from
 `rill-docs`, not fetched or evaluated at runtime. This code does not verify
 signatures, contract-secret consistency, complete funding history, or
 cooperative reservations, and is not connected to UI imports, signing,
-scanning, or broadcast. Historical authentication is the next increment.
+scanning, or broadcast.
+
+`inspectRecoveryPlaintext(bytes, independentlySelectedNetwork)` in
+`src/recoveryInspection.ts` adds offline, historical BTC to LN inspection.
+It checks the complete network identity, handshake and contract semantics,
+embedded signatures, secret/public-key and preimage consistency, every
+Taproot artifact, all signed funding revisions, and any retained cooperative
+reservation. Expired contracts and legacy empty feature lists are accepted;
+a reservation can refer to an older retained funding revision. Recognized
+reverse-only extensions are rejected for BTC to LN, while optional unknown
+extensions remain opaque. Empty history is valid for an initial record, but
+proves no funding. Errors are generic and the frozen report contains only
+public metadata, never keys, preimages, or the document.
+
+Inspection proves internal consistency under the embedded signers, **not**
+provider provenance, your ownership of the destination, chain inclusion,
+unspent state, maturity, or permission to sign/broadcast. It makes no network
+or storage calls and is not connected to the recovery UI yet. A future refund
+planner must authenticate its own byte snapshot and separately verify the
+funding output and refund conditions, never use the report as authorization.
+Upgrades perform no startup work, migration, or automatic recovery; absent or
+partial records trigger nothing and failed imports do not modify the input.
+
+The shared synthetic signature corpus runs in unit tests and the browser
+under a no-network CSP. To compare every case against Core's real native
+verifier using an **already running** `rillswap-dev-tools-1` container:
+
+```sh
+RILLSWAP_TEST_RECOVERY_NATIVE=1 bun test unit/recoveryInspectionNative.test.ts
+```
+
+The opt-in test is read-only and does not create containers or access the
+chain. Browser refund construction and broadcasting remain unimplemented.
 
 You need `rill-cli` (see its README), a synced Bitcoin Core node for the same
 network, the funded recovery file, its age key, and the funding attempt ID that

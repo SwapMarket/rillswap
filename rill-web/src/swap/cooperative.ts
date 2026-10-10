@@ -101,8 +101,12 @@ interface Authorization {
   readonly feeCapSat: bigint;
 }
 
+// Historical reservations may reference any signed revision. These four fields
+// are the complete funding input to transaction reconstruction, not a live binding policy.
+type ClaimFundingInput = Pick<FundingBinding, "funding_txid" | "contract_vout" | "contract_value_sat" | "contract_script_pubkey">;
+
 /** Bind signed terms to the funded output, like UnilateralAuthorization.from_terms(path="claim"). */
-function claimAuthorization(terms: BtcToLnTerms, binding: FundingBinding): Authorization {
+function claimAuthorization(terms: BtcToLnTerms, binding: ClaimFundingInput): Authorization {
   const contract = reconstructTaprootContract(terms);
   const valueSat = BigInt(binding.contract_value_sat);
   if (valueSat !== BigInt(terms.economics.contract_amount_sat)) {
@@ -168,12 +172,12 @@ function buildCooperativeClaim(auth: Authorization, feeSat: bigint): ClaimPlan {
 }
 
 /** The authorized key-path claim paying `feeSat` (what a provider proposes). */
-export function buildCooperativeClaimPlan(terms: BtcToLnTerms, binding: FundingBinding, feeSat: bigint): ClaimPlan {
+export function buildCooperativeClaimPlan(terms: BtcToLnTerms, binding: ClaimFundingInput, feeSat: bigint): ClaimPlan {
   return buildCooperativeClaim(claimAuthorization(terms, binding), feeSat);
 }
 
 /** Reconstruct the exact one-input key-path claim the provider proposed, or refuse. */
-export function verifyCooperativeClaimProposal(raw: Uint8Array, terms: BtcToLnTerms, binding: FundingBinding): ClaimPlan {
+export function verifyCooperativeClaimProposal(raw: Uint8Array, terms: BtcToLnTerms, binding: ClaimFundingInput): ClaimPlan {
   const auth = claimAuthorization(terms, binding);
   // version(4) count(1) outpoint(36) scriptSig(1) sequence(4) count(1): the output
   // value is bytes 47..54; exact reconstruction below checks every other byte.
