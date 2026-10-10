@@ -65,7 +65,7 @@ for (const patch of [{ payment_hash: "0".repeat(64) }, { num_msat: "999999" }, {
   });
 }
 
-for (const change of ["fee", "lock", "expiry", "destination", "amount", "custom", "secret", "empty", "multiple", "unsafe channel"]) {
+for (const change of ["fee", "lock", "expiry", "destination", "amount", "custom", "secret", "empty", "multiple", "unsafe channel", "alias", "secret field"]) {
   test(`unsafe route refuses without dispatch: ${change}`, async () => {
     const f = fixture(), altered = structuredClone(route);
     if (change === "fee") altered.total_fees_msat = "3000";
@@ -74,6 +74,8 @@ for (const change of ["fee", "lock", "expiry", "destination", "amount", "custom"
     if (change === "destination") altered.hops[0]!.pub_key = "02" + "66".repeat(32);
     if (change === "amount") altered.hops[0]!.amt_to_forward_msat = "1000001";
     if (change === "unsafe channel") altered.hops[0]!.chan_id = "18446744073709551616";
+    if (change === "alias") Object.assign(altered.hops[0]!, { amtToForwardMsat: "1000001" });
+    if (change === "secret field") Object.assign(altered, { recoverySecret: "not-public-metadata" });
     if (change === "custom") Object.assign(altered.hops[0]!, { custom_records: { 100000: "AA==" } });
     if (change === "secret") Object.assign(altered.hops[0]!, { mpp_record: { payment_addr: remote.payment_addr, total_amt_msat: binding.amount_msat } });
     if (change === "empty") altered.hops = [];

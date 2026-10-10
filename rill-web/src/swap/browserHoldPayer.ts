@@ -41,6 +41,8 @@ export interface BoundedHoldPlan {
 }
 
 function checkRoute(route: ObjectValue, binding: InvoiceBinding, limits: BoundedHoldPlan["limits"], tip: number, withSecret: boolean, secret: string): void {
+  const routeFields = ["total_time_lock", "total_fees", "total_amt", "hops", "total_fees_msat", "total_amt_msat", "first_hop_amount_msat", "custom_channel_data"];
+  require(Object.keys(route).every((key) => routeFields.includes(key)));
   const totalLock = integer(route.total_time_lock), fee = amount(route.total_fees_msat), total = amount(route.total_amt_msat);
   const principal = BigInt(binding.amount_msat);
   require(totalLock > tip && totalLock <= limits.maxExpiryHeight && fee <= BigInt(limits.feeLimitSat) * 1000n && total === principal + fee);
@@ -49,6 +51,9 @@ function checkRoute(route: ObjectValue, binding: InvoiceBinding, limits: Bounded
   let previous = totalLock;
   for (const [index, raw] of (route.hops as unknown[]).entries()) {
     const hop = object(raw), expiry = integer(hop.expiry), forward = amount(hop.amt_to_forward_msat), hopFee = amount(hop.fee_msat);
+    const hopFields = ["chan_id", "chan_capacity", "amt_to_forward", "fee", "expiry", "amt_to_forward_msat", "fee_msat", "pub_key", "tlv_payload",
+      "mpp_record", "amp_record", "custom_records", "metadata", "blinding_point", "encrypted_data", "total_amt_msat"];
+    require(Object.keys(hop).every((key) => hopFields.includes(key)));
     require(expiry > tip && expiry <= previous && forward >= principal && hopFee <= fee && typeof hop.pub_key === "string" && KEY.test(hop.pub_key));
     require(typeof hop.chan_id === "string" && /^(0|[1-9][0-9]{0,19})$/.test(hop.chan_id) && BigInt(hop.chan_id) <= 0xffffffffffffffffn);
     for (const field of ["amp_record", "custom_records", "metadata", "blinding_point", "encrypted_data"]) require(empty(hop[field]));
@@ -59,11 +64,30 @@ function checkRoute(route: ObjectValue, binding: InvoiceBinding, limits: Bounded
         expiry >= tip + binding.min_final_cltv_delta && expiry >= limits.minFinalExpiryHeight);
     }
     if (withSecret && last) {
-      const mpp = object(hop.mpp_record); require(mpp.payment_addr === secret && mpp.total_amt_msat === binding.amount_msat);
+      const mpp = object(hop.mpp_record); require(Object.keys(mpp).length === 2 && mpp.payment_addr === secret && mpp.total_amt_msat === binding.amount_msat);
     } else require(empty(hop.mpp_record));
     if (withSecret) require(hop.tlv_payload === true);
     previous = expiry;
   }
+}
+
+/** Public, bounded metadata only. Not invoice authentication or present dispatch authority. */
+export function validateStoredHoldPlan(plan: BoundedHoldPlan): void {
+  require(Object.keys(plan).length === 7 && ["nodeIdentity", "networkIdentity", "paymentHash", "invoiceBinding", "route", "feeMsat", "limits"].every((key) => Object.hasOwn(plan, key)));
+  require(KEY.test(plan.nodeIdentity) && isSupportedRecoveryNetwork(plan.networkIdentity) && /^[0-9a-f]{64}$/.test(plan.paymentHash));
+  const binding = plan.invoiceBinding;
+  require(Object.keys(binding).length === 7 && ["bolt11_sha256", "payment_hash", "amount_msat", "payee_compressed_pubkey", "created_at", "expires_at", "min_final_cltv_delta"].every((key) => Object.hasOwn(binding, key)));
+  require(/^[0-9a-f]{64}$/.test(binding.bolt11_sha256) && binding.payment_hash === plan.paymentHash && KEY.test(binding.payee_compressed_pubkey));
+  require(amount(binding.amount_msat) > 0n && amount(binding.amount_msat) % 1000n === 0n && integer(binding.created_at, Number.MAX_SAFE_INTEGER) < integer(binding.expires_at, Number.MAX_SAFE_INTEGER));
+  require(integer(binding.min_final_cltv_delta) > 0);
+  require(Object.keys(plan.limits).length === 4 && ["feeLimitSat", "minFinalExpiryHeight", "maxExpiryHeight", "deadlineAt"].every((key) => Object.hasOwn(plan.limits, key)));
+  require(amount(plan.limits.feeLimitSat) <= MAX_MSAT / 1000n && integer(plan.limits.minFinalExpiryHeight) > 0 &&
+    integer(plan.limits.maxExpiryHeight) >= plan.limits.minFinalExpiryHeight && integer(plan.limits.deadlineAt, Number.MAX_SAFE_INTEGER) > 0);
+  const route = object(plan.route); require(plan.feeMsat === route.total_fees_msat && Array.isArray(route.hops));
+  const mpp = object(object((route.hops as unknown[]).at(-1)).mpp_record);
+  require(typeof mpp.payment_addr === "string" && atob(mpp.payment_addr).length === 32 && btoa(atob(mpp.payment_addr)) === mpp.payment_addr);
+  checkRoute(route, binding, plan.limits, 0, true, mpp.payment_addr as string);
+  require(canonicalize(plan)!.length <= MAX_RESPONSE);
 }
 
 export class BrowserHoldPayer {
@@ -136,6 +160,7 @@ export class BrowserHoldPayer {
       object((route.hops as unknown[]).at(-1)).mpp_record = { payment_addr: secret, total_amt_msat: binding.amount_msat };
       const plan = freeze({ nodeIdentity: this.#identity, networkIdentity: this.#network, paymentHash: binding.payment_hash,
         invoiceBinding: binding, route, feeMsat: route.total_fees_msat as string, limits: bounds });
+      validateStoredHoldPlan(plan);
       this.#plans.set(plan, { invoice, secret }); this.#current(bounds, binding); return plan;
     } catch { throw new BrowserHoldPaymentRefusedError(); }
   }

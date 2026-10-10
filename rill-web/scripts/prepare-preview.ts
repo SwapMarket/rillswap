@@ -53,6 +53,28 @@ if (!recoveryAdmission.success) throw new AggregateError(recoveryAdmission.logs,
 writeFileSync("tmp/preview/test-only/recovery-inspection-cases.json", JSON.stringify(recoveryInspectionCases()));
 writeFileSync("tmp/preview/test-only/recovery-refund-cases.json", JSON.stringify(recoveryRefundCases()));
 const refundCase = recoveryRefundCases()[0]!;
+const reverseContext = { networkIdentity: refundCase.expectedNetwork, sessionId: refundCase.record.verification_context.handshake_init.session_id,
+  clientSessionKey: refundCase.record.verification_context.client_session_xonly_key,
+  providerSessionKey: refundCase.record.verification_context.provider_session_xonly_key,
+  providerIdentity: refundCase.record.contract_terms.provider_identity_key, deadlineAt: 4000,
+  request: { kind: "ln-to-btc", mode: "firm", nominal_payout_sat: "1000", payment_hash: refundCase.record.contract_terms.invoice_binding.payment_hash,
+    client_contract_compressed_key: refundCase.record.contract_terms.client_contract_compressed_key,
+    recovery_authorization_xonly_key: refundCase.record.contract_terms.recovery_authorization_xonly_key,
+    client_destination_script: refundCase.record.contract_terms.client_destination_script,
+    limits: { max_success_fee_sat: "1000", min_claim_fee_reserve_sat: "1000", max_claim_fee_sat: "1000", min_refund_lock_height: 1100, max_incoming_htlc_expiry_height: 1300 }, extensions: {} } };
+const reversePlan = { nodeIdentity: refundCase.record.contract_terms.client_contract_compressed_key, networkIdentity: refundCase.expectedNetwork,
+  paymentHash: reverseContext.request.payment_hash, invoiceBinding: { ...refundCase.record.contract_terms.invoice_binding, created_at: 1000, expires_at: 5000 },
+  route: { total_time_lock: 1221, total_fees_msat: "1000", total_amt_msat: (BigInt(refundCase.record.contract_terms.invoice_binding.amount_msat) + 1000n).toString(),
+    hops: [{ chan_id: "1", pub_key: refundCase.record.contract_terms.invoice_binding.payee_compressed_pubkey, expiry: 1221,
+      amt_to_forward_msat: refundCase.record.contract_terms.invoice_binding.amount_msat, fee_msat: "0", tlv_payload: true,
+      mpp_record: { payment_addr: btoa(String.fromCharCode(...new Uint8Array(32))), total_amt_msat: refundCase.record.contract_terms.invoice_binding.amount_msat } }] },
+  feeMsat: "1000", limits: { feeLimitSat: "2", minFinalExpiryHeight: 1200, maxExpiryHeight: 1250, deadlineAt: 4000 } };
+writeFileSync("tmp/preview/test-only/reverse-journal-draft.json", JSON.stringify({ context: reverseContext, plan: reversePlan,
+  claim: { fundingTxid: "a".repeat(64), fundingVout: 0, txid: "b".repeat(64), signedDigest: "c".repeat(64) } }));
+const reverseJournal = await Bun.build({ entrypoints: ["src/browserReverseJournal.ts"], outdir: "tmp/preview/test-only", target: "browser", format: "esm" });
+if (!reverseJournal.success) throw new AggregateError(reverseJournal.logs, "reverse journal test bundle failed");
+writeFileSync("tmp/preview/test-only/reverse-journal.html", '<!doctype html><script type="module">import { BrowserReverseJournal } from "./browserReverseJournal.js";' +
+  'window.BrowserReverseJournal = BrowserReverseJournal; window.reverseJournalReady = true;</script>');
 const refundDraft = { networkIdentity: refundCase.expectedNetwork, api: "http://127.0.0.1:8091/api", broadcastApi: "http://127.0.0.1:8092/api",
   fundingAttemptId: refundCase.fundingAttemptId, bindingRevision: refundCase.bindingRevision, rawFundingTransactionHex: refundCase.fundingTxHex,
   refund: constructSelectedRecoveryRefund(new TextEncoder().encode(canonicalize(refundCase.record)!), refundCase.expectedNetwork,

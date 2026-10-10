@@ -356,6 +356,25 @@ than waiting for hold settlement. Errors remain UNKNOWN and never authorize
 repayment. The in-memory one-use plan guard is not a cross-tab payment journal;
 durable payment-identity authorization is required before adding a UI caller.
 
+`browserReverseJournal.ts` is a disconnected encrypted-snapshot store for that
+future caller. Explicitly generated fresh sessions retain separate secrets,
+terms, payment-attempt, funded, and signed-claim snapshots. Funding never clears
+the UNKNOWN payment attempt. Strict three-store transactions check predecessor
+elections before writing, then verify committed readback. Payment elections
+bind the full network, payer, and payment hash across sessions/tabs; claim
+elections bind the full network/outpoint and immutable exact-byte digest.
+There is one first exposure transition; UNKNOWN/accepted allow only identical
+manual re-export after caller reauthentication, never another dispatch.
+
+No database opens on load, no migration runs, and no missing marker proves
+absence of prior execution. Partial/corrupted records or incompatible schemas
+are preserved and refused. `createFresh` is not a recovery/import fallback.
+Encrypted storage is not an external backup or authentication of its private
+contents. The execution caller must authenticate snapshots, acknowledge backups,
+check current approvals and chain evidence, and never restore payment authority
+from an imported file. Browser storage eviction or deletion can defeat these
+origin-local guarantees. Upgrade from previous releases initiates no work.
+
 The optional disposable regtest node adapter on 8093 preserves upstream TLS
 and scopes its baked macaroon to five RPCs. See `DEVELOPMENT.md` for explicit
 provisioning, credential risks, and read-only validation. No public build
