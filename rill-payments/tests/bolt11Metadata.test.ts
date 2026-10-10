@@ -12,7 +12,7 @@ const metadataTag = (metadata: string) => tag(23, bech32.toWords(sha256(encoder.
 
 // Genuine signed payloads, with explicit payee pin so signature corruption
 // cannot merely recover a different signer. The key is a public test fixture.
-function invoice(tags: number[][], corruptSignature = false): string {
+function invoice(tags: number[][], corruptSignature = false, prepend = false): string {
   const base = bech32.decode(testInvoice("metadata") as `${string}1${string}`, 2048);
   const original = base.words.slice(7, -104), retained: number[] = [];
   for (let i = 0; i < original.length;) {
@@ -20,7 +20,7 @@ function invoice(tags: number[][], corruptSignature = false): string {
     if (type !== 13) retained.push(...original.slice(i, i + 3 + length));
     i += 3 + length;
   }
-  const data = [...base.words.slice(0, 7), ...retained, ...tag(19, bech32.toWords(hexToBytes(receiver))), ...tags.flat()];
+  const data = [...base.words.slice(0, 7), ...(prepend ? tags.flat() : []), ...retained, ...tag(19, bech32.toWords(hexToBytes(receiver))), ...(prepend ? [] : tags.flat())];
   const bitLength = data.length * 5, byteLength = Math.ceil(bitLength / 8);
   const packed = data.reduce((bits, word) => (bits << 5n) | BigInt(word), 0n) << BigInt(byteLength * 8 - bitLength);
   const digest = sha256(new Uint8Array([...encoder.encode(base.prefix), ...hexToBytes(packed.toString(16).padStart(byteLength * 2, "0"))]));
@@ -52,16 +52,30 @@ test("wrong network and explicit-payee invalid signature still follow existing a
   expect(() => invoiceBinding(unknownFeature, "regtest")).toThrow("feature");
 });
 
-test("ambiguous, missing, malformed and noncanonical description tags refuse only metadata mode", () => {
+test("ambiguous, missing and noncanonical description tags refuse only metadata mode", () => {
   const metadata = "exact", valid = metadataTag(metadata), padding = bech32.toWords(sha256(encoder.encode(metadata)));
   padding[51] = padding[51]! | 1;
-  const unsupported = [[], [tag(13, [])], [valid, tag(13, [])], [valid, valid],
-    [tag(23, [1]), valid], [valid, tag(23, [1])], [tag(23, [])], [tag(23, padding)]];
+  const unsupported = [[], [tag(13, [])], [valid, tag(13, [])], [valid, valid], [tag(23, padding)]];
   for (const tags of unsupported) {
     const signed = invoice(tags), ordinary = invoiceBinding(signed, "regtest");
     expect(ordinary.payee_compressed_pubkey).toBe(receiver);
     expect(() => invoiceMetadataBinding(signed, "regtest", metadata)).toThrow("description tags");
     expect(invoiceBinding(signed, "regtest")).toEqual(ordinary);
+  }
+});
+
+test("every signed wrong-length p/h/s/n occurrence is refused before or after valid fields", () => {
+  const metadata = "exact", valid = metadataTag(metadata);
+  for (const type of [1, 23, 16, 19]) {
+    const length = type === 19 ? 53 : 52;
+    for (const words of [new Array<number>(length - 1).fill(0), new Array<number>(length + 1).fill(0), []]) {
+      for (const prepend of [true, false]) {
+        const signed = invoice([tag(type, words), valid], false, prepend);
+        expect(() => decodeBolt11(signed)).toThrow("Invoice refused");
+        expect(() => invoiceBinding(signed, "regtest")).toThrow("Invoice refused");
+        expect(() => invoiceMetadataBinding(signed, "regtest", metadata)).toThrow("Invoice refused");
+      }
+    }
   }
 });
 

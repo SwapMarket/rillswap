@@ -184,15 +184,14 @@ function parseFields(words: readonly number[]): Fields {
         fields.metadataHashCanonical = (value[HASH_WORDS - 1]! & 15) === 0;
       }
     }
-    // Payment hash, secret and payee must have their fixed length, and the
-    // payment hash must appear once (BOLT11 reader rules, lightning/bolts#1357).
-    // Otherwise different components could pick different hashes from one
-    // signed invoice, as in the 2026 lnp2pbot loss.
+    // BOLT11 reader requirements reject every wrong-length p/h/s/n occurrence.
+    // Duplicate binding rejection is our stricter application policy, not a
+    // claim that the unmerged lightning/bolts#1357 is a normative requirement.
     if (type === 1) {
       if (length !== HASH_WORDS) throw new InvoiceRejectedError("payment hash length invalid");
       if (fields.paymentHash !== null) throw new InvoiceRejectedError("multiple payment hashes");
     }
-    if ((type === 16 && length !== HASH_WORDS) || (type === 19 && length !== PAYEE_WORDS)) {
+    if (((type === 16 || type === 23) && length !== HASH_WORDS) || (type === 19 && length !== PAYEE_WORDS)) {
       throw new InvoiceRejectedError("fixed-length field invalid");
     }
     // Secret, payee, expiry and CLTV feed the binding and payment.
@@ -201,7 +200,6 @@ function parseFields(words: readonly number[]): Fields {
       if (seen.has(type)) throw new InvoiceRejectedError("duplicate binding field");
       seen.add(type);
     }
-    // Description hashes keep the older skip rule (see bolt11Metadata tests).
     if (type === 1 && length === HASH_WORDS && fields.paymentHash === null) {
       fields.paymentHash = bytesToHex(wordsToBytes(value, false).slice(0, 32));
     } else if (type === 16 && length === HASH_WORDS && fields.paymentSecret === null) {

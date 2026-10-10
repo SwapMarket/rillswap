@@ -13,6 +13,13 @@ const HASH = "0001020304050607080900010203040506070809000102030405060708090102";
 describe("BOLT11 reader rules (specification examples)", () => {
   for (const example of spec.valid) {
     test(`decodes: ${example.title}`, () => {
+      if (example.title === "Same, but including fields which must be ignored.") {
+        // Preserve the upstream historical bytes/title. They contradict the
+        // current reader MUST rejecting wrong-length p/h/s/n (BOLT11 commit
+        // 14901bdcacee53d95b46dc276b0f09c85d7d71fd, Requirements).
+        expect(() => decodeBolt11(example.invoice)).toThrow(InvoiceRejectedError);
+        return;
+      }
       const decoded = decodeBolt11(example.invoice);
       if (!example.title.startsWith("Public-key recovery with high-S")) {
         expect(decoded.payee).toBe(PAYEE);
