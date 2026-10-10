@@ -12,6 +12,28 @@ describe("explicit deployment defaults", () => {
     expect(relaysForNetwork("regtest")).toEqual(["ws://127.0.0.1:7777/"]);
     expect(relaysForNetwork("signet").every((relay) => relay.startsWith("wss://"))).toBe(true);
   });
+  test("node origins are explicit public configuration, with a local regtest default only", () => {
+    expect(resolveSwapDefaults({}).nodeApi).toBeUndefined();
+    expect(resolveSwapDefaults({ VITE_RILLSWAP_NETWORK: "signet" }).nodeApi).toBeUndefined();
+    expect(resolveSwapDefaults({ VITE_RILLSWAP_NETWORK: "regtest" }).nodeApi).toBe("http://127.0.0.1:8093");
+    expect(resolveSwapDefaults({ VITE_RILLSWAP_NETWORK: "regtest", VITE_RILLSWAP_NODE_API: "http://127.0.0.1:18093/" }).nodeApi).toBe("http://127.0.0.1:18093");
+    for (const value of ["http://node.example", "https://*", "https://*.example.com", "https://user:secret@node.example", "https://node.example/#secret", "https://node.example/?secret=1", ""]) {
+      for (const network of ["signet", "mainnet"]) expect(() => resolveSwapDefaults({ VITE_RILLSWAP_NETWORK: network, VITE_RILLSWAP_NODE_API: value })).toThrow();
+    }
+  });
+  test("public builds admit only an explicitly configured concrete node origin", async () => {
+    for (const configured of [false, true]) {
+      const destination = `tmp/node-csp-${configured ? "configured" : "unset"}`;
+      const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("VITE_RILLSWAP_")));
+      const child = Bun.spawn([process.execPath, "node_modules/vite/bin/vite.js", "build", "--outDir", destination], {
+        env: { ...env, VITE_RILLSWAP_NETWORK: "signet", ...(configured ? { VITE_RILLSWAP_NODE_API: "https://node.example:10443/lnd" } : {}) }, stdout: "pipe", stderr: "pipe",
+      });
+      const [errors, status] = await Promise.all([new Response(child.stderr).text(), child.exited, new Response(child.stdout).text()]);
+      expect(status).toBe(0); expect(errors).not.toContain("error");
+      const html = await Bun.file(`${destination}/swap.html`).text(), csp = html.match(/content="([^"]*connect-src[^"]*)"/)![1]!;
+      expect(csp.includes("https://node.example:10443")).toBe(configured); expect(csp).not.toContain("https://*"); expect(csp).not.toContain("http://127.0.0.1:8093");
+    }
+  }, 30000);
   test("returning to the deployment network restores a custom relay port", () => {
     const defaults = resolveSwapDefaults({ VITE_RILLSWAP_NETWORK: "regtest", VITE_RILLSWAP_RELAY: "ws://localhost:8777" });
     expect(relaysForNetwork("signet", defaults)).not.toContain("ws://localhost:8777/");

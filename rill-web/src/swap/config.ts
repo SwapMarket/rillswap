@@ -7,6 +7,8 @@ export interface SwapDefaults {
   readonly relays: readonly string[];
   readonly mempoolApi: string;
   readonly broadcastApi: string;
+  /** Public endpoint only. Credentials are never deployment defaults. */
+  readonly nodeApi?: string;
 }
 
 export const MAX_RELAYS = 4;
@@ -30,7 +32,7 @@ export function validateRelays(input: string, network: NetworkName): readonly st
 export function validateMempoolApi(value: string, network: NetworkName): string {
   const url = new URL(value);
   const local = url.hostname === "127.0.0.1" || url.hostname === "localhost";
-  if (url.username || url.password || url.search || url.hash ||
+  if (url.username || url.password || url.search || url.hash || url.hostname.includes("*") ||
       (url.protocol !== "https:" && !(network === "regtest" && local && url.protocol === "http:"))) {
     throw new Error("Use an HTTPS mempool API, or an explicit loopback HTTP API for regtest");
   }
@@ -59,6 +61,9 @@ export function resolveSwapDefaults(env: Record<string, string | undefined>): Sw
       (name === "regtest" ? "ws://127.0.0.1:7777" : "wss://relay.damus.io wss://nos.lol wss://relay.primal.net"), name),
     mempoolApi: validateMempoolApi(env.VITE_RILLSWAP_MEMPOOL_API ?? MEMPOOL_APIS[name], name),
     broadcastApi: validateMempoolApi(env.VITE_RILLSWAP_BROADCAST_API ?? (name === "regtest" ? "http://127.0.0.1:8092/api" : env.VITE_RILLSWAP_MEMPOOL_API ?? MEMPOOL_APIS[name]), name),
+    ...(env.VITE_RILLSWAP_NODE_API !== undefined || name === "regtest" ? {
+      nodeApi: validateMempoolApi(env.VITE_RILLSWAP_NODE_API ?? "http://127.0.0.1:8093", name),
+    } : {}),
   };
 }
 

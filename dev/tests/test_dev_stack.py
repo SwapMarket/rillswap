@@ -65,6 +65,10 @@ def test_chain_reader_is_whitelisted_loopback_only_and_stateless():
         "VITE_RILLSWAP_MEMPOOL_API: http://127.0.0.1:${RILL_DEV_CHAIN_PORT:-8091}/api"
         in compose_service("web")
     )
+    assert (
+        "VITE_RILLSWAP_NODE_API: http://127.0.0.1:${RILL_DEV_NODE_PORT:-8093}"
+        in compose_service("web")
+    )
 
 
 def test_has_channel_counts_open_and_pending_local_initiator():
