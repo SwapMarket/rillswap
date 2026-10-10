@@ -261,7 +261,12 @@ public metadata, never keys, preimages, or the document.
 Inspection proves internal consistency under the embedded signers, **not**
 provider provenance, your ownership of the destination, chain inclusion,
 unspent state, maturity, or permission to sign/broadcast. It makes no network
-or storage calls and is not connected to the recovery UI yet. A future refund
+or storage calls. The collapsed **Recover a swap** panel opens a local age file
+with the saved browser key by default, or with an explicitly selected original
+age key file. The key override never replaces the saved identity. Choose the
+original swap's network in Settings before inspecting; a different network
+selected when opening finishes discards the result. No decrypted document or key is shown or stored,
+and neither files nor reports are uploaded. A future refund
 planner must authenticate its own byte snapshot and separately verify the
 funding output and refund conditions, never use the report as authorization.
 Upgrades perform no startup work, migration, or automatic recovery; absent or

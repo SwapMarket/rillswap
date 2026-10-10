@@ -20,6 +20,7 @@ import type { PreparedReverseQuote, ReverseSwapRequest } from "./swap/reverseSwa
 import { invoiceBinding } from "./swap/bolt11";
 import { quoteSelectionLabel, stoppedSwapAdvice } from "./swapUiStatus";
 import { ASSETS, type AssetId, routeFor } from "./swapPairs";
+import { recoveryPanel } from "./recoveryUi";
 
 const NETWORKS = { mainnet, signet, testnet4, regtest } as const;
 
@@ -196,7 +197,7 @@ function mount(root: HTMLElement): void {
   safety.append(node("summary", "Before using this preview"),
     node("p", "Unaudited and experimental. Use fake-money test networks only. Contract secrets live in this tab; " +
       "keep it open until the swap finishes."),
-    node("p", "Browser recovery is not implemented yet. Save the encrypted recovery file before funding. " +
+    node("p", "Browser refunds are not implemented yet. You can inspect recovery files locally below. Save the encrypted recovery file before funding. " +
       "If the provider does not pay, refund after the lock height with rill recover watch-refund --chain-only " +
       "and your own Bitcoin Core node.", "swap-refund-intro"));
   const panel = node("div", "", "swap-panel");
@@ -232,6 +233,14 @@ function mount(root: HTMLElement): void {
     else if (line.startsWith("refused:") || line.startsWith("stopped:")) setStatus(line.replace(/^[^:]+: /, ""), -1, "error");
   };
   const walletPromise = BrowserRecoveryWallet.open();
+  card.insertBefore(recoveryPanel({
+    selectedNetwork: () => ({ name: network.value, identity: NETWORKS[network.value as NetworkName] }),
+    browserIdentity: async () => {
+      const key = await (await walletPromise).recoveryKey();
+      key.file.fill(0); // This temporary key-file copy is not used for a download.
+      return key.identity;
+    },
+  }), safety);
   // Register failure handling immediately so blocked storage never becomes an unhandled rejection.
   void walletPromise.then(async (wallet) => {
     await walletBackupControls(walletActions, wallet, walletStatus);
