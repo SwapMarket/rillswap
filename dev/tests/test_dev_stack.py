@@ -52,7 +52,10 @@ def test_static_cookie_matches_rpcauth():
 
 def test_chain_reader_is_whitelisted_loopback_only_and_stateless():
     assert matches("rill-chain", "rill-dev-chain-regtest")
-    assert "-rpcwhitelist=rill-chain:getblockchaininfo,getblockhash" in COMPOSE
+    assert (
+        "-rpcwhitelist=rill-chain:getblockchaininfo,getblockhash,getrawtransaction,getblockheader,gettxout"
+        in COMPOSE
+    )
     assert "-rpcwhitelistdefault=0" in COMPOSE
     service = compose_service("chain")
     assert "127.0.0.1:${RILL_DEV_CHAIN_PORT:-8091}:8091" in service

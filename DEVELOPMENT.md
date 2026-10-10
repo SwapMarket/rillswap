@@ -45,9 +45,17 @@ Anvil block interval with `RILL_DEV_ANVIL_BLOCK_SECONDS` (default 2), and the
 Monero block interval with `RILL_DEV_MONERO_BLOCK_SECONDS` (default 2), for
 example `RILL_DEV_WEB_PORT=9273 RILL_DEV_CHAIN_PORT=9091 dev/devctl up`.
 
-The chain adapter exposes only three Esplora-compatible GET routes for genesis,
-tip height, and tip hash. It holds no swap state or keys and never mines,
-repairs, scans, or calls wallet RPC. Host and browser Origin checks follow the
+The chain adapter exposes read-only Esplora-compatible GET routes for block
+hashes by height, tip height/hash, transaction hex/status, and confirmed
+unspent-output observations (`/tx/{txid}/outspend/{vout}`). Raw transaction
+responses are limited to 100,000 bytes. Null, missing, unconfirmed, spent, or
+inconsistent UTXO samples return unavailable, never `spent:false`. An unspent
+response still requires independently checking the raw transaction's identity
+and exact output in the browser. Sequential RPC samples are trusted local
+observations, not atomic snapshots or canonical-chain proofs.
+
+It holds no swap state or keys and never mines, repairs, scans, broadcasts,
+or calls wallet RPC. Host and browser Origin checks follow the
 configured local ports. Its dedicated Core reader is whitelisted, but the
 shared dev network and public privileged credentials are not container
 compromise isolation. Apply updated Core flags and service configuration with
@@ -55,7 +63,10 @@ compromise isolation. Apply updated Core flags and service configuration with
 `dev/devctl restart`. Existing volumes and wallets are retained; do not reset.
 After building the dev image, reproduce reader authorization on an isolated
 disposable node with `RILLSWAP_TEST_CHAIN_AUTH=1 pytest dev/tests/test_chain_core_auth.py`.
-This check does not mount or change existing chain volumes.
+This check mines and sends only on its isolated disposable node, covers
+confirmed/unconfirmed/spent/reorganized transaction observations, and verifies
+wallet, mining, preflight, and broadcast methods are denied to the reader. It
+does not mount or change existing chain volumes.
 
 ## What runs
 

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import socket
 import threading
+from decimal import Decimal
 from http.client import HTTPConnection
 from pathlib import Path
 
@@ -51,7 +53,15 @@ def request(server, method="GET", path="/api/blocks/tip/height", headers=None, b
 
 
 def test_allowed_cors_and_local_probes(server):
-    for path in api.ROUTES:
+    for path in [
+        "/api/block-height/0",
+        "/api/blocks/tip/height",
+        "/api/blocks/tip/hash",
+        "/api/block-height/100",
+        f"/api/tx/{'a' * 64}/hex",
+        f"/api/tx/{'a' * 64}/status",
+        f"/api/tx/{'a' * 64}/outspend/0",
+    ]:
         status, headers, body = request(
             server, path=path, headers={"Origin": "http://127.0.0.1:9273"}
         )
@@ -93,7 +103,25 @@ def test_duplicate_host_and_origin_headers_are_refused(server, header):
 
 
 @pytest.mark.parametrize(
-    "path", ["/", "/api/blocks/tip/hash?x=1", "/api/tx", "/wallet/test", "/api/block-height/1"]
+    "path",
+    [
+        "/",
+        "/api/blocks/tip/hash?x=1",
+        "/api/tx",
+        "/wallet/test",
+        "/api/block-height/01",
+        "/api/block-height/500000000",
+        "/api/block-height/" + "1" * 1000,
+        f"/api/tx/{'A' * 64}/hex",
+        f"/api/tx/{'a' * 63}/hex",
+        f"/api/tx/{'a' * 64}/hex?x=1",
+        f"/api/tx/{'a' * 64}/outspend/01",
+        f"/api/tx/{'a' * 64}/outspend/4294967296",
+        f"/api/tx/{'a' * 64}/outspend/" + "1" * 1000,
+        f"/api/tx/{'a' * 64}%2fhex",
+        "/api/block-height/%30",
+        "/api/tx/../../wallet/test",
+    ],
 )
 def test_routes_are_exact_and_read_only(server, path):
     assert request(server, path=path)[0] == 404
@@ -187,3 +215,267 @@ def test_rpc_response_bounds_timeout_and_redirects(monkeypatch):
         api.NoRedirect().redirect_request(None, None, 302, "redirect", None, "http://evil")
     proxies = [handler for handler in reader.opener.handlers if hasattr(handler, "proxies")]
     assert all(handler.proxies == {} for handler in proxies)
+
+
+@pytest.fixture
+def reader_samples(monkeypatch):
+    reader = api.ChainReader()
+    txid, block, tip = "b" * 64, "c" * 64, "a" * 64
+    output = {
+        "bestblock": tip,
+        "confirmations": 2,
+        "value": Decimal("0.00100000"),
+        "scriptPubKey": {"hex": "5120" + "d" * 64},
+        "coinbase": False,
+    }
+    samples = {
+        ("getblockchaininfo", ()): {"chain": "regtest", "blocks": 100, "bestblockhash": tip},
+        ("getblockhash", (0,)): api.GENESIS,
+        ("getblockhash", (99,)): block,
+        ("getblockhash", (100,)): tip,
+        ("getrawtransaction", (txid, False)): "00" * 60,
+        ("getrawtransaction", (txid, True)): {
+            "txid": txid,
+            "hex": "00" * 60,
+            "blockhash": block,
+            "confirmations": 2,
+        },
+        ("getblockheader", (block, True)): {
+            "hash": block,
+            "height": 99,
+            "confirmations": 2,
+            "time": 1700000000,
+        },
+        ("gettxout", (txid, 0, False)): output,
+        ("gettxout", (txid, 0, True)): {**output, "scriptPubKey": dict(output["scriptPubKey"])},
+    }
+    calls = []
+
+    def call(method, params):
+        key = method, tuple(params)
+        calls.append(key)
+        if key not in samples:
+            raise api.ChainUnavailable()
+        return samples[key]
+
+    monkeypatch.setattr(reader, "_call", call)
+    return reader, samples, calls, txid
+
+
+def test_transaction_routes_project_only_chain_observations(reader_samples):
+    reader, samples, calls, txid = reader_samples
+    assert reader.observe(f"/api/tx/{txid}/hex") == "00" * 60
+    assert json.loads(reader.observe(f"/api/tx/{txid}/status")) == {
+        "confirmed": True,
+        "block_height": 99,
+        "block_hash": "c" * 64,
+        "block_time": 1700000000,
+    }
+    assert json.loads(reader.observe(f"/api/tx/{txid}/outspend/0")) == {"spent": False}
+    assert reader.observe("/api/block-height/99") == "c" * 64
+    assert all(method in api.RPC_METHODS for method, _ in calls)
+    assert ("gettxout", (txid, 0, False)) in calls and ("gettxout", (txid, 0, True)) in calls
+
+
+def test_unconfirmed_and_stale_transaction_status(reader_samples):
+    reader, samples, _, txid = reader_samples
+    samples["getrawtransaction", (txid, True)] = {"txid": txid, "hex": "00" * 60}
+    assert json.loads(reader.observe(f"/api/tx/{txid}/status")) == {"confirmed": False}
+    samples["getrawtransaction", (txid, True)] = {
+        "txid": txid,
+        "hex": "00" * 60,
+        "blockhash": "c" * 64,
+        "confirmations": 0,
+    }
+    assert json.loads(reader.observe(f"/api/tx/{txid}/status")) == {"confirmed": False}
+
+
+@pytest.mark.parametrize("value", [None, "00" * 59, "00" * 60 + "0", "AA" * 60, "00" * 100001])
+def test_raw_transaction_bounds_and_spelling(reader_samples, value):
+    reader, samples, _, txid = reader_samples
+    samples["getrawtransaction", (txid, False)] = value
+    with pytest.raises(api.ChainUnavailable):
+        reader.observe(f"/api/tx/{txid}/hex")
+
+
+def test_raw_transaction_limit_is_inclusive(reader_samples):
+    reader, samples, _, txid = reader_samples
+    samples["getrawtransaction", (txid, False)] = "00" * 100000
+    assert len(reader.observe(f"/api/tx/{txid}/hex")) == 200000
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"txid": "f" * 64},
+        {"hex": "bad"},
+        {"confirmations": True},
+        {"confirmations": -1},
+        {"confirmations": 3},
+        {"blockhash": "bad"},
+        {"blockhash": None},
+    ],
+)
+def test_invalid_transaction_status_is_unknown(reader_samples, changes):
+    reader, samples, _, txid = reader_samples
+    samples["getrawtransaction", (txid, True)].update(changes)
+    with pytest.raises(api.ChainUnavailable):
+        reader.observe(f"/api/tx/{txid}/status")
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"height": True},
+        {"height": 101},
+        {"confirmations": -1},
+        {"confirmations": 3},
+        {"hash": "e" * 64},
+        {"time": -1},
+    ],
+)
+def test_invalid_or_reorganized_inclusion_is_unknown(reader_samples, changes):
+    reader, samples, _, txid = reader_samples
+    samples["getblockheader", ("c" * 64, True)].update(changes)
+    with pytest.raises(api.ChainUnavailable):
+        reader.observe(f"/api/tx/{txid}/status")
+
+
+@pytest.mark.parametrize("height", [99, 100])
+def test_changed_inclusion_or_tip_hash_is_unknown(reader_samples, height):
+    reader, samples, _, txid = reader_samples
+    samples["getblockhash", (height,)] = "e" * 64
+    with pytest.raises(api.ChainUnavailable):
+        reader.observe(f"/api/tx/{txid}/status")
+
+
+@pytest.mark.parametrize(
+    "chain,mempool", [(None, None), (None, {"confirmations": 0}), ("valid", None)]
+)
+def test_null_nonexistent_unconfirmed_or_spent_samples_never_prove_unspent(
+    reader_samples, chain, mempool
+):
+    reader, samples, _, txid = reader_samples
+    if chain != "valid":
+        samples["gettxout", (txid, 0, False)] = chain
+    samples["gettxout", (txid, 0, True)] = mempool
+    with pytest.raises(api.ChainUnavailable):
+        reader.observe(f"/api/tx/{txid}/outspend/0")
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"bestblock": "e" * 64},
+        {"confirmations": 0},
+        {"confirmations": True},
+        {"confirmations": 3},
+        {"value": Decimal("0.00100001")},
+        {"scriptPubKey": {"hex": "5120" + "e" * 64}},
+        {"coinbase": True},
+    ],
+)
+def test_changed_tip_or_output_between_utxo_reads_is_unknown(reader_samples, changes):
+    reader, samples, _, txid = reader_samples
+    samples["gettxout", (txid, 0, True)].update(changes)
+    with pytest.raises(api.ChainUnavailable):
+        reader.observe(f"/api/tx/{txid}/outspend/0")
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"value": True},
+        {"value": 0.001},
+        {"value": "0.00100000"},
+        {"value": Decimal("NaN")},
+        {"value": Decimal("Infinity")},
+        {"value": Decimal("-1")},
+        {"value": Decimal("21000001")},
+        {"value": Decimal("0.000000001")},
+        {"value": Decimal("1.0000000000000000000000000000000000001")},
+        {"value": Decimal("1e-1000000")},
+        {"scriptPubKey": {}},
+        {"scriptPubKey": {"hex": "0"}},
+        {"scriptPubKey": {"hex": "AA"}},
+        {"coinbase": 0},
+    ],
+)
+def test_malformed_or_inexact_utxo_data_is_unknown(reader_samples, changes):
+    reader, samples, _, txid = reader_samples
+    samples["gettxout", (txid, 0, False)].update(changes)
+    with pytest.raises(api.ChainUnavailable):
+        reader.observe(f"/api/tx/{txid}/outspend/0")
+
+
+def test_invalid_route_never_calls_reader_rpc(reader_samples):
+    reader, _, calls, txid = reader_samples
+    for path in [
+        "/api/block-height/01",
+        "/api/block-height/500000000",
+        f"/api/tx/{txid}/outspend/4294967296",
+    ]:
+        with pytest.raises(api.ChainUnavailable):
+            reader.observe(path)
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "method,limit", [("getblockchaininfo", 16384), ("getrawtransaction", 4 * 1024 * 1024)]
+)
+def test_rpc_limits_are_method_specific(monkeypatch, method, limit):
+    reader = api.ChainReader()
+
+    class Response:
+        status = 200
+        body = b"x" * (limit + 1)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self, length):
+            assert length == limit + 1
+            return self.body
+
+    response = Response()
+    monkeypatch.setattr(reader.opener, "open", lambda *args, **kwargs: response)
+    with pytest.raises(api.ChainUnavailable):
+        reader._call(method, [])
+    # Valid JSON padded to the exact cap is accepted, not silently truncated.
+    valid = b'{"id":1,"result":"ok","error":null}'
+    response.body = valid + b" " * (limit - len(valid))
+    assert reader._call(method, []) == "ok"
+
+
+def test_rpc_decimal_decode_and_invalid_envelope(monkeypatch):
+    reader = api.ChainReader()
+
+    class Response:
+        status = 200
+        body = b'{"id":1,"result":{"value":0.00000001},"error":null}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self, limit):
+            return self.body
+
+    response = Response()
+    monkeypatch.setattr(reader.opener, "open", lambda *args, **kwargs: response)
+    assert reader._call("gettxout", ["a" * 64, 0, True])["value"] == Decimal("0.00000001")
+    for invalid in [
+        b'{"id":true,"result":null}',
+        b'{"id":1,"result":NaN}',
+        b'{"id":1,"result":Infinity}',
+    ]:
+        response.body = invalid
+        with pytest.raises(api.ChainUnavailable):
+            reader._call("gettxout", [])
+    with pytest.raises(api.ChainUnavailable):
+        reader._call("sendrawtransaction", ["00"])
