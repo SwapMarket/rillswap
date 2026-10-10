@@ -345,6 +345,22 @@ The recovery panel now supports explicit BTC to LN refund preparation,
 identical-byte download, and broadcast, including existing mainnet contracts.
 New mainnet funding remains blocked. Full LN to BTC execution is separate.
 
+The disconnected `swap/browserHoldPayer.ts` implements exact-route LND planning
+and one-shot dispatch for that later execution layer. Construction never
+connects. Planning independently checks the original signed invoice against
+LND, pins the node/network, validates one full-amount route under absolute
+expiry/fee limits, and sets its final MPP record. Dispatch refreshes node and
+route-height checks on both sides of the durable authorization callback, then
+submits once with `SendToRouteV2`. It tracks a bounded streamed status rather
+than waiting for hold settlement. Errors remain UNKNOWN and never authorize
+repayment. The in-memory one-use plan guard is not a cross-tab payment journal;
+durable payment-identity authorization is required before adding a UI caller.
+
+The optional disposable regtest node adapter on 8093 preserves upstream TLS
+and scopes its baked macaroon to five RPCs. See `DEVELOPMENT.md` for explicit
+provisioning, credential risks, and read-only validation. No public build
+discovers it on load, and no current UI action dispatches through this module.
+
 After local inspection, **Check funding** explicitly connects to the API
 selected in Settings. It reopens and authenticates the selected file, checks
 the chosen revision's real transaction bytes locally, then repeats confirmed
