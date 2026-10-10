@@ -7,6 +7,7 @@
     "build": "bun run check:schemas && tsc --noEmit && vite build",
     "build:pages": "bun run check:schemas && tsc --noEmit && bun scripts/build-pages.ts",
     "test:pages": "playwright test --config playwright.pages.config.ts",
+    "test:regtest:reverse": "playwright test --config playwright.regtest.config.ts",
     "typecheck": "tsc --noEmit",
     "check:schemas": "bun scripts/generate-advertisement-validators.ts --check",
     "test": "playwright test"

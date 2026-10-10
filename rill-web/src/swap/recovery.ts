@@ -8,7 +8,7 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import canonicalize from "canonicalize";
 
 import { encryptCanonicalRecoveryForRecipient } from "../recoveryAgeContainer";
-import type { FundingBinding } from "./funding";
+import type { RecoveryFundingBinding } from "../recoveryInspection";
 import { reconstructTaprootContract } from "./taproot";
 import type { HandshakeAccept, HandshakeInit, TermsOffer, ReverseTermsOffer } from "./wire";
 
@@ -25,7 +25,7 @@ export interface RecoveryParts {
   readonly birthday: number;
   readonly createdAt: number;
   readonly updatedAt: number;
-  readonly funding: readonly { readonly binding: Omit<FundingBinding, "funder_role"> & { readonly funder_role: "client" | "provider" }; readonly signature: string }[];
+  readonly funding: readonly { readonly binding: RecoveryFundingBinding; readonly signature: string }[];
   readonly preimage: string | null;
   /** Recovery extensions, such as the cooperative reservation; empty by default. */
   readonly extensions?: Readonly<Record<string, unknown>>;

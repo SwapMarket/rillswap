@@ -10,6 +10,7 @@ import { handshake } from "./handshake";
 import { type RelayLink, Session, SwapError } from "./session";
 import type { SwapRequest } from "./swap";
 import { MAX_SATS, ProtocolError, requireShape, sats } from "./wire";
+import type { PreparedReverseExecution, ReverseExecutionConfiguration } from "./reverseExecution";
 
 export const REVERSE_PROFILE = "ln-to-btc/v1";
 
@@ -47,6 +48,7 @@ export interface ReverseQuote {
 
 export interface PreparedReverseQuote {
   readonly quote: ReverseQuote;
+  prepareExecution(configuration: ReverseExecutionConfiguration): Promise<PreparedReverseExecution>;
   dispose(): void;
 }
 
@@ -108,6 +110,7 @@ export async function prepareReverseQuote(
   request: ReverseSwapRequest,
   options: { readonly announcement: string; readonly replyMs?: number; readonly clock?: () => number },
 ): Promise<PreparedReverseQuote> {
+  request = structuredClone(request);
   checkReverseRequest(request);
   const clock = options.clock ?? Date.now;
   const { identity, network } = request;
@@ -122,6 +125,8 @@ export async function prepareReverseQuote(
     const answer = await session.replyTo(envelope, "quote_offer");
     const offer = checkReverseQuoteOffer(answer.payload, request, Math.floor(clock() / 1000));
     const economics = offer.economics;
+    let used = false, disposed = false;
+    let firmSession: Session | undefined;
     return Object.freeze({
       quote: Object.freeze({
         providerIdentity: identity,
@@ -135,7 +140,22 @@ export async function prepareReverseQuote(
         incomingHtlcExpiryDeltaBlocks: offer.incoming_htlc_expiry_delta_blocks,
         expiresAt: offer.expires_at,
       }),
-      dispose: () => session.secret.fill(0),
+      prepareExecution: async (configuration: ReverseExecutionConfiguration) => {
+        configuration.assertCurrent();
+        if (used || disposed || Math.floor(clock() / 1000) >= offer.expires_at) throw new SwapError("Estimate already used, expired, or discarded"); used = true;
+        session.secret.fill(0);
+        const { prepareReverseExecution } = await import("./reverseExecution");
+        configuration.assertCurrent(); if (disposed) throw new SwapError("Estimate discarded");
+        // RS-003/RS-004 require firm requests to be the first quote in a NEW
+        // session. Pin the selected provider, never its indicative session key.
+        firmSession = new Session(relay, network, REVERSE_PROFILE, options.replyMs ?? 15_000, clock);
+        try {
+          const agreed = await handshake(firmSession, provider, identity);
+          configuration.assertCurrent(); if (disposed) throw new SwapError("Estimate discarded");
+          return await prepareReverseExecution(firmSession, agreed, request, configuration, clock);
+        } catch (error) { firmSession.secret.fill(0); throw error; }
+      },
+      dispose: () => { used = disposed = true; session.secret.fill(0); firmSession?.secret.fill(0); },
     });
   } catch (error) {
     session.secret.fill(0);

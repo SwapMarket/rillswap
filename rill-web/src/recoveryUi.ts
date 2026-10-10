@@ -3,6 +3,8 @@ import { MAX_RECOVERY_CIPHERTEXT_BYTES } from "./recoveryAgeContainer";
 import { decryptRecoveryContainer } from "./recoveryKeys";
 import { inspectRecoveryPlaintext, type RecoveryInspection } from "./recoveryInspection";
 import { observeRecoveryFunding } from "./recoveryFunding";
+import { reverseRecoveryControls } from "./reverseRecoveryUi";
+import { parseRecoveryPlaintext } from "./recoveryDocument";
 import type { NetworkName } from "./swap/config";
 import { scriptAddress } from "./swap/address";
 import { prepareBrowserRefund, exportBrowserRefund, broadcastBrowserRefund } from "./browserRefund";
@@ -14,6 +16,7 @@ interface RecoveryUiOptions {
   readonly browserIdentity: () => Promise<string>;
   readonly selectedChainApi: () => string;
   readonly selectedBroadcastApi: () => string;
+  readonly selectedRelays?: () => readonly string[];
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, text = "", id?: string): HTMLElementTagNameMap[K] {
@@ -33,7 +36,7 @@ interface RecoveryPanel {
 export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
   const details = element("details", "", "swap-recovery");
   details.append(element("summary", "Recover a swap"), element("p",
-    "Open an encrypted BTC to Lightning recovery file using your saved browser key. " +
+    "Open an encrypted swap recovery file using your saved browser key. " +
     "Choose the original swap's network in Settings. Files and keys stay on this device."));
   const fileLabel = element("label", "Encrypted swap recovery file (.age)");
   const file = element("input", "", "swap-recovery-file");
@@ -85,12 +88,14 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
   fundingControls.append(refundControls);
   details.append(olderKey, inspect, result, fundingControls);
   let busy = false;
+  let disposeReverse: (() => void) | undefined;
   let inspected: RecoveryInspection | undefined;
   let pendingInvalidated = false;
   let prepared: RefundJournalRecord | undefined;
   const invalidateRefund = (): void => { approval.checked = false; prepare.disabled = true; prepared = undefined; download.hidden = broadcast.hidden = true; refundResult.replaceChildren(); };
 
   const clear = (): void => {
+    disposeReverse?.(); disposeReverse = undefined;
     pendingInvalidated = true; invalidateRefund();
     if (!busy) { result.replaceChildren(); fundingResult.replaceChildren(); fundingControls.hidden = true; inspected = undefined; }
   };
@@ -127,6 +132,7 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
       return;
     }
     busy = true;
+    disposeReverse?.(); disposeReverse = undefined;
     inspected = undefined; fundingControls.hidden = true; fundingResult.replaceChildren();
     file.disabled = keyFile.disabled = inspect.disabled = true;
     result.replaceChildren(element("p", "Opening and verifying locally..."));
@@ -135,6 +141,14 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
       try {
         const identity = selectedKey ? await selectedKey.text() : await options.browserIdentity();
         plaintext = await decryptRecoveryContainer(new Uint8Array(await selectedFile.arrayBuffer()), identity);
+        if (parseRecoveryPlaintext(plaintext).document.profile_id === "ln-to-btc/v1") {
+          pendingInvalidated = false;
+          const assertCurrent = (): void => { if (pendingInvalidated || options.selectedNetwork().name !== selected.name || file.files?.[0] !== selectedFile || keyFile.files?.[0] !== selectedKey) throw new Error("Recovery selection changed"); };
+          assertCurrent();
+          disposeReverse = reverseRecoveryControls(result, { plaintext, identity, network: expectedNetwork as { name: NetworkName; genesis_hash: string },
+            chainApi: options.selectedChainApi, broadcastApi: options.selectedBroadcastApi, relays: options.selectedRelays ?? (() => []), assertCurrent });
+          return;
+        }
         const report = inspectRecoveryPlaintext(plaintext, expectedNetwork);
         if (options.selectedNetwork().name !== selected.name || file.files?.[0] !== selectedFile || keyFile.files?.[0] !== selectedKey) throw new Error("Selection changed");
         show(report);

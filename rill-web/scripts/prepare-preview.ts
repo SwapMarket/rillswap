@@ -75,6 +75,16 @@ const reverseJournal = await Bun.build({ entrypoints: ["src/browserReverseJourna
 if (!reverseJournal.success) throw new AggregateError(reverseJournal.logs, "reverse journal test bundle failed");
 writeFileSync("tmp/preview/test-only/reverse-journal.html", '<!doctype html><script type="module">import { BrowserReverseJournal } from "./browserReverseJournal.js";' +
   'window.BrowserReverseJournal = BrowserReverseJournal; window.reverseJournalReady = true;</script>');
+const reverseRecovery = await Bun.build({ entrypoints: ["src/browserReverseRecovery.ts", "src/recoveryKeys.ts", "src/reverseRecoveryUi.ts"], outdir: "tmp/preview/test-only", target: "browser", format: "esm" });
+if (!reverseRecovery.success) throw new AggregateError(reverseRecovery.logs, "reverse recovery test bundle failed");
+const { reverseCase } = await import("../unit/fixtures/reverseRecoveryCases");
+const { createRecoveryKey } = await import("../src/recoveryKeys");
+const reverseNativeCase = reverseCase(), reverseRecoveryKey = await createRecoveryKey();
+writeFileSync("tmp/preview/test-only/reverse-recovery.json", JSON.stringify({ ...reverseNativeCase, plaintext: canonicalize(reverseNativeCase.record), identity: reverseRecoveryKey.identity }));
+writeFileSync("tmp/preview/test-only/reverse-recovery.html", '<!doctype html><main id="root"></main><script type="module">import * as recovery from "./browserReverseRecovery.js"; import * as keys from "./recoveryKeys.js"; import { reverseRecoveryControls } from "./reverseRecoveryUi.js";' +
+  'window.reverseRecovery = recovery; window.reverseKeys = keys; window.mountReverseRecovery = (data) => { window.reverseUi = { api: "http://127.0.0.1:8091/api", broadcast: "http://127.0.0.1:8092/api", current: true };' +
+  'return reverseRecoveryControls(document.querySelector("#root"), { plaintext: new TextEncoder().encode(data.plaintext), identity: data.identity, network: data.expectedNetwork,' +
+  'chainApi: () => window.reverseUi.api, broadcastApi: () => window.reverseUi.broadcast, relays: () => ["ws://127.0.0.1:7777/"], assertCurrent: () => { if (!window.reverseUi.current) throw Error("selection changed"); } }); }; window.reverseRecoveryReady = true;</script>');
 const refundDraft = { networkIdentity: refundCase.expectedNetwork, api: "http://127.0.0.1:8091/api", broadcastApi: "http://127.0.0.1:8092/api",
   fundingAttemptId: refundCase.fundingAttemptId, bindingRevision: refundCase.bindingRevision, rawFundingTransactionHex: refundCase.fundingTxHex,
   refund: constructSelectedRecoveryRefund(new TextEncoder().encode(canonicalize(refundCase.record)!), refundCase.expectedNetwork,

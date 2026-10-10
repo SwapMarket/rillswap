@@ -1,7 +1,7 @@
 /** Explicit, trusted-API funding observations. No signing, storage, retries, or broadcast. */
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { MAX_RECOVERY_PLAINTEXT_BYTES } from "./recoveryAgeContainer";
-import { checkSelectedRecoveryFundingTransaction, inspectRecoveryPlaintext, isSupportedRecoveryNetwork, type RecoveryFundingSelection } from "./recoveryInspection";
+import { checkSelectedRecoveryFundingTransaction, checkSelectedReverseFundingTransaction, inspectRecoveryPlaintext, inspectReverseRecoveryPlaintext, isSupportedRecoveryNetwork, type RecoveryFundingSelection } from "./recoveryInspection";
 import { parseStrictEventJson } from "./strictEventJson";
 import { readBoundedChainText, readChainTip, type ChainFetch } from "./swap/chainTip";
 import { validateMempoolApi, type NetworkName } from "./swap/config";
@@ -52,6 +52,23 @@ export async function observeRecoveryFunding(
   base: string,
   options: { readonly signal?: AbortSignal; readonly fetch?: ChainFetch } = {},
 ): Promise<RecoveryFundingObservation> {
+  return observeFunding(plaintext, independentlySelectedNetwork, selection, base, options, "btc-to-ln/v1");
+}
+
+/** Same explicit trusted-API consistency boundary, independently authenticated reverse evidence. */
+export async function observeReverseRecoveryFunding(
+  plaintext: Uint8Array,
+  independentlySelectedNetwork: { readonly name: NetworkName; readonly genesis_hash: string },
+  selection: RecoveryFundingSelection, base: string,
+  options: { readonly signal?: AbortSignal; readonly fetch?: ChainFetch } = {},
+): Promise<RecoveryFundingObservation> {
+  return observeFunding(plaintext, independentlySelectedNetwork, selection, base, options, "ln-to-btc/v1");
+}
+
+async function observeFunding(plaintext: Uint8Array,
+  independentlySelectedNetwork: { readonly name: NetworkName; readonly genesis_hash: string }, selection: RecoveryFundingSelection, base: string,
+  options: { readonly signal?: AbortSignal; readonly fetch?: ChainFetch }, profile: "btc-to-ln/v1" | "ln-to-btc/v1",
+): Promise<RecoveryFundingObservation> {
   let snapshot: Uint8Array | undefined;
   try {
     require(plaintext instanceof Uint8Array && plaintext.length > 0 && plaintext.length <= MAX_RECOVERY_PLAINTEXT_BYTES);
@@ -62,7 +79,7 @@ export async function observeRecoveryFunding(
     require(typeof chosen.fundingAttemptId === "string" && HEX32.test(chosen.fundingAttemptId));
     require(Number.isSafeInteger(chosen.bindingRevision) && chosen.bindingRevision >= 0 && chosen.bindingRevision < 64);
     const api = validateMempoolApi(base, network.name);
-    const report = inspectRecoveryPlaintext(snapshot, network);
+    const report = profile === "ln-to-btc/v1" ? inspectReverseRecoveryPlaintext(snapshot, network) : inspectRecoveryPlaintext(snapshot, network);
     const matches = report.fundingHistory.filter((binding) => binding.funding_attempt_id === chosen.fundingAttemptId && binding.binding_revision === chosen.bindingRevision);
     require(matches.length === 1);
     const binding = matches[0]!;
@@ -80,7 +97,7 @@ export async function observeRecoveryFunding(
       require(/^(?:[0-9a-f]{2})+$/.test(text));
       if (rawHex !== undefined) require(text === rawHex);
       // Establish actual output existence BEFORE interpreting any outspend flag.
-      checkSelectedRecoveryFundingTransaction(snapshot, network, chosen, hexToBytes(text));
+      (profile === "ln-to-btc/v1" ? checkSelectedReverseFundingTransaction : checkSelectedRecoveryFundingTransaction)(snapshot, network, chosen, hexToBytes(text));
       rawHex = text;
       const status = jsonObject(await get(`tx/${binding.funding_txid}/status`));
       require(status.confirmed === true && typeof status.block_height === "number" && Number.isSafeInteger(status.block_height) && status.block_height >= 0 && status.block_height <= tip.height);

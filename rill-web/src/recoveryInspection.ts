@@ -523,6 +523,7 @@ export interface ReverseRecoveryInspection {
   readonly minFundingDepth: number;
   readonly fundingHistory: readonly RecoveryFundingBinding[];
   readonly fallbackTxid: string | null;
+  readonly fallbackFeeSat: string | null;
 }
 
 export function inspectReverseRecoveryPlaintext(plaintext: Uint8Array, independentlySelectedNetwork: unknown): ReverseRecoveryInspection {
@@ -532,7 +533,7 @@ export function inspectReverseRecoveryPlaintext(plaintext: Uint8Array, independe
     contractHash: record.contract_hash, destinationScript: terms.client_destination_script, nominalPayoutSat: terms.economics.nominal_payout_sat,
     claimFeeReserveSat: terms.economics.claim_fee_reserve_sat, maxClaimFeeSat: terms.max_claim_fee_sat, refundLockHeight: terms.refund_lock_height,
     claimConfirmationBlocks: terms.timing_policy.claim_confirmation_blocks, minFundingDepth: terms.funding_confirmations,
-    fundingHistory: Object.freeze(record.funding_history.map(({ binding }) => Object.freeze({ ...binding }))), fallbackTxid: fallback?.txid ?? null });
+    fundingHistory: Object.freeze(record.funding_history.map(({ binding }) => Object.freeze({ ...binding }))), fallbackTxid: fallback?.txid ?? null, fallbackFeeSat: fallback?.feeSat ?? null });
 }
 
 export interface SelectedReverseClaimInput extends SelectedRecoveryRefundInput {

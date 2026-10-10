@@ -99,6 +99,8 @@ export class BrowserHoldPayer {
   readonly #clock: () => number;
   readonly #plans = new WeakMap<BoundedHoldPlan, { readonly invoice: string; readonly secret: string }>();
   readonly #used = new WeakSet<BoundedHoldPlan>();
+  /** Immutable normalized public transport metadata, never credentials. */
+  get endpoint(): string { return this.#endpoint; }
 
   /** Construction validates only. No connection or credential persistence. */
   constructor(configuration: { readonly endpoint: string; readonly macaroon: string; readonly nodeIdentity: string;
@@ -107,7 +109,7 @@ export class BrowserHoldPayer {
     require(KEY.test(configuration.nodeIdentity) && /^(?:[0-9a-f]{2}){1,4096}$/.test(configuration.macaroon));
     this.#network = freeze(structuredClone(configuration.network)); this.#identity = configuration.nodeIdentity;
     this.#endpoint = validateMempoolApi(configuration.endpoint, this.#network.name);
-    this.#macaroon = configuration.macaroon; this.#fetch = configuration.fetch ?? fetch; this.#clock = configuration.clock ?? Date.now;
+    this.#macaroon = configuration.macaroon; this.#fetch = (configuration.fetch ?? globalThis.fetch).bind(globalThis); this.#clock = configuration.clock ?? Date.now;
   }
 
   async #call(path: string, body?: unknown): Promise<unknown> {

@@ -52,3 +52,13 @@ test("price discovery sends only an indicative request, exposes no invoice, and 
   expect(result.afterDispose).toEqual([false, false]);
   expect(result.refused).toContain("does not honor request: payout");
 });
+test("continuing an estimate pins its provider and request but opens a new firm session exactly once", async () => {
+  const child = Bun.spawn([process.execPath, "unit/fixtures/reverseFirmSessionFixture.ts"], { stdout: "pipe", stderr: "pipe" });
+  const [output, errors, status] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+  expect(errors).toBe(""); expect(status).toBe(0); const result = JSON.parse(output);
+  expect(result.result.sessionId).not.toBe("0".repeat(64)); expect(result.result.handshakeSession).toBe(result.result.sessionId);
+  expect(result.result.identity).toBe("1".repeat(64)); expect(result.result.payout).toBe(result.expected);
+  expect(result.events.filter((v: string) => v === "new-session")).toHaveLength(2);
+  expect(result.events.slice(-2)).toEqual(["persist-firm-secrets", "firm-request"]);
+  expect(result.refused).toBe(true); expect(result.oldZero).toBe(true); expect(result.allZero).toBe(true);
+});

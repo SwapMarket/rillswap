@@ -166,7 +166,7 @@ test("canceling the pending final wallet check prevents execution and stale UI",
   expect(await page.evaluate(() => window.uiFixture.executed)).toBe(0);
 });
 
-test("Lightning to Bitcoin shows the lowest hold-invoice estimate, shares no address or hash, and discards every offer", async ({ page }) => {
+test("Lightning to Bitcoin keeps estimates private and retains sessions only until continuation or cancellation", async ({ page }) => {
   const tips = await mockTip(page);
   await page.goto(PAGE);
   await page.getByRole("button", { name: "Switch direction" }).click();
@@ -182,11 +182,15 @@ test("Lightning to Bitcoin shows the lowest hold-invoice estimate, shares no add
   await expect(page.locator("#swap-quote-accept")).toHaveCount(0);
   expect(tips).toEqual([]); // estimates need no chain height
   const fixture = await page.evaluate(() => ({ requests: window.uiFixture.requests, disposed: window.uiFixture.disposed }));
-  expect(fixture.disposed).toBe(2); // each of the two offers, once
+  expect(fixture.disposed).toBe(0); // retained only for the explicit Continue action
   const request = fixture.requests[0] as Record<string, unknown> & { payoutSat: bigint;
     limits: { minRefundDelayBlocks: number; maxIncomingHtlcDelayBlocks: number; minClaimFeeReserveSat: bigint } };
   expect(request.payoutSat).toBe(50_000n);
   expect(Object.keys(request).sort()).toEqual(["limits", "network", "payoutSat"]);
   expect(request.limits).toMatchObject({ minRefundDelayBlocks: 72, maxIncomingHtlcDelayBlocks: 432, minClaimFeeReserveSat: 500n });
+  await expect(page.locator("#swap-reverse-continue")).toBeDisabled(); // matching key-backup gate still applies
+  await expect(page.locator("#swap-start")).toBeDisabled();
+  await page.locator("#swap-edit").click();
+  expect(await page.evaluate(() => window.uiFixture.disposed)).toBe(2);
   await expect(page.locator("#swap-start")).toBeEnabled();
 });

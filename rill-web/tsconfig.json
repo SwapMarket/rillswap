@@ -13,5 +13,5 @@
     "skipLibCheck": true,
     "types": ["vite/client", "bun"]
   },
-  "include": ["src", "vite.config.ts", "tests", "unit", "scripts", "playwright.config.ts", "playwright.pages.config.ts"]
+  "include": ["src", "vite.config.ts", "tests", "unit", "regtest", "scripts", "playwright.config.ts", "playwright.pages.config.ts", "playwright.regtest.config.ts"]
 }

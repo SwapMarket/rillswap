@@ -55,6 +55,20 @@ test("construction is disconnected; a full-amount route is bounded and adds only
   await expect(f.payer.pay(plan, async () => {}, () => {})).rejects.toBeInstanceOf(BrowserHoldPaymentRefusedError);
   expect(f.calls.filter((call) => call.path === "/v2/router/route/send")).toHaveLength(1);
 });
+test("default browser fetch retains its Window/global receiver instead of the payer instance", async () => {
+  const original = globalThis.fetch; let calls = 0;
+  globalThis.fetch = Object.assign(async function(this: unknown, url: string | URL | Request): Promise<Response> {
+    expect(this).toBe(globalThis); calls++;
+    if (String(url).endsWith("/v1/getinfo")) return Response.json({ identity_pubkey: receiver, chains: [{ chain: "bitcoin", network: "regtest" }], synced_to_chain: true, block_height: 100 });
+    return new Response(JSON.stringify({ result: { payment_hash: binding.payment_hash, value_msat: binding.amount_msat, status: "IN_FLIGHT" } }) + "\n");
+  }, { preconnect: () => {} }) as typeof globalThis.fetch;
+  try {
+    for (const explicit of [false, true]) {
+      const before = calls, payer = new BrowserHoldPayer({ endpoint: "http://127.0.0.1:8093", macaroon: "00aa", nodeIdentity: receiver, network: { ...regtest, name: "regtest" }, ...(explicit ? { fetch: globalThis.fetch } : {}) });
+      expect(calls).toBe(before); expect(await payer.status(binding.payment_hash, binding.amount_msat)).toBe("IN_FLIGHT"); expect(calls).toBe(before + 2);
+    }
+  } finally { globalThis.fetch = original; }
+});
 
 for (const patch of [{ payment_hash: "0".repeat(64) }, { num_msat: "999999" }, { destination: "02" + "66".repeat(32) },
   { payment_addr: "" }, { expiry: "9999" }, { cltv_expiry: "17" }, { blinded_paths: [{}] }, { features: { 8: {}, 14: {}, 100: {} } }]) {

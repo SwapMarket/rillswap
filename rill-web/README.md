@@ -147,7 +147,8 @@ commands never publish, and no deployment has been triggered by this work.
 The card's **You send / You receive** selectors and the switch button choose
 the pair. `src/swapPairs.ts` is the single table mapping display assets to
 protocol profiles: BTC to LN (`btc-to-ln/v1`) is quotable and payable; LN to
-BTC (`ln-to-btc/v1`) currently returns price estimates only; USDT and USDC are
+BTC (`ln-to-btc/v1`) supports indicative comparison followed by explicitly
+approved execution through a configured LND node; USDT and USDC are
 listed in both directions as unavailable placeholders with no protocol
 profile. Unavailable pairs explain why and never connect anywhere.
 
@@ -159,8 +160,9 @@ Settings limits (minimum claim fee reserve 500 sat, minimum provider refund
 delay 72 blocks, maximum Lightning hold 432 blocks, matching `rill swap
 reverse`); the lowest `hold_invoice_sat` wins. RS-004 requires the preimage
 to be durably saved before any *firm* request, so signed terms and the hold
-invoice (`checkReverseTermsOffer` in `src/swap/wire.ts`) are left to the
-upcoming payment step, after persistence.
+invoice (`checkReverseTermsOffer` in `src/swap/wire.ts`) are requested only
+after persistence. Continuing pins the chosen provider and opens a fresh firm
+session, as RS-003/RS-004 require. Indicative sessions never become firm sessions.
 
 ### Automatic quote selection
 
@@ -251,9 +253,11 @@ in the tab's memory; the separate wallet root is persisted locally. The terms
 recovery file must be downloaded before accepting terms, and the funded one
 before the funding binding is sent and before broadcast. If the provider does
 not pay, refund from the funded recovery file after the refund height (see
-"Refunding a stopped swap" below); browser refund construction and spending
-are not implemented yet. Until they are, an external refund-address override
-is preferable if you need refunds in a conventional wallet. No upgrade or
+"Refunding a stopped swap" below). Browser contract refund construction and
+broadcast are supported. The recovery wallet is not a general-purpose Bitcoin
+spending UI: its standard BIP39/BIP84 backup can be restored in a compatible
+wallet, or use the external refund-address override for a conventional wallet.
+No upgrade or
 reload resumes a swap; retain the original downloaded recovery files.
 
 ### Refunding a stopped swap
@@ -343,10 +347,11 @@ RILLSWAP_TEST_RECOVERY_NATIVE=1 bun test unit/recoveryRefundNative.test.ts
 
 The recovery panel now supports explicit BTC to LN refund preparation,
 identical-byte download, and broadcast, including existing mainnet contracts.
-New mainnet funding remains blocked. Full LN to BTC execution is separate.
+New mainnet funding remains blocked. Reverse execution uses the separate
+explicit-action controller described below.
 
-The disconnected `swap/browserHoldPayer.ts` implements exact-route LND planning
-and one-shot dispatch for that later execution layer. Construction never
+`swap/browserHoldPayer.ts` implements exact-route LND planning
+and one-shot dispatch for reverse execution. Construction never
 connects. Planning independently checks the original signed invoice against
 LND, pins the node/network, validates one full-amount route under absolute
 expiry/fee limits, and sets its final MPP record. Dispatch refreshes node and
@@ -354,10 +359,10 @@ route-height checks on both sides of the durable authorization callback, then
 submits once with `SendToRouteV2`. It tracks a bounded streamed status rather
 than waiting for hold settlement. Errors remain UNKNOWN and never authorize
 repayment. The in-memory one-use plan guard is not a cross-tab payment journal;
-durable payment-identity authorization is required before adding a UI caller.
+the execution controller supplies cross-tab durable payment authorization.
 
-`browserReverseJournal.ts` is a disconnected encrypted-snapshot store for that
-future caller. Explicitly generated fresh sessions retain separate secrets,
+`browserReverseJournal.ts` stores encrypted snapshots for the explicit
+`swap/reverseExecution.ts` controller. Fresh sessions retain separate secrets,
 terms, payment-attempt, funded, and signed-claim snapshots. Funding never clears
 the UNKNOWN payment attempt. Strict three-store transactions check predecessor
 elections before writing, then verify committed readback. Payment elections
@@ -378,7 +383,65 @@ origin-local guarantees. Upgrade from previous releases initiates no work.
 The optional disposable regtest node adapter on 8093 preserves upstream TLS
 and scopes its baked macaroon to five RPCs. See `DEVELOPMENT.md` for explicit
 provisioning, credential risks, and read-only validation. No public build
-discovers it on load, and no current UI action dispatches through this module.
+discovers it on load.
+`VITE_RILLSWAP_NODE_API` admits one concrete node origin into the deployment CSP
+and prefills its public endpoint. Public builds supply no node by default;
+regtest defaults to loopback 8093. Custom nodes need browser-trusted TLS, CORS,
+and scoped LND permissions. Never put a macaroon in build configuration.
+Wildcard, credential-bearing, and non-regtest HTTP API URLs are refused.
+
+For an opt-in real browser acceptance check, use a **separate disposable
+Compose project** and the already-built development images. From the repository
+root (these commands create only new fake-money wallets):
+
+```sh
+export COMPOSE_PROJECT_NAME="rill-reverse-browser-$RANDOM"
+export RILL_DEV_WEB_PORT=15273 RILL_DEV_CHAIN_PORT=18091
+export RILL_DEV_BROADCAST_PORT=18092 RILL_DEV_NODE_PORT=18093
+export RILL_DEV_RELAY_PORT=17777
+docker compose -f dev/compose.yaml up -d --no-build \
+  tools maker-ln-to-btc chain broadcast user-node web
+(cd rill-web && RILLSWAP_RUN_BROWSER_REVERSE_REGTEST=1 bun run test:regtest:reverse)
+docker compose -f dev/compose.yaml down -v
+```
+
+Do not reuse the default project or reset its wallets. No automatic miner is
+started: the test explicitly mines only the funding and claim confirmations.
+It verifies one exact-route payment, native unilateral four-item witness,
+nominal payout, provider SETTLED, held invoice SETTLED, payer SUCCEEDED, and
+read-only reload recovery with identical saved bytes and no renewed submission.
+Fake-money encrypted backups and diagnostics remain under repository `tmp/`.
+Ordinary CI runs the unit, disconnected browser, and Pages regressions; the
+real-node check requires this explicit opt-in and isolated resources.
+
+The reverse execution UI connects only after signed terms, checked key backup,
+acknowledged per-swap backup, and an explicit node-connect action. The route
+and routing fee require a separate one-shot payment approval. The controller
+binds the approved transport to the payer's immutable normalized endpoint.
+Its initial private intent is encrypted before a firm request; native terms,
+funding, and exact claim backups are saved separately before later actions.
+Neither reload nor import restores acceptance or payment authority.
+
+Explicit funded recovery also works without the original browser execution
+history. `browserReverseRecovery.ts` authenticates the file, actual funding
+transaction and fresh trusted-API observations, then reserves a **claim-only**
+owner in the same global network/outpoint election as live execution. Its
+encrypted funded predecessor is durable before private preparation and is
+authenticated again on resumption, including after another tab wins a race.
+There are no payment fields or fabricated payment routes. Prior exposure stays
+UNKNOWN. Private interrupted preparation may be resumed explicitly; only one
+exact encrypted fallback can win selection, and exposure UNKNOWN is committed
+before any plaintext export or one-shot broadcast. Imported already-signed
+fallbacks start UNKNOWN and cannot gain new broadcast authority.
+
+Missing election metadata never overrides a retained owner. Explicit import
+conservatively inspects at most 256 local records before creating a reservation;
+more records or unrelated damaged records can block import rather than risk
+replacing an existing claim. No startup scan, migration, eviction, or record
+repair runs. An installation upgrading from the previous release keeps its
+existing records intact; partial or incompatible state remains blocked.
+Deleting all browser storage defeats origin-local elections: explicit recovery
+still cannot prove a preimage was private or an earlier claim never existed.
 
 Offline reverse recovery shares canonical admission, handshake/terms signatures,
 purpose-key checks and Taproot reconstruction with forward inspection. It

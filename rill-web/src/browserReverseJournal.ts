@@ -45,7 +45,27 @@ export interface ReverseJournalRecord {
   readonly claim: ReverseClaimIntent | null;
   readonly digest: string;
 }
-interface Election { readonly id: string; readonly owner: string; readonly digest: string; readonly state: "submission-unknown" | "prepared" | "accepted" }
+interface Election { readonly id: string; readonly owner: string; readonly digest: string; readonly state: "submission-unknown" | "prepared" | "accepted" | "recovery-reserved" }
+export interface ImportedClaimDraft {
+  readonly networkIdentity: unknown;
+  readonly fundingTxid: string;
+  readonly fundingVout: number;
+  readonly bindingHash: string;
+  readonly fundedPlaintextDigest: string;
+  readonly feeSat: string;
+}
+export interface ImportedClaimRecord {
+  readonly kind: "claim-only";
+  readonly id: string;
+  readonly draft: ImportedClaimDraft;
+  /** Absence of earlier origin-local history never proves private preimage/claim bytes. */
+  readonly priorExposure: "unknown";
+  readonly stage: "recovery-reserved" | "claim-ready" | "claim-unknown";
+  readonly funded: Snapshot;
+  readonly fallback: Snapshot | null;
+  readonly claim: ReverseClaimIntent | null;
+  readonly digest: string;
+}
 
 export class ReverseJournalRefusedError extends Error {
   constructor() { super("Reverse recovery state unavailable or conflicting. Preserve backups; no automatic retry or replacement is permitted."); this.name = "ReverseJournalRefusedError"; }
@@ -116,7 +136,7 @@ function seal(record: Omit<ReverseJournalRecord, "digest">): ReverseJournalRecor
   return recordSnapshot({ ...fields, digest: digest(fields) });
 }
 function election(value: unknown): Election { const o = object(value, ["id", "owner", "digest", "state"]);
-  require([o.id, o.owner, o.digest].every((field) => typeof field === "string" && HEX.test(field)) && ["prepared", "submission-unknown", "accepted"].includes(o.state as string)); return o as unknown as Election; }
+  require([o.id, o.owner, o.digest].every((field) => typeof field === "string" && HEX.test(field)) && ["prepared", "submission-unknown", "accepted", "recovery-reserved"].includes(o.state as string)); return o as unknown as Election; }
 
 export class BrowserReverseJournal {
   private constructor(private readonly database: IDBDatabase) {}
@@ -245,4 +265,120 @@ export class BrowserReverseJournal {
     const old = recordSnapshot(expected); require(old.stage === "claim-unknown" || old.stage === "accepted");
     const loaded = await this.get(old.context.networkIdentity, old.context.sessionId); require(loaded?.digest === old.digest); return loaded!;
   }
+
+  /** Resolve the SAME global outpoint owner used by live execution. Never replace a damaged owner. */
+  async claimOwner(network: unknown, fundingTxid: string, fundingVout: number): Promise<ReverseJournalRecord | ImportedClaimRecord | undefined> {
+    require(isSupportedRecoveryNetwork(network) && HEX.test(fundingTxid) && Number.isSafeInteger(fundingVout) && fundingVout >= 0 && fundingVout <= 0xffffffff);
+    const id = digest({ network, fundingTxid, fundingVout });
+    return new Promise((resolve, reject) => {
+      const tx = this.database.transaction([...STORES]), lookup = tx.objectStore("claims").get(id); let result: ReverseJournalRecord | ImportedClaimRecord | undefined;
+      lookup.onsuccess = () => { try {
+        if (lookup.result === undefined) return;
+        const marker = election(lookup.result), owner = tx.objectStore("sessions").get(marker.owner);
+        owner.onsuccess = () => { try {
+          if (owner.result?.kind === "claim-only") {
+            result = importedSnapshot(owner.result); require(canonicalize(importedElection(result)) === canonicalize(marker));
+          } else {
+            result = recordSnapshot(owner.result); require(result.claim !== null && canonicalize(this.#claimElection(result,
+              result.stage === "claim-ready" ? "prepared" : result.stage === "accepted" ? "accepted" : "submission-unknown")) === canonicalize(marker));
+            this.#checkElections(tx, result, () => {});
+          }
+          require(result.id === marker.owner && ("kind" in result ? result.draft.fundingTxid === fundingTxid && result.draft.fundingVout === fundingVout && canonicalize(result.draft.networkIdentity) === canonicalize(network) :
+            result.claim!.fundingTxid === fundingTxid && result.claim!.fundingVout === fundingVout && canonicalize(result.context.networkIdentity) === canonicalize(network)));
+        } catch { tx.abort(); } };
+      } catch { tx.abort(); } };
+      tx.oncomplete = () => resolve(result); tx.onabort = tx.onerror = () => reject(new ReverseJournalRefusedError());
+    });
+  }
+
+  /** Explicit authenticated funded import only. Stores a funded predecessor BEFORE private preparation. No payment fields/API. */
+  async reserveImportedClaim(draft: ImportedClaimDraft, encryptedFunded: Uint8Array): Promise<ImportedClaimRecord> {
+    const fixed = importedDraft(draft), next = importedSeal({ kind: "claim-only", id: digest({ kind: "claim-only", network: fixed.networkIdentity, fundingTxid: fixed.fundingTxid, fundingVout: fixed.fundingVout }),
+      draft: fixed, priorExposure: "unknown", stage: "recovery-reserved", funded: snapshot("funded", encryptedFunded), fallback: null, claim: null });
+    // Idempotent explicit resumption retains the FIRST exact predecessor and approval, not a newly randomized ciphertext.
+    const existing = await this.claimOwner(fixed.networkIdentity, fixed.fundingTxid, fixed.fundingVout);
+    if (existing) { require("kind" in existing && canonicalize(existing.draft) === canonicalize(fixed)); return existing as ImportedClaimRecord; }
+    return this.#writeImported(null, next);
+  }
+
+  async saveImportedClaim(expected: ImportedClaimRecord, claim: ReverseClaimIntent, encryptedFallback: Uint8Array, alreadySigned: boolean): Promise<ImportedClaimRecord> {
+    const old = importedSnapshot(expected); require(old.stage === "recovery-reserved");
+    const next = importedSeal({ ...old, stage: alreadySigned ? "claim-unknown" : "claim-ready", claim: structuredClone(claim), fallback: snapshot("claim-ready", encryptedFallback) });
+    return this.#writeImported(old, next);
+  }
+  async exposeImportedClaim(expected: ImportedClaimRecord): Promise<ImportedClaimRecord> {
+    const old = importedSnapshot(expected); require(old.stage === "claim-ready"); return this.#writeImported(old, importedSeal({ ...old, stage: "claim-unknown" }));
+  }
+  async reexportImportedClaim(expected: ImportedClaimRecord): Promise<ImportedClaimRecord> {
+    const old = importedSnapshot(expected); require(old.stage === "claim-unknown"); const saved = await this.claimOwner(old.draft.networkIdentity, old.draft.fundingTxid, old.draft.fundingVout);
+    require(saved !== undefined && "kind" in saved && saved.digest === old.digest); return saved as ImportedClaimRecord;
+  }
+  async #writeImported(expected: ImportedClaimRecord | null, next: ImportedClaimRecord): Promise<ImportedClaimRecord> {
+    next = importedSnapshot(next); const marker = importedElection(next);
+    await new Promise<void>((resolve, reject) => {
+      let tx: IDBTransaction;
+      try { tx = this.database.transaction([...STORES], "readwrite", { durability: "strict" }); require(tx.durability === "strict"); }
+      catch { reject(new ReverseJournalRefusedError()); return; }
+      const sessions = tx.objectStore("sessions"), claims = tx.objectStore("claims"), own = sessions.get(next.id), elected = claims.get(marker.id);
+      let completed = 0;
+      const check = (): void => { if (++completed !== 2) return; try {
+        if (expected) { require(importedSnapshot(own.result).digest === expected.digest && canonicalize(election(elected.result)) === canonicalize(importedElection(expected))); }
+        else require(own.result === undefined && elected.result === undefined);
+        const write = (): void => { sessions.put(next); if (expected) claims.put(marker); else claims.add(marker); };
+        if (expected) write();
+        else {
+          // Explicit import only: absence of a marker cannot bypass a retained
+          // owner whose election was lost. Bound this conservative inspection.
+          let count = 0; const cursor = sessions.openCursor();
+          cursor.onsuccess = () => { try {
+            const entry = cursor.result; if (!entry) { write(); return; } require(++count <= 256);
+            if (entry.value?.kind === "claim-only") {
+              const old = importedSnapshot(entry.value); require(!(canonicalize(old.draft.networkIdentity) === canonicalize(next.draft.networkIdentity) &&
+                old.draft.fundingTxid === next.draft.fundingTxid && old.draft.fundingVout === next.draft.fundingVout));
+            } else {
+              const old = recordSnapshot(entry.value); require(!(old.claim && canonicalize(old.context.networkIdentity) === canonicalize(next.draft.networkIdentity) &&
+                old.claim.fundingTxid === next.draft.fundingTxid && old.claim.fundingVout === next.draft.fundingVout));
+            }
+            entry.continue();
+          } catch { tx.abort(); } };
+        }
+      } catch { tx.abort(); } };
+      own.onsuccess = elected.onsuccess = check;
+      tx.oncomplete = () => resolve(); tx.onabort = tx.onerror = () => reject(new ReverseJournalRefusedError());
+    });
+    const saved = await this.claimOwner(next.draft.networkIdentity, next.draft.fundingTxid, next.draft.fundingVout);
+    require(saved !== undefined && "kind" in saved && saved.digest === next.digest); return saved as ImportedClaimRecord;
+  }
+}
+
+function importedDraft(value: unknown): ImportedClaimDraft {
+  const d = object(structuredClone(value), ["networkIdentity", "fundingTxid", "fundingVout", "bindingHash", "fundedPlaintextDigest", "feeSat"]);
+  require(isSupportedRecoveryNetwork(d.networkIdentity));
+  for (const hex of [d.fundingTxid, d.bindingHash, d.fundedPlaintextDigest]) require(typeof hex === "string" && HEX.test(hex));
+  require(typeof d.fundingVout === "number" && Number.isSafeInteger(d.fundingVout) && d.fundingVout >= 0 && d.fundingVout <= 0xffffffff);
+  require(typeof d.feeSat === "string" && /^(0|[1-9][0-9]{0,15})$/.test(d.feeSat) && BigInt(d.feeSat) <= 2100000000000000n);
+  return freeze(d as unknown as ImportedClaimDraft);
+}
+function importedSnapshot(value: unknown): ImportedClaimRecord {
+  const r = object(structuredClone(value), ["kind", "id", "draft", "priorExposure", "stage", "funded", "fallback", "claim", "digest"]), draft = importedDraft(r.draft);
+  require(r.kind === "claim-only" && r.priorExposure === "unknown" && ["recovery-reserved", "claim-ready", "claim-unknown"].includes(r.stage as string));
+  require(r.id === digest({ kind: "claim-only", network: draft.networkIdentity, fundingTxid: draft.fundingTxid, fundingVout: draft.fundingVout }));
+  const container = (value: unknown, stage: Snapshot["stage"]): Snapshot => {
+    const item = object(value, ["stage", "ciphertextHex", "digest"]); require(item.stage === stage && typeof item.ciphertextHex === "string" && /^(?:[0-9a-f]{2})+$/.test(item.ciphertextHex) && item.ciphertextHex.length <= MAX_CIPHER_BYTES * 2);
+    const verified = snapshot(stage, hexToBytes(item.ciphertextHex as string)); require(verified.digest === item.digest); return verified;
+  };
+  container(r.funded, "funded");
+  if (r.stage === "recovery-reserved") require(r.fallback === null && r.claim === null);
+  else {
+    container(r.fallback, "claim-ready"); const claim = object(r.claim, ["fundingTxid", "fundingVout", "txid", "signedDigest"]);
+    require(claim.fundingTxid === draft.fundingTxid && claim.fundingVout === draft.fundingVout && typeof claim.txid === "string" && HEX.test(claim.txid) && typeof claim.signedDigest === "string" && HEX.test(claim.signedDigest));
+  }
+  const { digest: saved, ...parts } = r; require(saved === digest(parts)); return freeze(r as unknown as ImportedClaimRecord);
+}
+function importedSeal(value: Omit<ImportedClaimRecord, "digest">): ImportedClaimRecord {
+  const { digest: _old, ...parts } = value as ImportedClaimRecord; return importedSnapshot({ ...parts, digest: digest(parts) });
+}
+function importedElection(record: ImportedClaimRecord): Election {
+  return { id: digest({ network: record.draft.networkIdentity, fundingTxid: record.draft.fundingTxid, fundingVout: record.draft.fundingVout }), owner: record.id,
+    digest: record.claim ? digest(record.claim) : record.digest, state: record.stage === "recovery-reserved" ? "recovery-reserved" : record.stage === "claim-ready" ? "prepared" : "submission-unknown" };
 }

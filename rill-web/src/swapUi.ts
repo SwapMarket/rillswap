@@ -1,5 +1,5 @@
 /**
- * Experimental browser BTC to LN client page. Everything sensitive stays in
+   * Experimental browser BTC and LN client page. Everything sensitive stays in
  * contract secrets stay in this tab; the recovery root is stored locally.
  * The user's own wallet funds and broadcasts, and the
  * user's own downloads hold the age-encrypted recovery files.
@@ -21,6 +21,7 @@ import { invoiceBinding } from "./swap/bolt11";
 import { quoteSelectionLabel, stoppedSwapAdvice } from "./swapUiStatus";
 import { ASSETS, type AssetId, routeFor } from "./swapPairs";
 import { recoveryPanel } from "./recoveryUi";
+import { mountReverseExecution } from "./reverseExecutionUi";
 
 const NETWORKS = { mainnet, signet, testnet4, regtest } as const;
 
@@ -108,7 +109,7 @@ function mount(root: HTMLElement): void {
   const chainApi = field(settings, "swap-chain-api", "Mempool API", __SWAP_DEFAULTS__.mempoolApi,
     "Trusted height observations, not independent chain verification. Custom origins need a deployment CSP allowance.");
   const broadcastApi = field(settings, "swap-broadcast-api", "Transaction broadcast API", __SWAP_DEFAULTS__.broadcastApi,
-    "Used only after explicit refund approval and a Broadcast refund click. Custom origins need a deployment CSP allowance.");
+    "Used only after explicit refund or claim approval and a broadcast click. Custom origins need a deployment CSP allowance.");
   const identity = field(settings, "swap-provider", "Provider identity", "",
     "Automatic by default. Optionally pin a provider's 64-character public identity key.");
   identity.placeholder = "Automatic (lowest verified provider price)";
@@ -172,8 +173,11 @@ function mount(root: HTMLElement): void {
     node("p", "Requesting a quote or checking recovery funding authorizes the configured connections for that attempt. " +
       "Nothing connects on page load or when you change settings."),
     chainDisclosure, relayDisclosure,
-    node("p", "Responding providers receive your Lightning invoice. Encrypted messages do not hide transport metadata. " +
+    node("p", "For Bitcoin to Lightning, responding providers receive your Lightning invoice. For Lightning to Bitcoin, " +
+      "only the selected firm provider receives your payout script and payment hash. Encrypted messages do not hide transport metadata. " +
       "Signatures authenticate offers, not provider reputation."),
+    node("p", "Connecting a Lightning node discloses its scoped credential to this tab and sends the signed hold invoice to that node. " +
+      "Credentials are not saved. Approving the exact route authorizes one payment attempt; signing and broadcasting a reverse claim reveals its preimage."),
     node("p", "Recovery keys and files are not uploaded. The recovery root is stored unencrypted in this browser, " +
       "where same-origin scripts can access it. Keep private backups and every encrypted per-swap recovery file. " +
       "Clearing browser storage can lose access to refunds."),
@@ -206,9 +210,8 @@ function mount(root: HTMLElement): void {
   safety.append(node("summary", "Before using this preview"),
     node("p", "Unaudited and experimental. Use fake-money test networks only. Contract secrets live in this tab; " +
       "keep it open until the swap finishes."),
-    node("p", "Browser refunds are not implemented yet. You can inspect recovery files locally below. Save the encrypted recovery file before funding. " +
-      "If the provider does not pay, refund after the lock height with rill recover watch-refund --chain-only " +
-      "and your own Bitcoin Core node.", "swap-refund-intro"));
+    node("p", "Save your recovery key and each encrypted swap backup before funding or paying. Browser recovery below can check funding, " +
+      "prepare a Bitcoin refund after its lock height, or recover a Lightning-to-Bitcoin claim. Missing evidence stays blocked; never pay again to recover an uncertain attempt.", "swap-refund-intro"));
   const panel = node("div", "", "swap-panel");
   panel.setAttribute("aria-live", "polite");
   const progress = node("section", "", "swap-progress");
@@ -251,6 +254,7 @@ function mount(root: HTMLElement): void {
     },
     selectedChainApi: () => validateMempoolApi(chainApi.value.trim(), network.value as NetworkName),
     selectedBroadcastApi: () => validateMempoolApi(broadcastApi.value.trim(), network.value as NetworkName),
+    selectedRelays: () => validateRelays(relay.value.trim(), network.value as NetworkName),
   });
   card.insertBefore(recovery.element, safety);
   // Register failure handling immediately so blocked storage never becomes an unhandled rejection.
@@ -317,11 +321,12 @@ function mount(root: HTMLElement): void {
   updateNetwork();
 
   let busy = false;
-  /** LN to BTC: verified quotes only. Paying a hold invoice is not implemented, so nothing is committed. */
+  /** Indicative comparison first; only the selected provider can enter durable execution. */
   const reverseQuote = (name: NetworkName): void => {
     let request: Omit<ReverseSwapRequest, "identity">;
     let urls: readonly string[];
     const pinned = identity.value.trim();
+    const destination = receiveAddress.value.trim();
     try {
       urls = validateRelays(relay.value.trim(), name);
       if (pinned && !/^[0-9a-f]{64}$/.test(pinned)) {
@@ -351,6 +356,14 @@ function mount(root: HTMLElement): void {
     for (const control of controls) (control as HTMLInputElement).disabled = true;
     settingsButton.disabled = true;
     const cancellation = new AbortController();
+    const captured = JSON.stringify([network.value, fromAsset.value, toAsset.value, receiveAddress.value, receiveAmount.value, relay.value, identity.value,
+      chainApi.value, broadcastApi.value, successFee.value, minReserve.value, claimFee.value, minRefundDelay.value, maxHold.value]);
+    const assertCurrent = (): void => {
+      cancellation.signal.throwIfAborted();
+      if (captured !== JSON.stringify([network.value, fromAsset.value, toAsset.value, receiveAddress.value, receiveAmount.value, relay.value, identity.value,
+        chainApi.value, broadcastApi.value, successFee.value, minReserve.value, claimFee.value, minRefundDelay.value, maxHold.value])) throw new Error("Swap selection changed");
+    };
+    let executing = false;
     let arrivals: readonly LocatedQuote<PreparedReverseQuote>[] = [];
     const done = node("button", "Edit swap", "swap-edit");
     done.type = "button";
@@ -361,6 +374,7 @@ function mount(root: HTMLElement): void {
       updateNetwork();
     };
     done.onclick = () => {
+      if (executing) return;
       cancellation.abort();
       for (const quote of arrivals) quote.dispose();
       panel.replaceChildren();
@@ -381,7 +395,8 @@ function mount(root: HTMLElement): void {
         arrivals = result.quotes;
         if (cancellation.signal.aborted) return;
         if (arrivals.length === 0) throw new Error("No provider returned acceptable terms. Nothing was paid.");
-        const quote = arrivals[0]!.prepared.quote;
+        let selected = arrivals[0]!;
+        const quote = selected.prepared.quote;
         const review = node("div", "", "swap-quote-review");
         review.append(node("p", "Estimated price", "swap-quote-kind"), node("h2", `${quote.holdInvoiceSat.toLocaleString()} sat`),
           node("p", `You pay this over Lightning (plus your wallet's routing fee) and receive ${quote.payoutSat.toLocaleString()} sat on-chain.`),
@@ -390,23 +405,50 @@ function mount(root: HTMLElement): void {
             `If the swap fails, your Lightning payment may stay pending for up to about ${quote.incomingHtlcExpiryDeltaBlocks} blocks. ` +
             `Estimate expires ${new Date(quote.expiresAt * 1000).toLocaleTimeString()}.`),
           node("p", `Lowest estimate among ${arrivals.length} responding provider${arrivals.length === 1 ? "" : "s"}.`, "swap-quote-selection"),
-          node("p", "Paying Lightning to Bitcoin swaps in the browser is coming next. Final signed terms are checked before any payment; " +
-            "nothing was paid and no address or payment hash was shared.", "swap-reverse-pending"));
+          node("p", "Nothing was paid and no address or payment hash was shared. Continue checks the selected provider's final signed terms before any payment.", "swap-reverse-pending"));
         if (directory.warnings.length || result.failures || eligible.length > MAX_QUOTE_PROVIDERS) {
           review.append(node("small", "Some relays or providers did not return complete results. This is not a market-wide best-price guarantee."));
         }
-        review.append(done);
+        const providers = node("details"); providers.append(node("summary", "Provider details & manual selection"));
+        const chosen = node("p", `Selected provider: ${selected.prepared.quote.providerIdentity}`, "swap-reverse-selected");
+        for (const [index, located] of arrivals.entries()) {
+          const label = node("label"), option = node("input"); option.type = "radio"; option.name = "reverse-provider"; option.checked = index === 0;
+          option.onchange = () => { selected = located; chosen.textContent = `Selected provider: ${located.prepared.quote.providerIdentity}. Estimated hold: ${located.prepared.quote.holdInvoiceSat} sat.`; };
+          label.append(option, node("span", `${located.prepared.quote.holdInvoiceSat} sat · ${located.prepared.quote.providerIdentity.slice(0, 12)}…`)); providers.append(label);
+        }
+        const wallet = await walletPromise; assertCurrent(); const info = await wallet.info(); assertCurrent();
+        const continueSwap = node("button", "Continue with selected provider", "swap-reverse-continue"); continueSwap.type = "button";
+        const backup = node("section", "", "swap-reverse-key-backup");
+        const refresh = async (): Promise<void> => { const current = await wallet.info(); assertCurrent();
+          if (current.fingerprint !== info.fingerprint) throw new Error("Recovery identity changed"); continueSwap.disabled = !current.backupVerified; };
+        await refresh(); await walletBackupControls(backup, wallet, undefined, refresh); assertCurrent();
+        continueSwap.onclick = () => {
+          if (executing) return;
+          continueSwap.disabled = true;
+          void (async () => {
+            const current = await wallet.info(); assertCurrent();
+            if (!current.backupVerified || current.fingerprint !== info.fingerprint) throw new Error("A matching recovery-key backup must be verified");
+            if (Date.now() / 1000 >= selected.prepared.quote.expiresAt) throw new Error("Estimate expired. Request a fresh quote.");
+            executing = true; done.disabled = true;
+            for (const quote of arrivals) if (quote !== selected) quote.dispose();
+            arrivals = [selected];
+            await mountReverseExecution(panel, { prepared: selected.prepared, network: { ...NETWORKS[name], name }, destinationScript: addressScript(destination, name),
+              ageRecipient: info.recipient, chainApi: chainApi.value.trim(), broadcastApi: broadcastApi.value.trim(), assertCurrent,
+              nodeApi: __SWAP_DEFAULTS__.network === name ? __SWAP_DEFAULTS__.nodeApi ?? "" : name === "regtest" ? "http://127.0.0.1:8093" : "",
+              status: (message, step) => setStatus(message, step), download: offerDownload });
+          })().catch(() => { report("stopped: Reverse execution could not continue. Keep backups; no uncertain payment will be retried."); });
+        };
+        review.append(providers, chosen, backup, continueSwap, done);
         panel.replaceChildren(review);
-        setStatus("Estimate ready. Payment is not available yet", 1);
+        setStatus("Estimate ready. Check your key backup, then continue", 1);
       } catch (error) {
         if (!cancellation.signal.aborted) {
           panel.replaceChildren(node("p", (error as Error).message, "swap-error"), done);
           report(`stopped: ${(error as Error).message}`);
         }
       } finally {
-        // Quote-only: discard every offer's private state now.
-        for (const quote of arrivals) quote.dispose();
-        if (!cancellation.signal.aborted) restore();
+        // Preserve selected private sessions for the explicit Continue action.
+        if (arrivals.length === 0 && !cancellation.signal.aborted) restore();
       }
     })();
   };
