@@ -10,11 +10,11 @@ import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 
 import * as generated from "../generated/wireValidators.js";
 import type { InvoiceBinding } from "./bolt11";
-import { contractHash, handshakeInitHash, handshakeAcceptHash, jcs, providerTermsHash } from "./hashes";
+import { contractHash, handshakeInitHash, handshakeAcceptHash, handshakeHash, jcs, providerTermsHash } from "./hashes";
 
 export const EPOCH_SESSION_FEATURE = "epoch-bound-session/v1";
 export const EPOCH_SESSION_EXTENSION = "rillswap/epoch-bound-session";
-/** Mandatory: every new swap commits to attempting a private MuSig2 key-path claim. */
+/** Negotiated commitment to a MuSig2 attempt, mandatory for new forward swaps. */
 export const COOPERATIVE_CLAIM_FEATURE = "cooperative-claim/v1";
 export const MAX_SATS = 2_100_000_000_000_000n;
 
@@ -126,10 +126,8 @@ export function checkHandshakeAccept(payload: unknown, init: HandshakeInit, send
   if ([...required].some((feature) => feature !== EPOCH_SESSION_FEATURE && feature !== COOPERATIVE_CLAIM_FEATURE)) {
     throw new ProtocolError("handshake requires an unknown feature");
   }
-  if (
-    !init.required_features.includes(COOPERATIVE_CLAIM_FEATURE) ||
-    !accept.required_features.includes(COOPERATIVE_CLAIM_FEATURE)
-  ) {
+  if (init.required_features.includes(COOPERATIVE_CLAIM_FEATURE) !== accept.required_features.includes(COOPERATIVE_CLAIM_FEATURE) ||
+    (init.profile_id !== "ln-to-btc/v1" && !init.required_features.includes(COOPERATIVE_CLAIM_FEATURE))) {
     throw new ProtocolError("cooperative claim must be jointly negotiated");
   }
   if (required.has(EPOCH_SESSION_FEATURE)) {
@@ -422,13 +420,13 @@ export function checkLnToBtcTerms(terms: LnToBtcTerms): void {
   if (terms.refund_lock_height + 1 + timing.refund_and_ln_resolution_blocks >= timing.min_incoming_htlc_expiry_height) {
     throw new ProtocolError("incoming HTLC exposure does not cover refund resolution");
   }
-  if (terms.required_features.length !== 1 || terms.required_features[0] !== COOPERATIVE_CLAIM_FEATURE) {
-    throw new ProtocolError("terms offer does not commit to cooperative claims");
-  }
+  if (terms.required_features.some((feature) => feature !== COOPERATIVE_CLAIM_FEATURE)) throw new ProtocolError("reverse terms require an unsupported feature");
 }
 
 export interface ReverseOfferContext extends Omit<OfferContext, "request" | "invoiceBinding"> {
   readonly request: ReverseFirmQuoteRequest;
+  readonly handshakeInit: HandshakeInit;
+  readonly handshakeAccept: HandshakeAccept;
   /** Decode the provider's hold invoice for this network; throws on anything unacceptable. */
   readonly decodeInvoice: (invoice: string) => InvoiceBinding;
 }
@@ -438,6 +436,14 @@ export function checkReverseTermsOffer(payload: unknown, context: ReverseOfferCo
   const offer = requireShape<ReverseTermsOffer>("validateReverseTermsOffer", payload);
   const terms = offer.terms.contract_terms;
   checkLnToBtcTerms(terms);
+  const { handshakeInit: init, handshakeAccept: accept } = context;
+  if (!same(init.network_identity, context.network) || !same(accept.network_identity, context.network)) throw new ProtocolError("terms offer is not bound to this provider (reverse handshake network)");
+  if (init.profile_id !== "ln-to-btc/v1" || accept.profile_id !== init.profile_id ||
+    bytesToHex(handshakeHash(init, accept)) !== context.transcript) throw new ProtocolError("reverse handshake hash or profile mismatch");
+  const cooperation = init.required_features.includes(COOPERATIVE_CLAIM_FEATURE);
+  if (cooperation !== accept.required_features.includes(COOPERATIVE_CLAIM_FEATURE) ||
+    cooperation !== terms.required_features.includes(COOPERATIVE_CLAIM_FEATURE)) throw new ProtocolError("reverse cooperation commitment mismatch");
+  if (cooperation) throw new ProtocolError("browser reverse execution requires unilateral terms");
   let binding: InvoiceBinding;
   try {
     binding = context.decodeInvoice(offer.hold_invoice);

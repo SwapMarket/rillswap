@@ -10,6 +10,8 @@ import {
   checkHandshakeAccept,
   checkTermsOffer,
   COOPERATIVE_CLAIM_FEATURE,
+  EPOCH_SESSION_FEATURE,
+  EPOCH_SESSION_EXTENSION,
   type FirmQuoteRequest,
   type HandshakeInit,
   ProtocolError,
@@ -81,6 +83,31 @@ describe("handshake accept", () => {
     expect(() =>
       checkHandshakeAccept({ accept: unknown, provider_identity_signature: signature }, init, sender),
     ).toThrow(ProtocolError);
+  });
+});
+
+describe("reverse handshake settlement selection", () => {
+  const vector = auth.valid.find((item) => item.profile_id === "ln-to-btc/v1")!, secret = hexToBytes(vector.handshake_accept.signer_secret_key);
+  const selected = (initFeatures: string[], acceptFeatures: string[]) => {
+    const init = { ...(vector.handshake_init.object as unknown as HandshakeInit), required_features: initFeatures,
+      extensions: initFeatures.includes(EPOCH_SESSION_FEATURE) ? { [EPOCH_SESSION_EXTENSION]: { epoch_inbox_xonly_key: bytesToHex(schnorr.getPublicKey(hexToBytes("0".repeat(63) + "4"))) } } : {} };
+    const accept = { ...vector.handshake_accept.object, required_features: acceptFeatures, handshake_init_hash: bytesToHex(handshakeInitHash(init)) };
+    return { init, sender: accept.provider_session_xonly_key, payload: { accept, provider_identity_signature: bytesToHex(schnorr.sign(handshakeAcceptHash(accept), secret)) } };
+  };
+  test("unilateral and cooperative reverse commitments both require exact joint selection", () => {
+    for (const features of [[], [COOPERATIVE_CLAIM_FEATURE]]) {
+      const { init, sender, payload } = selected(features, features); expect(checkHandshakeAccept(payload, init, sender).required_features).toEqual(features);
+    }
+    for (const [a, b] of [[[], [COOPERATIVE_CLAIM_FEATURE]], [[COOPERATIVE_CLAIM_FEATURE], []]]) {
+      const { init, sender, payload } = selected(a!, b!); expect(() => checkHandshakeAccept(payload, init, sender)).toThrow("cooperative claim must be jointly");
+    }
+  });
+  test("epoch admission stays independent of unilateral selection", () => {
+    const selectedEpoch = selected([EPOCH_SESSION_FEATURE], [EPOCH_SESSION_FEATURE]);
+    expect(checkHandshakeAccept(selectedEpoch.payload, selectedEpoch.init, selectedEpoch.sender).required_features).toEqual([EPOCH_SESSION_FEATURE]);
+    for (const [a, b] of [[[EPOCH_SESSION_FEATURE], []], [[], [EPOCH_SESSION_FEATURE]]]) {
+      const { init, sender, payload } = selected(a!, b!); expect(() => checkHandshakeAccept(payload, init, sender)).toThrow("epoch-bound admission");
+    }
   });
 });
 

@@ -28,8 +28,17 @@ height, remaining budget, destination, and fee viability. It MUST construct
 and sign a valid unilateral claim and durably record that plan. For current
 height `h`, policy MUST establish `h + delta_claim_confirmation < R`.
 
-Only then may the user reveal the preimage. The provider verifies it and may
-settle the hold. The provider MUST NOT issue a usable cooperative partial
+Only then may the user reveal the preimage. A client MAY explicitly select
+direct unilateral settlement by omitting `cooperative-claim/v1` in both
+authenticated handshake halves and requiring its absence in the signed terms.
+It then reveals the preimage only in the validated claim witness. The provider
+observes that outpoint spend and validates the witness preimage before settling
+the hold. No cooperative proposal, nonce or partial signature is needed, and
+missing local metadata MUST NOT select this mode or renew payment authority.
+
+If cooperation is negotiated, the user reveals the preimage through the
+bounded cooperative flow. The provider verifies it and may settle the hold.
+The provider MUST NOT issue a usable cooperative partial
 signature before it possesses the valid preimage and has a safely settleable
 accepted payment. If cooperation fails, the user broadcasts and fee-bumps the
 unilateral claim.

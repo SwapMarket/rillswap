@@ -422,6 +422,17 @@ recovery must remain blocked instead of repaying or inferring a signed binding
 from a script-matching UTXO. Receiver disposal erases its private key copy;
 immutable parsed strings and caller-owned keys cannot be guaranteed erased.
 
+New browser reverse handshakes explicitly negotiate unilateral settlement:
+cooperation is absent from both authenticated halves and their signed terms,
+while required epoch binding is preserved. Forward cooperation remains
+mandatory; a peer cannot introduce/drop a commitment in its reply or terms.
+Providers still advertise cooperation and accept cooperative reverse clients.
+Only the reverse profile is exempt from fresh mandatory-cooperation admission.
+Historical signed sessions and stored provider policy are not rewritten,
+and upgrades trigger no new negotiation, scan, funding, or payment. Unfeatured
+reverse sessions gain no cooperative nonce/signing authority. This explicit
+authenticated mode is not inferred from missing browser or provider metadata.
+
 After local inspection, **Check funding** explicitly connects to the API
 selected in Settings. It reopens and authenticates the selected file, checks
 the chosen revision's real transaction bytes locally, then repeats confirmed

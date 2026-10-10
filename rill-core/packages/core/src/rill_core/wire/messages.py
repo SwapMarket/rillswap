@@ -532,9 +532,11 @@ def require_supported_contract_features(
 ) -> None:
     """Bind supported signed contract features to both handshake commitments.
 
-    The cooperative feature commits a *new* swap to attempt key-path claiming,
-    but never removes independent unilateral claim/refund. The absence of a
-    feature in accepted legacy terms remains authoritative for that swap.
+    Negotiating the cooperative feature commits a swap to attempt key-path
+    claiming, but never removes independent unilateral claim/refund. New forward
+    admission requires it; new reverse clients may explicitly negotiate its
+    absence in both handshakes and terms. Signed historical terms retain their
+    original commitment. No local metadata selects or changes this feature.
     """
     if set(terms.required_features) - {COOPERATIVE_CLAIM_FEATURE}:
         raise ValueError("unsupported contract feature")

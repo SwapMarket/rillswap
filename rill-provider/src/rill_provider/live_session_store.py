@@ -2034,8 +2034,9 @@ class LiveSessionStore:
                     if (
                         COOPERATIVE_CLAIM_FEATURE in self._policy.features
                         and COOPERATIVE_CLAIM_FEATURE not in init.required_features
+                        and init.profile_id != "ln-to-btc/v1"
                     ):
-                        # Mandatory for new business only; recorded sessions
+                        # Mandatory for new forward business; recorded sessions
                         # (including unfeatured ones) replay above unchanged.
                         raise LiveSessionStoreError("new session requires cooperative claims")  # noqa: TRY301
                     # Accepted sessions are retained forever but hold economic
@@ -2442,7 +2443,11 @@ class LiveSessionStore:
             if not suites or not capabilities:
                 raise LiveSessionStoreError("no mutually supported selection")  # noqa: TRY301
             cooperative = COOPERATIVE_CLAIM_FEATURE in init.required_features
-            if COOPERATIVE_CLAIM_FEATURE in policy.features and not cooperative:
+            if (
+                COOPERATIVE_CLAIM_FEATURE in policy.features
+                and not cooperative
+                and init.profile_id != "ln-to-btc/v1"
+            ):
                 # A reservation recorded before cooperation became mandatory
                 # gets no fresh accept; the client must negotiate again.
                 raise LiveSessionStoreError("new session requires cooperative claims")  # noqa: TRY301
@@ -2988,9 +2993,10 @@ class LiveSessionStore:
                         outer.message_type == "quote_request"
                         and COOPERATIVE_CLAIM_FEATURE in self._policy.features
                         and not cooperative
+                        and outer.profile_id != "ln-to-btc/v1"
                     ):
-                        # New contracts are always cooperative, so a session
-                        # negotiated before that requirement must negotiate again.
+                        # Forward contracts remain cooperative. Reverse clients
+                        # may explicitly negotiate a unilateral claim instead.
                         raise LiveSessionStoreError("request not admissible")  # noqa: TRY301
                     prior = tuple(
                         _canonical_envelope(document)

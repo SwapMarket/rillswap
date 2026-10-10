@@ -148,10 +148,18 @@ MUST immediately leave unilateral recovery available.
 
 ### 5.1 Negotiated action payloads
 
-For **new** swaps, `cooperative-claim/v1` is required in both authenticated
-handshake halves and signed contract terms. An accepted older swap without it
-continues unilaterally. The claimant (provider for BTC to LN, client for LN to
-BTC) initiates a bounded cooperative attempt. Both peers use signed RS-001
+For **new BTC to LN** swaps, `cooperative-claim/v1` is required in both
+authenticated handshake halves and signed contract terms. For **LN to BTC**,
+the client MAY explicitly choose unilateral settlement by omitting that feature
+from both authenticated handshake halves; the signed terms MUST then omit it
+too. Required epoch binding remains independent. Supporting/advertising
+cooperation does not require every reverse client to negotiate it.
+
+When cooperation is negotiated, the claimant (provider for BTC to LN, client
+for LN to BTC) initiates a bounded cooperative attempt. A unilaterally negotiated
+reverse swap MUST NOT acquire cooperative nonce or signing authority. Signed
+historical commitments remain unchanged, including accepted older unfeatured
+swaps continuing unilaterally. Both cooperative peers use signed RS-001
 envelopes with the same session, network, profile, and contract hash. The
 receiver independently checks the claimant/cosigner sender role, message
 sequence, exact `in_reply_to`, signed feature negotiation, frozen transaction,

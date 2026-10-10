@@ -2,13 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 
-import { contractHash, providerTermsHash } from "../src/swap/hashes";
+import { contractHash, providerTermsHash, handshakeHash, handshakeInitHash } from "../src/swap/hashes";
 import type { InvoiceBinding } from "../src/swap/bolt11";
 import {
   checkReverseFirmQuoteRequest, checkReverseTermsOffer, COOPERATIVE_CLAIM_FEATURE, type LnToBtcTerms, ProtocolError,
-  type ReverseFirmQuoteRequest, type ReverseOfferContext,
+  type ReverseFirmQuoteRequest, type ReverseOfferContext, type HandshakeInit, type HandshakeAccept, checkLnToBtcTerms,
 } from "../src/swap/wire";
 import taproot from "./fixtures/taproot-cases-v1.json";
+import { reverseRecord } from "./fixtures/reverseRecoveryCases";
 
 // Public test identity secret (never for funds); the vector's provider identity is its x-only key.
 const IDENTITY_SECRET = hexToBytes(`${"00".repeat(31)}01`);
@@ -24,9 +25,12 @@ describe("LN to BTC terms offer", () => {
     ...base,
     economics: { ...base.economics, mining_prepayment_sat: "0", hold_invoice_sat: hold },
     invoice_binding: { ...base.invoice_binding, amount_msat: `${hold}000` },
-    required_features: [COOPERATIVE_CLAIM_FEATURE],
+    required_features: [],
   };
-  const transcript = "cd".repeat(32);
+  const saved = reverseRecord().verification_context;
+  const handshakeInit: HandshakeInit = { ...saved.handshake_init, protocol: "rillswap", wire_version: "1", profile_id: "ln-to-btc/v1", network_identity: terms.network_identity, required_features: [] };
+  const handshakeAccept: HandshakeAccept = { ...saved.handshake_accept, network_identity: terms.network_identity, required_features: [], handshake_init_hash: bytesToHex(handshakeInitHash(handshakeInit)) };
+  const transcript = bytesToHex(handshakeHash(handshakeInit, handshakeAccept));
   const request: ReverseFirmQuoteRequest = {
     kind: "ln-to-btc",
     mode: "firm",
@@ -52,6 +56,8 @@ describe("LN to BTC terms offer", () => {
   const decoded = new Map<string, InvoiceBinding>([[HOLD_INVOICE, terms.invoice_binding]]);
   const context = (changes: Partial<ReverseOfferContext> = {}, signed: LnToBtcTerms = terms): ReverseOfferContext => ({
     request,
+    handshakeInit,
+    handshakeAccept,
     decodeInvoice: (invoice) => { const binding = decoded.get(invoice); if (!binding) throw new Error("bad invoice"); return binding; },
     transcript,
     envelopeContractHash: bytesToHex(contractHash(signed)),
@@ -120,11 +126,25 @@ describe("LN to BTC terms offer", () => {
       mutate((t) => { t.economics.mining_prepayment_sat = "1"; t.economics.hold_invoice_sat = "101999"; }),
       mutate((t) => { t.claimant = "provider"; t.refund_party = "client"; }),
       mutate((t) => { t.timing_policy.refund_and_ln_resolution_blocks = 29; }),
-      mutate((t) => { t.required_features = []; }),
+      mutate((t) => { t.required_features = [COOPERATIVE_CLAIM_FEATURE]; }),
       mutate((t) => { t.recovery_authorization_xonly_key = t.provider_identity_key as string; }),
     ]) {
       expect(() => checkReverseTermsOffer(sign(broken), context({}, broken))).toThrow(ProtocolError);
     }
+  });
+
+  test("historical supported cooperative terms do not imply a live browser cooperation mode", () => {
+    const cooperative = { ...terms, required_features: [COOPERATIVE_CLAIM_FEATURE] };
+    expect(() => checkLnToBtcTerms(cooperative)).not.toThrow();
+    expect(() => checkReverseTermsOffer(sign(cooperative), context({}, cooperative))).toThrow("commitment mismatch");
+    for (const halves of [
+      { handshakeInit: { ...handshakeInit, required_features: [COOPERATIVE_CLAIM_FEATURE] } },
+      { handshakeAccept: { ...handshakeAccept, required_features: [COOPERATIVE_CLAIM_FEATURE] } },
+    ]) expect(() => checkReverseTermsOffer(sign(terms), context(halves))).toThrow(ProtocolError);
+    const init = { ...handshakeInit, required_features: [COOPERATIVE_CLAIM_FEATURE] }, accept = { ...handshakeAccept, required_features: [COOPERATIVE_CLAIM_FEATURE] },
+      digest = bytesToHex(handshakeHash(init, accept));
+    const payload = { ...sign(cooperative), terms: { ...sign(cooperative).terms, handshake_hash: digest } };
+    expect(() => checkReverseTermsOffer(payload, context({ handshakeInit: init, handshakeAccept: accept, transcript: digest }, cooperative))).toThrow("requires unilateral terms");
   });
 
   test("forward offers never pass the reverse check", () => {
