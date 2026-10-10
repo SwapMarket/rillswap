@@ -50,6 +50,12 @@ for payload, path in [(request('getwalletinfo'), ''), (request('getwalletinfo'),
 assert call([request('getblockchaininfo'), request('getblockhash', [0])])[0] == 200
 for user, password in [('rill', 'rill-dev-regtest'), ('__cookie__', 'rill-dev-regtest-cookie')]:
     assert call(request('getrpcinfo'), user, password)[0] == 200
+for method, params in [('testmempoolaccept', [['00'], 0.1]),
+    ('sendrawtransaction', ['00', 0.1, 0])]:
+    assert call(request(method, params), 'rill-broadcast', 'rill-dev-broadcast-regtest')[0] == 200
+for method in ['getblockchaininfo', 'getblockhash', 'getrawtransaction', 'getblockheader',
+    'gettxout', 'getwalletinfo', 'generatetoaddress', 'signrawtransactionwithwallet', 'getrpcinfo']:
+    assert call(request(method), 'rill-broadcast', 'rill-dev-broadcast-regtest')[0] == 403
 
 # Actual transaction observations on this isolated node, not existing dev funds.
 # Only the privileged test setup mines/sends; the adapter still has five reads.
@@ -58,6 +64,10 @@ spec = importlib.util.spec_from_file_location('chain_api', '/check/chain_api.py'
 api = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(api)
 api.CORE_URL = sys.argv[1]
+sys.modules['chain_api'] = api
+sys.path.insert(0, '/check')
+import broadcast_api
+broadcaster = broadcast_api.Broadcaster()
 reader = api.ChainReader()
 def setup_rpc(method, params=None, wallet=False):
     code, body = call(request(method, params), '__cookie__', 'rill-dev-regtest-cookie',
@@ -93,7 +103,21 @@ spend_address = setup_rpc('getnewaddress', wallet=True)
 raw = setup_rpc('createrawtransaction', [[{'txid': txid, 'vout': vout}], {spend_address: 0.00099}])
 signed = setup_rpc('signrawtransactionwithwallet', [raw], wallet=True)
 assert signed['complete']
-spend = setup_rpc('sendrawtransaction', [signed['hex']])
+low_cap = json.loads(call(request('testmempoolaccept', [[signed['hex']], 0.000001]),
+    'rill-broadcast', 'rill-dev-broadcast-regtest')[1])['result']
+assert low_cap[0]['allowed'] is False and low_cap[0]['reject-reason'] == 'max-fee-exceeded'
+# A positive OP_RETURN burn must not be submitted by the zero-burn adapter.
+burn_raw = setup_rpc('createrawtransaction', [[{'txid': txid, 'vout': vout}],
+    [{spend_address: 0.00098}, {'data': '01'}]])
+marker = '0000000000000000036a0101'
+assert burn_raw.count(marker) == 1
+burn_raw = burn_raw.replace(marker, (1000).to_bytes(8, 'little').hex() + '036a0101')
+burn_signed = setup_rpc('signrawtransactionwithwallet', [burn_raw], wallet=True)
+assert burn_signed['complete']
+try: broadcaster.submit(burn_signed['hex'])
+except broadcast_api.BroadcastUnavailable: pass
+else: raise AssertionError('positive burn must be refused')
+spend = broadcaster.submit(signed['hex'])
 unavailable(f'/api/tx/{txid}/outspend/{vout}')  # Mempool spend remains UNKNOWN, never unspent.
 setup_rpc('generatetoaddress', [1, address])
 unavailable(f'/api/tx/{txid}/outspend/{vout}')  # Confirmed spent is likewise unavailable.
@@ -115,9 +139,9 @@ def test_core_reader_whitelist_preserves_existing_clients():
     name = "rillswap-chain-check-" + uuid.uuid4().hex[:12]
 
     def docker(*args):
-        return subprocess.run(
-            ["docker", *args], check=True, capture_output=True, text=True, timeout=60
-        )
+        result = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=60)
+        assert result.returncode == 0, result.stdout + result.stderr
+        return result
 
     docker("network", "create", name)
     try:
@@ -146,6 +170,8 @@ def test_core_reader_whitelist_preserves_existing_clients():
             name,
             "-v",
             f"{Path(__file__).parents[1] / 'chain_api.py'}:/check/chain_api.py:ro",
+            "-v",
+            f"{Path(__file__).parents[1] / 'broadcast_api.py'}:/check/broadcast_api.py:ro",
             "rillswap-dev:local",
             "python",
             "-c",

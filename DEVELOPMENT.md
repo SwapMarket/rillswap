@@ -37,6 +37,7 @@ all chain/wallet/maker state. `dev/devctl help` lists every command.
 | Nostr relay (from the host/browser) | ws://127.0.0.1:7777 |
 | Nostr relay (inside the stack) | ws://relay:8080 |
 | Read-only regtest chain API | http://127.0.0.1:8091/api |
+| Explicit regtest transaction broadcast | http://127.0.0.1:8092/api/tx |
 
 Override host ports with `RILL_DEV_WEB_PORT`, `RILL_DEV_SHOP_PORT`,
 `RILL_DEV_RELAY_PORT`, `RILL_DEV_CHAIN_PORT`, and `RILL_DEV_ANVIL_PORT`, the Bitcoin auto-miner
@@ -67,6 +68,25 @@ This check mines and sends only on its isolated disposable node, covers
 confirmed/unconfirmed/spent/reorganized transaction observations, and verifies
 wallet, mining, preflight, and broadcast methods are denied to the reader. It
 does not mount or change existing chain volumes.
+
+The separate broadcast adapter accepts only an explicit `POST /api/tx` from
+the configured local web Origin/Host. It receives signed transaction hex, never
+keys or recovery files. The chain adapter remains read-only. Core checks
+regtest genesis before each submission, preflights once, then sends the exact
+transaction once with a fixed 0.1 BTC/kvB fee ceiling and zero burn allowance.
+That ceiling is a coarse 10,000-sat/vB backstop, not a recommended wallet fee.
+Failures after sending may be unknown; neither adapter nor browser retries.
+The broadcast credential allows only `testmempoolaccept,sendrawtransaction`.
+Public disposable privileged credentials and local processes can bypass this
+browser-origin admission boundary; it is not compromise isolation or a public
+authenticated service. Its socket timeout limits inactivity, not total worker
+lifetime. It stores no persistent state and never broadcasts at startup.
+
+Apply broadcast changes with
+`docker compose -f dev/compose.yaml up -d --build bitcoind chain broadcast web`.
+Existing volumes are retained. Missing/partial configuration means unavailable,
+not automatic repair, reindexing, reset, or transaction replay. Override the
+loopback port with `RILL_DEV_BROADCAST_PORT` (default 8092).
 
 ## What runs
 
