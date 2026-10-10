@@ -346,6 +346,21 @@ which can reveal public addresses and amounts. It receives no keys, recovery
 files, or invoices. This is explained in collapsed **Privacy & terms**.
 Importing, page load, and Settings changes still make no connections.
 
+The disconnected `BrowserRefundJournal` stores immutable, public signed refund
+intents in IndexedDB. Its states are `prepared`, `submission-unknown`, and
+`accepted` (API acceptance is not confirmation). Strict transaction durability,
+completion, and readback precede exposure. An atomic transition elects one
+winner across tabs; failures never reset or replace intent. Unknown/accepted
+records permit explicit identical-byte export, not another application POST.
+These integrity checks do not replace recovery-file signature authorization.
+
+Upgrading performs no startup action or migration. Explicit use may create an
+absent store; absence proves nothing about previous external exposure. Partial
+records or incompatible stores remain preserved and block the action. Storage
+durability is not protection against eviction, deletion, or another browser.
+Keep the original encrypted backups. Chromium fault/concurrency tests cover
+the journal, not a universal browser durability guarantee.
+
 You need `rill-cli` (see its README), a synced Bitcoin Core node for the same
 network, the funded recovery file, its age key, and the funding attempt ID that
 the page printed (`attempt <ID> revision 0`). After the refund block shown by

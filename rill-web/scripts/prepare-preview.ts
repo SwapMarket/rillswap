@@ -1,6 +1,9 @@
 import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { recoveryInspectionCases } from "../unit/fixtures/recoveryInspectionCases";
 import { recoveryRefundCases } from "../unit/fixtures/recoveryRefundCases";
+import { constructSelectedRecoveryRefund } from "../src/recoveryInspection";
+import canonicalize from "canonicalize";
+import { hexToBytes } from "@noble/hashes/utils.js";
 
 // Copy identical dist bytes to root and a repository subpath for loopback tests.
 rmSync("tmp/preview", { recursive: true, force: true });
@@ -46,6 +49,21 @@ if (!recoveryAdmission.success) throw new AggregateError(recoveryAdmission.logs,
 // runner (unbundled Ajv standalone output uses require for its static runtime).
 writeFileSync("tmp/preview/test-only/recovery-inspection-cases.json", JSON.stringify(recoveryInspectionCases()));
 writeFileSync("tmp/preview/test-only/recovery-refund-cases.json", JSON.stringify(recoveryRefundCases()));
+const refundCase = recoveryRefundCases()[0]!;
+const refundDraft = { networkIdentity: refundCase.expectedNetwork, api: "http://127.0.0.1:8091/api",
+  fundingAttemptId: refundCase.fundingAttemptId, bindingRevision: refundCase.bindingRevision, rawFundingTransactionHex: refundCase.fundingTxHex,
+  refund: constructSelectedRecoveryRefund(new TextEncoder().encode(canonicalize(refundCase.record)!), refundCase.expectedNetwork,
+    { fundingAttemptId: refundCase.fundingAttemptId, bindingRevision: refundCase.bindingRevision, rawFundingTransaction: hexToBytes(refundCase.fundingTxHex),
+      sampledTipHeight: refundCase.tipHeight, feeSat: BigInt(refundCase.feeSat) }) };
+writeFileSync("tmp/preview/test-only/refund-journal-draft.json", JSON.stringify(refundDraft));
+writeFileSync("tmp/preview/test-only/refund-journal-alternatives.json", JSON.stringify([100n, 101n].map((feeSat) => ({ ...refundDraft,
+  refund: constructSelectedRecoveryRefund(new TextEncoder().encode(canonicalize(refundCase.record)!), refundCase.expectedNetwork,
+    { fundingAttemptId: refundCase.fundingAttemptId, bindingRevision: refundCase.bindingRevision, rawFundingTransaction: hexToBytes(refundCase.fundingTxHex),
+      sampledTipHeight: refundCase.tipHeight, feeSat }) }))));
+const refundJournal = await Bun.build({ entrypoints: ["src/browserRefundJournal.ts"], outdir: "tmp/preview/test-only", target: "browser", format: "esm" });
+if (!refundJournal.success) throw new AggregateError(refundJournal.logs, "refund journal bundle failed");
+writeFileSync("tmp/preview/test-only/refund-journal.html", '<!doctype html><script type="module">' +
+  'import { BrowserRefundJournal } from "./browserRefundJournal.js"; window.BrowserRefundJournal = BrowserRefundJournal; window.refundJournalReady = true;</script>');
 const admissionCsp = "default-src 'none'; script-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'";
 writeFileSync("tmp/preview/test-only/recovery-admission.html", `<!doctype html><meta http-equiv="Content-Security-Policy" content="${admissionCsp}">` +
   '<script type="module" src="./recovery-admission-harness.js"></script>');
