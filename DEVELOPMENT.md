@@ -38,6 +38,7 @@ all chain/wallet/maker state. `dev/devctl help` lists every command.
 | Nostr relay (inside the stack) | ws://relay:8080 |
 | Read-only regtest chain API | http://127.0.0.1:8091/api |
 | Explicit regtest transaction broadcast | http://127.0.0.1:8092/api/tx |
+| Explicit user-node browser transport | http://127.0.0.1:8093 |
 
 Override host ports with `RILL_DEV_WEB_PORT`, `RILL_DEV_SHOP_PORT`,
 `RILL_DEV_RELAY_PORT`, `RILL_DEV_CHAIN_PORT`, and `RILL_DEV_ANVIL_PORT`, the Bitcoin auto-miner
@@ -87,6 +88,48 @@ Apply broadcast changes with
 Existing volumes are retained. Missing/partial configuration means unavailable,
 not automatic repair, reindexing, reset, or transaction replay. Override the
 loopback port with `RILL_DEV_BROADCAST_PORT` (default 8092).
+
+The regtest-only `user-node` adapter makes LND's five bounded-payment RPCs
+available to explicit browser actions. `/configuration` returns the expected
+node identity/network and a URI-restricted macaroon only to the configured
+local web Origin/Host, with `Cache-Control: no-store`. It permits `DecodePayReq`,
+`GetInfo`, `QueryRoutes`, `SendToRouteV2`, and `TrackPaymentV2`, not wallet,
+invoice creation, admin, or unrestricted payment-router methods. The browser
+owns route selection, payment approval, limits, and durable dispatch ordering;
+the adapter only transports bounded requests/streamed responses to one fixed
+user node and never retries or logs payment data. Upstream TLS is verified
+against the original LND certificate and expected node/network. LND's TLS
+configuration, existing clients, and wallet volumes are unchanged.
+
+This macaroon still authorizes arbitrary routed **regtest** payments. URI
+restrictions do not impose an amount or destination budget. Local processes
+can forge Origin/Host, and allowed-origin script compromise can steal the
+credential. This is disposable development infrastructure, not a production
+credential service. The browser keeps credentials only in memory. Payment
+responses can contain preimages; the adapter transports them without storing
+or logging them. No recovery secrets are uploaded. Real-node access requires
+explicit user configuration and browser-trusted HTTPS, not certificate bypass.
+
+Explicit bootstrap creates a new dedicated `browser-node` volume containing
+only its scoped credential, public configuration, and TLS certificate. It
+records configuration before baking; interrupted/partial or unsupported files
+remain preserved and block provisioning. Complete matching files are never
+automatically repaired or replaced. Neither adapter startup nor missing
+credentials initiate a payment, reset wallets, or start scans. The adapter
+does not mount the admin-credential/state volume. For a running stack, provision
+only this capability without rerunning funding/bootstrap:
+
+```sh
+docker compose -f dev/compose.yaml run --rm --no-deps bootstrap python -c \
+  'import sys; sys.path.insert(0,"/src/dev"); from devtool import provision_browser_node; provision_browser_node()'
+docker compose -f dev/compose.yaml up -d --no-deps user-node
+RILLSWAP_TEST_USER_NODE=1 pytest -q dev/tests/test_user_node_live.py
+```
+
+The opt-in live test reads identity, verifies unrelated native RPC denial,
+and queries a route. It never dispatches a payment. Override the loopback port
+with `RILL_DEV_NODE_PORT` (default 8093). Browser LN to BTC execution still needs
+its durable payment/claim lifecycle before this transport becomes a UI action.
 
 ## What runs
 

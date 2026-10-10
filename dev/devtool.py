@@ -539,6 +539,44 @@ def provision_user() -> None:
         private_write(home / "age.recipient", f"{identity.to_public()}\n", 0o644)
 
 
+def provision_browser_node(directory: Path = Path("/browser-node")) -> None:
+    """Explicit bootstrap only: a dedicated credential, never an admin export."""
+    from user_node_api import METHODS
+
+    names = {"configuration.json", "browser.macaroon", "tls.cert"}
+    present = {path.name for path in directory.iterdir()}
+    if present:
+        if present != names:
+            raise SystemExit("Partial browser node credentials preserved; browser access disabled")
+        config = json.loads((directory / "configuration.json").read_text())
+        if (
+            config.get("permissions") != sorted(METHODS)
+            or config.get("network_identity") != network_identity()
+        ):
+            raise SystemExit(
+                "Unsupported browser node credentials preserved; browser access disabled"
+            )
+        # Existing files are never silently regenerated, repaired, or escalated.
+        return
+    lnd = Lnd("user")
+    info = lnd.info()
+    if info.get("chains") != [{"chain": "bitcoin", "network": "regtest"}]:
+        raise SystemExit("Browser access requires the disposable regtest node")
+    config = {
+        "node_identity": info["identity_pubkey"],
+        "network_identity": network_identity(),
+        "permissions": sorted(METHODS),
+    }
+    # Record intent first. An interruption leaves partial state blocked, not regenerated.
+    private_write(directory / "configuration.json", json.dumps(config) + "\n", 0o644)
+    baked = lnd.post(
+        "/v1/macaroon",
+        {"permissions": [{"entity": "uri", "action": method} for method in sorted(METHODS)]},
+    )
+    private_write(directory / "browser.macaroon", bytes.fromhex(baked["macaroon"]))
+    private_write(directory / "tls.cert", (STATE / "lnd/user/tls.cert").read_bytes(), 0o644)
+
+
 def provision_merchant(lnd: Lnd) -> None:
     """Files for `bun src/cli.ts provision|serve` (rill-payments merchant CLI).
 
@@ -613,6 +651,7 @@ def cmd_bootstrap(_: argparse.Namespace) -> None:
     for direction in DIRECTIONS:
         provision_maker(direction, makers)
     provision_user()
+    provision_browser_node()
     provision_merchant(lnds["merchant"])
     monero = ensure_monero()
     write_info(lnds, makers, monero)

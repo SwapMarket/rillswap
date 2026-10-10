@@ -211,6 +211,7 @@ services:
       - ..:/src:ro
       - state:/state
       - lnd-maker:/lnd/maker:ro
+      - browser-node:/browser-node
       - lnd-user:/lnd/user:ro
       - lnd-merchant:/lnd/merchant:ro
       - monero-merchant:/monero-wallets/merchant:ro
@@ -341,6 +342,23 @@ services:
       bitcoind:
         condition: service_healthy
 
+  user-node:
+    image: rillswap-dev:local
+    restart: unless-stopped
+    command: [python, /src/dev/user_node_api.py]
+    environment:
+      RILL_DEV_NODE_PORT: ${RILL_DEV_NODE_PORT:-8093}
+      RILL_DEV_WEB_PORT: ${RILL_DEV_WEB_PORT:-5273}
+    volumes:
+      - ./user_node_api.py:/src/dev/user_node_api.py:ro
+      - ./chain_api.py:/src/dev/chain_api.py:ro
+      - browser-node:/browser-node:ro
+    ports:
+      - 127.0.0.1:${RILL_DEV_NODE_PORT:-8093}:8093
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+
   web:
     <<: *rill
     working_dir: /src/rill-web
@@ -368,6 +386,7 @@ services:
       - 127.0.0.1:${RILL_DEV_WEB_PORT:-5273}:5173
 
 volumes:
+  browser-node:
   bitcoind:
   lnd-maker:
   lnd-user:
