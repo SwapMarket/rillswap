@@ -1,5 +1,6 @@
 import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { recoveryInspectionCases } from "../unit/fixtures/recoveryInspectionCases";
+import { recoveryRefundCases } from "../unit/fixtures/recoveryRefundCases";
 
 // Copy identical dist bytes to root and a repository subpath for loopback tests.
 rmSync("tmp/preview", { recursive: true, force: true });
@@ -44,9 +45,11 @@ if (!recoveryAdmission.success) throw new AggregateError(recoveryAdmission.logs,
 // Generate the synthetic native-signature corpus in Bun, not Playwright's Node
 // runner (unbundled Ajv standalone output uses require for its static runtime).
 writeFileSync("tmp/preview/test-only/recovery-inspection-cases.json", JSON.stringify(recoveryInspectionCases()));
+writeFileSync("tmp/preview/test-only/recovery-refund-cases.json", JSON.stringify(recoveryRefundCases()));
 const admissionCsp = "default-src 'none'; script-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'";
 writeFileSync("tmp/preview/test-only/recovery-admission.html", `<!doctype html><meta http-equiv="Content-Security-Policy" content="${admissionCsp}">` +
   '<script type="module" src="./recovery-admission-harness.js"></script>');
 writeFileSync("tmp/preview/test-only/recovery-admission-harness.js", 'import { parseRecoveryPlaintext } from "./recoveryDocument.js";' +
-  'import { inspectRecoveryPlaintext } from "./recoveryInspection.js";' +
-  'window.parseRecoveryPlaintext = parseRecoveryPlaintext; window.inspectRecoveryPlaintext = inspectRecoveryPlaintext; window.recoveryAdmissionReady = true;');
+  'import { inspectRecoveryPlaintext, constructSelectedRecoveryRefund } from "./recoveryInspection.js";' +
+  'window.parseRecoveryPlaintext = parseRecoveryPlaintext; window.inspectRecoveryPlaintext = inspectRecoveryPlaintext;' +
+  'window.constructSelectedRecoveryRefund = constructSelectedRecoveryRefund; window.recoveryAdmissionReady = true;');

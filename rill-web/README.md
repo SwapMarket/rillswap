@@ -280,8 +280,41 @@ verifier using an **already running** `rillswap-dev-tools-1` container:
 RILLSWAP_TEST_RECOVERY_NATIVE=1 bun test unit/recoveryInspectionNative.test.ts
 ```
 
-The opt-in test is read-only and does not create containers or access the
-chain. Browser refund construction and broadcasting remain unimplemented.
+The opt-in inspection test is read-only and does not create containers or
+access the chain.
+
+`constructSelectedRecoveryRefund` in the same module is a disconnected offline
+BTC to LN refund constructor. It reauthenticates its own recovery bytes, selects
+an explicit signed funding attempt/revision, and verifies the actual funding
+transaction's identity, anchor, inputs, and exact contract output. It uses the
+signed client destination only, caps the fee, enforces the 294-sat P2WPKH or
+330-sat P2TR dust floor, requires an observed height strictly above the refund
+lock, and signs a fixed BIP341 script-path transaction with fresh Web Crypto
+auxiliary randomness. The result contains only immutable public transaction
+bytes and metadata. Construction supports the exact mainnet, default signet,
+testnet4, and namespaced default-regtest execution identities used by Core;
+other identities remain inspectable but cannot sign. This does not enable new
+mainnet funding. Secret-bearing authenticated state remains private and
+uncached; temporary byte buffers are cleared best-effort, not guaranteed erased
+from browser memory.
+
+Its caller-supplied transaction and height do **not** prove inclusion, an
+unspent output, maturity, destination ownership, or permission to spend.
+Returned signed bytes are a **broadcastable spending capability**: a future
+real-funds caller must independently verify the chain and obtain explicit
+approval **before signing or export**, then recheck before broadcasting. There
+is no production caller, UI signing action, network request, persistence, or
+broadcast path yet. Missing/partial inputs never trigger automatic work.
+
+To compare the synthetic refund corpus's digest, signature, witness, exact
+transaction, txid, and vsize with Core's native implementation (public fixture
+keys only, no chain access):
+
+```sh
+RILLSWAP_TEST_RECOVERY_NATIVE=1 bun test unit/recoveryRefundNative.test.ts
+```
+
+Actual browser refund signing integration and broadcasting remain unavailable.
 
 You need `rill-cli` (see its README), a synced Bitcoin Core node for the same
 network, the funded recovery file, its age key, and the funding attempt ID that

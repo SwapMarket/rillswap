@@ -1,22 +1,29 @@
 /**
- * Offline RS-007 BTC to LN inspection, matching Core's historical checks.
- * This proves internal consistency under embedded signers, not provenance,
+ * Offline RS-007 BTC to LN inspection and disconnected refund construction.
+ * Inspection proves internal consistency under embedded signers, not provenance,
  * ownership, chain inclusion, unspent state, or authority to sign/broadcast.
+ * The constructor produces broadcastable spending bytes. Future callers MUST
+ * obtain explicit approval before signing/export, not only before broadcasting.
  * Return values and errors contain no secrets. Immutable parsed strings cannot
  * be guaranteed erased from browser memory. There are no live-time gates.
  */
-import { secp256k1 } from "@noble/curves/secp256k1.js";
+import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { bytesToHex, concatBytes, hexToBytes } from "@noble/hashes/utils.js";
+import mainnet from "./networks/mainnet.json" with { type: "json" };
+import signet from "./networks/signet.json" with { type: "json" };
+import testnet4 from "./networks/testnet4.json" with { type: "json" };
+import regtest from "./networks/regtest-rillswap-e2e-v1.json" with { type: "json" };
 import { validateNetwork } from "./generated/manualAdvertisementValidators.js";
 import { parseRecoveryPlaintext } from "./recoveryDocument";
 import { COOPERATIVE_RESERVATION_EXTENSION, verifyCooperativeClaimProposal } from "./swap/cooperative";
 import type { FundingBinding } from "./swap/funding";
 import {
   clientAcceptanceHash, contractHash, epochBoundSessionId, fundingBindingHash, handshakeAcceptHash,
-  handshakeHash, handshakeInitHash, jcs, providerTermsHash, unsignedEnvelopeHash,
+  handshakeHash, handshakeInitHash, jcs, providerTermsHash, taggedHash, unsignedEnvelopeHash,
 } from "./swap/hashes";
 import { reconstructTaprootContract, type TaprootContract } from "./swap/taproot";
+import { MAX_TRANSACTION_BYTES, parseTransaction, serializeTransaction, type Transaction } from "./swap/transaction";
 import {
   COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_EXTENSION, EPOCH_SESSION_FEATURE, MAX_SATS, sats,
   verifySchnorr, type BtcToLnTerms, type HandshakeAccept, type HandshakeInit,
@@ -47,7 +54,7 @@ interface HistoricalBinding extends Omit<FundingBinding, "binding_revision" | "r
 
 /** Only used after bounded, canonical admission has checked every field's shape. */
 interface RecoveryRecord {
-  readonly network_identity: { readonly name: string };
+  readonly network_identity: { readonly name: string; readonly deployment_namespace: string | null };
   readonly profile_id: string;
   readonly contract_hash: string;
   readonly created_at: number;
@@ -208,8 +215,8 @@ function checkReservation(record: RecoveryRecord): void {
   require(matches === 1);
 }
 
-/** Network selection is external to the document. Success is a redacted report, never spending authority. */
-export function inspectRecoveryPlaintext(plaintext: Uint8Array, independentlySelectedNetwork: unknown): RecoveryInspection {
+/** Private secret-bearing state. Every public operation authenticates its own input snapshot. */
+function authenticateRecovery(plaintext: Uint8Array, independentlySelectedNetwork: unknown): RecoveryRecord {
   try {
     // Validate/snapshot the trust anchor; malformed or absent expectations never select a network for us.
     const network = JSON.parse(new TextDecoder().decode(jcs(independentlySelectedNetwork))) as unknown;
@@ -240,7 +247,7 @@ export function inspectRecoveryPlaintext(plaintext: Uint8Array, independentlySel
     const knowledge = record.monotonic_knowledge;
     require(knowledge.preimage_known === (knowledge.preimage !== null));
     if (knowledge.preimage !== null) require(bytesToHex(sha256(hexToBytes(knowledge.preimage))) === terms.invoice_binding.payment_hash);
-    // The signing key stays local and is used only for deriving the public point, never for a signature.
+    // This authentication stage only derives the public point; it never signs.
     const secret = hexToBytes(record.user_secret.contract_secret_key);
     try { require(bytesToHex(secp256k1.getPublicKey(secret, true)) === terms.client_contract_compressed_key); }
     finally { secret.fill(0); }
@@ -249,9 +256,166 @@ export function inspectRecoveryPlaintext(plaintext: Uint8Array, independentlySel
     checkHistory(record);
     require(!Object.hasOwn(record.extensions, "rillswap/reverse-claim-fallback") && !Object.hasOwn(record.extensions, "rillswap/reverse-preimage-disclosure"));
     checkReservation(record);
-    return Object.freeze({ verification: "historical-static", networkName: record.network_identity.name,
-      profileId: "btc-to-ln/v1", contractHash: record.contract_hash, refundLockHeight: terms.refund_lock_height,
-      firstRefundEligibleHeight: terms.refund_lock_height + 1, recordedBindingCount: record.funding_history.length });
+    return record;
   } catch { /* Do not attach errors from parsers, crypto, or secret-bearing documents. */ }
   throw new RecoveryInspectionRefusedError();
+}
+
+/** Network selection is external to the document. Success is a redacted report, never spending authority. */
+export function inspectRecoveryPlaintext(plaintext: Uint8Array, independentlySelectedNetwork: unknown): RecoveryInspection {
+  const record = authenticateRecovery(plaintext, independentlySelectedNetwork);
+  return Object.freeze({ verification: "historical-static", networkName: record.network_identity.name,
+    profileId: "btc-to-ln/v1", contractHash: record.contract_hash, refundLockHeight: record.contract_terms.refund_lock_height,
+    firstRefundEligibleHeight: record.contract_terms.refund_lock_height + 1, recordedBindingCount: record.funding_history.length });
+}
+
+export interface SelectedRecoveryRefundInput {
+  readonly fundingAttemptId: string;
+  readonly bindingRevision: number;
+  readonly rawFundingTransaction: Uint8Array;
+  /** Caller observation, not a chain proof. Must be freshly checked outside this offline constructor. */
+  readonly sampledTipHeight: number;
+  readonly feeSat: bigint;
+}
+
+export interface ConstructedRecoveryRefund {
+  readonly transactionHex: string;
+  readonly txid: string;
+  readonly contractHash: string;
+  readonly fundingTxid: string;
+  readonly fundingVout: number;
+  readonly destinationScript: string;
+  readonly refundLockHeight: number;
+  readonly feeSat: string;
+  readonly outputValueSat: string;
+  readonly vsize: number;
+}
+
+export class RecoveryRefundRefusedError extends Error {
+  constructor() {
+    super("Recovery refund construction refused");
+    this.name = "RecoveryRefundRefusedError";
+  }
+}
+
+function executionNetwork(record: RecoveryRecord): void {
+  const network = record.network_identity;
+  const supported: Record<string, unknown> = { mainnet, signet, testnet4, regtest };
+  require(Object.hasOwn(supported, network.name));
+  if (network.name === "regtest") {
+    require(typeof network.deployment_namespace === "string" && network.deployment_namespace.length > 0);
+    require(same({ ...network, deployment_namespace: regtest.deployment_namespace }, regtest));
+  } else require(same(network, supported[network.name]));
+  // Existing mainnet refunds are supported. This is NOT the new-funding release gate.
+}
+
+/** Core check_funding_binding_transaction rules, not UTXO, inclusion, or chain evidence. */
+function checkFundingTransaction(raw: Uint8Array, binding: HistoricalBinding): void {
+  const transaction = parseTransaction(raw);
+  require(transaction.txid === binding.funding_txid);
+  const inputs = transaction.inputs.map((input) => `${input.txid}:${input.vout}`);
+  require(new Set(inputs).size === inputs.length && inputs.includes(`${binding.lineage_anchor_txid}:${binding.lineage_anchor_vout}`));
+  require(transaction.inputs.every((input) => input.scriptSig.length === 0));
+  let contractOutputs = 0, total = 0n;
+  for (const [index, output] of transaction.outputs.entries()) {
+    total += output.value;
+    const script = bytesToHex(output.script);
+    if (script === binding.contract_script_pubkey) {
+      require(index === binding.contract_vout && output.value === BigInt(binding.contract_value_sat));
+      contractOutputs++;
+    } else require(/^(0014[0-9a-f]{40}|5120[0-9a-f]{64})$/.test(script));
+  }
+  require(contractOutputs === 1 && total <= MAX_SATS);
+}
+
+const refundU32 = (value: number): Uint8Array => Uint8Array.of(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff);
+function refundU64(value: bigint): Uint8Array {
+  const bytes = new Uint8Array(8);
+  for (let i = 0; i < 8; i++) bytes[i] = Number((value >> BigInt(i * 8)) & 0xffn);
+  return bytes;
+}
+
+/** Our only scripts here are 22/34 bytes, so their canonical CompactSize is one byte. */
+const refundScriptBytes = (script: Uint8Array): Uint8Array => {
+  require(script.length < 0xfd);
+  return concatBytes(Uint8Array.of(script.length), script);
+};
+
+/** BIP341 DEFAULT script-path spend (ext_flag 1, input 0, no annex). */
+function refundSighash(binding: HistoricalBinding, contract: TaprootContract, output: Transaction["outputs"][number], lockHeight: number): Uint8Array {
+  const prevout = concatBytes(hexToBytes(binding.funding_txid).reverse(), refundU32(binding.contract_vout));
+  const message = concatBytes(
+    Uint8Array.of(0x00), // hash_type DEFAULT
+    refundU32(2), refundU32(lockHeight),
+    sha256(prevout), sha256(refundU64(BigInt(binding.contract_value_sat))),
+    sha256(refundScriptBytes(hexToBytes(binding.contract_script_pubkey))),
+    sha256(refundU32(0xfffffffd)),
+    sha256(concatBytes(refundU64(output.value), refundScriptBytes(output.script))),
+    Uint8Array.of(0x02), // spend_type = ext_flag * 2 + annex_present
+    refundU32(0),
+    hexToBytes(contract.refund_leaf_hash), Uint8Array.of(0x00), refundU32(0xffffffff),
+  );
+  return taggedHash("TapSighash", concatBytes(Uint8Array.of(0x00), message));
+}
+
+/**
+ * Disconnected selected-outpoint BTC to LN refund construction. Reauthenticates
+ * bytes and checks the raw funding transaction, never trusts an inspection
+ * report. Caller-supplied height is NOT certified chain data. Before invoking
+ * this for real funds, independently check funding inclusion, maturity, and
+ * mempool-aware unspent state and obtain explicit user approval BEFORE signing.
+ * Output is a broadcastable capability, not a report or proof of destination
+ * ownership. Recheck before manual broadcast. No storage,
+ * network, automatic selection, destination override, or broadcast occurs here.
+ */
+export function constructSelectedRecoveryRefund(
+  plaintext: Uint8Array, independentlySelectedNetwork: unknown, input: SelectedRecoveryRefundInput,
+): ConstructedRecoveryRefund {
+  let secret: Uint8Array | undefined, auxiliary: Uint8Array | undefined;
+  try {
+    const { fundingAttemptId, bindingRevision, sampledTipHeight, feeSat, rawFundingTransaction } = input;
+    require(rawFundingTransaction instanceof Uint8Array && rawFundingTransaction.length > 0 && rawFundingTransaction.length <= MAX_TRANSACTION_BYTES);
+    const rawFunding = Uint8Array.from(rawFundingTransaction);
+    require(typeof fundingAttemptId === "string" && /^[0-9a-f]{64}$/.test(fundingAttemptId));
+    require(Number.isSafeInteger(bindingRevision) && bindingRevision >= 0 && bindingRevision < 64);
+    require(Number.isSafeInteger(sampledTipHeight) && sampledTipHeight >= 0 && sampledTipHeight < 500_000_000);
+    require(typeof feeSat === "bigint" && feeSat >= 0n && feeSat <= MAX_SATS);
+    const record = authenticateRecovery(plaintext, independentlySelectedNetwork);
+    executionNetwork(record);
+    const matches = record.funding_history.filter(({ binding }) => binding.funding_attempt_id === fundingAttemptId && binding.binding_revision === bindingRevision);
+    require(matches.length === 1);
+    const binding = matches[0]!.binding, terms = record.contract_terms;
+    checkFundingTransaction(rawFunding, binding);
+    require(sampledTipHeight > terms.refund_lock_height && feeSat <= BigInt(terms.max_refund_fee_sat));
+    const destination = hexToBytes(terms.client_destination_script);
+    const dust = destination.length === 22 ? 294n : 330n;
+    const value = BigInt(binding.contract_value_sat) - feeSat;
+    require(value >= dust);
+    const output = { value, script: destination };
+    const transaction = { version: 2, locktime: terms.refund_lock_height, outputs: [output], inputs: [
+      { txid: binding.funding_txid, vout: binding.contract_vout, scriptSig: new Uint8Array(), sequence: 0xfffffffd, witness: [] as Uint8Array[] },
+    ] };
+    const digest = refundSighash(binding, record.taproot_contract, output, terms.refund_lock_height);
+    secret = hexToBytes(record.user_secret.contract_secret_key);
+    auxiliary = crypto.getRandomValues(new Uint8Array(32));
+    const signature = schnorr.sign(digest, secret, auxiliary);
+    require(signature.length === 64 && schnorr.verify(signature, digest, hexToBytes(terms.client_contract_compressed_key.slice(2))));
+    transaction.inputs[0]!.witness = [signature, hexToBytes(record.taproot_contract.refund_script), hexToBytes(record.taproot_contract.refund_control_block)];
+    const signed = serializeTransaction(transaction, true);
+    const parsed = parseTransaction(signed);
+    // Reauthorize every parsed byte, including exact witness shape, after signing.
+    require(parsed.version === 2 && parsed.locktime === transaction.locktime && parsed.inputs.length === 1 && parsed.outputs.length === 1);
+    const finalInput = parsed.inputs[0]!, finalOutput = parsed.outputs[0]!;
+    require(finalInput.txid === binding.funding_txid && finalInput.vout === binding.contract_vout && finalInput.sequence === 0xfffffffd && finalInput.scriptSig.length === 0);
+    require(finalInput.witness.length === 3 && finalInput.witness.every((item, index) => bytesToHex(item) === bytesToHex(transaction.inputs[0]!.witness[index]!)));
+    require(finalOutput.value === value && bytesToHex(finalOutput.script) === terms.client_destination_script);
+    require(bytesToHex(serializeTransaction(parsed, true)) === bytesToHex(signed));
+    const baseSize = serializeTransaction(parsed, false).length;
+    return Object.freeze({ transactionHex: bytesToHex(signed), txid: parsed.txid, contractHash: record.contract_hash,
+      fundingTxid: binding.funding_txid, fundingVout: binding.contract_vout, destinationScript: terms.client_destination_script,
+      refundLockHeight: terms.refund_lock_height, feeSat: feeSat.toString(), outputValueSat: value.toString(),
+      vsize: Math.ceil((baseSize * 3 + signed.length) / 4) });
+  } catch { /* Never expose document, signer, or parser errors or causes. */ }
+  finally { secret?.fill(0); auxiliary?.fill(0); }
+  throw new RecoveryRefundRefusedError();
 }
