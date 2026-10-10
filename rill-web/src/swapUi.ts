@@ -137,6 +137,13 @@ function mount(root: HTMLElement): void {
   form.append(pair, pairNote);
   const invoiceBox = node("div");
   const invoice = field(invoiceBox, "swap-invoice", "Lightning invoice to pay (BOLT11)");
+  // Merchant handoffs use a fragment, never a server-visible invoice query.
+  // Prefilling is inert: no quote, connection, or payment starts automatically.
+  const handoffInvoice = new URLSearchParams(location.hash.slice(1)).get("invoice");
+  if (handoffInvoice !== null) {
+    if (handoffInvoice.length > 0 && handoffInvoice.length <= 4096) invoice.value = handoffInvoice;
+    history.replaceState(null, "", location.pathname + location.search);
+  }
   invoice.placeholder = "Paste your Lightning invoice";
   const receiveBox = node("div");
   const receiveAddress = field(receiveBox, "swap-receive-address", "Bitcoin address to receive");

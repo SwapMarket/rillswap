@@ -21,16 +21,47 @@ bun test
 Canonical schemas and public fixtures live in `rill-docs/`. Generated validators
 are checked in and use no runtime schema compilation in browser consumers.
 
+## Recognizable RillPay checkout
+
+`@rillswap/payments/rillpay` exports `mountRillPay(container, options)`, or build
+the browser module with `bun run build:rillpay`. The demo shop uses this same
+renderer. Supply merchant/item/total text, a list of `RillPayMethod` rows, and
+an `onPay(methodId)` callback that creates and displays merchant payment
+instructions. It does not itself contact a wallet, create an order, send funds,
+persist state, or establish acceptance.
+
+Each row declares eligibility and an unavailable reason, price, merchant fee,
+provider fee, wallet/network fee, and confirmation time. Use `null` for unknown
+values; they remain visibly unknown, never silently zero. The merchant owns
+eligibility and must enforce it again on order creation. All methods remain
+visible, including amount-restricted or unavailable methods. Text is rendered
+inertly, pending selection is pinned, errors are redacted, and all-ineligible
+checkouts disable the payment action. `destroy()` removes the mounted view.
+The scoped built-in stylesheet requires the host's inline-style CSP allowance
+(or an approved stylesheet policy); it does not modify global document styles.
+
+Demo prices are fixed-rate fake-money prices, not live exchange quotes. Bitcoin
+swap costs/confirmation targets come from the provider quote; wallet fees stay
+unknown until the wallet supplies them. Native token confirmations are local
+Anvil targets, not production timing guarantees. The Bitcoin handoff uses an
+invoice URL fragment, not a server-visible query; RillSwap removes it after
+inertly prefilling, without automatically requesting a quote or moving funds.
+Existing order persistence and signed-acceptance verification are unchanged.
+
 ## Explicit invoice metadata binding
 
 `@rillswap/payments/bolt11` exports `invoiceMetadataBinding(invoice, network,
 metadata)` for an optional strict hash-bound invoice profile. It uses the
-unchanged invoice admission policy, requires exactly one canonical `h` tag and
+shared invoice admission policy, requires exactly one canonical `h` tag and
 no `d` tag, and hashes the exact original metadata UTF-8 bytes. Whitespace,
 Unicode normalization and JSON reserialization change that hash. Metadata must
-be well-formed Unicode and at most 16 KiB encoded; malformed or duplicate hash
-tags are refused only by this explicit helper. Its seven-field binding shape
-and ordinary `decodeBolt11`/`invoiceBinding` behavior remain unchanged.
+be well-formed Unicode and at most 16 KiB encoded. Every reader rejects
+wrong-length `p/h/s/n` tags according to current BOLT11 requirements, despite
+the contradictory historical upstream example. Duplicate description hashes
+and noncanonical description-hash padding are rejected by the metadata helper;
+ordinary admission retains its existing policy for those cases. Duplicate
+payment-binding fields remain a stricter application policy. The seven-field
+invoice binding shape and original-text/signature hashing are unchanged.
 
 Current [LUD-06](https://github.com/lnurl/luds/blob/913c49e5b65081473eed7889eee5f806dd30f049/06.md)
 no longer mandates metadata hash binding. This helper is not universal LNURL-pay

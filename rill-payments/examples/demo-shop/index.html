@@ -5,13 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Rill demo shop (regtest)</title>
 <style>
-  body { font: 15px/1.45 system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; color: #1d2433; }
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 960px; margin: 3rem auto; padding: 0 1rem; color: #17372f; background: #f3f8f5; }
   h1 small { font-size: .5em; color: #b4472d; font-weight: 600; margin-left: .5rem; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; }
-  .card, .panel { border: 1px solid #d8dde6; border-radius: 10px; padding: 1rem; background: #fff; }
+  .card, .panel { border: 1px solid #d6e4dc; border-radius: 20px; padding: 1.5rem; background: #fff; box-shadow: 0 8px 28px #183b2d06; }
   .price { font-size: 1.3rem; font-weight: 600; } .muted { color: #667085; font-size: .9em; }
-  button { font: inherit; padding: .45rem .9rem; border-radius: 8px; border: 1px solid #2f5bea; background: #2f5bea; color: #fff; cursor: pointer; }
-  button.secondary { background: #fff; color: #2f5bea; }
+  button, .pay-link { font: inherit; padding: .65rem 1rem; border-radius: 12px; border: 1px solid #174b3b; background: #174b3b; color: #fff; cursor: pointer; text-decoration: none; display: inline-block; }
+  button.secondary { background: #fff; color: #174b3b; }
+  #checkout { padding: 0; border: 0; background: transparent; box-shadow: none; }
+  details { margin-top: 1rem; } summary { color: #526e62; cursor: pointer; }
   label.rail { display: block; margin: .3rem 0; }
   textarea, pre { width: 100%; box-sizing: border-box; font: 12px/1.4 ui-monospace, monospace; background: #f5f7fa; border: 1px solid #d8dde6; border-radius: 6px; padding: .5rem; white-space: pre-wrap; word-break: break-all; }
   textarea { height: 6rem; }
@@ -25,11 +27,7 @@
 
 <div class="grid" id="products"></div>
 
-<div class="panel" id="checkout" hidden>
-  <h2 id="checkout-title"></h2>
-  <div id="rails"></div>
-  <p><button id="place">Place order</button> <button class="secondary" id="cancel">Cancel</button></p>
-</div>
+<div id="checkout" hidden></div>
 
 <div class="panel" id="order" hidden>
   <h2>Order <span id="order-id"></span>: <span class="status" id="order-status"></span></h2>
@@ -44,11 +42,15 @@
 </div>
 
 <script type="module">
+import { mountRillPay } from "/rillpay.js";
 const $ = (id) => document.getElementById(id);
 const esc = (text) => String(text).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const catalog = await (await fetch("/api/catalog")).json();
 let selected = null;
 let polling = null;
+let checkoutView = null;
+let preparingOrder = false;
+const productButtons = [];
 
 $("rate").textContent = `Demo rates: 1 BTC = ${catalog.demoUsdPerBtc.toLocaleString()} USD, 1 fUSDC = 1 fUSDT = 1 USD, 1 XMR = ${catalog.demoUsdPerXmr} USD. ` +
   `Signed acceptances are checked against the pinned merchant key ${catalog.acceptanceKey.slice(0, 16)}...`;
@@ -58,29 +60,35 @@ for (const product of catalog.products) {
   card.className = "card";
   card.innerHTML = `<h3>${esc(product.name)}</h3><div class="price">$${(product.usdCents / 100).toFixed(2)}</div>
     <div class="muted">${product.sat.toLocaleString()} sat</div><p><button>Buy</button></p>`;
-  card.querySelector("button").onclick = () => choose(product);
+  const buy = card.querySelector("button");
+  buy.onclick = () => choose(product);
+  productButtons.push(buy);
   $("products").append(card);
 }
 
 function choose(product) {
+  if (preparingOrder) return;
   selected = product;
-  $("checkout-title").textContent = `Pay for ${product.name}`;
-  $("rails").innerHTML = Object.entries(catalog.rails).map(([id, rail], index) =>
-    `<label class="rail"><input type="radio" name="rail" value="${id}" ${index === 0 ? "checked" : ""} ${rail.available ? "" : "disabled"}>
-      ${esc(rail.label)}${rail.available ? "" : " (unavailable, see the shop log)"}</label>`).join("");
+  checkoutView?.destroy();
+  checkoutView = mountRillPay($("checkout"), { merchant: "Rill demo shop · regtest", item: product.name,
+    total: `$${(product.usdCents / 100).toFixed(2)}`, methods: product.methods,
+    onCancel: () => { $("checkout").hidden = true; },
+    onPay: async (rail) => {
+      if (preparingOrder) throw new Error("Order preparation already pending");
+      preparingOrder = true; productButtons.forEach((button) => { button.disabled = true; });
+      try {
+        const response = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ productId: product.id, rail }) });
+        const order = await response.json(); if (!response.ok) throw new Error("Order could not be created");
+        $("checkout").hidden = true; show(order);
+      } finally {
+        preparingOrder = false; productButtons.forEach((button) => { button.disabled = false; });
+      }
+    },
+  });
   $("checkout").hidden = false;
   $("checkout").scrollIntoView({ behavior: "smooth" });
 }
-$("cancel").onclick = () => { $("checkout").hidden = true; };
-$("place").onclick = async () => {
-  const rail = document.querySelector("input[name=rail]:checked").value;
-  const response = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ productId: selected.id, rail }) });
-  const order = await response.json();
-  if (!response.ok) return alert(order.error);
-  $("checkout").hidden = true;
-  show(order);
-};
 
 function instructions(order) {
   if (order.monero) {
@@ -106,16 +114,16 @@ function instructions(order) {
   const invoice = order.invoice ?? "";
   const copy = `<p><button class="secondary" id="copy">Copy invoice</button></p>`;
   if (order.rail === "lightning") {
-    return `<p>Pay this Lightning invoice with any regtest wallet, or from the dev user node:</p>
+    return `<p>Pay with your regtest Lightning wallet. Wallet routing fees are separate.</p>
+      <p><a class="pay-link" href="lightning:${esc(invoice)}">Open Lightning wallet</a></p>
       <textarea readonly>${esc(invoice)}</textarea>${copy}
-      <pre>dev/devctl pay ${esc(invoice)}</pre>`;
+      <details><summary>Local testing command</summary><pre>dev/devctl pay ${esc(invoice)}</pre></details>`;
   }
-  return `<p>Pay with on-chain BTC: a RillSwap maker pays this invoice once your on-chain funding confirms.</p>
+  const swap = new URL(catalog.swapPage); swap.hash = new URLSearchParams({ invoice }).toString();
+  return `<p>Pay with Bitcoin: RillSwap finds a provider quote and handles recovery in your browser. No funds move until you approve.</p>
+    <p><a class="pay-link" href="${esc(swap.href)}" target="_blank" rel="noopener noreferrer">Continue in RillSwap</a></p>
     <textarea readonly>${esc(invoice)}</textarea>${copy}
-    <p>From the CLI (Core <code>user</code> wallet funds the swap):</p>
-    <pre>dev/devctl swap btc-to-ln ${esc(invoice)}</pre>
-    <p>Or in the browser: open <a href="${esc(catalog.swapPage)}" target="_blank">the swap page</a>, paste this
-    invoice, and take the other fields from <code>dev/devctl web-inputs</code>.</p>`;
+    <details><summary>Local testing command</summary><pre>dev/devctl swap btc-to-ln ${esc(invoice)}</pre></details>`;
 }
 
 function show(order) {

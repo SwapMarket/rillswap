@@ -31,6 +31,7 @@ jobs:
           bun run test
           bun run build:sdk
           bun run build:native-sdk
+          bun run build:rillpay
       - name: Install pinned Chromium for checkout persistence tests
         run: bunx playwright install --with-deps chromium
       - name: Check native checkout cross-tab and reopen behavior

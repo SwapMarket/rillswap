@@ -1,4 +1,16 @@
 import { expect, test } from "@playwright/test";
+
+test("merchant invoice fragments prefill locally without connecting and are removed from the address bar", async ({ page }) => {
+  const requests: string[] = [], sockets: string[] = [];
+  page.on("request", (request) => requests.push(request.url())); page.on("websocket", (socket) => sockets.push(socket.url()));
+  await page.goto("http://127.0.0.1:18765/swap.html#invoice=ln-public-test-handoff");
+  await expect(page.locator("#swap-invoice")).toHaveValue("ln-public-test-handoff");
+  expect(new URL(page.url()).hash).toBe(""); expect(sockets).toEqual([]);
+  for (const request of requests) { expect(request).not.toContain("ln-public-test-handoff"); expect(new URL(request).host).toBe("127.0.0.1:18765"); }
+  await page.goto("about:blank");
+  await page.goto("http://127.0.0.1:18765/swap.html#invoice=" + "x".repeat(4097));
+  await expect(page.locator("#swap-invoice")).toHaveValue(""); expect(new URL(page.url()).hash).toBe("");
+});
 import { testInvoice } from "../../rill-payments/tests/helpers";
 import { scriptAddress } from "../src/swap/address";
 

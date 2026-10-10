@@ -10,6 +10,7 @@ import type { SignedAcceptance } from "../../src/server";
 import { DEMO_USD_PER_BTC, findAcceptance, priceSat, readOrderHistory } from "./checkout";
 import { STABLECOINS, startStablecoins, tokenBaseUnits, type NativeCheckout, type StablecoinRail, type TokenRail } from "./native";
 import { DEMO_USD_PER_XMR, formatXmr, startMonero, xmrAtomic, type MoneroCheckout, type MoneroRail } from "./monero";
+import { demoPaymentMethods } from "./paymentOptions";
 
 const STATE = process.env.RILL_DEV_STATE ?? "/state";
 const MERCHANT_API = process.env.RILL_DEV_MERCHANT_API ?? "http://127.0.0.1:8787";
@@ -72,6 +73,8 @@ const RAILS: Record<Rail, { label: string; available: boolean }> = {
   ...Object.fromEntries(STABLECOINS.map((spec) => [spec.rail, { label: `${spec.symbol} on Anvil (fake stablecoin)`, available: tokens.has(spec.rail) }])),
   monero: { label: "Monero (local regtest chain)", available: monero !== null },
 } as Record<Rail, { label: string; available: boolean }>;
+
+let checkoutBundle: ReturnType<typeof Bun.build> | undefined;
 
 function loadOrders(): { orders: Order[]; known: boolean } {
   const history = readOrderHistory<Order & { acceptance: { paymentHash?: string } | null }>(ORDERS_FILE);
@@ -190,9 +193,16 @@ Bun.serve({
       if (url.pathname === "/" && request.method === "GET") {
         return new Response(Bun.file(new URL("./index.html", import.meta.url).pathname));
       }
+      if (url.pathname === "/rillpay.js" && request.method === "GET") {
+        checkoutBundle ??= Bun.build({ entrypoints: [new URL("../../src/rillPay.ts", import.meta.url).pathname], target: "browser", format: "esm" });
+        const bundle = await checkoutBundle;
+        if (!bundle.success) throw new Error("RillPay browser bundle could not be built");
+        return new Response(bundle.outputs[0], { headers: { "Content-Type": "text/javascript", "Cache-Control": "no-cache" } });
+      }
       if (url.pathname === "/api/catalog") {
         return json({
-          products: PRODUCTS.map((product) => ({ ...product, sat: priceSat(product.usdCents) })),
+          products: PRODUCTS.map((product) => ({ ...product, sat: priceSat(product.usdCents), methods: demoPaymentMethods(product.usdCents,
+            Object.fromEntries(Object.entries(RAILS).map(([id, rail]) => [id, rail.available]))) })),
           rails: RAILS,
           tokens: Object.fromEntries([...tokens.values()].map((token) => [token.rail, { symbol: token.symbol, address: token.token }])),
           demoUsdPerBtc: DEMO_USD_PER_BTC,
