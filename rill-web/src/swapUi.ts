@@ -160,7 +160,7 @@ function mount(root: HTMLElement): void {
   const chainDisclosure = node("p", "", "swap-chain-disclosure");
   const relayDisclosure = node("p", "", "swap-relay-disclosure");
   privacy.append(node("summary", "Privacy & terms"),
-    node("p", "Requesting a quote authorizes the configured connections for this attempt. " +
+    node("p", "Requesting a quote or checking recovery funding authorizes the configured connections for that attempt. " +
       "Nothing connects on page load or when you change settings."),
     chainDisclosure, relayDisclosure,
     node("p", "Responding providers receive your Lightning invoice. Encrypted messages do not hide transport metadata. " +
@@ -233,14 +233,16 @@ function mount(root: HTMLElement): void {
     else if (line.startsWith("refused:") || line.startsWith("stopped:")) setStatus(line.replace(/^[^:]+: /, ""), -1, "error");
   };
   const walletPromise = BrowserRecoveryWallet.open();
-  card.insertBefore(recoveryPanel({
+  const recovery = recoveryPanel({
     selectedNetwork: () => ({ name: network.value, identity: NETWORKS[network.value as NetworkName] }),
     browserIdentity: async () => {
       const key = await (await walletPromise).recoveryKey();
       key.file.fill(0); // This temporary key-file copy is not used for a download.
       return key.identity;
     },
-  }), safety);
+    selectedChainApi: () => validateMempoolApi(chainApi.value.trim(), network.value as NetworkName),
+  });
+  card.insertBefore(recovery.element, safety);
   // Register failure handling immediately so blocked storage never becomes an unhandled rejection.
   void walletPromise.then(async (wallet) => {
     await walletBackupControls(walletActions, wallet, walletStatus);
@@ -250,11 +252,14 @@ function mount(root: HTMLElement): void {
       : "Using your existing browser recovery key.";
   }).catch((error: Error) => { walletStatus.textContent = error.message; });
   const updateDisclosure = (): void => {
-    chainDisclosure.textContent = `Chain API: ${chainApi.value.trim()}. When automatic height is used, this operator sees your IP, ` +
-      "but receives no keys, invoices, or addresses. Its observations are trusted, not independent chain verification.";
+    chainDisclosure.textContent = `Chain API: ${chainApi.value.trim()}. This operator sees your IP when automatic height or recovery funding is checked, ` +
+      "and the selected public transaction ID and output for recovery checks, which can reveal their public addresses and amounts. " +
+      "It receives no keys, recovery files, or invoices. " +
+      "Its observations are trusted, not independent chain verification.";
     relayDisclosure.textContent = `Nostr relays: ${relay.value.trim().split(/\s+/).join(", ")}. Operators see your IP and transport metadata.`;
   };
-  chainApi.oninput = relay.oninput = updateDisclosure;
+  chainApi.oninput = () => { updateDisclosure(); recovery.clearFundingObservation(); };
+  relay.oninput = updateDisclosure;
   updateDisclosure();
   const updateNetwork = (): void => {
     const main = network.value === "mainnet";
@@ -292,6 +297,7 @@ function mount(root: HTMLElement): void {
     refund.value = tip.value = age.value = "";
     updateDisclosure();
     updateNetwork();
+    recovery.clearFundingObservation();
   };
   updateNetwork();
 

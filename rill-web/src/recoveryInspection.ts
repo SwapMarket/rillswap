@@ -38,6 +38,8 @@ export interface RecoveryInspection {
   readonly firstRefundEligibleHeight: number;
   /** Signed revisions, NOT evidence that any output actually exists or is unspent. */
   readonly recordedBindingCount: number;
+  /** Embedded signed history, not provenance, transaction, or UTXO evidence. */
+  readonly fundingHistory: readonly RecoveryFundingBinding[];
 }
 
 export class RecoveryInspectionRefusedError extends Error {
@@ -47,10 +49,11 @@ export class RecoveryInspectionRefusedError extends Error {
   }
 }
 
-interface HistoricalBinding extends Omit<FundingBinding, "binding_revision" | "replaces_txid"> {
+export interface RecoveryFundingBinding extends Omit<FundingBinding, "binding_revision" | "replaces_txid"> {
   readonly binding_revision: number;
   readonly replaces_txid: string | null;
 }
+type HistoricalBinding = RecoveryFundingBinding;
 
 /** Only used after bounded, canonical admission has checked every field's shape. */
 interface RecoveryRecord {
@@ -266,7 +269,43 @@ export function inspectRecoveryPlaintext(plaintext: Uint8Array, independentlySel
   const record = authenticateRecovery(plaintext, independentlySelectedNetwork);
   return Object.freeze({ verification: "historical-static", networkName: record.network_identity.name,
     profileId: "btc-to-ln/v1", contractHash: record.contract_hash, refundLockHeight: record.contract_terms.refund_lock_height,
-    firstRefundEligibleHeight: record.contract_terms.refund_lock_height + 1, recordedBindingCount: record.funding_history.length });
+    firstRefundEligibleHeight: record.contract_terms.refund_lock_height + 1, recordedBindingCount: record.funding_history.length,
+    fundingHistory: Object.freeze(record.funding_history.map(({ binding: b }) => Object.freeze({
+      contract_hash: b.contract_hash, funding_attempt_id: b.funding_attempt_id, binding_revision: b.binding_revision, funder_role: b.funder_role,
+      lineage_anchor_txid: b.lineage_anchor_txid, lineage_anchor_vout: b.lineage_anchor_vout, funding_txid: b.funding_txid,
+      contract_vout: b.contract_vout, contract_value_sat: b.contract_value_sat, contract_script_pubkey: b.contract_script_pubkey,
+      replaces_txid: b.replaces_txid, created_at: b.created_at,
+    }))) });
+}
+
+export interface RecoveryFundingSelection {
+  readonly fundingAttemptId: string;
+  readonly bindingRevision: number;
+}
+
+function selectBinding(record: RecoveryRecord, selection: RecoveryFundingSelection): HistoricalBinding {
+  const { fundingAttemptId, bindingRevision } = selection;
+  require(typeof fundingAttemptId === "string" && /^[0-9a-f]{64}$/.test(fundingAttemptId));
+  require(Number.isSafeInteger(bindingRevision) && bindingRevision >= 0 && bindingRevision < 64);
+  const matches = record.funding_history.filter(({ binding }) => binding.funding_attempt_id === fundingAttemptId && binding.binding_revision === bindingRevision);
+  require(matches.length === 1);
+  return matches[0]!.binding;
+}
+
+/** Authenticate and check selected funding bytes only. No chain, ownership, or spending authority. */
+export function checkSelectedRecoveryFundingTransaction(
+  plaintext: Uint8Array, independentlySelectedNetwork: unknown, selection: RecoveryFundingSelection, rawFundingTransaction: Uint8Array,
+): void {
+  try {
+    const chosen = { fundingAttemptId: selection.fundingAttemptId, bindingRevision: selection.bindingRevision };
+    require(rawFundingTransaction instanceof Uint8Array && rawFundingTransaction.length > 0 && rawFundingTransaction.length <= MAX_TRANSACTION_BYTES);
+    const raw = Uint8Array.from(rawFundingTransaction);
+    const record = authenticateRecovery(plaintext, independentlySelectedNetwork);
+    require(isSupportedRecoveryNetwork(record.network_identity));
+    checkFundingTransaction(raw, selectBinding(record, chosen));
+    return;
+  } catch { /* No byte-check diagnostics or secret-bearing causes escape. */ }
+  throw new RecoveryInspectionRefusedError();
 }
 
 export interface SelectedRecoveryRefundInput {
@@ -298,15 +337,17 @@ export class RecoveryRefundRefusedError extends Error {
   }
 }
 
-function executionNetwork(record: RecoveryRecord): void {
-  const network = record.network_identity;
-  const supported: Record<string, unknown> = { mainnet, signet, testnet4, regtest };
-  require(Object.hasOwn(supported, network.name));
-  if (network.name === "regtest") {
-    require(typeof network.deployment_namespace === "string" && network.deployment_namespace.length > 0);
-    require(same({ ...network, deployment_namespace: regtest.deployment_namespace }, regtest));
-  } else require(same(network, supported[network.name]));
-  // Existing mainnet refunds are supported. This is NOT the new-funding release gate.
+/** Core's supported execution identities, NOT the new-mainnet-funding release gate. */
+export function isSupportedRecoveryNetwork(value: unknown): boolean {
+  try {
+    if (!validateNetwork(value)) return false;
+    const network = value as RecoveryRecord["network_identity"];
+    const supported: Record<string, unknown> = { mainnet, signet, testnet4, regtest };
+    if (!Object.hasOwn(supported, network.name)) return false;
+    if (network.name === "regtest") return typeof network.deployment_namespace === "string" && network.deployment_namespace.length > 0 &&
+      same({ ...network, deployment_namespace: regtest.deployment_namespace }, regtest);
+    return same(network, supported[network.name]);
+  } catch { return false; }
 }
 
 /** Core check_funding_binding_transaction rules, not UTXO, inclusion, or chain evidence. */
@@ -376,15 +417,11 @@ export function constructSelectedRecoveryRefund(
     const { fundingAttemptId, bindingRevision, sampledTipHeight, feeSat, rawFundingTransaction } = input;
     require(rawFundingTransaction instanceof Uint8Array && rawFundingTransaction.length > 0 && rawFundingTransaction.length <= MAX_TRANSACTION_BYTES);
     const rawFunding = Uint8Array.from(rawFundingTransaction);
-    require(typeof fundingAttemptId === "string" && /^[0-9a-f]{64}$/.test(fundingAttemptId));
-    require(Number.isSafeInteger(bindingRevision) && bindingRevision >= 0 && bindingRevision < 64);
     require(Number.isSafeInteger(sampledTipHeight) && sampledTipHeight >= 0 && sampledTipHeight < 500_000_000);
     require(typeof feeSat === "bigint" && feeSat >= 0n && feeSat <= MAX_SATS);
     const record = authenticateRecovery(plaintext, independentlySelectedNetwork);
-    executionNetwork(record);
-    const matches = record.funding_history.filter(({ binding }) => binding.funding_attempt_id === fundingAttemptId && binding.binding_revision === bindingRevision);
-    require(matches.length === 1);
-    const binding = matches[0]!.binding, terms = record.contract_terms;
+    require(isSupportedRecoveryNetwork(record.network_identity));
+    const binding = selectBinding(record, { fundingAttemptId, bindingRevision }), terms = record.contract_terms;
     checkFundingTransaction(rawFunding, binding);
     require(sampledTipHeight > terms.refund_lock_height && feeSat <= BigInt(terms.max_refund_fee_sat));
     const destination = hexToBytes(terms.client_destination_script);

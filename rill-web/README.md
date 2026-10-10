@@ -257,6 +257,9 @@ reverse-only extensions are rejected for BTC to LN, while optional unknown
 extensions remain opaque. Empty history is valid for an initial record, but
 proves no funding. Errors are generic and the frozen report contains only
 public metadata, never keys, preimages, or the document.
+Its explicitly projected, deeply frozen `fundingHistory` contains only the
+public binding fields, not signatures or the secret-bearing record. These
+fields are still not transaction or chain evidence.
 
 Inspection proves internal consistency under the embedded signers, **not**
 provider provenance, your ownership of the destination, chain inclusion,
@@ -315,6 +318,33 @@ RILLSWAP_TEST_RECOVERY_NATIVE=1 bun test unit/recoveryRefundNative.test.ts
 ```
 
 Actual browser refund signing integration and broadcasting remain unavailable.
+
+After local inspection, **Check funding** explicitly connects to the API
+selected in Settings. It reopens and authenticates the selected file, checks
+the chosen revision's real transaction bytes locally, then repeats confirmed
+inclusion, block-hash, unspent-output, and stable tip/genesis observations.
+HTTP errors, missing/spent outputs, malformed or inconsistent responses,
+nonexistent output indexes, cancellation, and timeouts remain unavailable.
+The total attempt has a 20-second ceiling (each tip check also has its own
+10-second ceiling). There is no automatic retry, revision fallback, or polling.
+Only Core's supported execution identities can be checked; unsupported
+historical identities remain inspectable without making a connection.
+
+Multiple retained revisions have an explicit selector, initially showing the
+newest. A failed newest revision never silently switches to an older one.
+Zero funding history exposes no chain check. Changing a file/key clears the
+report; network/API Settings changes also clear completed observations and
+invalidate pending results. A different file, key, or revision at completion
+discards the result. A coherent immature observation displays a waiting state. The
+result is labeled **trusted API observation**, and `refundMatureAtObservedTip`
+means only that its reported tip is above the signed lock height. Agreement
+does not prove a canonical chain, a global mempool view, destination ownership,
+or permission to sign. No UI action signs or broadcasts yet.
+
+The selected API sees your IP and the public funding transaction/output,
+which can reveal public addresses and amounts. It receives no keys, recovery
+files, or invoices. This is explained in collapsed **Privacy & terms**.
+Importing, page load, and Settings changes still make no connections.
 
 You need `rill-cli` (see its README), a synced Bitcoin Core node for the same
 network, the funded recovery file, its age key, and the funding attempt ID that

@@ -24,8 +24,11 @@ for (const { name, record, accepted, expectedNetwork } of recoveryInspectionCase
 test("reports expose only allowlisted public metadata, with no raw or nested secret-bearing object", () => {
   const record = reservedRecord();
   const report = inspectRecoveryPlaintext(bytes(record), record.network_identity);
-  expect(Object.keys(report).sort()).toEqual(["contractHash", "firstRefundEligibleHeight", "networkName", "profileId", "recordedBindingCount", "refundLockHeight", "verification"]);
-  for (const value of Object.values(report)) expect(["string", "number"].includes(typeof value)).toBe(true);
+  expect(Object.keys(report).sort()).toEqual(["contractHash", "firstRefundEligibleHeight", "fundingHistory", "networkName", "profileId", "recordedBindingCount", "refundLockHeight", "verification"]);
+  for (const [key, value] of Object.entries(report)) if (key !== "fundingHistory") expect(["string", "number"].includes(typeof value)).toBe(true);
+  expect(Object.isFrozen(report.fundingHistory)).toBe(true);
+  expect(Object.isFrozen(report.fundingHistory[0])).toBe(true);
+  expect(Object.keys(report.fundingHistory[0]!).sort()).toEqual(["binding_revision", "contract_hash", "contract_script_pubkey", "contract_value_sat", "contract_vout", "created_at", "funder_role", "funding_attempt_id", "funding_txid", "lineage_anchor_txid", "lineage_anchor_vout", "replaces_txid"]);
   expect(JSON.stringify(report)).not.toContain(record.user_secret.contract_secret_key);
   expect(JSON.stringify(report)).not.toContain(record.monotonic_knowledge.preimage!);
 });
