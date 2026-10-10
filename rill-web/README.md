@@ -408,6 +408,20 @@ block higher-fee urgent historical claims; it is not full native acceptance
 parity. Differential tests classify native construction independently from
 browser results and separately validate funded/fallback successor ordering.
 
+`restoreReverseFundingReader` restores only an authenticated funding mailbox
+from the original client session secret and independently checked transcript.
+It has no send/handshake/acknowledgment API and cannot renew payment authority.
+`recoverReverseFundingEnvelopes` explicitly queries one to four selected relay
+archives by original recipient and kind 1059, without outer-author or two-day
+filters. Signed-session candidates still require independent binding-signature,
+contract and raw funding transaction validation before persistence or spending.
+Duplicate copies are discarded; failed, partial or truncated archives remain
+visibly incomplete. Empty EOSE results prove neither no payment nor no funding.
+If the provider never published its binding or relays no longer retain it,
+recovery must remain blocked instead of repaying or inferring a signed binding
+from a script-matching UTXO. Receiver disposal erases its private key copy;
+immutable parsed strings and caller-owned keys cannot be guaranteed erased.
+
 After local inspection, **Check funding** explicitly connects to the API
 selected in Settings. It reopens and authenticates the selected file, checks
 the chosen revision's real transaction bytes locally, then repeats confirmed

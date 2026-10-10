@@ -3,12 +3,13 @@
  * and an authenticated inbox (port of rill-cli live_swap._Session and
  * rill-provider's strict gift-wrap receive rules). Keys live in memory only.
  */
-import { schnorr } from "@noble/curves/secp256k1.js";
+import { schnorr, secp256k1 } from "@noble/curves/secp256k1.js";
 import { bytesToHex, hexToBytes, randomBytes } from "@noble/hashes/utils.js";
 import canonicalize from "canonicalize";
 import { getEventHash, getPublicKey, nip44, type NostrEvent, verifyEvent } from "nostr-tools";
 
 import { wrapPrivateRegtestEnvelope } from "../nip59Transport";
+import { validateNetwork } from "../generated/manualAdvertisementValidators.js";
 import { jcs, unsignedEnvelopeHash } from "./hashes";
 import { requireShape } from "./wire";
 
@@ -124,6 +125,55 @@ export class SwapError extends Error {
 
 export const NIP59_BACKDATE_SECONDS = 2 * 24 * 3600;
 
+/** Shared transport/session authentication, not application-payload authorization. */
+function authenticateSessionEvent(raw: string, secret: Uint8Array, network: unknown, profile: string,
+  sessionId: string, providerKey: string | null): Envelope | null {
+  try {
+    const frame = unwrapGiftWrap(raw, secret, network, profile), envelope = frame.envelope;
+    if (envelope.session_id !== sessionId || frame.sealAuthor !== envelope.sender_session_key ||
+      (providerKey !== null && envelope.sender_session_key !== providerKey)) return null;
+    if (envelope.message_type !== "handshake_accept" &&
+      !schnorr.verify(hexToBytes(envelope.signature ?? ""), unsignedEnvelopeHash(envelope as unknown as Record<string, unknown>), hexToBytes(envelope.sender_session_key))) return null;
+    return envelope;
+  } catch { return null; }
+}
+
+export interface ReverseFundingMailboxReader {
+  readonly clientKey: string;
+  /** Original session only. No restored outbound sequence, send, handshake, payment, or ack API. */
+  admit(raw: string): Envelope | null;
+  dispose(): void;
+}
+
+/**
+ * Offline receive-only restoration. Callers independently authenticate the
+ * saved transcript first and validate binding signatures/actual funding bytes
+ * afterward. Archive queries must have no two-day cutoff or outer-author pin.
+ */
+export function restoreReverseFundingReader(configuration: {
+  readonly secret: Uint8Array; readonly clientKey: string; readonly sessionId: string;
+  readonly providerSessionKey: string; readonly network: unknown; readonly contractHash: string;
+}): ReverseFundingMailboxReader {
+  let secret: Uint8Array | undefined;
+  try {
+    if (!(configuration.secret instanceof Uint8Array) || configuration.secret.length !== 32) throw new Error();
+    secret = Uint8Array.from(configuration.secret);
+    const clientKey = getPublicKey(secret), sessionId = configuration.sessionId, providerKey = configuration.providerSessionKey, contractHash = configuration.contractHash;
+    if (clientKey !== configuration.clientKey || providerKey === clientKey ||
+      ![clientKey, sessionId, providerKey, contractHash].every((value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value))) throw new Error();
+    secp256k1.Point.fromBytes(hexToBytes(`02${providerKey}`)).assertValidity();
+    const network: unknown = JSON.parse(canonicalize(configuration.network)!); if (!validateNetwork(network)) throw new Error();
+    const key = secret, seen = new Set<string>(); let disposed = false;
+    return Object.freeze({ clientKey, admit(raw: string): Envelope | null {
+      if (disposed || seen.size >= 256) return null;
+      const envelope = authenticateSessionEvent(raw, key, network, "ln-to-btc/v1", sessionId, providerKey);
+      if (!envelope || envelope.message_type !== "funding_binding" || envelope.in_reply_to !== null ||
+        envelope.contract_hash !== contractHash || seen.has(envelope.message_id)) return null;
+      seen.add(envelope.message_id); return envelope;
+    }, dispose(): void { disposed = true; key.fill(0); seen.clear(); } });
+  } catch { secret?.fill(0); throw new SwapError("Original reverse funding mailbox could not be restored"); }
+}
+
 export class Session {
   readonly secret = schnorr.utils.randomSecretKey();
   readonly key = getPublicKey(this.secret);
@@ -186,31 +236,8 @@ export class Session {
 
   /** Admit one raw event as an authenticated envelope for this session, or null. */
   admit(raw: string): Envelope | null {
-    let frame: Frame;
-    try {
-      frame = unwrapGiftWrap(raw, this.secret, this.network, this.profile);
-    } catch {
-      return null;
-    }
-    const envelope = frame.envelope;
-    if (
-      envelope.session_id !== this.sessionId ||
-      this.seen.has(envelope.message_id) ||
-      frame.sealAuthor !== envelope.sender_session_key ||
-      (this.providerKey !== null && envelope.sender_session_key !== this.providerKey)
-    ) {
-      return null;
-    }
-    if (envelope.message_type !== "handshake_accept") {
-      try {
-        const digest = unsignedEnvelopeHash(envelope as unknown as Record<string, unknown>);
-        if (!schnorr.verify(hexToBytes(envelope.signature ?? ""), digest, hexToBytes(envelope.sender_session_key))) {
-          return null;
-        }
-      } catch {
-        return null;
-      }
-    }
+    const envelope = authenticateSessionEvent(raw, this.secret, this.network, this.profile, this.sessionId, this.providerKey);
+    if (envelope === null || this.seen.has(envelope.message_id)) return null;
     this.seen.add(envelope.message_id);
     return envelope;
   }
