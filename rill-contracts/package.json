@@ -1,0 +1,12 @@
+{
+  "name": "@rillswap/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Vendored EVM HTLC contract sources and their pinned compiled artifacts.",
+  "scripts": {
+    "generate": "bun generate.ts",
+    "check": "bun generate.ts --check"
+  },
+  "devDependencies": { "@types/bun": "1.3.11", "typescript": "7.0.2", "solc": "0.8.33" }
+}
