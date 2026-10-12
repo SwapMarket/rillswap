@@ -36,6 +36,8 @@ export interface SponsorConfig {
   readonly entryPoint: string;
   /** The only EIP-7702 delegate the staging key may authorize. */
   readonly delegate: string;
+  /** Alchemy gas policy (`paymasterService.policyId`); omit for a proxy that applies its own. */
+  readonly policyId?: string;
 }
 export interface SponsoredCall {
   readonly to: string;
@@ -208,6 +210,8 @@ export async function verifyPreparedCalls(config: SponsorConfig, result: unknown
   const request = record(opEntry.signatureRequest, "signature request");
   if (request.type !== "personal_sign" || !sameAddress(record(request.data, "signature request data").raw, hash)) throw new EvmError("sponsor asked to sign something other than the user operation");
   const feePayment = opEntry.feePayment === undefined ? null : record(opEntry.feePayment, "fee payment");
+  // A token paymaster would charge the account (which holds the payout) instead of sponsoring it.
+  if (feePayment !== null && feePayment.sponsored !== true) throw new EvmError("sponsor is not paying for gas");
   let authorization: VerifiedPrepared["authorization"] = null;
   if (expect.authorizationNonce === null) {
     if (auths.length !== 0) throw new EvmError("sponsor requested a delegation the account does not need");
@@ -241,7 +245,7 @@ export function signPreparedCalls(verified: VerifiedPrepared, secret: Uint8Array
 
 export const DELEGATION_PREFIX = "0xef0100";
 
-/** Status codes of `wallet_getCallsStatus` (EIP-5792 ranges). */
+/** Status codes of `wallet_getCallsStatus`: 1xx pending, 200 confirmed, 115/116 and 4xx-6xx failed. */
 export type SponsoredStatus = { readonly state: "pending" } | { readonly state: "confirmed"; readonly txHash: string } | { readonly state: "failed"; readonly status: number };
 
 export class GasSponsor {
@@ -275,7 +279,7 @@ export class GasSponsor {
     const result = await this.call("wallet_prepareCalls", [{
       from: sender, chainId: `0x${this.config.chainId.toString(16)}`,
       calls: calls.map((call) => ({ to: checkEvmAddress(call.to, "call target"), data: checkHex(call.data, "call data"), value: "0x0" })),
-      capabilities: { eip7702Auth: true },
+      capabilities: { eip7702Auth: true, ...(this.config.policyId ? { paymasterService: { policyId: this.config.policyId } } : {}) },
     }]);
     const verified = await verifyPreparedCalls(this.config, result, {
       sender, callData, authorizationNonce,
@@ -286,21 +290,23 @@ export class GasSponsor {
     });
     const signed = signPreparedCalls(verified, secret);
     const sent = record(await this.call("wallet_sendPreparedCalls", [signed]), "send result");
-    const ids = Array.isArray(sent.preparedCallIds) ? sent.preparedCallIds : [];
-    if (typeof ids[0] !== "string" || ids[0].length === 0) throw new EvmError("gas sponsor returned no call id");
-    return { callId: ids[0], userOpHash: verified.userOpHash };
+    // `id` is current; `preparedCallIds` is the older (still returned) form.
+    const id = typeof sent.id === "string" ? sent.id : Array.isArray(sent.preparedCallIds) ? sent.preparedCallIds[0] : undefined;
+    if (typeof id !== "string" || id.length === 0) throw new EvmError("gas sponsor returned no call id");
+    return { callId: id, userOpHash: verified.userOpHash };
   }
 
   async status(callId: string): Promise<SponsoredStatus> {
     const result = record(await this.call("wallet_getCallsStatus", [callId]), "call status");
     const status = typeof result.status === "number" ? result.status : Number.NaN;
-    if (status === 200 || status === 115) {
+    if (status === 200) {
       const receipts = Array.isArray(result.receipts) ? result.receipts : [];
       const hash = receipts[0] === undefined ? undefined : record(receipts[0], "receipt").transactionHash;
       if (typeof hash !== "string" || !HEX32.test(hash)) throw new EvmError("gas sponsor reported success without a transaction hash");
       return { state: "confirmed", txHash: hash.slice(2).toLowerCase() };
     }
-    if (status >= 100 && status < 200) return { state: "pending" };
+    // 115/116 are failed preconfirmations; other 1xx (pending, preconfirmed) wait for 200.
+    if (status >= 100 && status < 200 && status !== 115 && status !== 116) return { state: "pending" };
     return { state: "failed", status };
   }
 

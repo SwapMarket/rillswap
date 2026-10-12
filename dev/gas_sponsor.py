@@ -204,7 +204,7 @@ class Sponsor:
             )
             call_id = uuid.uuid4().hex
             self.calls[call_id] = "0x" + tx_hash.hex()
-        return {"preparedCallIds": [call_id]}
+        return {"id": call_id, "preparedCallIds": [call_id]}  # current and legacy Alchemy forms
 
     def status(self, call_id: Any) -> dict[str, Any]:
         tx_hash = self.calls.get(call_id) if isinstance(call_id, str) else None

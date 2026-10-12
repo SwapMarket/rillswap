@@ -197,7 +197,16 @@ page recomputes the EIP-7702 authorization digest and the EntryPoint v0.7 user
 operation hash over calldata it built, pins chain, delegate, and EntryPoint,
 refuses any other signature request, and confirms the destination's Transfer
 in the included transaction. The sponsor learns the preimage and destination.
-Without a sponsor, the connected EVM wallet's address is the destination and
+In production the sponsor is Alchemy's Wallet API (what Boltz uses behind its
+own proxy): set `VITE_RILLSWAP_EVM_SPONSOR=https://api.g.alchemy.com/v2/<key>`
+(restrict the key to your origin in the Alchemy dashboard), the canonical
+EntryPoint `0x0000000071727de22e5e9d8baf0edac6f37da032` and SMA7702 v1.1.0
+delegate `0x77021100bd87b7008e5e1989d0eb38555d0d0000`, and
+`VITE_RILLSWAP_EVM_SPONSOR_POLICY` to the gas policy UUID (sent as
+`paymasterService.policyId`; leave it unset for a proxy that applies its own).
+A prepared call whose `feePayment` is not sponsored is refused. CORS from the
+browser and Alchemy's live responses have not been tested yet; check them on a
+supported testnet before relying on them. Without a sponsor, the connected EVM wallet's address is the destination and
 it needs native gas for the claim. Pay the QR invoice
 from any Lightning wallet, without configuring a Lightning node. The browser
 stores the encrypted preimage before the firm request, then commits the signed

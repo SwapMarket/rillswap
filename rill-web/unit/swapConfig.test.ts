@@ -35,6 +35,10 @@ describe("explicit deployment defaults", () => {
     expect(() => resolveSwapDefaults({ ...env, VITE_RILLSWAP_EVM_7702_DELEGATE: undefined })).toThrow("together");
     expect(() => resolveSwapDefaults({ ...env, VITE_RILLSWAP_EVM_ENTRY_POINT: "0x1234" })).toThrow("lowercase 0x addresses");
     expect(() => resolveSwapDefaults({ ...env, VITE_RILLSWAP_NETWORK: "mainnet" })).toThrow();
+    const policy = "0B1E8F2A-3C4D-4E5F-8A9B-0C1D2E3F4A5B";
+    expect(resolveSwapDefaults({ ...env, VITE_RILLSWAP_EVM_SPONSOR_POLICY: policy }).evmSponsor?.policyId).toBe(policy.toLowerCase());
+    expect(() => resolveSwapDefaults({ ...env, VITE_RILLSWAP_EVM_SPONSOR_POLICY: "my-policy" })).toThrow("UUID");
+    expect(() => resolveSwapDefaults({ VITE_RILLSWAP_NETWORK: "regtest", VITE_RILLSWAP_EVM_SPONSOR_POLICY: policy })).toThrow("needs VITE_RILLSWAP_EVM_SPONSOR");
   });
   test("public builds admit only an explicitly configured concrete node origin", async () => {
     for (const configured of [false, true]) {

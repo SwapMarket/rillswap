@@ -132,9 +132,12 @@ function mount(root: HTMLElement): void {
     "Sponsored claims are bound to this EntryPoint; the browser recomputes every hash it signs.");
   const evmDelegate = field(settings, "swap-evm-delegate", "EIP-7702 account delegate", __SWAP_DEFAULTS__.evmSponsor?.delegate ?? "",
     "The only contract the browser-held claim key will delegate to. Changing it moves trust to that contract's code.");
+  const evmSponsorPolicy = field(settings, "swap-evm-sponsor-policy", "Gas sponsor policy ID (optional)", __SWAP_DEFAULTS__.evmSponsor?.policyId ?? "",
+    "Alchemy gas policy UUID sent with each sponsored claim. Leave empty for a sponsor proxy that applies its own policy.");
   const sponsorConfigured = (): boolean => [evmSponsor, evmEntryPoint, evmDelegate].some((input) => input.value.trim() !== "");
   const selectedSponsor = (): EvmSponsorDefaults | null => sponsorConfigured()
-    ? validateEvmSponsor(evmSponsor.value.trim(), evmEntryPoint.value.trim().toLowerCase(), evmDelegate.value.trim().toLowerCase(), network.value as NetworkName) : null;
+    ? validateEvmSponsor(evmSponsor.value.trim(), evmEntryPoint.value.trim().toLowerCase(), evmDelegate.value.trim().toLowerCase(), network.value as NetworkName,
+      evmSponsorPolicy.value.trim()) : null;
   const identity = field(settings, "swap-provider", "Provider identity", "",
     "Automatic by default. Optionally pin a provider's 64-character public identity key, or choose one under Providers.");
   identity.placeholder = "Automatic (lowest verified provider price)";

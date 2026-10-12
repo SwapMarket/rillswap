@@ -80,6 +80,15 @@ describe("prepared-call verification", () => {
   test("rejects an operation the account would pay for", async () => {
     await rejects(prepared({ ...vectors.userOp, maxFeePerGas: "0x1" }), "not paying for gas");
     await expect(verifyPreparedCalls(config, prepared(vectors.sponsoredUserOp), expectation())).resolves.toBeDefined();
+    // A token paymaster would charge the account, which holds the payout.
+    const charged = prepared(vectors.sponsoredUserOp, false);
+    await rejects({ ...charged, feePayment: { sponsored: false, tokenAddress: `0x${"12".repeat(20)}`, maxAmount: "0x10" } }, "not paying for gas");
+  });
+  test("tolerates Alchemy's extra metadata fields", async () => {
+    const op = prepared(vectors.userOp, false);
+    const extra = { ...op, details: { type: "user-operation", data: { hash: "0x00", calls: [] } },
+      signatureRequest: { ...(op.signatureRequest as Record<string, unknown>), rawPayload: `0x${"55".repeat(32)}` } };
+    await expect(verifyPreparedCalls(config, extra, expectation({ authorizationNonce: null }))).resolves.toBeDefined();
   });
   test("rejects wrong chains, foreign signature requests, and delegation mismatches", async () => {
     const wrongChain = prepared() as { data: Record<string, unknown>[] };
@@ -134,7 +143,7 @@ describe("GasSponsor client", () => {
     expect(callId).toBe("call-1"); expect(hash).toBe(vectors.userOpHash);
     const request = (seen[0]!.params[0] as { from: string; chainId: string; calls: unknown[]; capabilities: unknown });
     expect(request.from).toBe(vectors.address); expect(request.chainId).toBe("0x7a69"); expect(request.calls).toHaveLength(2);
-    expect(request.capabilities).toEqual({ eip7702Auth: true });
+    expect(request.capabilities).toEqual({ eip7702Auth: true });  // a proxy applies its own policy
     const sent = seen[1]!.params[0] as { type: string; data: { signature: { data: string } }[] };
     expect(sent.data[1]!.signature.data).toBe(vectors.userOpSignature);
     await expect(sponsor.awaitInclusion("call-1")).resolves.toBe("ab".repeat(32));
@@ -147,6 +156,26 @@ describe("GasSponsor client", () => {
     await expect(sponsor.awaitInclusion("call-2")).rejects.toThrow("status 500");
     const delegated = new EvmRpc("http://rpc.test/", fakeFetch((method) => (method === "eth_getCode" ? "0xef0100" + vectors.delegate.slice(2) : rpcAnswers[method])));
     await expect(sponsor.delegationNonce(delegated, vectors.address)).resolves.toBeNull();
+  });
+  test("sends the configured Alchemy policy and prefers the current send result id", async () => {
+    let capabilities: unknown;
+    const policyId = "0b1e8f2a-3c4d-4e5f-8a9b-0c1d2e3f4a5b";
+    const sponsor = new GasSponsor({ ...config, policyId }, fakeFetch((method, params) => {
+      if (method === "wallet_prepareCalls") { capabilities = (params[0] as { capabilities: unknown }).capabilities; return prepared(); }
+      if (method === "wallet_sendPreparedCalls") return { id: "call-new", preparedCallIds: ["call-old"] };
+      return new Error("unexpected");
+    }));
+    await expect(sponsor.submit(rpc, secret, vectors.calls)).resolves.toMatchObject({ callId: "call-new" });
+    expect(capabilities).toEqual({ eip7702Auth: true, paymasterService: { policyId } });
+  });
+  test("failed preconfirmations fail, preconfirmed keeps waiting for 200", async () => {
+    for (const status of [115, 116, 400, 600]) {
+      const sponsor = new GasSponsor(config, fakeFetch(() => ({ status, receipts: [{ transactionHash: `0x${"ab".repeat(32)}` }] })));
+      await expect(sponsor.status("call")).resolves.toEqual({ state: "failed", status });
+    }
+    for (const status of [100, 110]) {
+      await expect(new GasSponsor(config, fakeFetch(() => ({ status }))).status("call")).resolves.toEqual({ state: "pending" });
+    }
   });
   test("pending status keeps polling until the deadline", async () => {
     const sponsor = new GasSponsor(config, fakeFetch(() => ({ status: 100 })));

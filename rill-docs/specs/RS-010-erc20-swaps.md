@@ -266,7 +266,12 @@ an Alchemy-compatible sponsor API (`wallet_prepareCalls`,
 untrusted: the client recomputes the EIP-7702 authorization digest and the
 EntryPoint user operation hash from calldata it built itself, requires the
 pinned chain, delegate, EntryPoint, and live nonces, and signs nothing
-opaque. The staging account never holds native coin. The sponsor learns the
+opaque. It refuses a prepared operation that is not paid for (no paymaster
+and nonzero fees, or a `feePayment` that is not `sponsored`), so a token
+paymaster can never charge the payout. With Alchemy's Wallet API the client
+names the operator's gas policy as `paymasterService.policyId`. Calls are
+complete only at status 200; 115 and 116 (failed preconfirmations) and 4xx
+to 6xx are failures. The staging account never holds native coin. The sponsor learns the
 preimage and the destination; the client records its exposure marker before
 the first request that carries the preimage. A container holding
 `claim_key` can repeat the sponsored claim without a wallet.

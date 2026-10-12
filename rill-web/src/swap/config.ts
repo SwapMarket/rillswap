@@ -20,12 +20,16 @@ export interface EvmSponsorDefaults {
   readonly entryPoint: string;
   /** The only EIP-7702 delegate the browser-held claim key may authorize. */
   readonly delegate: string;
+  /** Alchemy gas policy id sent as `paymasterService.policyId`; absent for a proxy that applies its own. */
+  readonly policyId?: string;
 }
 
 const EVM_ADDRESS = /^0x[0-9a-f]{40}$/;
-export function validateEvmSponsor(url: string, entryPoint: string, delegate: string, network: NetworkName): EvmSponsorDefaults {
+const POLICY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export function validateEvmSponsor(url: string, entryPoint: string, delegate: string, network: NetworkName, policyId = ""): EvmSponsorDefaults {
   if (!EVM_ADDRESS.test(entryPoint) || !EVM_ADDRESS.test(delegate)) throw new Error("EntryPoint and delegate must be lowercase 0x addresses");
-  return { url: validateMempoolApi(url, network), entryPoint, delegate };
+  if (policyId !== "" && !POLICY_ID.test(policyId)) throw new Error("Gas sponsor policy id must be a UUID");
+  return { url: validateMempoolApi(url, network), entryPoint, delegate, ...(policyId !== "" ? { policyId: policyId.toLowerCase() } : {}) };
 }
 
 export const MAX_RELAYS = 4;
@@ -90,9 +94,13 @@ export function resolveSwapDefaults(env: Record<string, string | undefined>): Sw
 
 function sponsorDefaults(env: Record<string, string | undefined>, name: NetworkName): { evmSponsor?: EvmSponsorDefaults } {
   const values = [env.VITE_RILLSWAP_EVM_SPONSOR, env.VITE_RILLSWAP_EVM_ENTRY_POINT, env.VITE_RILLSWAP_EVM_7702_DELEGATE];
-  if (values.every((value) => value === undefined)) return {};
+  const policy = env.VITE_RILLSWAP_EVM_SPONSOR_POLICY;
+  if (values.every((value) => value === undefined)) {
+    if (policy !== undefined) throw new Error("VITE_RILLSWAP_EVM_SPONSOR_POLICY needs VITE_RILLSWAP_EVM_SPONSOR");
+    return {};
+  }
   if (values.some((value) => value === undefined)) throw new Error("Set VITE_RILLSWAP_EVM_SPONSOR, VITE_RILLSWAP_EVM_ENTRY_POINT, and VITE_RILLSWAP_EVM_7702_DELEGATE together");
-  return { evmSponsor: validateEvmSponsor(values[0]!, values[1]!.toLowerCase(), values[2]!.toLowerCase(), name) };
+  return { evmSponsor: validateEvmSponsor(values[0]!, values[1]!.toLowerCase(), values[2]!.toLowerCase(), name, policy ?? "") };
 }
 
 export const relaysForNetwork = (network: NetworkName, deployment?: SwapDefaults): readonly string[] =>
