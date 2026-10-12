@@ -31,6 +31,7 @@ const output = "// Generated from vendored RS-005 schemas. Run `bun run check:sc
   standaloneCode(ajv, {
     validateAdvertisement: advertisementSchema.$id,
     validateNetwork: networkId,
+    validateEvmAssetIdentity: `${commonSchema.$id}#/$defs/evmAssetIdentity`,
   });
 const path = resolve(import.meta.dir, "../src/generated/manualAdvertisementValidators.js");
 

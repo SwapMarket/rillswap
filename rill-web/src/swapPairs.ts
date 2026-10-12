@@ -4,7 +4,7 @@
  * future asset (for example a stablecoin) changes this table, not the form.
  */
 export type AssetId = "btc" | "ln" | "usdt" | "usdc";
-export type ProfileId = "btc-to-ln/v1" | "ln-to-btc/v1";
+export type ProfileId = "btc-to-ln/v1" | "ln-to-btc/v1" | "erc20-to-ln/v1" | "ln-to-erc20/v1";
 
 export interface Asset {
   readonly id: AssetId;
@@ -35,6 +35,10 @@ export interface Route {
 const PROFILES: Partial<Record<`${AssetId}>${AssetId}`, ProfileId>> = {
   "btc>ln": "btc-to-ln/v1",
   "ln>btc": "ln-to-btc/v1",
+  "usdc>ln": "erc20-to-ln/v1",
+  "usdt>ln": "erc20-to-ln/v1",
+  "ln>usdc": "ln-to-erc20/v1",
+  "ln>usdt": "ln-to-erc20/v1",
 };
 
 /** Profiles whose browser quote flow exists in this build. */

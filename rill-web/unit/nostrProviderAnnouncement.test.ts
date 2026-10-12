@@ -14,6 +14,7 @@ import {
 } from "../src/nostrProviderAnnouncement";
 import application from "./fixtures/manual-advertisement-regtest-v1.json";
 import vector from "./fixtures/nostr-announcement-regtest-v1.json";
+import type { ProfileId } from "../src/swapPairs";
 
 const SECRET = Uint8Array.from({ length: 32 }, (_, i) => i === 31 ? 2 : 0);
 const PUBLIC = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
@@ -43,10 +44,10 @@ function fixtureEvent(): {
   };
 }
 
-function accept(raw: string, identity = PUBLIC, network: unknown = NETWORK) {
+function accept(raw: string, identity = PUBLIC, network: unknown = NETWORK, profile: ProfileId = "btc-to-ln/v1") {
   const clock = spyOn(Date, "now").mockReturnValue(1703021600 * 1000);
   try {
-    return verifyNostrProviderAnnouncement(raw, identity, network, "btc-to-ln/v1");
+    return verifyNostrProviderAnnouncement(raw, identity, network, profile);
   } finally {
     clock.mockRestore();
   }
@@ -101,6 +102,43 @@ describe("private-regtest NIP-01 signed announcement", () => {
         .toThrow(AnnouncementRefusedError);
     },
   );
+
+  const asset = {
+    family: "evm" as const, chain_id: 31337, name: "anvil-dev", htlc_contract: `0x${"1a".repeat(20)}`, htlc_version: 6 as const,
+    token_contract: `0x${"2b".repeat(20)}`, token_symbol: "fUSDC", token_decimals: 6, block_seconds: 2, deployment_namespace: "dev",
+  };
+
+  test("admits the signed RS-010 asset list and exposes it to EVM profiles only", () => {
+    const wrapper = structuredClone(application);
+    wrapper.advertisement.profiles = ["btc-to-ln/v1", "erc20-to-ln/v1"];
+    (wrapper.advertisement.extensions as Record<string, unknown>)["rillswap/evm-assets-v1"] = [asset];
+    reSignApplication(wrapper);
+    const event = reSign({ ...fixtureEvent(), content: jcs(wrapper) });
+    expect(accept(JSON.stringify(event)).evmAssets).toEqual([asset]);
+    const evm = accept(JSON.stringify(event), PUBLIC, NETWORK, "erc20-to-ln/v1");
+    expect(evm.profileId).toBe("erc20-to-ln/v1");
+    expect(evm.evmAssets[0]!.token_symbol).toBe("fUSDC");
+    expect(accept(JSON.stringify(fixtureEvent())).evmAssets).toEqual([]);
+  });
+
+  test.each([
+    [[]], [null], [{ ...asset, htlc_version: 5 }], [[{ ...asset, htlc_contract: `0x${"1A".repeat(20)}` }]],
+    [[asset, asset]], [[{ ...asset, extra: 1 }]], [Array.from({ length: 17 }, () => asset)],
+  ])("refuses a malformed signed asset list %j", (listed) => {
+    const wrapper = structuredClone(application);
+    (wrapper.advertisement.extensions as Record<string, unknown>)["rillswap/evm-assets-v1"] = listed;
+    reSignApplication(wrapper);
+    expect(() => accept(JSON.stringify(reSign({ ...fixtureEvent(), content: jcs(wrapper) }))))
+      .toThrow(AnnouncementRefusedError);
+  });
+
+  test("an EVM profile without any served asset is refused", () => {
+    const wrapper = structuredClone(application);
+    wrapper.advertisement.profiles = ["ln-to-erc20/v1"];
+    reSignApplication(wrapper);
+    const event = JSON.stringify(reSign({ ...fixtureEvent(), content: jcs(wrapper) }));
+    expect(() => accept(event, PUBLIC, NETWORK, "ln-to-erc20/v1")).toThrow(AnnouncementRefusedError);
+  });
 
   test("known handshake requirement does not authorize unrelated signed extensions", () => {
     const wrapper = structuredClone(application);

@@ -109,11 +109,12 @@ export interface DirectoryEntry {
   readonly profiles: readonly AnnouncementProfile[];
   readonly amountBands: AnnouncementCandidate["amountBands"];
   readonly indicativeFeePolicy: AnnouncementCandidate["indicativeFeePolicy"];
+  readonly evmAssets: AnnouncementCandidate["evmAssets"];
   readonly relayUrls: readonly string[];
   readonly expiresAt: number;
 }
 
-export const DIRECTORY_PROFILES: readonly AnnouncementProfile[] = ["btc-to-ln/v1", "ln-to-btc/v1"];
+export const DIRECTORY_PROFILES: readonly AnnouncementProfile[] = ["btc-to-ln/v1", "ln-to-btc/v1", "erc20-to-ln/v1", "ln-to-erc20/v1"];
 
 /** Fee a provider announces for `amount`, before any firm quote. */
 export function indicativeFee(policy: AnnouncementCandidate["indicativeFeePolicy"], amount: bigint): bigint {
@@ -138,7 +139,7 @@ export function directoryFromObservations(observations: readonly RelayObservatio
       entries.set(key, previous
         ? { ...previous, profiles: [...previous.profiles, profile], relayUrls: [...new Set([...previous.relayUrls, ...relayUrls])] }
         : { identity: announcement.identityXOnlyKey, slot: announcement.slot, profiles: [profile], amountBands: announcement.amountBands,
-          indicativeFeePolicy: announcement.indicativeFeePolicy, relayUrls, expiresAt: announcement.expiresAt });
+          indicativeFeePolicy: announcement.indicativeFeePolicy, evmAssets: announcement.evmAssets, relayUrls, expiresAt: announcement.expiresAt });
     }
   }
   return { entries: [...entries.values()].sort((a, b) => `${a.identity}:${a.slot}`.localeCompare(`${b.identity}:${b.slot}`)), warnings: [...warnings] };

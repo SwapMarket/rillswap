@@ -4,22 +4,32 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import canonicalize from "canonicalize";
 import { verifyEvent, type NostrEvent } from "nostr-tools";
 
-import { verifyManualProviderAdvertisement, type ManualProviderCandidate } from "./manualProviderAdvertisement";
+import { EVM_ASSETS_EXTENSION, verifyManualProviderAdvertisement, type ManualProviderCandidate } from "./manualProviderAdvertisement";
 import { parseStrictEventJson } from "./strictEventJson";
+import type { ProfileId } from "./swapPairs";
 
 const HEX32 = /^[0-9a-f]{64}$/;
 const HEX64 = /^[0-9a-f]{128}$/;
 const encoder = new TextEncoder();
 const HANDSHAKE_REQUIREMENTS = "rillswap/handshake-required-features";
 
+/**
+ * Only the epoch-binding requirement and the RS-010 asset list are understood;
+ * any other extension key refuses the announcement. The asset list's contents
+ * are validated by the manual advertisement verifier.
+ */
 function supportedExtensions(value: unknown): boolean {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const extensions = value as Record<string, unknown>;
-  const keys = Object.keys(extensions);
-  if (keys.length === 0) return true;
-  const required = extensions[HANDSHAKE_REQUIREMENTS];
-  return keys.length === 1 && keys[0] === HANDSHAKE_REQUIREMENTS &&
-    Array.isArray(required) && required.length === 1 && required[0] === "epoch-bound-session/v1";
+  for (const key of Object.keys(extensions)) {
+    if (key === EVM_ASSETS_EXTENSION) continue;
+    const required = extensions[HANDSHAKE_REQUIREMENTS];
+    if (key !== HANDSHAKE_REQUIREMENTS ||
+        !Array.isArray(required) || required.length !== 1 || required[0] !== "epoch-bound-session/v1") {
+      return false;
+    }
+  }
+  return true;
 }
 
 export interface AnnouncementCandidate extends Omit<ManualProviderCandidate, "source"> {
@@ -51,7 +61,7 @@ export function verifyNostrProviderAnnouncement(
   rawEventJson: string,
   approvedIdentityXOnlyKey: string,
   independentlySelectedNetwork: unknown,
-  independentlySelectedProfile: "btc-to-ln/v1" | "ln-to-btc/v1",
+  independentlySelectedProfile: ProfileId,
 ): AnnouncementCandidate {
   try {
     const raw = parseStrictEventJson(rawEventJson);
@@ -128,7 +138,7 @@ export function verifyNostrProviderAnnouncement(
       outerEventId: event.id,
       addressD: addressTag[1],
       // supportedExtensions admits only the exact epoch-binding requirement.
-      requiresEpochBinding: Object.keys(advertisement.extensions as object).length > 0,
+      requiresEpochBinding: Object.hasOwn(advertisement.extensions as object, HANDSHAKE_REQUIREMENTS),
     });
   } catch {
     throw new AnnouncementRefusedError();

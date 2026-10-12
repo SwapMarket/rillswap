@@ -4,13 +4,15 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { hexToBytes } from "@noble/hashes/utils.js";
 import canonicalize from "canonicalize";
 
-import { validateAdvertisement, validateNetwork } from "./generated/manualAdvertisementValidators.js";
+import { validateAdvertisement, validateEvmAssetIdentity, validateNetwork } from "./generated/manualAdvertisementValidators.js";
+import type { ProfileId } from "./swapPairs";
 
 const MAX_MANUAL_ADVERTISEMENT_BYTES = 64 * 1024;
 const MAX_FUTURE_SECONDS = 300; // Local input policy, not a Nostr wire requirement.
 const MAX_SATOSHIS = 2_100_000_000_000_000n;
 const XONLY_HEX = /^[0-9a-f]{64}$/;
 const SUITE = "nostr-nip44v2-nip59/v1";
+const PROFILES: ReadonlySet<unknown> = new Set(["btc-to-ln/v1", "ln-to-btc/v1", "erc20-to-ln/v1", "ln-to-erc20/v1"]);
 const encoder = new TextEncoder();
 
 interface SignedAdvertisement {
@@ -29,8 +31,39 @@ interface SignedAdvertisement {
     revision: number;
     created_at: number;
     expires_at: number;
+    extensions: Record<string, unknown>;
   };
   signature: string;
+}
+
+/** RS-010 advertisement extension listing the ERC20 assets a provider serves. */
+export const EVM_ASSETS_EXTENSION = "rillswap/evm-assets-v1";
+const MAX_EVM_ASSETS = 16;
+
+export interface EvmAssetIdentity {
+  readonly family: "evm";
+  readonly chain_id: number;
+  readonly name: string;
+  readonly htlc_contract: string;
+  readonly htlc_version: 6;
+  readonly token_contract: string;
+  readonly token_symbol: string;
+  readonly token_decimals: number;
+  readonly block_seconds: number;
+  readonly deployment_namespace: string | null;
+}
+
+/** The validated assets of the RS-010 extension, or null when it is absent or malformed. */
+export function evmAssetsOf(extensions: Record<string, unknown>): readonly EvmAssetIdentity[] | null {
+  if (!Object.hasOwn(extensions, EVM_ASSETS_EXTENSION)) return [];
+  const listed = extensions[EVM_ASSETS_EXTENSION];
+  if (!Array.isArray(listed) || listed.length === 0 || listed.length > MAX_EVM_ASSETS ||
+      !listed.every((asset) => validateEvmAssetIdentity(asset))) {
+    return null;
+  }
+  const assets = listed as EvmAssetIdentity[];
+  const keys = new Set(assets.map((asset) => `${asset.chain_id}:${asset.token_contract}`));
+  return keys.size === assets.length ? assets.map((asset) => Object.freeze({ ...asset })) : null;
 }
 
 /** Only a historical authenticated offer, not a live endpoint or session. */
@@ -38,7 +71,7 @@ export interface ManualProviderCandidate {
   readonly source: "manual-app-signature-only";
   readonly identityXOnlyKey: string;
   readonly networkIdentityJcs: string;
-  readonly profileId: "btc-to-ln/v1" | "ln-to-btc/v1";
+  readonly profileId: ProfileId;
   readonly slot: string;
   readonly revision: number;
   readonly expiresAt: number;
@@ -48,6 +81,8 @@ export interface ManualProviderCandidate {
   readonly advertisementJcs: string;
   readonly amountBands: readonly Readonly<{ minimum_sat: string; maximum_sat: string }>[];
   readonly indicativeFeePolicy: Readonly<{ base_sat: string; proportional_millionths: number }>;
+  /** RS-010 assets served, empty for Bitcoin-only providers. */
+  readonly evmAssets: readonly EvmAssetIdentity[];
 }
 
 export class ManualAdvertisementRefusedError extends Error {
@@ -77,7 +112,7 @@ export function verifyManualProviderAdvertisement(
   rawCanonicalJson: string,
   approvedIdentityXOnlyKey: string,
   independentlySelectedNetwork: unknown,
-  independentlySelectedProfile: "btc-to-ln/v1" | "ln-to-btc/v1",
+  independentlySelectedProfile: ProfileId,
 ): ManualProviderCandidate {
   try {
     if (typeof rawCanonicalJson !== "string" ||
@@ -86,7 +121,7 @@ export function verifyManualProviderAdvertisement(
         typeof approvedIdentityXOnlyKey !== "string" ||
         !XONLY_HEX.test(approvedIdentityXOnlyKey) ||
         !validateNetwork(independentlySelectedNetwork) ||
-        !["btc-to-ln/v1", "ln-to-btc/v1"].includes(independentlySelectedProfile)) {
+        !PROFILES.has(independentlySelectedProfile)) {
       throw new ManualAdvertisementRefusedError();
     }
     const document: unknown = JSON.parse(rawCanonicalJson);
@@ -99,7 +134,9 @@ export function verifyManualProviderAdvertisement(
     }
     const { advertisement: ad, signature } = document as unknown as SignedAdvertisement;
     const networkJcs = canonicalize(independentlySelectedNetwork);
-    if (networkJcs === undefined ||
+    const evmAssets = evmAssetsOf(ad.extensions);
+    if (networkJcs === undefined || evmAssets === null ||
+        (independentlySelectedProfile.includes("erc20") && evmAssets.length === 0) ||
         ad.provider_identity_xonly_key !== approvedIdentityXOnlyKey ||
         !ad.network_identities.some((candidate) => canonicalize(candidate) === networkJcs) ||
         !ad.profiles.includes(independentlySelectedProfile) ||
@@ -144,6 +181,7 @@ export function verifyManualProviderAdvertisement(
       advertisementJcs: canonicalize(ad)!,
       amountBands: Object.freeze(ad.amount_bands.map((band) => Object.freeze({ ...band }))),
       indicativeFeePolicy: Object.freeze({ ...ad.indicative_fee_policy }),
+      evmAssets: Object.freeze(evmAssets),
     });
   } catch {
     // Do not leak untrusted input, signature details, or endpoint strings.
