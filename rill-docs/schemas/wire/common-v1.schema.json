@@ -150,6 +150,30 @@
         "pattern": "^[a-z0-9][a-z0-9.-]{0,62}/[a-z0-9][a-z0-9._-]{0,62}$"
       }
     },
+    "evmAddress": { "type": "string", "pattern": "^0x[0-9a-f]{40}$" },
+    "decimalTokenUnits": { "type": "string", "pattern": "^(0|[1-9][0-9]{0,38})$" },
+    "positiveTokenUnits": { "type": "string", "pattern": "^[1-9][0-9]{0,38}$" },
+    "evmAssetIdentity": {
+      "description": "RS-010 chain, HTLC deployment, and token identity of one ERC20 asset. Addresses are lowercase hex.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "chain_id", "name", "htlc_contract", "htlc_version", "token_contract", "token_symbol", "token_decimals", "block_seconds", "deployment_namespace"],
+      "properties": {
+        "family": { "const": "evm" },
+        "chain_id": { "$ref": "#/$defs/positiveCount" },
+        "name": { "$ref": "#/$defs/identifier" },
+        "htlc_contract": { "$ref": "#/$defs/evmAddress" },
+        "htlc_version": { "const": 6 },
+        "token_contract": { "$ref": "#/$defs/evmAddress" },
+        "token_symbol": { "type": "string", "pattern": "^[\\x21-\\x7e]{1,16}$" },
+        "token_decimals": { "type": "integer", "minimum": 0, "maximum": 36 },
+        "block_seconds": { "$ref": "#/$defs/positiveCount" },
+        "deployment_namespace": { "oneOf": [{ "$ref": "#/$defs/identifier" }, { "type": "null" }] }
+      },
+      "allOf": [
+        { "if": { "properties": { "chain_id": { "const": 31337 } } }, "then": { "properties": { "deployment_namespace": { "$ref": "#/$defs/identifier" } } } }
+      ]
+    },
     "featureList": {
       "type": "array",
       "maxItems": 64,

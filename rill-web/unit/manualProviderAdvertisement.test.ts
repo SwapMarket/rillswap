@@ -30,10 +30,10 @@ const OTHER_MAILBOX = Buffer.from(schnorr.getPublicKey(
 test("vendored discovery schema and signed fixture match reviewed docs hashes", () => {
   const sources = [
     ["schemas/wire/common-v1.schema.json", "src/schemas/wire/common-v1.schema.json",
-      "5a30f9f2d5b2d1372338ed8ca75fb0eb577e16c0048bf2df36493c0942eaf9dd"],
+      "0780c9d5a615b3b547793e9a11972da1b1b27a8e88d7f2d5608a20f357d35599"],
     ["schemas/advertisements/advertisement-v1.schema.json",
       "src/schemas/advertisements/advertisement-v1.schema.json",
-      "3ad82b2b17333213a7e5f7333005cbb51211399abaf84e0938775c3ca1bdc4de"],
+      "ce0a4724dccf5ac961eb7008f58e970bf750b0c49c3f7733edf205843beb785b"],
     ["vectors/discovery/manual-advertisement-regtest-v1.json",
       "unit/fixtures/manual-advertisement-regtest-v1.json",
       "9a76830053da440eeb86280f7f633d5697226e3f4f47c8e08255d6535e8a9e10"],

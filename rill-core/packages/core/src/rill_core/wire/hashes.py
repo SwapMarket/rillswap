@@ -17,6 +17,7 @@ if TYPE_CHECKING:
         ClientAcceptance,
         ContractTerms,
         Envelope,
+        EvmContractTerms,
         FundingBinding,
         HandshakeAccept,
         HandshakeInit,
@@ -45,7 +46,7 @@ def canonical_model(model: BaseModel, *, exclude: set[str] | None = None) -> byt
     return canonicalize(cast("JsonValue", value))
 
 
-def contract_hash(terms: ContractTerms) -> bytes:
+def contract_hash(terms: ContractTerms | EvmContractTerms) -> bytes:
     """Hash complete contract terms with the version-one domain."""
     return tagged_hash("RillSwap/contract/v1", canonical_model(terms))
 

@@ -58,7 +58,7 @@
           "maxItems": 8,
           "uniqueItems": true,
           "items": {
-            "enum": ["btc-to-ln/v1", "ln-to-btc/v1"]
+            "enum": ["btc-to-ln/v1", "ln-to-btc/v1", "erc20-to-ln/v1", "ln-to-erc20/v1"]
           }
         },
         "amount_bands": {

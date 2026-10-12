@@ -9,6 +9,7 @@ import advertisementSchema from "../src/schemas/advertisements/advertisement-v1.
 import commonSchema from "../src/schemas/wire/common-v1.schema.json";
 import contractTermsSchema from "../src/schemas/wire/contract-terms-v1.schema.json";
 import envelopeSchema from "../src/schemas/wire/envelope-v1.schema.json";
+import evmContractTermsSchema from "../src/schemas/wire/evm-contract-terms-v1.schema.json";
 import fundingBindingSchema from "../src/schemas/wire/funding-binding-v1.schema.json";
 import handshakeSchema from "../src/schemas/wire/handshake-v1.schema.json";
 import quoteSchema from "../src/schemas/wire/quote-v1.schema.json";
@@ -39,6 +40,7 @@ for (const schema of [
   commonSchema,
   contractTermsSchema,
   envelopeSchema,
+  evmContractTermsSchema,
   fundingBindingSchema,
   handshakeSchema,
   quoteSchema,

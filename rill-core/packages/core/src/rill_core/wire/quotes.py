@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from pydantic import Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 from rill_core.wire.canonical import JsonValue, canonicalize, parse_json_strict
-from rill_core.wire.messages import BtcToLnEconomics, InvoiceBinding, ProviderTerms
+from rill_core.wire.messages import BtcToLnEconomics, ContractTerms, InvoiceBinding, ProviderTerms
 from rill_core.wire.types import (
     CompressedKey,
     ExactInteger,
@@ -113,21 +113,25 @@ class FirmQuoteRequest(StrictModel):
 
 QuoteRequest = IndicativeQuoteRequest | FirmQuoteRequest
 if TYPE_CHECKING:
+    from rill_core.wire.evm_quotes import EvmQuoteRequest
     from rill_core.wire.reverse_quotes import (
         ReverseFirmQuoteRequest,
         ReverseIndicativeQuoteRequest,
     )
 
-    AnyQuoteRequest = QuoteRequest | ReverseIndicativeQuoteRequest | ReverseFirmQuoteRequest
+    AnyQuoteRequest = (
+        QuoteRequest | ReverseIndicativeQuoteRequest | ReverseFirmQuoteRequest | EvmQuoteRequest
+    )
 
 
 def parse_quote_request(document: bytes) -> AnyQuoteRequest:
     """Strictly parse a ``QuoteRequestV1`` payload, dispatching on ``kind`` and ``mode``.
 
-    Returns an RS-003 request for ``btc-to-ln`` and an RS-004 request
-    (``rill_core.wire.reverse_quotes``) for ``ln-to-btc``.
+    Returns an RS-003 request for ``btc-to-ln``, an RS-004 request
+    (``rill_core.wire.reverse_quotes``) for ``ln-to-btc``, and an RS-010 request
+    (``rill_core.wire.evm_quotes``) for the ERC20 kinds.
     """
-    from rill_core.wire import reverse_quotes  # noqa: PLC0415 - reverse imports this module
+    from rill_core.wire import evm_quotes, reverse_quotes  # noqa: PLC0415 - they import this module
 
     parsed = parse_json_strict(document)
     kind = parsed.get("kind") if isinstance(parsed, dict) else None
@@ -137,6 +141,10 @@ def parse_quote_request(document: bytes) -> AnyQuoteRequest:
         ("btc-to-ln", "firm"): FirmQuoteRequest,
         ("ln-to-btc", "indicative"): reverse_quotes.ReverseIndicativeQuoteRequest,
         ("ln-to-btc", "firm"): reverse_quotes.ReverseFirmQuoteRequest,
+        ("erc20-to-ln", "indicative"): evm_quotes.Erc20IndicativeQuoteRequest,
+        ("erc20-to-ln", "firm"): evm_quotes.Erc20FirmQuoteRequest,
+        ("ln-to-erc20", "indicative"): evm_quotes.LnToErc20IndicativeQuoteRequest,
+        ("ln-to-erc20", "firm"): evm_quotes.LnToErc20FirmQuoteRequest,
     }
     model = models.get((kind, mode))
     if model is None:
@@ -195,11 +203,11 @@ class TermsOfferPayload(StrictModel):
     @model_validator(mode="after")
     def validate_hold_invoice(self) -> TermsOfferPayload:
         """Require the hold invoice for LN to BTC and forbid it otherwise."""
-        reverse = self.terms.contract_terms.profile_id == "ln-to-btc/v1"
+        reverse = self.terms.contract_terms.profile_id in {"ln-to-btc/v1", "ln-to-erc20/v1"}
         if reverse and self.hold_invoice is None:
-            raise ValueError("LN to BTC terms offer requires a hold invoice")
+            raise ValueError("LN to BTC or LN to ERC20 terms offer requires a hold invoice")
         if not reverse and self.hold_invoice is not None:
-            raise ValueError("BTC to LN terms offer carries no hold invoice")
+            raise ValueError("BTC to LN or ERC20 to LN terms offer carries no hold invoice")
         if self.hold_invoice is not None and (
             len(self.hold_invoice) > MAX_INVOICE_CHARS or not _INVOICE.fullmatch(self.hold_invoice)
         ):
@@ -234,6 +242,8 @@ def check_terms_offer(
     Signature verification is separate (``provider_terms_signature``).
     """
     terms = offer.terms.contract_terms
+    if not isinstance(terms, ContractTerms):
+        raise ValueError("terms offer does not carry BTC to LN contract terms")  # noqa: TRY004
     economics = terms.economics
     limits = request.limits
     checks = (

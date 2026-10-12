@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import Field, model_validator
 
 from rill_core.wire.canonical import JsonValue  # noqa: TC001 - pydantic resolves at runtime
-from rill_core.wire.messages import InvoiceBinding, LnToBtcEconomics, LnToBtcTiming
+from rill_core.wire.messages import ContractTerms, InvoiceBinding, LnToBtcEconomics, LnToBtcTiming
 from rill_core.wire.types import (
     CompressedKey,
     ExactInteger,
@@ -137,6 +137,8 @@ def check_reverse_terms_offer(
     what commits it. Signature verification is separate.
     """
     terms = offer.terms.contract_terms
+    if not isinstance(terms, ContractTerms):
+        raise ValueError("terms offer does not carry LN to BTC contract terms")  # noqa: TRY004
     economics = terms.economics
     timing = terms.timing_policy
     limits = request.limits

@@ -39,7 +39,7 @@
           "const": "1"
         },
         "profile_id": {
-          "enum": ["btc-to-ln/v1", "ln-to-btc/v1"]
+          "enum": ["btc-to-ln/v1", "ln-to-btc/v1", "erc20-to-ln/v1", "ln-to-erc20/v1"]
         },
         "network_identity": {
           "$ref": "common-v1.schema.json#/$defs/networkIdentity"
@@ -102,7 +102,7 @@
           "const": "1"
         },
         "profile_id": {
-          "enum": ["btc-to-ln/v1", "ln-to-btc/v1"]
+          "enum": ["btc-to-ln/v1", "ln-to-btc/v1", "erc20-to-ln/v1", "ln-to-erc20/v1"]
         },
         "network_identity": {
           "$ref": "common-v1.schema.json#/$defs/networkIdentity"

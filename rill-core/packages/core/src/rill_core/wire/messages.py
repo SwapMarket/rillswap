@@ -17,13 +17,19 @@ from rill_core.wire.hashes import (
     handshake_init_hash,
 )
 from rill_core.wire.types import (
+    BitcoinProfileId,
     CompressedKey,
+    DecimalTokenUnits,
+    EvmAddress,
+    EvmAssetIdentity,
+    EvmProfileId,
     ExactInteger,
     Hex32,
     Identifier,
     NetworkIdentity,
     Party,
     PositiveCount,
+    PositiveTokenUnits,
     ProfileId,
     ScriptHex,
     Signature64,
@@ -36,6 +42,7 @@ from rill_core.wire.types import (
     validate_decimal_msats,
     validate_decimal_sats,
     validate_extensions,
+    validate_token_units,
 )
 
 MAX_PAYLOAD_MEMBERS = 128
@@ -171,7 +178,7 @@ class ContractTerms(StrictModel):
 
     protocol: Literal["rillswap"]
     contract_version: Literal["1"]
-    profile_id: ProfileId
+    profile_id: BitcoinProfileId
     network_identity: NetworkIdentity
     provider_identity_key: XOnlyKey
     client_contract_compressed_key: CompressedKey
@@ -289,11 +296,203 @@ class ContractTerms(StrictModel):
             raise ValueError("nonzero prepayment requires the named extension")
 
 
+SATS_PER_BTC = 100_000_000
+BITCOIN_BLOCK_SECONDS = 600
+
+
+def ceil_div(numerator: int, denominator: int) -> int:
+    """Integer ceiling division for RS-010 rate conversions."""
+    return -(-numerator // denominator)
+
+
+class Erc20ToLnEconomics(StrictModel):
+    """ERC20 to LN amount commitments (RS-010)."""
+
+    kind: Literal["erc20-to-ln"]
+    lightning_principal_sat: str
+    rate_token_base_per_btc: PositiveTokenUnits
+    success_fee_token_base: DecimalTokenUnits
+    lock_amount_token_base: PositiveTokenUnits
+
+    @model_validator(mode="after")
+    def validate_equation(self) -> Erc20ToLnEconomics:
+        """Require lock = ceil(L * rate / 1e8) + S."""
+        principal = validate_decimal_sats(
+            self.lightning_principal_sat, field="lightning_principal_sat", positive=True
+        )
+        rate = validate_token_units(self.rate_token_base_per_btc, field="rate_token_base_per_btc")
+        fee = validate_token_units(self.success_fee_token_base, field="success_fee_token_base")
+        lock = validate_token_units(
+            self.lock_amount_token_base, field="lock_amount_token_base", positive=True
+        )
+        if ceil_div(principal * rate, SATS_PER_BTC) + fee != lock:
+            raise ValueError("ERC20 to LN economics must satisfy lock = ceil(L * rate / 1e8) + S")
+        return self
+
+
+class LnToErc20Economics(StrictModel):
+    """LN to ERC20 amount commitments (RS-010)."""
+
+    kind: Literal["ln-to-erc20"]
+    payout_token_base: PositiveTokenUnits
+    rate_token_base_per_btc: PositiveTokenUnits
+    payout_sat_equivalent: str
+    success_fee_sat: str
+    hold_invoice_sat: str
+
+    @model_validator(mode="after")
+    def validate_equations(self) -> LnToErc20Economics:
+        """Require E = ceil(D * 1e8 / rate) and H = E + S."""
+        payout = validate_token_units(
+            self.payout_token_base, field="payout_token_base", positive=True
+        )
+        rate = validate_token_units(self.rate_token_base_per_btc, field="rate_token_base_per_btc")
+        equivalent = validate_decimal_sats(
+            self.payout_sat_equivalent, field="payout_sat_equivalent", positive=True
+        )
+        fee = validate_decimal_sats(self.success_fee_sat, field="success_fee_sat")
+        hold = validate_decimal_sats(self.hold_invoice_sat, field="hold_invoice_sat", positive=True)
+        if ceil_div(payout * SATS_PER_BTC, rate) != equivalent:
+            raise ValueError("LN to ERC20 economics must satisfy E = ceil(D * 1e8 / rate)")
+        if equivalent + fee != hold:
+            raise ValueError("LN to ERC20 economics must satisfy H = E + S")
+        return self
+
+
+class Erc20ToLnTiming(StrictModel):
+    """Negotiated ERC20 to LN exposure margins (RS-010)."""
+
+    kind: Literal["erc20-to-ln"]
+    max_outgoing_htlc_expiry_height: ExactInteger
+    learn_and_claim_seconds: PositiveCount
+
+
+class LnToErc20Timing(StrictModel):
+    """Negotiated LN to ERC20 exposure margins (RS-010)."""
+
+    kind: Literal["ln-to-erc20"]
+    min_incoming_htlc_expiry_height: ExactInteger
+    refund_and_ln_resolution_seconds: PositiveCount
+
+
+class EvmContractTerms(StrictModel):
+    """Complete immutable commitment for the EVM HTLC profiles (RS-010)."""
+
+    protocol: Literal["rillswap"]
+    contract_version: Literal["1"]
+    profile_id: EvmProfileId
+    network_identity: NetworkIdentity
+    evm_asset: EvmAssetIdentity
+    provider_identity_key: XOnlyKey
+    client_evm_address: EvmAddress
+    provider_evm_address: EvmAddress
+    claimant: Party
+    refund_party: Party
+    invoice_binding: InvoiceBinding
+    economics: Erc20ToLnEconomics | LnToErc20Economics = Field(discriminator="kind")
+    htlc_timelock_block: PositiveCount
+    evm_reference_block: ExactInteger
+    btc_reference_height: ExactInteger
+    funding_confirmations: PositiveCount
+    settlement_confirmations: PositiveCount
+    recovery_authorization_xonly_key: XOnlyKey
+    terms_expiry: ExactInteger
+    timing_policy: Erc20ToLnTiming | LnToErc20Timing = Field(discriminator="kind")
+    required_features: tuple[Identifier, ...]
+    extensions: dict[str, JsonValue]
+
+    @property
+    def evm_blocks_until_timelock(self) -> int:
+        """Blocks between the reference block and the refund timelock."""
+        return self.htlc_timelock_block - self.evm_reference_block
+
+    @property
+    def htlc_claim_address(self) -> str:
+        """The HTLC ``claimAddress`` for these terms."""
+        return self.provider_evm_address if self.claimant == "provider" else self.client_evm_address
+
+    @property
+    def htlc_refund_address(self) -> str:
+        """The HTLC ``refundAddress`` for these terms."""
+        return (
+            self.client_evm_address if self.refund_party == "client" else self.provider_evm_address
+        )
+
+    @property
+    def htlc_amount_token_base(self) -> int:
+        """The exact locked token amount for these terms."""
+        if isinstance(self.economics, Erc20ToLnEconomics):
+            return int(self.economics.lock_amount_token_base)
+        return int(self.economics.payout_token_base)
+
+    @model_validator(mode="after")
+    def validate_contract(self) -> EvmContractTerms:
+        """Enforce profile roles, amounts, address separation, and cross-chain timing."""
+        require_feature_list(self.required_features, field="required_features")
+        validate_extensions(self.extensions)
+        if self.client_evm_address == self.provider_evm_address:
+            raise ValueError("client and provider EVM addresses must be distinct")
+        if self.provider_identity_key == self.recovery_authorization_xonly_key:
+            raise ValueError("keys assigned to distinct purposes must be distinct")
+        if self.htlc_timelock_block <= self.evm_reference_block:
+            raise ValueError("HTLC timelock must be after the EVM reference block")
+        invoice_msat = validate_decimal_msats(
+            self.invoice_binding.amount_msat, field="amount_msat", positive=True
+        )
+        evm_seconds = self.evm_blocks_until_timelock * self.evm_asset.block_seconds
+        if self.profile_id == "erc20-to-ln/v1":
+            self._validate_erc20_to_ln(invoice_msat, evm_seconds)
+        else:
+            self._validate_ln_to_erc20(invoice_msat, evm_seconds)
+        return self
+
+    def _validate_erc20_to_ln(self, invoice_msat: int, evm_seconds: int) -> None:
+        if not isinstance(self.economics, Erc20ToLnEconomics) or not isinstance(
+            self.timing_policy, Erc20ToLnTiming
+        ):
+            raise ValueError(  # noqa: TRY004
+                "ERC20 to LN terms contain the wrong discriminated objects",
+            )
+        if (self.claimant, self.refund_party) != ("provider", "client"):
+            raise ValueError("ERC20 to LN roles are reversed")
+        if invoice_msat != int(self.economics.lightning_principal_sat) * 1_000:
+            raise ValueError("invoice does not equal ERC20 to LN principal")
+        if self.timing_policy.max_outgoing_htlc_expiry_height < self.btc_reference_height:
+            raise ValueError("outgoing HTLC expiry precedes the Bitcoin reference height")
+        ln_seconds = (
+            self.timing_policy.max_outgoing_htlc_expiry_height - self.btc_reference_height
+        ) * BITCOIN_BLOCK_SECONDS + self.timing_policy.learn_and_claim_seconds
+        if ln_seconds >= evm_seconds:
+            raise ValueError("outgoing HTLC exposure does not fit before the EVM timelock")
+
+    def _validate_ln_to_erc20(self, invoice_msat: int, evm_seconds: int) -> None:
+        if not isinstance(self.economics, LnToErc20Economics) or not isinstance(
+            self.timing_policy, LnToErc20Timing
+        ):
+            raise ValueError(  # noqa: TRY004
+                "LN to ERC20 terms contain the wrong discriminated objects",
+            )
+        if (self.claimant, self.refund_party) != ("client", "provider"):
+            raise ValueError("LN to ERC20 roles are reversed")
+        if invoice_msat != int(self.economics.hold_invoice_sat) * 1_000:
+            raise ValueError("invoice does not equal LN to ERC20 held amount")
+        if self.timing_policy.min_incoming_htlc_expiry_height < self.btc_reference_height:
+            raise ValueError("incoming HTLC expiry precedes the Bitcoin reference height")
+        ln_seconds = (
+            self.timing_policy.min_incoming_htlc_expiry_height - self.btc_reference_height
+        ) * BITCOIN_BLOCK_SECONDS
+        if evm_seconds + self.timing_policy.refund_and_ln_resolution_seconds >= ln_seconds:
+            raise ValueError("incoming HTLC exposure does not cover the EVM refund resolution")
+
+
+AnyContractTerms = ContractTerms | EvmContractTerms
+
+
 class ProviderTerms(StrictModel):
     """Exact provider identity-signed contract offer object."""
 
     contract_hash: Hex32
-    contract_terms: ContractTerms
+    contract_terms: AnyContractTerms = Field(discriminator="profile_id")
     handshake_hash: Hex32
 
     @model_validator(mode="after")

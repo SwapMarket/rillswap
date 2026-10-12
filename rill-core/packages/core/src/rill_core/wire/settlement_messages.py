@@ -13,7 +13,7 @@ from pydantic import Field, model_validator
 
 from rill_core.wire.canonical import canonicalize, parse_json_strict
 from rill_core.wire.messages import ClientAcceptance, FundingBinding  # noqa: TC001
-from rill_core.wire.types import Hex32, Signature64, StrictModel
+from rill_core.wire.types import ExactInteger, Hex32, Signature64, StrictModel
 
 MIN_TRANSACTION_BYTES = 60
 MAX_TRANSACTION_BYTES = 100_000
@@ -105,6 +105,15 @@ class RefundConfirmed(StrictModel):
     refund_txid: Hex32
 
 
+class EvmLockupObserved(StrictModel):
+    """RS-010: a ``Lockup`` log matching the terms was found at this transaction and log index."""
+
+    kind: Literal["evm_lockup_observed"]
+    lock_tx_hash: Hex32
+    log_index: ExactInteger
+    block_number: ExactInteger
+
+
 AnyObservation = (
     PaymentSettled
     | PaymentFailed
@@ -114,6 +123,7 @@ AnyObservation = (
     | SwapAborted
     | RefundBroadcast
     | RefundConfirmed
+    | EvmLockupObserved
 )
 Observation = Annotated[AnyObservation, Field(discriminator="kind")]
 _OBSERVATIONS: dict[str, type[AnyObservation]] = {
@@ -125,6 +135,7 @@ _OBSERVATIONS: dict[str, type[AnyObservation]] = {
     "swap_aborted": SwapAborted,
     "refund_broadcast": RefundBroadcast,
     "refund_confirmed": RefundConfirmed,
+    "evm_lockup_observed": EvmLockupObserved,
 }
 
 

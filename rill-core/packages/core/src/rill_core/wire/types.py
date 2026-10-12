@@ -58,7 +58,15 @@ type Identifier = Annotated[
 ]
 type ExactInteger = Annotated[int, Field(strict=True, ge=0, le=9_007_199_254_740_991)]
 type PositiveCount = Annotated[int, Field(strict=True, ge=1, le=9_007_199_254_740_991)]
-type ProfileId = Literal["btc-to-ln/v1", "ln-to-btc/v1"]
+type BitcoinProfileId = Literal["btc-to-ln/v1", "ln-to-btc/v1"]
+type EvmProfileId = Literal["erc20-to-ln/v1", "ln-to-erc20/v1"]
+type ProfileId = BitcoinProfileId | EvmProfileId
+type EvmAddress = Annotated[str, StringConstraints(pattern=r"^0x[0-9a-f]{40}$")]
+type DecimalTokenUnits = Annotated[str, StringConstraints(pattern=r"^(0|[1-9][0-9]{0,38})$")]
+type PositiveTokenUnits = Annotated[str, StringConstraints(pattern=r"^[1-9][0-9]{0,38}$")]
+MAX_TOKEN_UNITS = 10**39 - 1
+DEV_EVM_CHAIN_ID = 31337
+ERC20_SWAP_CONTRACT_VERSION = 6
 type Party = Literal["client", "provider"]
 
 _EXTENSION_KEY = re.compile(r"^[a-z0-9][a-z0-9.-]{0,62}/[a-z0-9][a-z0-9._-]{0,62}$")
@@ -96,6 +104,30 @@ class NetworkIdentity(StrictModel):
         return self
 
 
+class EvmAssetIdentity(StrictModel):
+    """RS-010 chain, HTLC deployment, and token identity of one ERC20 asset."""
+
+    family: Literal["evm"]
+    chain_id: PositiveCount
+    name: Identifier
+    htlc_contract: EvmAddress
+    htlc_version: Literal[6]
+    token_contract: EvmAddress
+    token_symbol: Annotated[str, StringConstraints(pattern=r"^[\x21-\x7e]{1,16}$")]
+    token_decimals: int = Field(strict=True, ge=0, le=36)
+    block_seconds: PositiveCount
+    deployment_namespace: Identifier | None
+
+    @model_validator(mode="after")
+    def validate_dev_namespace(self) -> EvmAssetIdentity:
+        """Require a namespace on the shared local dev chain id and distinct contracts."""
+        if self.chain_id == DEV_EVM_CHAIN_ID and self.deployment_namespace is None:
+            raise ValueError("dev chain identity requires a deployment namespace")
+        if self.htlc_contract == self.token_contract:
+            raise ValueError("HTLC and token contracts must differ")
+        return self
+
+
 class Extensions(StrictModel):
     """Bounded namespaced optional extension container."""
 
@@ -114,6 +146,14 @@ class Extensions(StrictModel):
 def validate_decimal_sats(value: str, *, field: str, positive: bool = False) -> int:
     """Validate a canonical satoshi wire string and return its integer value."""
     parsed = parse_canonical_decimal(value, field=field, maximum=MAX_SATS)
+    if positive and parsed == 0:
+        raise ValidationError(f"{field} must be positive")
+    return parsed
+
+
+def validate_token_units(value: str, *, field: str, positive: bool = False) -> int:
+    """Validate a canonical token base-unit wire string and return its integer value."""
+    parsed = parse_canonical_decimal(value, field=field, maximum=MAX_TOKEN_UNITS)
     if positive and parsed == 0:
         raise ValidationError(f"{field} must be positive")
     return parsed
