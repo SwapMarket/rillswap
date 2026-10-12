@@ -15,7 +15,8 @@ import { type FundingRequest, type SwapRequest } from "./swap/swap";
 import { mempoolApiForNetwork, relaysForNetwork, validateMempoolApi, validateRelays, type NetworkName } from "./swap/config";
 import { readChainTip } from "./swap/chainTip";
 import { BrowserRecoveryWallet } from "./browserRecoveryWallet";
-import { discoverMarketplace, eligibleProviders, ineligibilityReason, quoteProviders, quoteReverseProviders, type LocatedQuote, MAX_QUOTE_PROVIDERS } from "./swap/marketplace";
+import { type DirectoryEntry, discoverDirectory, discoverMarketplace, eligibleProviders, indicativeFee, ineligibilityReason, quoteProviders, quoteReverseProviders,
+  type LocatedQuote, MAX_QUOTE_PROVIDERS } from "./swap/marketplace";
 import type { PreparedReverseQuote, ReverseSwapRequest } from "./swap/reverseSwap";
 import { invoiceBinding } from "./swap/bolt11";
 import { quoteSelectionLabel, stoppedSwapAdvice } from "./swapUiStatus";
@@ -83,7 +84,10 @@ function mount(root: HTMLElement): void {
   const settingsButton = node("button", "Settings", "swap-settings-toggle");
   settingsButton.type = "button";
   settingsButton.setAttribute("aria-haspopup", "dialog");
-  cardHead.append(node("h2", "Swap Bitcoin"), settingsButton);
+  const providersButton = node("button", "Providers", "swap-providers-toggle");
+  providersButton.type = "button";
+  providersButton.setAttribute("aria-haspopup", "dialog");
+  cardHead.append(node("h2", "Swap Bitcoin"), providersButton, settingsButton);
   const settings = node("dialog", "", "swap-settings");
   const settingsHead = node("div");
   settingsHead.className = "card-heading";
@@ -112,8 +116,82 @@ function mount(root: HTMLElement): void {
   const broadcastApi = field(settings, "swap-broadcast-api", "Transaction broadcast API", __SWAP_DEFAULTS__.broadcastApi,
     "Used only after explicit refund or claim approval and a broadcast click. Custom origins need a deployment CSP allowance.");
   const identity = field(settings, "swap-provider", "Provider identity", "",
-    "Automatic by default. Optionally pin a provider's 64-character public identity key.");
+    "Automatic by default. Optionally pin a provider's 64-character public identity key, or choose one under Providers.");
   identity.placeholder = "Automatic (lowest verified provider price)";
+  // The provider directory: every announced provider with its limits and fees, browsable before any amount.
+  const providers = node("dialog", "", "swap-providers");
+  const providersHead = node("div");
+  providersHead.className = "card-heading";
+  const closeProviders = node("button", "Close", "swap-providers-close");
+  closeProviders.type = "button";
+  providersHead.append(node("h2", "Providers"), closeProviders);
+  const providersIntro = node("p", "", "swap-providers-intro");
+  const loadProviders = node("button", "Load providers", "swap-providers-load");
+  loadProviders.type = "button";
+  const providersStatus = node("p", "", "swap-providers-status");
+  providersStatus.setAttribute("role", "status");
+  const providersList = node("div", "", "swap-providers-list");
+  providers.append(providersHead, providersIntro, loadProviders, providersStatus, providersList);
+  providersButton.onclick = () => {
+    providersIntro.textContent = `Load connects to your configured relays and lists every provider announced for ${network.value}. ` +
+      "Signatures authenticate announcements, not reputation; limits and fees are indicative until a signed quote.";
+    providers.showModal();
+  };
+  closeProviders.onclick = () => providers.close();
+  const providerChoice = node("p", "", "swap-provider-choice");
+  const DIRECTION: Record<string, string> = { "btc-to-ln/v1": "Bitcoin to Lightning", "ln-to-btc/v1": "Lightning to Bitcoin" };
+  let directoryEntries: readonly DirectoryEntry[] = [];
+  const showProviderChoice = (): void => {
+    const pinned = identity.value.trim();
+    providerChoice.textContent = pinned ? `Provider: ${pinned.slice(0, 12)}… (chosen by you)` : "Provider: automatic, lowest verified price";
+    for (const option of providersList.querySelectorAll<HTMLInputElement>("input[type=radio]")) option.checked = option.value === pinned;
+  };
+  const renderDirectory = (): void => {
+    const pinned = identity.value.trim();
+    const choice = (value: string, text: string): HTMLLabelElement => {
+      const label = node("label"), option = node("input");
+      option.type = "radio"; option.name = "directory-provider"; option.value = value; option.checked = value === pinned;
+      option.onchange = () => { identity.value = value; showProviderChoice(); };
+      label.append(option, node("strong", text));
+      return label;
+    };
+    const automatic = node("article");
+    automatic.className = "swap-provider";
+    automatic.append(choice("", "Automatic"), node("p", "Compares the eligible providers' signed quotes and picks the lowest verified price."));
+    providersList.replaceChildren(automatic);
+    for (const entry of directoryEntries) {
+      const article = node("article");
+      article.className = "swap-provider";
+      const bands = entry.amountBands.map((band) => `${BigInt(band.minimum_sat).toLocaleString()} to ${BigInt(band.maximum_sat).toLocaleString()} sat`).join(", ");
+      const fee = entry.indicativeFeePolicy;
+      const sample = 100_000n;
+      article.append(choice(entry.identity, `${entry.identity.slice(0, 12)}…`),
+        node("p", `Directions: ${entry.profiles.map((profile) => DIRECTION[profile] ?? profile).join(", ")}`),
+        node("p", `Limits: ${bands}`),
+        node("p", `Fee: ${BigInt(fee.base_sat).toLocaleString()} sat + ${(fee.proportional_millionths / 10_000).toFixed(2)}% ` +
+          `(about ${indicativeFee(fee, sample).toLocaleString()} sat on a ${sample.toLocaleString()} sat swap)`),
+        node("small", `Identity: ${entry.identity}. Slot: ${entry.slot}. Relays: ${entry.relayUrls.join(", ")}. ` +
+          `Announcement expires ${new Date(entry.expiresAt * 1000).toLocaleString()}.`));
+      providersList.append(article);
+    }
+  };
+  loadProviders.onclick = () => {
+    const name = network.value as NetworkName;
+    let urls: readonly string[];
+    try { urls = validateRelays(relay.value.trim(), name); } catch (error) { providersStatus.textContent = (error as Error).message; return; }
+    loadProviders.disabled = true;
+    providersStatus.textContent = "Checking signed announcements on your relays...";
+    void discoverDirectory(urls, NETWORKS[name]).then((directory) => {
+      directoryEntries = directory.entries;
+      renderDirectory();
+      providersStatus.textContent = directory.entries.length === 0 ? "No provider announced on these relays." :
+        `${directory.entries.length} announced provider${directory.entries.length === 1 ? "" : "s"}.` +
+        (directory.warnings.length ? ` Some relays were incomplete: ${directory.warnings.join("; ")}.` : "");
+    }, (error: Error) => { providersStatus.textContent = error.message; }).finally(() => { loadProviders.disabled = false; });
+  };
+  identity.oninput = showProviderChoice;
+  renderDirectory();
+  showProviderChoice();
   const pair = node("div", "", "swap-pair");
   const pairSide = (id: string, caption: string, value: AssetId): HTMLSelectElement => {
     const box = node("label");
@@ -136,7 +214,7 @@ function mount(root: HTMLElement): void {
   const toAsset = pairSide("swap-to", "You receive", "ln");
   const pairNote = node("p", "", "swap-pair-note");
   pairNote.setAttribute("role", "note");
-  form.append(pair, pairNote);
+  form.append(pair, pairNote, providerChoice);
   const invoiceBox = node("div");
   const invoice = field(invoiceBox, "swap-invoice", "Lightning invoice to pay (BOLT11)");
   invoice.placeholder = "Paste your Lightning invoice";
@@ -236,7 +314,7 @@ function mount(root: HTMLElement): void {
   diagnostics.append(log);
   card.append(cardHead, form, tracking, progress, panel, privacy, safety, diagnostics);
   const footer = node("footer", "Provider-neutral · No account · Locally verified");
-  root.replaceChildren(header, intro, card, footer, settings);
+  root.replaceChildren(header, intro, card, footer, settings, providers);
   const setStatus = (text: string, step: number, state = "working"): void => {
     status.textContent = text;
     progress.dataset.state = state;
@@ -347,6 +425,7 @@ function mount(root: HTMLElement): void {
     updateDisclosure();
     updateNetwork();
     recovery.clearFundingObservation();
+    directoryEntries = []; renderDirectory(); providersStatus.textContent = "";
   };
   network.onchange = applyNetwork;
   updateNetwork();
@@ -411,7 +490,7 @@ function mount(root: HTMLElement): void {
     const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button")].filter((control) => control !== receiveAddress);
     busy = true;
     for (const control of controls) (control as HTMLInputElement).disabled = true;
-    settingsButton.disabled = true;
+    settingsButton.disabled = providersButton.disabled = true;
     const cancellation = new AbortController();
     const selection = (): string => JSON.stringify([network.value, fromAsset.value, toAsset.value, receiveAmount.value, relay.value, identity.value,
       chainApi.value, broadcastApi.value, successFee.value, minReserve.value, claimFee.value, minRefundDelay.value, maxHold.value]);
@@ -428,7 +507,7 @@ function mount(root: HTMLElement): void {
     const restore = (): void => {
       busy = false;
       for (const control of controls) (control as HTMLInputElement).disabled = false;
-      settingsButton.disabled = false;
+      settingsButton.disabled = providersButton.disabled = false;
       receiveAddress.disabled = false;
       updateNetwork();
     };
@@ -577,7 +656,7 @@ function mount(root: HTMLElement): void {
     for (const input of controls) {
       (input as HTMLInputElement).disabled = true;
     }
-    settingsButton.disabled = true;
+    settingsButton.disabled = providersButton.disabled = true;
     const guard = (unload: BeforeUnloadEvent): void => unload.preventDefault();
     window.addEventListener("beforeunload", guard);
     let cancelled = false;
@@ -590,7 +669,7 @@ function mount(root: HTMLElement): void {
     const restore = (): void => {
       busy = false;
       for (const control of controls) (control as HTMLInputElement).disabled = false;
-      settingsButton.disabled = false;
+      settingsButton.disabled = providersButton.disabled = false;
       updateNetwork();
       window.removeEventListener("beforeunload", guard);
     };

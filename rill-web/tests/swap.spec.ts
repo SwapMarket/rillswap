@@ -267,3 +267,55 @@ test("the swap page installs no service worker, so no release replaces it mid-sw
     nodes.map((node) => (node as HTMLScriptElement).src));
   for (const src of scripts) expect(new URL(src).host).toBe("127.0.0.1:18765");
 });
+
+test("the provider directory lists announced limits and fees on explicit load and chooses the pinned provider", async ({ page }) => {
+  const { schnorr } = await import("@noble/curves/secp256k1.js");
+  const { sha256 } = await import("@noble/hashes/sha2.js");
+  const { default: canonicalize } = await import("canonicalize");
+  const { finalizeEvent, getPublicKey } = await import("nostr-tools");
+  const { default: application } = await import("../unit/fixtures/manual-advertisement-regtest-v1.json", { with: { type: "json" } });
+  const { default: vector } = await import("../unit/fixtures/nostr-announcement-regtest-v1.json", { with: { type: "json" } });
+  const secret = new Uint8Array(32); secret[31] = 2;
+  const wrapper = structuredClone(application);
+  wrapper.advertisement.provider_identity_xonly_key = getPublicKey(secret);
+  wrapper.advertisement.expires_at = Math.floor(Date.now() / 1000) + 3600;
+  wrapper.advertisement.created_at = Math.floor(Date.now() / 1000) - 60;
+  const tag = sha256(new TextEncoder().encode("RillSwap/advertisement/v1"));
+  const content = new TextEncoder().encode(canonicalize(wrapper.advertisement)!);
+  const digest = new Uint8Array(64 + content.length); digest.set(tag); digest.set(tag, 32); digest.set(content, 64);
+  wrapper.signature = Buffer.from(schnorr.sign(sha256(digest), secret)).toString("hex");
+  const event = finalizeEvent({ kind: vector.kind, created_at: wrapper.advertisement.created_at, tags: structuredClone(vector.tags), content: canonicalize(wrapper)! }, secret);
+  let requests = 0;
+  await page.routeWebSocket("ws://127.0.0.1:7777/", (socket) => {
+    socket.onMessage((message) => {
+      const frame = JSON.parse(String(message));
+      if (frame[0] === "REQ") { requests++; socket.send(JSON.stringify(["EVENT", frame[1], event])); socket.send(JSON.stringify(["EOSE", frame[1]])); }
+    });
+  });
+  await page.goto(SWAP);
+  await page.locator("#swap-settings-toggle").click();
+  await page.locator("#swap-network").selectOption("regtest");
+  await page.locator("#swap-settings-close").click();
+  await expect(page.locator("#swap-provider-choice")).toHaveText("Provider: automatic, lowest verified price");
+  await page.locator("#swap-providers-toggle").click();
+  await expect(page.locator("#swap-providers")).toBeVisible();
+  await expect(page.locator("#swap-providers-intro")).toContainText("regtest");
+  expect(requests).toBe(0); // opening the directory connects nowhere
+  await expect(page.locator(".swap-provider")).toHaveCount(1); // automatic only
+  await page.locator("#swap-providers-load").click();
+  await expect(page.locator("#swap-providers-status")).toHaveText("1 announced provider.");
+  expect(requests).toBe(1);
+  const entry = page.locator(".swap-provider").nth(1);
+  await expect(entry).toContainText("Directions: Bitcoin to Lightning, Lightning to Bitcoin");
+  await expect(entry).toContainText("Limits: 1,000 to 100,000 sat");
+  await expect(entry).toContainText("Fee: 50 sat + 0.10% (about 150 sat on a 100,000 sat swap)");
+  await expect(entry).toContainText(`Identity: ${wrapper.advertisement.provider_identity_xonly_key}`);
+  await entry.locator("input[type=radio]").check();
+  await page.locator("#swap-providers-close").click();
+  await expect(page.locator("#swap-provider-choice")).toHaveText(`Provider: ${wrapper.advertisement.provider_identity_xonly_key.slice(0, 12)}… (chosen by you)`);
+  await page.locator("#swap-settings-toggle").click();
+  await expect(page.locator("#swap-provider")).toHaveValue(wrapper.advertisement.provider_identity_xonly_key);
+  await page.locator("#swap-provider").fill("");
+  await page.locator("#swap-settings-close").click();
+  await expect(page.locator("#swap-provider-choice")).toHaveText("Provider: automatic, lowest verified price");
+});

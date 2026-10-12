@@ -164,10 +164,23 @@ invoice (`checkReverseTermsOffer` in `src/swap/wire.ts`) are requested only
 after persistence. Continuing pins the chosen provider and opens a fresh firm
 session, as RS-003/RS-004 require. Indicative sessions never become firm sessions.
 
+### Provider directory
+
+**Providers** opens a directory of every provider announced for the selected
+network, before any amount or invoice is entered. Nothing connects until
+**Load providers**, which queries the configured relays once and verifies
+each announcement for both profiles (`discoverDirectory` in
+`src/swap/marketplace.ts`). Each entry shows the directions it serves, its
+announced amount limits, its indicative fee (base plus proportional, with a
+sample on 100,000 sat), full identity, slot, relays, and announcement expiry.
+Choosing an entry pins its identity (the same field as Settings); the form
+shows the current choice. Announced limits and fees are indicative; only a
+signed quote binds a provider.
+
 ### Automatic quote selection
 
-Leave the provider identity empty for automatic discovery, or pin it in
-Settings. **Get quote** queries the configured relays, filters authenticated
+Leave the provider identity empty for automatic discovery, choose one under
+Providers, or pin it in Settings. **Get quote** queries the configured relays, filters authenticated
 announcements by amount, and requests up to eight firm offers on separate
 single-relay sessions. Indicative fees order the bounded shortlist; only
 locally verified signed terms determine the displayed winner. The winner has

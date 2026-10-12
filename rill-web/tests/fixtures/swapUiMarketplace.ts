@@ -11,6 +11,9 @@ export const MAX_QUOTE_PROVIDERS = 8;
 export const discoverMarketplace = async () => ({ providers: [{}], warnings: [] });
 export const eligibleProviders = (providers: unknown[]) => providers;
 export const ineligibilityReason = () => "fixture ineligible";
+export const discoverDirectory = async () => ({ entries: [], warnings: [] });
+export const indicativeFee = (policy: { base_sat: string; proportional_millionths: number }, amount: bigint) =>
+  BigInt(policy.base_sat) + (amount * BigInt(policy.proportional_millionths) + 999_999n) / 1_000_000n;
 export const quoteProviders = async (_providers: unknown[], request: unknown) => {
   window.uiFixture.requests.push(structuredClone(request));
   return { failures: 0, reasons: [], quotes: ["4", "5"].map((id) => ({ relayUrl: "ws://127.0.0.1:7777/",

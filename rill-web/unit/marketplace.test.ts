@@ -3,7 +3,7 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import canonicalize from "canonicalize";
 import { finalizeEvent, getPublicKey } from "nostr-tools";
-import { eligibleProviders, ineligibilityReason, rankQuotes, scanAnnouncements, type LocatedQuote, type RelayObservation } from "../src/swap/marketplace";
+import { directoryFromObservations, eligibleProviders, indicativeFee, ineligibilityReason, rankQuotes, scanAnnouncements, type LocatedQuote, type RelayObservation } from "../src/swap/marketplace";
 import application from "./fixtures/manual-advertisement-regtest-v1.json";
 import vector from "./fixtures/nostr-announcement-regtest-v1.json";
 import network from "../src/networks/regtest-rillswap-e2e-v1.json";
@@ -75,6 +75,20 @@ test("highest revision replaces older transport provenance and amount bands filt
   const identity = directory.providers[0]!.announcement.identityXOnlyKey.slice(0, 12);
   expect(ineligibilityReason(directory.providers, 10001n)).toBe(`No provider accepts 10,001 sat. Announced limits: 100 to 10,000 sat (${identity}…).`);
   expect(ineligibilityReason([], 10001n)).toContain("No provider announced this swap direction");
+});
+
+test("the directory lists each announced slot once with every profile it serves and its announced terms", () => {
+  const raw = announcement(3, "25");
+  const directory = directoryFromObservations([observed([raw]), observed([raw], "wss://b.test/")], network);
+  expect(directory.entries).toHaveLength(1);
+  const entry = directory.entries[0]!;
+  expect(entry.profiles).toEqual(["btc-to-ln/v1", "ln-to-btc/v1"]);
+  expect(entry.relayUrls).toEqual(["wss://a.test/", "wss://b.test/"]);
+  expect(entry.amountBands).toEqual([{ minimum_sat: "100", maximum_sat: "10000" }]);
+  expect(entry.indicativeFeePolicy.base_sat).toBe("25");
+  expect(indicativeFee(entry.indicativeFeePolicy, 10_000n)).toBe(25n + BigInt(Math.ceil(10_000 * application.advertisement.indicative_fee_policy.proportional_millionths / 1_000_000)));
+  expect(directory.warnings).toEqual([]);
+  expect(directoryFromObservations([observed(["not json"])], network).entries).toEqual([]);
 });
 
 test("verified contract prices, not indicative prices, choose the winner with deterministic ties", () => {

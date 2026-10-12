@@ -76,12 +76,11 @@ export function scanAnnouncements(
   };
 }
 
-export async function discoverMarketplace(
+async function observeRelays(
   urls: readonly string[], network: SwapRequest["network"], identity?: string, signal?: AbortSignal,
-  profile: AnnouncementProfile = "btc-to-ln/v1",
-): Promise<ProviderDirectory> {
+): Promise<readonly RelayObservation[]> {
   if (urls.length === 0 || urls.length > MAX_RELAYS) throw new SwapError("Relay count invalid");
-  const observations = await Promise.all(urls.map(async (url): Promise<RelayObservation> => {
+  return Promise.all(urls.map(async (url): Promise<RelayObservation> => {
     let relay: RelayConnection | undefined;
     try {
       signal?.throwIfAborted();
@@ -94,7 +93,55 @@ export async function discoverMarketplace(
       return { url, result: { events: [], truncated: false, completion: "error" } };
     } finally { relay?.close(); }
   }));
-  return scanAnnouncements(observations, network, identity, profile);
+}
+
+export async function discoverMarketplace(
+  urls: readonly string[], network: SwapRequest["network"], identity?: string, signal?: AbortSignal,
+  profile: AnnouncementProfile = "btc-to-ln/v1",
+): Promise<ProviderDirectory> {
+  return scanAnnouncements(await observeRelays(urls, network, identity, signal), network, identity, profile);
+}
+
+/** One announced provider slot across every profile it serves, for browsing before any amount is entered. */
+export interface DirectoryEntry {
+  readonly identity: string;
+  readonly slot: string;
+  readonly profiles: readonly AnnouncementProfile[];
+  readonly amountBands: AnnouncementCandidate["amountBands"];
+  readonly indicativeFeePolicy: AnnouncementCandidate["indicativeFeePolicy"];
+  readonly relayUrls: readonly string[];
+  readonly expiresAt: number;
+}
+
+export const DIRECTORY_PROFILES: readonly AnnouncementProfile[] = ["btc-to-ln/v1", "ln-to-btc/v1"];
+
+/** Fee a provider announces for `amount`, before any firm quote. */
+export function indicativeFee(policy: AnnouncementCandidate["indicativeFeePolicy"], amount: bigint): bigint {
+  return BigInt(policy.base_sat) + (amount * BigInt(policy.proportional_millionths) + 999_999n) / 1_000_000n;
+}
+
+export interface Directory { readonly entries: readonly DirectoryEntry[]; readonly warnings: readonly string[] }
+
+export async function discoverDirectory(urls: readonly string[], network: SwapRequest["network"], signal?: AbortSignal): Promise<Directory> {
+  return directoryFromObservations(await observeRelays(urls, network, undefined, signal), network);
+}
+
+export function directoryFromObservations(observations: readonly RelayObservation[], network: SwapRequest["network"]): Directory {
+  const entries = new Map<string, DirectoryEntry>();
+  const warnings = new Set<string>();
+  for (const profile of DIRECTORY_PROFILES) {
+    const directory = scanAnnouncements(observations, network, undefined, profile);
+    for (const warning of directory.warnings) warnings.add(warning);
+    for (const { announcement, relayUrls } of directory.providers) {
+      const key = `${announcement.identityXOnlyKey}:${announcement.slot}`;
+      const previous = entries.get(key);
+      entries.set(key, previous
+        ? { ...previous, profiles: [...previous.profiles, profile], relayUrls: [...new Set([...previous.relayUrls, ...relayUrls])] }
+        : { identity: announcement.identityXOnlyKey, slot: announcement.slot, profiles: [profile], amountBands: announcement.amountBands,
+          indicativeFeePolicy: announcement.indicativeFeePolicy, relayUrls, expiresAt: announcement.expiresAt });
+    }
+  }
+  return { entries: [...entries.values()].sort((a, b) => `${a.identity}:${a.slot}`.localeCompare(`${b.identity}:${b.slot}`)), warnings: [...warnings] };
 }
 
 export interface LocatedQuote<P extends { dispose(): void } = PreparedSwap> {
@@ -104,10 +151,7 @@ export interface LocatedQuote<P extends { dispose(): void } = PreparedSwap> {
   dispose(): void;
 }
 
-const estimatedFee = (provider: LocatedProvider, amount: bigint): bigint => {
-  const fee = provider.announcement.indicativeFeePolicy;
-  return BigInt(fee.base_sat) + (amount * BigInt(fee.proportional_millionths) + 999_999n) / 1_000_000n;
-};
+const estimatedFee = (provider: LocatedProvider, amount: bigint): bigint => indicativeFee(provider.announcement.indicativeFeePolicy, amount);
 
 export function eligibleProviders(providers: readonly LocatedProvider[], amount: bigint): readonly LocatedProvider[] {
   return providers.filter(({ announcement }) => announcement.amountBands.some((band) =>
