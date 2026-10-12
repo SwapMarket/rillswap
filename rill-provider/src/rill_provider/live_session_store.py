@@ -79,8 +79,10 @@ from rill_core.wire.hashes import (
     unsigned_envelope_hash,
 )
 from rill_core.wire.messages import (
+    AnyContractTerms,
     ContractTerms,
     Envelope,
+    EvmContractTerms,
     FundingBinding,
     HandshakeAccept,
     HandshakeAcceptPayload,
@@ -121,7 +123,7 @@ if TYPE_CHECKING:
     from rill_provider.reverse_operations import ReverseOperation, ReverseOperations
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
-SCHEMA_VERSION = 14  # v8-v13 upgrade on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
+SCHEMA_VERSION = 15  # v8-v14 upgrade on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
 CONTRACT_KEY_RECORD_KIND = "rillswap-provider-contract-key"
 OPEN_PHASES = ("CONFIRMED", "ACCEPTED")  # sessions that may still send requests
 SWAP_TRANSITIONS = frozenset(
@@ -152,6 +154,34 @@ REVERSE_SWAP_TRANSITIONS = frozenset(
         ("REFUNDING", "REFUNDED"),  # refund at depth, hold canceled
     }
 )
+# RS-010: EVM swaps reuse the Bitcoin state names. Evidence is HTLC ``Lockup`` /
+# ``Claim`` logs and transaction hashes instead of outpoints and raw transactions.
+EVM_SWAP_TRANSITIONS = frozenset(
+    {
+        # erc20-to-ln: the client locks tokens, we pay the invoice and claim.
+        ("ACCEPTED", "FUNDING_SEEN"),  # the exact Lockup observed at funding depth
+        ("ACCEPTED", "FAILED"),  # terms expired before any lock
+        ("FUNDING_SEEN", "PAYING"),  # the one payment grant
+        ("FUNDING_SEEN", "FAILED"),  # lock no longer payable (timing) before any dispatch
+        ("PAYING", "PAID"),
+        ("PAYING", "FAILED"),
+        ("PAID", "CLAIMING"),  # our claim sent
+        ("CLAIMING", "CLAIMED"),  # our claim at settlement depth
+        ("CLAIMING", "LOST"),  # the lock is gone without our claim (client refund)
+        # ln-to-erc20: we lock tokens after the hold is accepted, the client claims.
+        ("ACCEPTED", "LN_HELD"),
+        ("ACCEPTED", "ABORTED"),
+        ("LN_HELD", "FUNDING_SENT"),  # the one lock grant: reservation DISPATCHED
+        ("LN_HELD", "ABORTED"),
+        ("FUNDING_SENT", "FUNDED"),  # our lock at funding depth
+        ("FUNDING_SENT", "SETTLED"),  # the client's Claim appeared before our depth check
+        ("FUNDED", "SETTLED"),  # Claim log revealed the preimage: hold settled
+        ("FUNDED", "REFUNDING"),  # timelock passed, still locked: refund sent
+        ("REFUNDING", "SETTLED"),  # the claim won the race
+        ("REFUNDING", "REFUNDED"),  # refund at settlement depth, hold canceled
+    }
+)
+EVM_TERMINAL_STATES = ("FAILED", "CLAIMED", "LOST", "ABORTED", "SETTLED", "REFUNDED")
 REVERSE_STATES = (
     "LN_HELD",
     "FUNDING_SENT",
@@ -400,7 +430,23 @@ REVERSE_PREIMAGE_EVIDENCE_SCHEMA = (
     "length(document) BETWEEN 1 AND 65536), received_at INTEGER NOT NULL CHECK "
     "(typeof(received_at)='integer' AND received_at>=0))"
 )
-SCHEMA = (*SCHEMA_V13, REVERSE_PREIMAGE_EVIDENCE_SCHEMA)
+SCHEMA_V14 = (*SCHEMA_V13, REVERSE_PREIMAGE_EVIDENCE_SCHEMA)
+# v15 (RS-010): EVM HTLC evidence for erc20-to-ln and ln-to-erc20 swaps. A row
+# exists for every EVM-profile swap from acceptance, and its presence routes
+# the swap to the EVM lifecycle (``evm_settlement_work``) instead of the
+# Bitcoin one. lock_* is the counterparty's observed ``Lockup`` log (forward
+# swaps); provider_tx_hash is our own lock (reverse swaps); claim_tx_hash is
+# our claim (forward) or the observed client claim (reverse); refund_tx_hash is
+# our refund (reverse). Hashes are lowercase hex without ``0x``.
+EVM_SWAP_SCHEMA = (
+    "CREATE TABLE evm_swaps (session_id TEXT PRIMARY KEY NOT NULL, "
+    "lock_tx_hash TEXT, lock_log_index INTEGER CHECK (lock_log_index >= 0), "
+    "lock_block INTEGER CHECK (lock_block >= 0), provider_tx_hash TEXT, "
+    "claim_tx_hash TEXT, refund_tx_hash TEXT, "
+    "CHECK ((lock_tx_hash IS NULL) = (lock_log_index IS NULL) AND "
+    "(lock_tx_hash IS NULL) = (lock_block IS NULL)))"
+)
+SCHEMA = (*SCHEMA_V14, EVM_SWAP_SCHEMA)
 MAX_CLAIM_ATTEMPTS = 32
 COOPERATION_BUDGET_SECONDS = 30
 COOPERATION_OBSERVATION_MAX_AGE_SECONDS = 5
@@ -655,6 +701,30 @@ class SwapRecord:
     funding_binding: bytes | None
     preimage: str | None
     claim_txid: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class EvmSettlementItem:
+    """One accepted EVM-profile swap (RS-010) the EVM settlement engine still has to move."""
+
+    session_id: str
+    state: str
+    blocked: bool
+    terms_offer: bytes
+    invoice: str  # erc20-to-ln: the client's bolt11 from its firm request; "" for reverse
+    preimage: str | None
+    dispatch_state: str  # payment_dispatch state or UNKNOWN (forward only)
+    payer: PaymentAuthority | None
+    lock_tx_hash: str | None
+    lock_log_index: int | None
+    lock_block: int | None
+    provider_tx_hash: str | None
+    claim_tx_hash: str | None
+    refund_tx_hash: str | None
+
+    def terms(self) -> EvmContractTerms:
+        """Return the signed EVM terms this swap was accepted under."""
+        return _evm_offer_terms(self.terms_offer)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1090,6 +1160,8 @@ class LiveSessionStore:
                 _upgrade_v12(connection)
             if version in (5, 6, 7, 8, 9, 10, 11, 12, 13):
                 _upgrade_v13(connection)
+            if version in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14):
+                _upgrade_v14(connection)
             if version != SCHEMA_VERSION:
                 connection.execute("UPDATE meta SET schema_version=?", (SCHEMA_VERSION,))
                 connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -5512,10 +5584,10 @@ class LiveSessionStore:
                     "JOIN sessions s ON s.session_id = w.session_id "
                     "LEFT JOIN payment_dispatch p ON p.session_id = w.session_id "
                     "JOIN inbox i ON i.session_id = w.session_id AND i.sender_key = s.client_key "
-                    "AND i.seq = ? WHERE w.state IN ('ACCEPTED', 'FUNDING_SEEN', 'PAYING', 'PAID', "
-                    "'CLAIMING', 'LN_HELD', 'FUNDING_SENT', 'FUNDED', 'REFUNDING') "
-                    + selected
-                    + "ORDER BY w.updated_at, w.session_id",
+                    "AND i.seq = ? LEFT JOIN evm_swaps e ON e.session_id = w.session_id "
+                    "WHERE e.session_id IS NULL AND w.state IN ('ACCEPTED', 'FUNDING_SEEN', "
+                    "'PAYING', 'PAID', 'CLAIMING', 'LN_HELD', 'FUNDING_SENT', 'FUNDED', "
+                    "'REFUNDING') " + selected + "ORDER BY w.updated_at, w.session_id",
                     parameters,
                 ).fetchall()
                 items = tuple(
@@ -5962,6 +6034,160 @@ class LiveSessionStore:
             raise
         except Exception:  # noqa: BLE001 - never echo storage details
             raise LiveSessionStoreError("scan cursor refused") from None
+
+    def evm_settlement_work(self) -> tuple[EvmSettlementItem, ...]:
+        """Return every open EVM-profile swap (RS-010) with its retained evidence."""
+        try:
+            with self._write() as connection:
+                rows = connection.execute(
+                    "SELECT w.session_id, w.state, s.blocked, w.terms_offer, i.canonical_bytes, "
+                    "w.preimage, COALESCE(p.state, 'UNKNOWN'), p.payment_hash, p.request, "
+                    "e.lock_tx_hash, e.lock_log_index, e.lock_block, e.provider_tx_hash, "
+                    "e.claim_tx_hash, e.refund_tx_hash FROM evm_swaps e "
+                    "JOIN swaps w ON w.session_id = e.session_id "
+                    "JOIN sessions s ON s.session_id = w.session_id "
+                    "LEFT JOIN payment_dispatch p ON p.session_id = w.session_id "
+                    "JOIN inbox i ON i.session_id = w.session_id AND i.sender_key = s.client_key "
+                    "AND i.seq = ? WHERE w.state IN ('ACCEPTED', 'FUNDING_SEEN', 'PAYING', 'PAID', "
+                    "'CLAIMING', 'LN_HELD', 'FUNDING_SENT', 'FUNDED', 'REFUNDING') "
+                    "ORDER BY w.updated_at, w.session_id",
+                    (FIRST_REQUEST_SEQUENCE,),
+                ).fetchall()
+                return tuple(
+                    EvmSettlementItem(
+                        session_id,
+                        state,
+                        bool(blocked),
+                        offer,
+                        str(_canonical_envelope(request).payload.get("invoice", "")),
+                        preimage,
+                        payment_dispatch,
+                        bound_payer(record, payment_hash=hashed, network=self._network)
+                        if payment_dispatch == "SUBMITTED"
+                        else None,
+                        *evidence,
+                    )
+                    for (
+                        session_id,
+                        state,
+                        blocked,
+                        offer,
+                        request,
+                        preimage,
+                        payment_dispatch,
+                        hashed,
+                        record,
+                        *evidence,
+                    ) in rows
+                )
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("EVM settlement work unavailable") from None
+
+    def advance_evm_swap(  # noqa: PLR0912, PLR0913 - one atomic transition's explicit parts
+        self,
+        session_id: str,
+        *,
+        from_state: str,
+        to_state: str,
+        signer: EnvelopeSigner,
+        now: int,
+        lockup: tuple[str, int, int] | None = None,
+        tx_hash: str | None = None,
+        preimage: str | None = None,
+        failed_by_payer: str | None = None,
+        observation: dict[str, Any] | None = None,
+    ) -> None:
+        """Move one EVM-profile swap (RS-010) forward in one transaction.
+
+        ``FUNDING_SEEN`` records the observed ``lockup`` ``(tx_hash, log_index,
+        block)``. ``PAYING`` is the one payment grant (an UNSENT dispatch row).
+        ``PAID`` and ``SETTLED`` need the preimage of the terms' payment hash.
+        ``CLAIMING``, ``FUNDING_SENT`` and ``REFUNDING`` record our sent
+        transaction's ``tx_hash`` before it is broadcast; ``FUNDING_SENT`` also
+        marks the reservation ``DISPATCHED`` so a lock is never sent twice.
+        ``SETTLED`` may name the client's claim ``tx_hash``. Terminal states
+        release the reservation with the evidence they carry.
+        """
+        _check_evm_transition(
+            (from_state, to_state), lockup=lockup, tx_hash=tx_hash, preimage=preimage
+        )
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT w.terms_offer, w.preimage FROM swaps w JOIN evm_swaps e "
+                    "ON e.session_id = w.session_id WHERE w.session_id=? AND w.state=?",
+                    (session_id, from_state),
+                ).fetchone()
+                if row is None:
+                    raise StaleSwapError("swap state changed")  # noqa: TRY301
+                offer_bytes, retained_preimage = row
+                terms = _evm_offer_terms(offer_bytes)
+                payment_hash = terms.invoice_binding.payment_hash
+                if preimage is not None and (
+                    type(preimage) is not str
+                    or len(preimage) != 64  # noqa: PLR2004 - hex preimage
+                    or hashlib.sha256(bytes.fromhex(preimage)).hexdigest() != payment_hash
+                    or (retained_preimage is not None and retained_preimage != preimage)
+                ):
+                    raise LiveSessionStoreError("preimage does not match the payment hash")  # noqa: TRY301
+                updated = connection.execute(
+                    "UPDATE swaps SET state=?, preimage=COALESCE(?, preimage), updated_at=? "
+                    "WHERE session_id=? AND state=?",
+                    (to_state, preimage, now, session_id, from_state),
+                ).rowcount
+                if updated != 1:
+                    raise StaleSwapError("swap state changed")  # noqa: TRY301
+                if to_state == "FUNDING_SEEN" and lockup is not None:
+                    connection.execute(
+                        "UPDATE evm_swaps SET lock_tx_hash=?, lock_log_index=?, lock_block=? "
+                        "WHERE session_id=?",
+                        (*lockup, session_id),
+                    )
+                elif to_state == "PAYING":
+                    connection.execute(
+                        "INSERT INTO payment_dispatch VALUES (?, ?, 'UNSENT', NULL)",
+                        (session_id, payment_hash),
+                    )
+                elif to_state == "FUNDING_SENT":
+                    connection.execute(
+                        "UPDATE evm_swaps SET provider_tx_hash=? WHERE session_id=?",
+                        (tx_hash, session_id),
+                    )
+                    granted = connection.execute(
+                        "UPDATE economic_reservations SET state='DISPATCHED' "
+                        "WHERE payment_hash=? AND session_id=? AND state IN ('UNSENT', 'UNKNOWN')",
+                        (payment_hash, session_id),
+                    ).rowcount
+                    if granted != 1:
+                        raise LiveSessionStoreError("funding grant refused")  # noqa: TRY301
+                elif to_state in ("CLAIMING", "SETTLED") and tx_hash is not None:
+                    connection.execute(
+                        "UPDATE evm_swaps SET claim_tx_hash=? WHERE session_id=?",
+                        (tx_hash, session_id),
+                    )
+                elif to_state == "REFUNDING":
+                    connection.execute(
+                        "UPDATE evm_swaps SET refund_tx_hash=? WHERE session_id=?",
+                        (tx_hash, session_id),
+                    )
+                if to_state in EVM_TERMINAL_STATES:
+                    _release_evm_terminal(
+                        connection,
+                        session_id,
+                        to_state,
+                        now,
+                        payment_hash=payment_hash,
+                        failed_by_payer=failed_by_payer,
+                        network=self._network,
+                    )
+                if observation is not None:
+                    self._record_observation(connection, session_id, observation, signer, now)
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage or crypto details
+            raise LiveSessionStoreError("swap transition refused") from None
 
     def advance_swap(  # noqa: PLR0913 - one atomic transition's explicit parts
         self,
@@ -7488,6 +7714,7 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
         11: SCHEMA_V11,
         12: SCHEMA_V12,
         13: SCHEMA_V13,
+        14: SCHEMA_V14,
         SCHEMA_VERSION: SCHEMA,
     }[version]
     indexes = {
@@ -7498,6 +7725,7 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
         11: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
         12: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
         13: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
+        14: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
         SCHEMA_VERSION: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
     }
     expected = {("table", statement.split()[2]): statement for statement in schema}
@@ -7660,6 +7888,104 @@ def _upgrade_v13(connection: sqlite3.Connection) -> None:
     connection.execute(REVERSE_PREIMAGE_EVIDENCE_SCHEMA)
 
 
+def _upgrade_v14(connection: sqlite3.Connection) -> None:
+    """Add the empty EVM evidence table (RS-010); no existing swap is an EVM swap.
+
+    Bitcoin swaps keep their states and lifecycle: only swaps accepted under
+    an EVM profile after this version ever get a row here.
+    """
+    connection.execute(EVM_SWAP_SCHEMA)
+
+
+def _check_evm_transition(
+    transition: tuple[str, str],
+    *,
+    lockup: tuple[str, int, int] | None,
+    tx_hash: str | None,
+    preimage: str | None,
+) -> None:
+    """Refuse an EVM transition that lacks, or carries, the wrong evidence."""
+    to_state = transition[1]
+    if transition not in EVM_SWAP_TRANSITIONS:
+        raise LiveSessionStoreError("swap transition unsupported")
+    if (to_state == "FUNDING_SEEN") != (lockup is not None):
+        raise LiveSessionStoreError("lock observation needs the exact lockup")
+    if (to_state in ("CLAIMING", "FUNDING_SENT", "REFUNDING")) != (
+        tx_hash is not None and to_state != "SETTLED"
+    ):
+        raise LiveSessionStoreError("sent transaction transition needs its hash")
+    if (to_state in ("PAID", "SETTLED")) != (preimage is not None):
+        raise LiveSessionStoreError("settlement needs the preimage")
+
+
+def _release_evm_terminal(  # noqa: PLR0913 - explicit terminal evidence
+    connection: sqlite3.Connection,
+    session_id: str,
+    to_state: str,
+    now: int,
+    *,
+    payment_hash: str,
+    failed_by_payer: str | None,
+    network: NetworkIdentity | None,
+) -> bool:
+    """Release an EVM swap's reservation with the evidence its terminal state carries.
+
+    The rules mirror the Bitcoin lifecycles: FAILED releases an UNSENT
+    reservation, or a DISPATCHED one only when the dispatch record's bound
+    payer attested the failure; CLAIMED, LOST, SETTLED and REFUNDED release a
+    dispatched reservation on the retained chain evidence; ABORTED releases an
+    undispatched one.
+    """
+    (claim_tx_hash, refund_tx_hash) = connection.execute(
+        "SELECT claim_tx_hash, refund_tx_hash FROM evm_swaps WHERE session_id=?", (session_id,)
+    ).fetchone()
+    if to_state == "FAILED":
+        evidence = _release_evidence("failed-before-dispatch", failed_at=int(now))
+        allowed: tuple[str, str] = ("UNSENT", "UNSENT")
+        row = connection.execute(
+            "SELECT request FROM payment_dispatch WHERE session_id=? AND state='SUBMITTED'",
+            (session_id,),
+        ).fetchone()
+        payer = (
+            bound_payer(row[0], payment_hash=payment_hash, network=network)
+            if row is not None and network is not None
+            else None
+        )
+        if failed_by_payer is not None and payer is not None:
+            if payer.node_pubkey != failed_by_payer:
+                raise LiveSessionStoreError("failure attributed to another payer")
+            evidence = _release_evidence(
+                "failed-after-dispatch", failed_at=int(now), payer=payer.node_pubkey
+            )
+            allowed = ("UNSENT", "DISPATCHED")
+    elif to_state == "CLAIMED":
+        if claim_tx_hash is None:
+            raise LiveSessionStoreError("claim evidence unavailable")
+        evidence = _release_evidence("evm-claim-confirmed", claim_tx_hash=claim_tx_hash)
+        allowed = ("DISPATCHED", "UNKNOWN")
+    elif to_state == "LOST":
+        evidence = _release_evidence("evm-claim-lost", lost_at=int(now))
+        allowed = ("DISPATCHED", "UNKNOWN")
+    elif to_state == "ABORTED":
+        evidence = _release_evidence("hold-canceled", aborted_at=int(now))
+        allowed = ("UNSENT", "UNKNOWN")
+    elif to_state == "SETTLED":
+        evidence = _release_evidence("hold-settled", settled_at=int(now))
+        allowed = ("DISPATCHED", "UNKNOWN")
+    else:
+        if refund_tx_hash is None:
+            raise LiveSessionStoreError("refund evidence unavailable")
+        evidence = _release_evidence("evm-refund-confirmed", refund_tx_hash=refund_tx_hash)
+        allowed = ("DISPATCHED", "UNKNOWN")
+    return bool(
+        connection.execute(
+            "UPDATE economic_reservations SET state='RELEASED', release_evidence=? "
+            "WHERE payment_hash=? AND session_id=? AND state IN (?, ?)",
+            (evidence, payment_hash, session_id, *allowed),
+        ).rowcount
+    )
+
+
 def _check_reverse_transition(
     transition: tuple[str, str],
     *,
@@ -7806,13 +8132,26 @@ def _release_terminal(  # noqa: PLR0913 - explicit terminal evidence
     )
 
 
-def _offer_terms(offer: bytes) -> ContractTerms:
-    """Return the Bitcoin contract terms of one retained canonical terms offer."""
-    terms = parse_model_json(
+def _offered_any_terms(offer: bytes) -> AnyContractTerms:
+    """Return the contract terms (any profile) of one retained canonical terms offer."""
+    return parse_model_json(
         TermsOfferPayload, canonicalize(_canonical_envelope(offer).payload)
     ).terms.contract_terms
+
+
+def _offer_terms(offer: bytes) -> ContractTerms:
+    """Return the Bitcoin contract terms of one retained canonical terms offer."""
+    terms = _offered_any_terms(offer)
     if not isinstance(terms, ContractTerms):
         raise TypeError("retained terms offer is not a Bitcoin profile")
+    return terms
+
+
+def _evm_offer_terms(offer: bytes) -> EvmContractTerms:
+    """Return the EVM contract terms of one retained canonical terms offer."""
+    terms = _offered_any_terms(offer)
+    if not isinstance(terms, EvmContractTerms):
+        raise LiveSessionStoreError("retained terms offer is not an EVM profile")
     return terms
 
 
@@ -8030,6 +8369,11 @@ def _apply_effect(
             "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
             (request.session_id, effect.contract_hash, replied[0], document, now),
         )
+        if isinstance(_offered_any_terms(replied[0]), EvmContractTerms):
+            connection.execute(
+                "INSERT INTO evm_swaps VALUES (?, NULL, NULL, NULL, NULL, NULL, NULL)",
+                (request.session_id,),
+            )
         connection.execute(
             "UPDATE sessions SET phase='ACCEPTED' WHERE session_id=?", (request.session_id,)
         )

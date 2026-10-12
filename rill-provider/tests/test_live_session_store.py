@@ -203,8 +203,15 @@ def without_v13_arbitration(connection: sqlite3.Connection) -> None:
     connection.execute("DROP TABLE claim_arbitration")
 
 
+def without_v15_evm_swaps(connection: sqlite3.Connection) -> None:
+    """Restore exact v14 (or earlier), only if no EVM swap exists."""
+    assert connection.execute("SELECT count(*) FROM evm_swaps").fetchone() == (0,)
+    connection.execute("DROP TABLE evm_swaps")
+
+
 def without_v14_preimage_evidence(connection: sqlite3.Connection) -> None:
     """Restore exact v13 (or earlier), without discarding retained knowledge."""
+    without_v15_evm_swaps(connection)
     assert connection.execute("SELECT count(*) FROM reverse_preimage_evidence").fetchone() == (0,)
     connection.execute("DROP TABLE reverse_preimage_evidence")
 
