@@ -28,6 +28,7 @@ ANVIL_KEYS = (
     "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a",
     "0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6",
     "0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a",
+    "0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba",
 )
 # Canonical ERC-4337 / EIP-7702 contracts, deployed through Anvil's built-in CREATE2 factory so
 # they land at the same addresses (and bytecode) as on public chains.
@@ -37,6 +38,9 @@ AA_ARTIFACTS = tuple(
 )
 CREATE2_FACTORY = "0x4e59b44847b379578588920ca78fbf26c0b4956c"
 DEPLOYER, USER, _SHOP, MAKER, SPONSOR = range(5)
+# Each provider process needs its own signer (nonces): MAKER locks tokens for ln-to-erc20,
+# FORWARD_MAKER claims them for erc20-to-ln.
+FORWARD_MAKER = 5
 TOKEN = {"name": "Fake USD Coin", "symbol": "fUSDC", "decimals": 6}
 GRANT = 1_000_000 * 10 ** TOKEN["decimals"]  # one million tokens each
 # Fixed dev price: 1 BTC = 100,000 fUSDC, in base units per BTC.

@@ -471,9 +471,11 @@ def provision_maker(
 
     config_path = home / "provider.json"
     if evm is not None:
-        from evm_dev import ANVIL_KEYS, ANVIL_RPC, MAKER
+        from evm_dev import ANVIL_KEYS, ANVIL_RPC, FORWARD_MAKER, MAKER
 
-        private_write(home / "evm-signer.key", ANVIL_KEYS[MAKER] + "\n")
+        # One signer key per provider process: shared keys race for nonces.
+        key = ANVIL_KEYS[FORWARD_MAKER] if direction == "erc20-to-ln" else ANVIL_KEYS[MAKER]
+        private_write(home / "evm-signer.key", key + "\n")
     if not config_path.exists():
         maker_wallet = Core("maker")
         address = maker_wallet("getnewaddress", f"{direction}-destination", "bech32m")
