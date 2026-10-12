@@ -142,6 +142,14 @@ class TxReceipt:
     status: Literal["success", "reverted"]
 
 
+@dataclass(frozen=True, slots=True)
+class SignedTx:
+    """A signed, not yet broadcast transaction: record it durably, then ``broadcast``."""
+
+    tx_hash: str  # lowercase hex without 0x
+    raw: bytes
+
+
 class EvmHtlcClient:
     """Reads and writes against one verified ERC20Swap deployment on one chain."""
 
@@ -289,22 +297,44 @@ class EvmHtlcClient:
             return None
         return self._send(contract.functions.approve(spender, MAX_UINT256))
 
-    def lock(self, params: LockParams) -> str:
-        """Send ``lock(...)`` from the signer, which must already hold allowance and balance."""
-        return self._send(self._htlc.functions.lock(*params.as_args()))
+    def prepare_lock(self, params: LockParams) -> SignedTx:
+        """Sign ``lock(...)`` from the signer, which must already hold allowance and balance."""
+        return self._prepare(self._htlc.functions.lock(*params.as_args()))
 
-    def claim(self, params: LockParams, preimage: str) -> str:
-        """Send the six-argument ``claim``; pays ``claim_address`` and is permissionless."""
+    def prepare_claim(self, params: LockParams, preimage: str) -> SignedTx:
+        """Sign the six-argument ``claim``; it pays ``claim_address`` and is permissionless."""
         _hash, amount, token, claim_address, refund_address, timelock = params.as_args()
-        return self._send(
+        return self._prepare(
             self._htlc.functions.claim(
                 bytes.fromhex(preimage), amount, token, claim_address, refund_address, timelock
             )
         )
 
+    def prepare_refund(self, params: LockParams) -> SignedTx:
+        """Sign the six-argument timed ``refund``; valid once ``block.number >= timelock``."""
+        return self._prepare(self._htlc.functions.refund(*params.as_args()))
+
+    def broadcast(self, raw: bytes) -> str:
+        """Submit signed bytes (idempotent for an already known transaction); return the hash."""
+        try:
+            return bytes(self._web3.eth.send_raw_transaction(raw)).hex()
+        except ValueError as error:  # e.g. "already known" / nonce too low once mined
+            tx_hash = bytes(Web3.keccak(raw)).hex()
+            if self.receipt(tx_hash) is not None or "already known" in str(error).lower():
+                return tx_hash
+            raise EvmBackendError(f"broadcast refused: {error}") from error
+
+    def lock(self, params: LockParams) -> str:
+        """Sign and send ``lock(...)``."""
+        return self.broadcast(self.prepare_lock(params).raw)
+
+    def claim(self, params: LockParams, preimage: str) -> str:
+        """Sign and send the six-argument ``claim``."""
+        return self.broadcast(self.prepare_claim(params, preimage).raw)
+
     def refund(self, params: LockParams) -> str:
-        """Send the six-argument timed ``refund``; valid once ``block.number >= timelock``."""
-        return self._send(self._htlc.functions.refund(*params.as_args()))
+        """Sign and send the six-argument ``refund``."""
+        return self.broadcast(self.prepare_refund(params).raw)
 
     def sign_cooperative_refund(self, params: LockParams) -> tuple[int, str, str]:
         """Sign the EIP-712 ``Refund`` message as ``claimAddress`` (cooperative refund)."""
@@ -340,6 +370,9 @@ class EvmHtlcClient:
         return int(signed.v), signed.r.to_bytes(32, "big").hex(), signed.s.to_bytes(32, "big").hex()
 
     def _send(self, call: Any) -> str:  # noqa: ANN401 - web3 ContractFunction is untyped
+        return self.broadcast(self._prepare(call).raw)
+
+    def _prepare(self, call: Any) -> SignedTx:  # noqa: ANN401 - web3 ContractFunction is untyped
         if self._account is None:
             raise EvmBackendError("no EVM signer configured")
         sender = Web3.to_checksum_address(self.signer_address)
@@ -356,5 +389,5 @@ class EvmHtlcClient:
             }
         )
         signed = self._account.sign_transaction(transaction)
-        tx_hash = self._web3.eth.send_raw_transaction(signed.raw_transaction)
-        return bytes(tx_hash).hex()
+        raw = bytes(signed.raw_transaction)
+        return SignedTx(bytes(Web3.keccak(raw)).hex(), raw)

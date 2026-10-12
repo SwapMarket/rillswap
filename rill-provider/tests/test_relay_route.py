@@ -129,6 +129,7 @@ def test_serving_refuses_an_unsafe_relay_route_at_startup(
         allow_direct_relays=allow_direct,
         relay_urls=relays,
         provider_destination_script=None,
+        handshake=SimpleNamespace(profile="btc-to-ln/v1"),
         lnd=None,
         bitcoin_core=None,
     )

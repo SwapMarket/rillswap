@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from rill_core.wire.messages import Envelope
     from rill_core.wire.types import NetworkIdentity, ProfileId
 
+    from rill_provider.evm_quote_policy import EvmQuoteContext
     from rill_provider.live_session_store import RequestContext
 
 MILLIONTHS = 1_000_000
@@ -132,7 +133,7 @@ class FirmSigner:
 
     network: NetworkIdentity
     provider_identity_key: str
-    provider_destination_script: str
+    provider_destination_script: str | None  # None: no Bitcoin firm offers (EVM profiles)
     sign: Callable[[ProviderTerms], str]
 
 
@@ -150,6 +151,7 @@ class QuoteTerms:
     invoice: InvoiceOutcome = None
     profile: ProfileId = "btc-to-ln/v1"
     hold: HoldOutcome = None
+    evm: EvmQuoteContext | None = None  # RS-010 profiles only
 
 
 def _error(code: str, message: str) -> Answer:
@@ -237,7 +239,7 @@ def _firm(  # noqa: PLR0911 - one closed answer per rule
     request: FirmQuoteRequest, context: RequestContext, terms: QuoteTerms
 ) -> Answer:
     firm, schedule, tip = terms.firm, terms.schedule, terms.tip_height
-    if firm is None:
+    if firm is None or firm.provider_destination_script is None:
         return _error("unsupported_request", "firm requests are not offered")
     principal = int(request.lightning_principal_sat)
     if not any(low <= principal <= high for low, high in terms.amount_bands):
@@ -384,7 +386,7 @@ def _reverse_firm(  # noqa: PLR0911 - one closed answer per rule
     request: ReverseFirmQuoteRequest, context: RequestContext, terms: QuoteTerms
 ) -> Answer:
     firm, schedule, tip = terms.firm, terms.schedule, terms.tip_height
-    if firm is None:
+    if firm is None or firm.provider_destination_script is None:
         return _error("unsupported_request", "firm requests are not offered")
     payout = int(request.nominal_payout_sat)
     if not any(low <= payout <= high for low, high in terms.amount_bands):

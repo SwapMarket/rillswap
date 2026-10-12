@@ -55,7 +55,9 @@ def _ready(
         )
     )
     service: Any = SimpleNamespace(
-        _settlement=settlement, _store=SimpleNamespace(firm_capacity_available=lambda: capacity)
+        _settlement=settlement,
+        _evm_settlement=None,
+        _store=SimpleNamespace(firm_capacity_available=lambda: capacity),
     )
     return asyncio.run(HandshakeService._route_ready(service, DOCUMENT, terms))  # noqa: SLF001
 

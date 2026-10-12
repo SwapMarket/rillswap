@@ -15,10 +15,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from rill_core.domain.amounts import MAX_SATS
 from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE
 from rill_core.wire.types import (
+    EvmAssetIdentity,
     NetworkIdentity,
     require_v1_destination_script,
 )
 
+from rill_provider.evm_quote_policy import EVM_PROFILES, EvmSchedule
 from rill_provider.handshake_service import ServicePolicy
 from rill_provider.handshake_store import HandshakePolicy
 from rill_provider.live_session_store import (
@@ -104,6 +106,68 @@ class Lnd(_Strict):
     invoices_macaroon: Path | None = None
 
 
+class EvmToken(_Strict):
+    """One ERC20 token served on the configured chain (RS-010)."""
+
+    token_contract: str = Field(pattern=r"^0x[0-9a-f]{40}$")
+    token_symbol: str = Field(min_length=1, max_length=16)
+    token_decimals: int = Field(ge=0, le=36)
+    # Fixed operator price until a rate source exists: token base units per BTC.
+    rate_token_base_per_btc: int = Field(ge=1)
+
+
+class EvmSettings(_Strict):
+    """One EVM chain with one verified Boltz ERC20Swap v6 deployment (RS-010)."""
+
+    rpc_url: str = Field(pattern=r"^https?://")
+    chain_id: int = Field(ge=1)
+    name: str = Field(min_length=1, max_length=32)
+    htlc_contract: str = Field(pattern=r"^0x[0-9a-f]{40}$")
+    block_seconds: int = Field(ge=1, le=3600)
+    deployment_namespace: str | None = None
+    signer_key_file: Path  # owner-only file holding one hex secp256k1 private key
+    tokens: tuple[EvmToken, ...] = Field(min_length=1, max_length=16)
+    funding_confirmations: int = Field(default=1, ge=1)
+    settlement_confirmations: int = Field(default=1, ge=1)
+    forward_timelock_delay_blocks: int = Field(ge=2)
+    reverse_timelock_delay_blocks: int = Field(ge=3)
+    learn_and_claim_seconds: int = Field(ge=1)
+    refund_and_ln_resolution_seconds: int = Field(ge=1)
+
+    def assets(self) -> tuple[EvmAssetIdentity, ...]:
+        """Return the served asset identities exactly as terms will carry them."""
+        return tuple(
+            EvmAssetIdentity(
+                family="evm",
+                chain_id=self.chain_id,
+                name=self.name,
+                htlc_contract=self.htlc_contract,
+                htlc_version=6,
+                token_contract=token.token_contract,
+                token_symbol=token.token_symbol,
+                token_decimals=token.token_decimals,
+                block_seconds=self.block_seconds,
+                deployment_namespace=self.deployment_namespace,
+            )
+            for token in self.tokens
+        )
+
+    def rates(self) -> dict[str, int]:
+        """Return the fixed rate per token contract."""
+        return {token.token_contract: token.rate_token_base_per_btc for token in self.tokens}
+
+    def schedule(self) -> EvmSchedule:
+        """Return the EVM-side quote schedule."""
+        return EvmSchedule(
+            funding_confirmations=self.funding_confirmations,
+            settlement_confirmations=self.settlement_confirmations,
+            forward_timelock_delay_blocks=self.forward_timelock_delay_blocks,
+            reverse_timelock_delay_blocks=self.reverse_timelock_delay_blocks,
+            learn_and_claim_seconds=self.learn_and_claim_seconds,
+            refund_and_ln_resolution_seconds=self.refund_and_ln_resolution_seconds,
+        )
+
+
 class PublicTerms(_Strict):
     """RS-005 announcement terms."""
 
@@ -127,6 +191,7 @@ class OperatorConfig(_Strict):
     bitcoin_core: BitcoinCore | None = None
     lnd: Lnd | None = None
     provider_destination_script: str | None = None  # P2WPKH/P2TR; enables firm offers
+    evm: EvmSettings | None = None  # required for the RS-010 ERC20 profiles
     quote: QuoteSettings = QuoteSettings()
     authority: Attestation
     handshake: HandshakeSelection
@@ -158,10 +223,12 @@ class OperatorConfig(_Strict):
     def handshake_policy(self) -> HandshakePolicy:
         """Return the store-bound negotiation policy."""
         h = self.handshake
+        # Cooperative MuSig2 claims are intrinsic to the Bitcoin profiles, never
+        # an operator toggle; EVM HTLC profiles have no key-path claim.
+        intrinsic = set() if h.profile in EVM_PROFILES else {COOPERATIVE_CLAIM_FEATURE}
         return HandshakePolicy(
             profile=h.profile,  # type: ignore[arg-type]
-            # Cooperative MuSig2 claims are intrinsic, never an operator toggle.
-            features=frozenset(h.features) | {COOPERATIVE_CLAIM_FEATURE},
+            features=frozenset(h.features) | intrinsic,
             encryption_suites=frozenset(h.encryption_suites),
             capabilities=frozenset(h.capabilities),
         )
@@ -236,7 +303,32 @@ def load_config(path: Path) -> OperatorConfig:
         update["bitcoin_core"] = config.bitcoin_core.model_copy(
             update={"cookie_file": _resolve(base, config.bitcoin_core.cookie_file)}
         )
+    if config.evm is not None:
+        update["evm"] = config.evm.model_copy(
+            update={"signer_key_file": _resolve(base, config.evm.signer_key_file)}
+        )
     return config.model_copy(update=update)
+
+
+def read_evm_signer_key(path: Path) -> str:
+    """Read an owner-only file holding one hex EVM private key; refuse loose permissions."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        raise OperatorConfigError("EVM signer key file unavailable") from None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+            raise OperatorConfigError("EVM signer key file must be a 0600 regular file")
+        if info.st_uid != os.geteuid():
+            raise OperatorConfigError("EVM signer key file must be owned by this user")
+        data = os.read(fd, MAX_IDENTITY_FILE_BYTES + 1)
+    finally:
+        os.close(fd)
+    key = data.decode("utf-8", "replace").strip().lower().removeprefix("0x")
+    if len(key) != 64 or any(c not in "0123456789abcdef" for c in key):  # noqa: PLR2004
+        raise OperatorConfigError("EVM signer key file must hold one 32-byte hex key")
+    return "0x" + key
 
 
 def read_custody_identity(path: Path) -> str:

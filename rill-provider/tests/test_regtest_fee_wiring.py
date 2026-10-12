@@ -39,6 +39,7 @@ def test_operator_settlement_allows_fixed_fee_only_on_regtest(
 ) -> None:
     config = SimpleNamespace(
         network=network,
+        handshake=SimpleNamespace(profile="btc-to-ln/v1"),
         bitcoin_core=SimpleNamespace(port=18443, cookie_file=tmp_path / "cookie", wallet="w"),
         lnd=SimpleNamespace(
             port=10009,

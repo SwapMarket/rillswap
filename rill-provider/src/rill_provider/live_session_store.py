@@ -436,15 +436,19 @@ SCHEMA_V14 = (*SCHEMA_V13, REVERSE_PREIMAGE_EVIDENCE_SCHEMA)
 # the swap to the EVM lifecycle (``evm_settlement_work``) instead of the
 # Bitcoin one. lock_* is the counterparty's observed ``Lockup`` log (forward
 # swaps); provider_tx_hash is our own lock (reverse swaps); claim_tx_hash is
-# our claim (forward) or the observed client claim (reverse); refund_tx_hash is
-# our refund (reverse). Hashes are lowercase hex without ``0x``.
+# our claim (forward, with its signed bytes) or the observed client claim
+# (reverse, hash only); refund_tx_hash is our refund (reverse). Signed bytes
+# are retained so an interrupted broadcast can be repeated after a restart.
+# Hashes are lowercase hex without ``0x``.
 EVM_SWAP_SCHEMA = (
     "CREATE TABLE evm_swaps (session_id TEXT PRIMARY KEY NOT NULL, "
     "lock_tx_hash TEXT, lock_log_index INTEGER CHECK (lock_log_index >= 0), "
-    "lock_block INTEGER CHECK (lock_block >= 0), provider_tx_hash TEXT, "
-    "claim_tx_hash TEXT, refund_tx_hash TEXT, "
+    "lock_block INTEGER CHECK (lock_block >= 0), provider_tx_hash TEXT, provider_tx BLOB, "
+    "claim_tx_hash TEXT, claim_tx BLOB, refund_tx_hash TEXT, refund_tx BLOB, "
     "CHECK ((lock_tx_hash IS NULL) = (lock_log_index IS NULL) AND "
-    "(lock_tx_hash IS NULL) = (lock_block IS NULL)))"
+    "(lock_tx_hash IS NULL) = (lock_block IS NULL)), "
+    "CHECK ((provider_tx_hash IS NULL) = (provider_tx IS NULL)), "
+    "CHECK ((refund_tx_hash IS NULL) = (refund_tx IS NULL)))"
 )
 SCHEMA = (*SCHEMA_V14, EVM_SWAP_SCHEMA)
 MAX_CLAIM_ATTEMPTS = 32
@@ -719,8 +723,11 @@ class EvmSettlementItem:
     lock_log_index: int | None
     lock_block: int | None
     provider_tx_hash: str | None
+    provider_tx: bytes | None
     claim_tx_hash: str | None
+    claim_tx: bytes | None
     refund_tx_hash: str | None
+    refund_tx: bytes | None
 
     def terms(self) -> EvmContractTerms:
         """Return the signed EVM terms this swap was accepted under."""
@@ -6043,7 +6050,8 @@ class LiveSessionStore:
                     "SELECT w.session_id, w.state, s.blocked, w.terms_offer, i.canonical_bytes, "
                     "w.preimage, COALESCE(p.state, 'UNKNOWN'), p.payment_hash, p.request, "
                     "e.lock_tx_hash, e.lock_log_index, e.lock_block, e.provider_tx_hash, "
-                    "e.claim_tx_hash, e.refund_tx_hash FROM evm_swaps e "
+                    "e.provider_tx, e.claim_tx_hash, e.claim_tx, e.refund_tx_hash, e.refund_tx "
+                    "FROM evm_swaps e "
                     "JOIN swaps w ON w.session_id = e.session_id "
                     "JOIN sessions s ON s.session_id = w.session_id "
                     "LEFT JOIN payment_dispatch p ON p.session_id = w.session_id "
@@ -6094,7 +6102,8 @@ class LiveSessionStore:
         signer: EnvelopeSigner,
         now: int,
         lockup: tuple[str, int, int] | None = None,
-        tx_hash: str | None = None,
+        sent: tuple[str, bytes] | None = None,
+        observed_claim: str | None = None,
         preimage: str | None = None,
         failed_by_payer: str | None = None,
         observation: dict[str, Any] | None = None,
@@ -6104,15 +6113,13 @@ class LiveSessionStore:
         ``FUNDING_SEEN`` records the observed ``lockup`` ``(tx_hash, log_index,
         block)``. ``PAYING`` is the one payment grant (an UNSENT dispatch row).
         ``PAID`` and ``SETTLED`` need the preimage of the terms' payment hash.
-        ``CLAIMING``, ``FUNDING_SENT`` and ``REFUNDING`` record our sent
-        transaction's ``tx_hash`` before it is broadcast; ``FUNDING_SENT`` also
-        marks the reservation ``DISPATCHED`` so a lock is never sent twice.
-        ``SETTLED`` may name the client's claim ``tx_hash``. Terminal states
-        release the reservation with the evidence they carry.
+        ``CLAIMING``, ``FUNDING_SENT`` and ``REFUNDING`` record our signed
+        transaction ``sent`` as ``(tx_hash, raw)`` before it is broadcast;
+        ``FUNDING_SENT`` also marks the reservation ``DISPATCHED`` so a lock is
+        never signed twice. ``SETTLED`` may name the client's ``observed_claim``
+        hash. Terminal states release the reservation with their evidence.
         """
-        _check_evm_transition(
-            (from_state, to_state), lockup=lockup, tx_hash=tx_hash, preimage=preimage
-        )
+        _check_evm_transition((from_state, to_state), lockup=lockup, sent=sent, preimage=preimage)
         try:
             with self._write() as connection:
                 row = connection.execute(
@@ -6150,10 +6157,10 @@ class LiveSessionStore:
                         "INSERT INTO payment_dispatch VALUES (?, ?, 'UNSENT', NULL)",
                         (session_id, payment_hash),
                     )
-                elif to_state == "FUNDING_SENT":
+                elif to_state == "FUNDING_SENT" and sent is not None:
                     connection.execute(
-                        "UPDATE evm_swaps SET provider_tx_hash=? WHERE session_id=?",
-                        (tx_hash, session_id),
+                        "UPDATE evm_swaps SET provider_tx_hash=?, provider_tx=? WHERE session_id=?",
+                        (*sent, session_id),
                     )
                     granted = connection.execute(
                         "UPDATE economic_reservations SET state='DISPATCHED' "
@@ -6162,15 +6169,20 @@ class LiveSessionStore:
                     ).rowcount
                     if granted != 1:
                         raise LiveSessionStoreError("funding grant refused")  # noqa: TRY301
-                elif to_state in ("CLAIMING", "SETTLED") and tx_hash is not None:
+                elif to_state == "CLAIMING" and sent is not None:
+                    connection.execute(
+                        "UPDATE evm_swaps SET claim_tx_hash=?, claim_tx=? WHERE session_id=?",
+                        (*sent, session_id),
+                    )
+                elif to_state == "SETTLED" and observed_claim is not None:
                     connection.execute(
                         "UPDATE evm_swaps SET claim_tx_hash=? WHERE session_id=?",
-                        (tx_hash, session_id),
+                        (observed_claim, session_id),
                     )
-                elif to_state == "REFUNDING":
+                elif to_state == "REFUNDING" and sent is not None:
                     connection.execute(
-                        "UPDATE evm_swaps SET refund_tx_hash=? WHERE session_id=?",
-                        (tx_hash, session_id),
+                        "UPDATE evm_swaps SET refund_tx_hash=?, refund_tx=? WHERE session_id=?",
+                        (*sent, session_id),
                     )
                 if to_state in EVM_TERMINAL_STATES:
                     _release_evm_terminal(
@@ -7901,7 +7913,7 @@ def _check_evm_transition(
     transition: tuple[str, str],
     *,
     lockup: tuple[str, int, int] | None,
-    tx_hash: str | None,
+    sent: tuple[str, bytes] | None,
     preimage: str | None,
 ) -> None:
     """Refuse an EVM transition that lacks, or carries, the wrong evidence."""
@@ -7910,10 +7922,8 @@ def _check_evm_transition(
         raise LiveSessionStoreError("swap transition unsupported")
     if (to_state == "FUNDING_SEEN") != (lockup is not None):
         raise LiveSessionStoreError("lock observation needs the exact lockup")
-    if (to_state in ("CLAIMING", "FUNDING_SENT", "REFUNDING")) != (
-        tx_hash is not None and to_state != "SETTLED"
-    ):
-        raise LiveSessionStoreError("sent transaction transition needs its hash")
+    if (to_state in ("CLAIMING", "FUNDING_SENT", "REFUNDING")) != (sent is not None):
+        raise LiveSessionStoreError("sent transaction transition needs the signed transaction")
     if (to_state in ("PAID", "SETTLED")) != (preimage is not None):
         raise LiveSessionStoreError("settlement needs the preimage")
 
@@ -8371,7 +8381,8 @@ def _apply_effect(
         )
         if isinstance(_offered_any_terms(replied[0]), EvmContractTerms):
             connection.execute(
-                "INSERT INTO evm_swaps VALUES (?, NULL, NULL, NULL, NULL, NULL, NULL)",
+                "INSERT INTO evm_swaps VALUES (?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
+                "NULL, NULL)",
                 (request.session_id,),
             )
         connection.execute(

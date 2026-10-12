@@ -236,7 +236,8 @@ def _advertisement(identity: str, terms: AnnouncementTerms) -> dict[str, Any]:
         and _supported(terms.network)
         and 1 <= len(terms.profiles) <= 8  # noqa: PLR2004
         and len(set(terms.profiles)) == len(terms.profiles)
-        and set(terms.profiles) <= {"btc-to-ln/v1", "ln-to-btc/v1"}
+        and set(terms.profiles)
+        <= {"btc-to-ln/v1", "ln-to-btc/v1", "erc20-to-ln/v1", "ln-to-erc20/v1"}
         and 1 <= len(bands) <= 16  # noqa: PLR2004
         and all(0 < low <= high for low, high in bands)
         and terms.base_fee_sat >= 0

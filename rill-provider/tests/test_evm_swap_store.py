@@ -90,7 +90,8 @@ def _accept_evm_swap(
         (session, digest, canonicalize(offer), b"accepted"),
     )
     connection.execute(
-        "INSERT INTO evm_swaps VALUES (?, NULL, NULL, NULL, NULL, NULL, NULL)", (session,)
+        "INSERT INTO evm_swaps VALUES (?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
+        (session,),
     )
     connection.execute("UPDATE sessions SET phase='ACCEPTED' WHERE session_id=?", (session,))
     connection.execute("INSERT INTO payment_hashes VALUES (?, ?, 1000)", (PAYMENT_HASH, session))
@@ -142,9 +143,9 @@ def test_forward_lifecycle_records_lock_payment_grant_and_claim(harness: Harness
         with pytest.raises(live.LiveSessionStoreError, match="preimage"):
             advance("PAYING", "PAID", preimage="22" * 32)
         advance("PAYING", "PAID", preimage=PREIMAGE)
-        with pytest.raises(live.LiveSessionStoreError, match="needs its hash"):
+        with pytest.raises(live.LiveSessionStoreError, match="signed transaction"):
             advance("PAID", "CLAIMING")
-        advance("PAID", "CLAIMING", tx_hash=TX)
+        advance("PAID", "CLAIMING", sent=(TX, b"raw"))
         (item,) = store.evm_settlement_work()
         assert (item.state, item.preimage, item.claim_tx_hash) == ("CLAIMING", PREIMAGE, TX)
         assert _reservation(store)[0] == "UNSENT"  # no dispatch was committed in this test
@@ -175,12 +176,17 @@ def test_reverse_lifecycle_grants_one_lock_and_settles_on_the_preimage(harness: 
         session = _accept_evm_swap(store, harness, evm_terms("ln-to-erc20/v1"))
         advance = _advancer(store, session)
         advance("ACCEPTED", "LN_HELD")
-        advance("LN_HELD", "FUNDING_SENT", tx_hash=TX)
+        advance("LN_HELD", "FUNDING_SENT", sent=(TX, b"raw"))
         assert _reservation(store)[0] == "DISPATCHED"
         (item,) = store.evm_settlement_work()
-        assert (item.state, item.provider_tx_hash, item.invoice) == ("FUNDING_SENT", TX, "")
+        assert (item.state, item.provider_tx_hash, item.provider_tx, item.invoice) == (
+            "FUNDING_SENT",
+            TX,
+            b"raw",
+            "",
+        )
         advance("FUNDING_SENT", "FUNDED")
-        advance("FUNDED", "SETTLED", preimage=PREIMAGE, tx_hash="ef" * 32)
+        advance("FUNDED", "SETTLED", preimage=PREIMAGE, observed_claim="ef" * 32)
         state, evidence = _reservation(store)
         assert state == "RELEASED"
         assert b"hold-settled" in (evidence or b"")
@@ -196,12 +202,14 @@ def test_reverse_refund_releases_on_the_refund_hash(harness: Harness) -> None:
         session = _accept_evm_swap(store, harness, evm_terms("ln-to-erc20/v1"))
         advance = _advancer(store, session)
         advance("ACCEPTED", "LN_HELD")
-        advance("LN_HELD", "FUNDING_SENT", tx_hash=TX)
+        advance("LN_HELD", "FUNDING_SENT", sent=(TX, b"raw"))
         store._connection.execute("UPDATE swaps SET state='LN_HELD'")  # noqa: SLF001
         with pytest.raises(live.LiveSessionStoreError, match="funding grant refused"):
-            advance("LN_HELD", "FUNDING_SENT", tx_hash=TX)  # the reservation is already dispatched
+            advance(
+                "LN_HELD", "FUNDING_SENT", sent=(TX, b"raw")
+            )  # the reservation is already dispatched
         store._connection.execute("UPDATE swaps SET state='FUNDED'")  # noqa: SLF001
-        advance("FUNDED", "REFUNDING", tx_hash="ef" * 32)
+        advance("FUNDED", "REFUNDING", sent=("ef" * 32, b"refund"))
         advance("REFUNDING", "REFUNDED")
         state, evidence = _reservation(store)
         assert state == "RELEASED"

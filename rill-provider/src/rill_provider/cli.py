@@ -22,6 +22,9 @@ from rill_core.errors import ValidationError
 from rill_core.networks import require_funding_release
 
 from rill_provider.core_tx_bytes import CoreTransactionReader
+from rill_provider.evm_htlc import EvmBackendError, EvmHtlcClient
+from rill_provider.evm_quote_policy import EVM_PROFILES
+from rill_provider.evm_settlement import EvmSettlementEngine
 from rill_provider.handshake_service import HandshakeService
 from rill_provider.live_session_store import LiveSessionStore, LiveSessionStoreError
 from rill_provider.lnd_hold_invoice import LndHoldInvoices
@@ -33,6 +36,7 @@ from rill_provider.operator_config import (
     OperatorConfigError,
     load_config,
     read_custody_identity,
+    read_evm_signer_key,
 )
 from rill_provider.payment_reconciliation import reconcile_payment
 from rill_provider.provider_identity import ProviderIdentity, ProviderIdentityError
@@ -169,20 +173,12 @@ def _chain_tip(config: OperatorConfig) -> Callable[[], int] | None:
     return reader.tip_height
 
 
-def _settlement(
-    config: OperatorConfig, store: LiveSessionStore, crypto: Context
-) -> SettlementEngine | None:
-    lnd, core = config.lnd, config.bitcoin_core
-    if lnd is None or core is None or lnd.payment_macaroon is None:
+def _payment_sender(config: OperatorConfig) -> LndPaymentSender | None:
+    lnd = config.lnd
+    if lnd is None or lnd.payment_macaroon is None:
         return None
     try:
-        chain = CoreTransactionReader(
-            port=core.port,
-            cookie_path=core.cookie_file,
-            network=config.network,
-            wallet=core.wallet,
-        )
-        lightning = LndPaymentSender(
+        return LndPaymentSender(
             host="127.0.0.1",
             port=lnd.port,
             tls_certificate_path=lnd.tls_certificate,
@@ -191,6 +187,60 @@ def _settlement(
         )
     except ValueError:
         raise OperatorConfigError("settlement requires a supported network") from None
+
+
+def _evm_settlement(
+    config: OperatorConfig, store: LiveSessionStore, crypto: Context
+) -> EvmSettlementEngine | None:
+    """Build the RS-010 engine for an EVM-profile process; None for Bitcoin profiles."""
+    evm, profile = config.evm, config.handshake.profile
+    if evm is None or profile not in EVM_PROFILES:
+        return None
+    htlc = EvmHtlcClient(
+        rpc_url=evm.rpc_url,
+        chain_id=evm.chain_id,
+        htlc_contract=evm.htlc_contract,
+        signer_private_key=read_evm_signer_key(evm.signer_key_file),
+    )
+    try:
+        htlc.verify_deployment()  # refuse at startup, never mid-swap
+    except EvmBackendError as error:
+        raise OperatorConfigError(f"EVM HTLC deployment refused: {error}") from None
+    tip = _chain_tip(config)
+    if tip is None:
+        raise OperatorConfigError("EVM profiles need bitcoin_core for the Bitcoin tip")
+    return EvmSettlementEngine(
+        store,
+        htlc,
+        crypto,
+        assets=evm.assets(),
+        rates=evm.rates,
+        schedule=evm.schedule(),
+        btc_tip=tip,
+        lightning=_payment_sender(config),
+        hold_invoices=_hold_invoices(config),
+    )
+
+
+def _settlement(
+    config: OperatorConfig, store: LiveSessionStore, crypto: Context
+) -> SettlementEngine | None:
+    lnd, core = config.lnd, config.bitcoin_core
+    if lnd is None or core is None or lnd.payment_macaroon is None:
+        return None
+    if config.handshake.profile in EVM_PROFILES:
+        return None  # the EVM engine owns this process's swaps
+    try:
+        chain = CoreTransactionReader(
+            port=core.port,
+            cookie_path=core.cookie_file,
+            network=config.network,
+            wallet=core.wallet,
+        )
+    except ValueError:
+        raise OperatorConfigError("settlement requires a supported network") from None
+    lightning = _payment_sender(config)
+    assert lightning is not None  # noqa: S101 - payment_macaroon checked above
     # Regtest Core rarely has a fee estimate; its relay/mempool floors and the
     # configured claim floor then price cooperative claims. Public networks
     # always require an affirmative conservative estimate.
@@ -256,6 +306,23 @@ async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
         raise OperatorConfigError(
             "ln-to-btc firm offers need lnd.invoices_macaroon and bitcoin_core"
         )
+    if config.handshake.profile in EVM_PROFILES:
+        # RS-010 profiles pay (erc20-to-ln) or hold (ln-to-erc20) on LND, lock on
+        # the EVM chain, and read the Bitcoin tip for cross-chain timing.
+        needed = (
+            "payment_macaroon"
+            if config.handshake.profile == "erc20-to-ln/v1"
+            else ("invoices_macaroon")
+        )
+        if (
+            config.evm is None
+            or config.bitcoin_core is None
+            or lnd is None
+            or getattr(lnd, needed) is None
+        ):
+            raise OperatorConfigError(
+                f"{config.handshake.profile} needs evm, bitcoin_core and lnd.{needed}"
+            )
     try:
         proxy = require_relay_route(
             config.network, config.relay_proxy, allow_direct=config.allow_direct_relays
@@ -296,6 +363,7 @@ async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
             invoice_decoder=_invoice_decoder(config),
             settlement=_settlement(config, store, crypto),
             hold_invoices=_hold_invoices(config),
+            evm_settlement=_evm_settlement(config, store, crypto),
         )
         await service.run(stop)
 

@@ -18,11 +18,13 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from rill_core.wire.canonical import canonicalize, parse_model_json
+from rill_core.wire.evm_quotes import LnToErc20FirmQuoteRequest
 from rill_core.wire.hashes import canonical_model
 from rill_core.wire.messages import Envelope, InvoiceBinding
 from rill_core.wire.quotes import QuoteError, parse_quote_request
 from rill_core.wire.reverse_quotes import ReverseFirmQuoteRequest
 
+from rill_provider.evm_quote_policy import EVM_PROFILES, ln_to_erc20_hold_msat
 from rill_provider.live_session_store import (
     COOPERATION_BUDGET_SECONDS,
     FIRST_REQUEST_SEQUENCE,
@@ -56,6 +58,7 @@ if TYPE_CHECKING:
     from rill_core.wire.types import NetworkIdentity, ProfileId
     from rill_crypto import Context
 
+    from rill_provider.evm_settlement import EvmSettlementEngine
     from rill_provider.live_session_store import (
         PreparedFallback,
         ReadinessChallenge,
@@ -68,6 +71,7 @@ if TYPE_CHECKING:
     from rill_provider.settlement_engine import ClaimProbeWindow, SettlementEngine
 
 LOG = logging.getLogger(__name__)
+REVERSE_PROFILES = ("ln-to-btc/v1", "ln-to-erc20/v1")  # the provider funds after a hold
 NIP59_BACKDATE_SECONDS = 2 * 24 * 60 * 60
 MAX_SEEN_EVENTS = 4096
 TIP_LOOKUP_WAIT_SECONDS = 2.0  # waiting bound, not cancellation of Core's worker thread
@@ -153,6 +157,7 @@ class HandshakeService:
         invoice_decoder: Callable[[str], InvoiceBinding] | None = None,
         settlement: SettlementEngine | None = None,
         hold_invoices: LndHoldInvoices | None = None,
+        evm_settlement: EvmSettlementEngine | None = None,
     ) -> None:
         """Bind already-acquired, already-verified resources.
 
@@ -172,6 +177,7 @@ class HandshakeService:
         self._invoice_decoder = invoice_decoder
         self._settlement = settlement
         self._hold_invoices = hold_invoices
+        self._evm_settlement = evm_settlement  # RS-010 profiles: quotes, readiness, and ticks
         self._state = _State()
         self._deadline_healthy = True
         self._deadline_wall_anchor, self._deadline_monotonic_anchor = self._now(), time.monotonic()
@@ -442,7 +448,7 @@ class HandshakeService:
         """Install the current filter on one (re)connected relay."""
         await relay.subscribe(self._filters())
 
-    async def tick(self, relays: Sequence[Relay]) -> None:
+    async def tick(self, relays: Sequence[Relay]) -> None:  # noqa: PLR0912 - one periodic duty per branch
         """Rotate epochs, refresh the announcement, resubscribe, retry the outbox."""
         self._expire_readiness()
         for session_id, (_, expires) in tuple(self._fresh_featured_accepts.items()):
@@ -470,6 +476,9 @@ class HandshakeService:
             for session_id, moved in (await self._settlement.tick(now)).items():
                 LOG.info("swap %s moved to %s", session_id[:16], moved)
                 await self._begin_paid_probe(session_id, moved, relays)
+        if self._evm_settlement is not None:
+            for session_id, moved in (await self._evm_settlement.tick(now)).items():
+                LOG.info("EVM swap %s moved to %s", session_id[:16], moved)
         due = sorted(  # least recently attempted first (never attempted = 0)
             (
                 entry.message_id
@@ -793,7 +802,9 @@ class HandshakeService:
 
     def _firm_signer(self) -> FirmSigner | None:
         script = self._policy.provider_destination_script
-        if self._invoice_decoder is None or script is None:
+        if self._invoice_decoder is None or (
+            script is None and self._policy.profile not in EVM_PROFILES
+        ):
             return None
         return FirmSigner(
             network=self._policy.network,
@@ -841,7 +852,7 @@ class HandshakeService:
             self._hold_invoices is None
             or self._invoice_decoder is None
             or terms.firm is None
-            or terms.profile != "ln-to-btc/v1"
+            or terms.profile not in REVERSE_PROFILES
             or envelope.get("sequence") != FIRST_REQUEST_SEQUENCE
             or not isinstance(payload, dict)
             or payload.get("mode") != "firm"
@@ -852,11 +863,17 @@ class HandshakeService:
             request = parse_quote_request(canonicalize(payload))
         except ValueError:
             return None  # the quote rules answer request_unacceptable
-        if not isinstance(request, ReverseFirmQuoteRequest):
+        if isinstance(request, ReverseFirmQuoteRequest):
+            payout = int(request.nominal_payout_sat)
+            value_msat: int | None = hold_invoice_msat(terms, payout)
+            if not any(low <= payout <= high for low, high in terms.amount_bands):
+                value_msat = None
+        elif isinstance(request, LnToErc20FirmQuoteRequest):
+            value_msat = ln_to_erc20_hold_msat(terms, request)  # None: unquotable now
+        else:
             return None
-        payout = int(request.nominal_payout_sat)
         if (
-            not any(low <= payout <= high for low, high in terms.amount_bands)
+            value_msat is None
             or self._store.payment_hash_reserved(request.payment_hash)
             or not self._store.firm_capacity_available()
         ):
@@ -870,7 +887,7 @@ class HandshakeService:
             bolt11 = await operation.worker(
                 lambda: hold_invoices.add(
                     request.payment_hash,
-                    value_msat=hold_invoice_msat(terms, payout),
+                    value_msat=value_msat,
                     expiry_seconds=schedule.hold_invoice_lifetime,
                     cltv_expiry_delta=schedule.incoming_htlc_expiry_delta_blocks,
                 )
@@ -913,12 +930,12 @@ class HandshakeService:
                 or original.message_id != answer.request_message_id
                 or original.message_type != "quote_request"
                 or original.sequence != FIRST_REQUEST_SEQUENCE
-                or original.profile_id != "ln-to-btc/v1"
+                or original.profile_id not in REVERSE_PROFILES
                 or original.network_identity != self._policy.network
             ):
                 return False
             request = parse_quote_request(canonicalize(original.payload))
-            if not isinstance(request, ReverseFirmQuoteRequest) or (
+            if not isinstance(request, ReverseFirmQuoteRequest | LnToErc20FirmQuoteRequest) or (
                 request.payment_hash != hold[1].payment_hash
             ):
                 return False
@@ -933,7 +950,7 @@ class HandshakeService:
                 or response.session_id != answer.session_id
                 or response.message_id != answer.response_message_id
                 or response.in_reply_to != answer.request_message_id
-                or response.profile_id != "ln-to-btc/v1"
+                or response.profile_id not in REVERSE_PROFILES
                 or response.network_identity != self._policy.network
                 or response.contract_hash is not None
                 or response.signature is None
@@ -962,7 +979,8 @@ class HandshakeService:
         self, document: bytes, terms: QuoteTerms
     ) -> QuoteTerms:
         """Offer firm terms only when settlement could pay this invoice now."""
-        binding, tip, settlement = terms.invoice, terms.tip_height, self._settlement
+        binding, tip = terms.invoice, terms.tip_height
+        settlement = self._settlement if self._settlement is not None else self._evm_settlement
         if (
             terms.firm is None
             or not isinstance(binding, InvoiceBinding)
@@ -1027,6 +1045,11 @@ class HandshakeService:
             invoice=invoice,
             profile=policy.profile,
         )
+        if policy.profile in EVM_PROFILES:
+            evm = self._evm_settlement
+            terms = replace(
+                terms, evm=await asyncio.to_thread(evm.quote_context) if evm is not None else None
+            )
         terms = await self._route_ready(document, terms)
         if operation is not None:
             terms = replace(terms, hold=await self._open_hold(document, terms, operation=operation))
@@ -1083,7 +1106,7 @@ class HandshakeService:
 
     async def _answer(self, document: bytes, relays: Sequence[Relay], now: int) -> str:
         policy = self._policy
-        if policy.profile == "ln-to-btc/v1":
+        if policy.profile in REVERSE_PROFILES:
             async with self._store.reverse_operations.operation() as operation:
                 answer, sent = await self._prepare_answer(document, now, operation=operation)
         else:

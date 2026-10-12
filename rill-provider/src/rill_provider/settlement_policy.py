@@ -16,10 +16,11 @@ from rill_core.settlement.funding import check_funding_binding_transaction
 from rill_core.settlement.taproot import TaprootKeyOperations
 from rill_core.wire.canonical import canonicalize, parse_model_json
 from rill_core.wire.hashes import client_acceptance_hash, funding_binding_hash
-from rill_core.wire.messages import ContractTerms, Envelope
+from rill_core.wire.messages import AnyContractTerms, ContractTerms, Envelope
 from rill_core.wire.quotes import TermsOfferPayload
 from rill_core.wire.settlement_messages import FundingBindingPayload, TermsAcceptPayload
 
+from rill_provider.evm_quote_policy import EVM_PROFILES, answer_evm_quote
 from rill_provider.live_session_store import AcceptSwap, Answer, BindFunding
 from rill_provider.quote_policy import answer_quote
 
@@ -49,16 +50,21 @@ def _ack(request: Envelope, contract: str, effect: AcceptSwap | BindFunding) -> 
     )
 
 
+def offered_any_terms(offer_envelope: Envelope) -> AnyContractTerms:
+    """Return the contract terms (any profile) of one of our recorded ``terms_offer`` envelopes."""
+    offer = parse_model_json(TermsOfferPayload, canonicalize(offer_envelope.payload))
+    return offer.terms.contract_terms
+
+
 def offered_terms(offer_envelope: Envelope) -> ContractTerms:
     """Return the Bitcoin contract terms of one of our recorded ``terms_offer`` envelopes."""
-    offer = parse_model_json(TermsOfferPayload, canonicalize(offer_envelope.payload))
-    terms = offer.terms.contract_terms
+    terms = offered_any_terms(offer_envelope)
     if not isinstance(terms, ContractTerms):
         raise TypeError("recorded terms offer is not a Bitcoin profile")
     return terms
 
 
-def answer_client_request(
+def answer_client_request(  # noqa: PLR0911 - one dispatch per message type
     request: Envelope,
     prior: tuple[Envelope, ...],
     context: RequestContext,
@@ -71,6 +77,8 @@ def answer_client_request(
             return _error("request_unacceptable", "quote requests start an exchange")
         if context.swap is not None:  # one swap per session; no new offers after it
             return _error("unsupported_request", "session already has a swap")
+        if terms.profile in EVM_PROFILES:
+            return answer_evm_quote(request, prior, context, terms)
         return answer_quote(request, prior, context, terms)
     if request.message_type == "terms_accept":
         return answer_acceptance(request, context, now=terms.now, crypto=crypto)
@@ -91,7 +99,7 @@ def answer_acceptance(
     try:
         payload = parse_model_json(TermsAcceptPayload, canonicalize(request.payload))
         acceptance = payload.acceptance
-        terms = offered_terms(offer)
+        terms = offered_any_terms(offer)
         if (
             acceptance.contract_hash != offer.contract_hash
             or acceptance.handshake_hash != context.handshake_hash
