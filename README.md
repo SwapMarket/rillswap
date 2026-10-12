@@ -62,3 +62,15 @@ diagnostics use disposable regtest wallets and must never be pointed at a real
 installation. Git history for each former component repository is retained as
 ancestors of the monorepo import commits, even though old commits use their
 original component-relative paths.
+
+## License
+
+RillSwap is MIT licensed (`LICENSE`; each component carries the same
+license). Third-party files keep their own licenses and are marked where they
+live: `rill-contracts/vendor/boltz-core/` (Boltz `ERC20Swap.sol`, MIT; Uniswap
+`TransferHelper.sol`, GPL-3.0-or-later, which is compiled into
+`rill-contracts/artifacts/erc20-swap-v6.json`), and the dev-stack account
+abstraction artifacts `entry-point-v0.7.json` (GPL-3.0),
+`execution-install-delegate.json` and `sma7702.json` (GPL-3.0-or-later). The
+GPL text is in `rill-contracts/licenses/GPL-3.0.txt`; each of those artifacts
+records its upstream source.
