@@ -9,6 +9,7 @@ import type { EvmAssetIdentity } from "../manualProviderAdvertisement";
 import { invoiceBinding } from "./bolt11";
 import { encryptEvmRecovery, lockOf, type EvmRecoveryParts, type LnToErc20Terms, type LnToErc20TermsOffer } from "./erc20Swap";
 import { awaitReceipt, checkEvmAddress, lockHash, type EvmRpc, type HtlcLock } from "./evmHtlc";
+import { stagingAddress } from "./gasSponsor";
 import { clientAcceptanceHash } from "./hashes";
 import { handshake, newKeyPair } from "./handshake";
 import { Session, SwapError, type RelayLink } from "./session";
@@ -102,7 +103,12 @@ export function checkLnErc20TermsOffer(payload: unknown, context: {
 }
 
 export interface LnErc20Configuration {
+  /** The HTLC claim address: the user's wallet account, or the staging account of `claimKey`. */
   readonly clientEvmAddress: string;
+  /** Browser-held secp256k1 key behind `clientEvmAddress` for gas-sponsored claims; stored with the preimage. */
+  readonly claimKey?: Uint8Array;
+  /** Where the sponsored claim forwards the tokens; required with `claimKey`. */
+  readonly claimDestination?: string;
   readonly evmTip: number;
   readonly btcTip: number;
   readonly ageRecipient: string;
@@ -118,7 +124,10 @@ export interface LnErc20Hooks {
   checkWallet(): Promise<void>;
   /** Atomic durable exposure grant, before any preimage-bearing wallet/RPC request. */
   markExposure(contractHash: string): Promise<void>;
+  /** Submit the claim and return its transaction hash once known (sponsored claims: after inclusion). */
   claim(lock: HtlcLock, preimage: string, htlc: string): Promise<string>;
+  /** Who pays claim gas: the claim account itself (`wallet`) or a gas sponsor (`sponsored`). */
+  readonly claimGas: "wallet" | "sponsored";
 }
 export interface PreparedLnErc20Execution {
   readonly terms: LnToErc20Terms;
@@ -177,6 +186,9 @@ export async function prepareLnErc20Quote(relay: RelayLink, request: LnErc20Requ
 
 async function prepareFirm(relay: RelayLink, request: LnErc20Request, options: { readonly announcement: string; readonly replyMs?: number; readonly clock?: () => number }, config: LnErc20Configuration): Promise<PreparedLnErc20Execution> {
   checkEvmAddress(config.clientEvmAddress, "claim address");
+  const claimKey = config.claimKey === undefined ? null : bytesToHex(config.claimKey);
+  if (claimKey !== null && (config.claimKey!.length !== 32 || stagingAddress(config.claimKey!) !== config.clientEvmAddress)) throw new SwapError("claim key does not control the claim address");
+  if (claimKey !== null) checkEvmAddress(config.claimDestination, "token destination");
   if (![config.evmTip, config.btcTip].every((tip) => Number.isSafeInteger(tip) && tip >= 0)) throw new SwapError("invalid chain tips");
   const clock = options.clock ?? Date.now, seconds = (): number => Math.floor(clock() / 1000);
   const provider = verifyNostrProviderAnnouncement(options.announcement, request.identity, request.network, LN_TO_ERC20);
@@ -188,7 +200,8 @@ async function prepareFirm(relay: RelayLink, request: LnErc20Request, options: {
     const recoveryKey = newKeyPair(); recoveryKey.secret.fill(0);
     const createdAt = seconds();
     const secrets = canonicalize({ format: "rillswap-evm-recovery", format_version: "1", profile_id: LN_TO_ERC20,
-      stage: "pre-firm", network_identity: request.network, session_id: session.sessionId, preimage, payment_hash: paymentHash, created_at: createdAt });
+      stage: "pre-firm", network_identity: request.network, session_id: session.sessionId, preimage, payment_hash: paymentHash,
+      ...(claimKey === null ? {} : { claim_key: claimKey }), created_at: createdAt });
     await config.saveSecrets(await encryptCanonicalRecoveryForRecipient(new TextEncoder().encode(secrets!), config.ageRecipient), session.sessionId);
     const firm: LnErc20FirmRequest = {
       kind: "ln-to-erc20", mode: "firm", payout_token_base: request.payoutTokenBase.toString(), payment_hash: paymentHash,
@@ -218,7 +231,7 @@ async function prepareFirm(relay: RelayLink, request: LnErc20Request, options: {
             client_session_xonly_key: session.key, provider_session_xonly_key: session.providerKey! };
           const acceptanceSignature = bytesToHex(schnorr.sign(clientAcceptanceHash(acceptance), session.secret));
           let record: EvmRecoveryParts = { network: request.network, init, accept, acceptSignature, offer, acceptanceSignature,
-            clientSessionKey: session.key, lockTxHash: null, preimage, createdAt, updatedAt: seconds() };
+            clientSessionKey: session.key, lockTxHash: null, preimage, claimKey, claimDestination: config.claimDestination ?? null, createdAt, updatedAt: seconds() };
           const save = async (stage: "terms" | "locked" | "claim-submitted" | "claimed"): Promise<Uint8Array> => {
             const file = await encryptEvmRecovery(record, config.ageRecipient); await hooks.saveRecovery(file, stage, contractHash); return file;
           };
@@ -238,8 +251,8 @@ async function prepareFirm(relay: RelayLink, request: LnErc20Request, options: {
             if (!funded) await new Promise((resolve) => setTimeout(resolve, 2_000));
           }
           record = { ...record, lockTxHash: funded.txHash, updatedAt: seconds() }; await save("locked");
-          hooks.report("Token lock confirmed. Check and approve the claim in your EVM wallet");
-          const safety = await assertSafeEvmClaim(hooks.rpc, terms, preimage);
+          hooks.report(hooks.claimGas === "sponsored" ? "Token lock confirmed. Claiming through the gas sponsor" : "Token lock confirmed. Check and approve the claim in your EVM wallet");
+          const safety = await assertSafeEvmClaim(hooks.rpc, terms, preimage, hooks.claimGas);
           await hooks.checkWallet();
           await hooks.markExposure(contractHash);
           assertFreshEvmClaim(safety);
@@ -247,6 +260,8 @@ async function prepareFirm(relay: RelayLink, request: LnErc20Request, options: {
           record = { ...record, claimTxHash, updatedAt: seconds() }; await save("claim-submitted");
           const receipt = await awaitReceipt(hooks.rpc, claimTxHash, terms.settlement_confirmations, hooks.signal ? { signal: hooks.signal } : {});
           if (!receipt.status) throw new SwapError("Claim reverted after preimage exposure. Do not assume Lightning was refunded; inspect the chain before any retry");
+          // A bundled claim can be included without taking effect; the lock itself is the proof.
+          if (await hooks.rpc.lockActive(request.asset.htlc_contract, lock)) throw new SwapError("Claim transaction confirmed but the token lock is still active. Inspect the chain before any retry");
           record = { ...record, updatedAt: seconds() };
           return { claimTxHash, recovery: await save("claimed") };
         } finally { session.secret.fill(0); }
@@ -256,7 +271,7 @@ async function prepareFirm(relay: RelayLink, request: LnErc20Request, options: {
 }
 
 /** No claim calldata is sent during these checks: even eth_estimateGas would leak the preimage. */
-export async function assertSafeEvmClaim(rpc: EvmRpc, terms: LnToErc20Terms, preimage: string): Promise<{ readonly checkedAt: number }> {
+export async function assertSafeEvmClaim(rpc: EvmRpc, terms: LnToErc20Terms, preimage: string, claimGas: "wallet" | "sponsored" = "wallet"): Promise<{ readonly checkedAt: number }> {
   if (!/^[0-9a-f]{64}$/.test(preimage) || bytesToHex(sha256(hexToBytes(preimage))) !== terms.invoice_binding.payment_hash) throw new SwapError("claim preimage mismatch");
   if (await rpc.chainId() !== terms.evm_asset.chain_id) throw new SwapError("wrong EVM RPC chain");
   await rpc.verifyHtlc(terms.evm_asset.htlc_contract);
@@ -266,9 +281,11 @@ export async function assertSafeEvmClaim(rpc: EvmRpc, terms: LnToErc20Terms, pre
   const logs = await rpc.findLockups(terms.evm_asset.htlc_contract, lock.preimageHash, Math.max(0, terms.evm_reference_block - 12), tip);
   if (!logs.some((log) => lockHash(log.lock) === lockHash(lock) && tip - log.blockNumber + 1 >= terms.funding_confirmations) ||
       !await rpc.lockActive(terms.evm_asset.htlc_contract, lock)) throw new SwapError("Exact confirmed token lock is not active");
-  // A conservative gas budget, not a simulation or guarantee. Wallet estimation happens only after the exposure marker.
-  const balance = await rpc.nativeBalance(terms.client_evm_address), price = await rpc.gasPrice();
-  if (balance <= 0n || balance < price * 500_000n) throw new SwapError("Fund your EVM wallet with gas before claiming; the preimage has not been exposed");
+  if (claimGas === "wallet") {
+    // A conservative gas budget, not a simulation or guarantee. Wallet estimation happens only after the exposure marker.
+    const balance = await rpc.nativeBalance(terms.client_evm_address), price = await rpc.gasPrice();
+    if (balance <= 0n || balance < price * 500_000n) throw new SwapError("Fund your EVM wallet with gas before claiming; the preimage has not been exposed");
+  }
   // Historical scans and gas reads can stall. The disclosure grant uses a new live check,
   // and its age includes those final RPC requests, wallet checks, and the durable commit.
   const checkedAt = performance.now();

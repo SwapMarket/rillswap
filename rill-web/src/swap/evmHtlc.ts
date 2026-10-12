@@ -64,11 +64,13 @@ export const ABI = Object.freeze({
   hashValues: selector("hashValues(bytes32,uint256,address,address,address,uint256)"),
   version: selector("version()"),
   approve: selector("approve(address,uint256)"),
+  transfer: selector("transfer(address,uint256)"),
   allowance: selector("allowance(address,address)"),
   balanceOf: selector("balanceOf(address)"),
   lockupTopic: `0x${bytesToHex(keccak_256(encoder.encode("Lockup(bytes32,uint256,address,address,address,uint256)")))}`,
   claimTopic: `0x${bytesToHex(keccak_256(encoder.encode("Claim(bytes32,bytes32)")))}`,
   refundTopic: `0x${bytesToHex(keccak_256(encoder.encode("Refund(bytes32)")))}`,
+  transferTopic: `0x${bytesToHex(keccak_256(encoder.encode("Transfer(address,address,uint256)")))}`,
 });
 
 const lockWords = (lock: HtlcLock): string =>
@@ -80,6 +82,7 @@ export const encodeRefund = (lock: HtlcLock): string => `0x${ABI.refund}${lockWo
 export const encodeClaim = (lock: HtlcLock, preimage: string): string =>
   `0x${ABI.claim}${hashWord(preimage)}${lockWords(lock).slice(64)}`;
 export const encodeApprove = (spender: string, amount: bigint): string => `0x${ABI.approve}${addressWord(spender)}${word(amount)}`;
+export const encodeTransfer = (to: string, amount: bigint): string => `0x${ABI.transfer}${addressWord(to)}${word(amount)}`;
 
 /** keccak256 of the packed lock values: the key of the HTLC's `swaps` mapping. */
 export function lockHash(lock: HtlcLock): string {
@@ -226,6 +229,15 @@ export class EvmRpc {
     const result = await this.call("eth_getTransactionReceipt", [`0x${hashWord(txHash)}`]) as { blockNumber?: string; status?: string } | null;
     if (result === null || result === undefined) return null;
     return { blockNumber: hexInt(result.blockNumber, "block number"), status: result.status === "0x1" };
+  }
+
+  /** Token amount the mined transaction `txHash` transferred to `to` (sum of the token's Transfer logs). */
+  async transferred(txHash: string, token: string, to: string): Promise<bigint> {
+    const result = await this.call("eth_getTransactionReceipt", [`0x${hashWord(txHash)}`]) as { logs?: RawLog[] } | null;
+    if (!result || !Array.isArray(result.logs)) throw new EvmError("transaction receipt unavailable");
+    return result.logs.filter((log) => !log.removed && log.address.toLowerCase() === checkEvmAddress(token, "token") && log.topics[0] === ABI.transferTopic &&
+      log.topics.length === 3 && wordAddress(log.topics[2]!.slice(2).toLowerCase()) === checkEvmAddress(to, "recipient"))
+      .reduce((sum, log) => sum + wordUint(wordAt(log.data, 0)), 0n);
   }
 }
 

@@ -27,6 +27,15 @@ describe("explicit deployment defaults", () => {
     expect(resolveSwapDefaults({ VITE_RILLSWAP_NETWORK: "mainnet", VITE_RILLSWAP_EVM_RPC: "https://rpc.example/v1/" }).evmRpc).toBe("https://rpc.example/v1");
     expect(() => resolveSwapDefaults({ VITE_RILLSWAP_NETWORK: "mainnet", VITE_RILLSWAP_EVM_RPC: "http://rpc.example" })).toThrow();
   });
+  test("the gas sponsor is opt-in deployment configuration pinned together with its EntryPoint and delegate", () => {
+    expect(resolveSwapDefaults({ VITE_RILLSWAP_NETWORK: "regtest" }).evmSponsor).toBeUndefined();
+    const env = { VITE_RILLSWAP_NETWORK: "regtest", VITE_RILLSWAP_EVM_SPONSOR: "http://127.0.0.1:8094/", VITE_RILLSWAP_EVM_ENTRY_POINT: "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+      VITE_RILLSWAP_EVM_7702_DELEGATE: "0x77021100bD87b7008E5E1989d0eB38555d0d0000" };
+    expect(resolveSwapDefaults(env).evmSponsor).toEqual({ url: "http://127.0.0.1:8094", entryPoint: "0x0000000071727de22e5e9d8baf0edac6f37da032", delegate: "0x77021100bd87b7008e5e1989d0eb38555d0d0000" });
+    expect(() => resolveSwapDefaults({ ...env, VITE_RILLSWAP_EVM_7702_DELEGATE: undefined })).toThrow("together");
+    expect(() => resolveSwapDefaults({ ...env, VITE_RILLSWAP_EVM_ENTRY_POINT: "0x1234" })).toThrow("lowercase 0x addresses");
+    expect(() => resolveSwapDefaults({ ...env, VITE_RILLSWAP_NETWORK: "mainnet" })).toThrow();
+  });
   test("public builds admit only an explicitly configured concrete node origin", async () => {
     for (const configured of [false, true]) {
       const destination = `tmp/node-csp-${configured ? "configured" : "unset"}`;

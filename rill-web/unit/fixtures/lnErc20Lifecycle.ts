@@ -47,11 +47,12 @@ try {
     } });
   const rpc = { chainId: async () => ASSET.chain_id, verifyHtlc: async () => {}, blockNumber: async () => 1500,
     findLockups: async () => [{ lock: lockOf(execution.terms), txHash: "55".repeat(32), blockNumber: 1200, logIndex: 0 }],
-    lockActive: async () => true, nativeBalance: async () => 1_000_000n, gasPrice: async () => 1n };
+    lockActive: async () => true, nativeBalance: async () => 1_000_000n, gasPrice: async () => 1n,
+    receipt: async () => ({ blockNumber: 1200, status: true }) };
   await execution.execute({ rpc: rpc as never, report: () => {}, showInvoice: () => { events.push("invoice"); },
     saveRecovery: async (_file, stage) => { events.push(`recovery:${stage}`); if (mode === "terms" && stage === "terms") throw new Error("terms commit aborted"); },
-    checkWallet: async () => { events.push("wallet:check"); },
+    checkWallet: async () => { events.push("wallet:check"); }, claimGas: "wallet",
     markExposure: async () => { events.push("exposure:commit"); if (mode === "exposure") throw new Error("exposure commit aborted"); if (mode === "stale") monotonic = 6_000; },
-    claim: async () => { events.push("wallet:claim"); throw new Error("wallet response lost"); } });
+    claim: async () => { events.push("wallet:claim"); if (mode === "ineffective") return "ab".repeat(32); throw new Error("wallet response lost"); } });
 } catch (caught) { error = (caught as Error).message; }
 console.log(JSON.stringify({ events, error }));

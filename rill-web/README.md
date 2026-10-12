@@ -166,7 +166,8 @@ approved execution paid from any Lightning wallet (or, under Advanced, a
 configured LND node); USDC or USDT to LN (`erc20-to-ln/v1`, RS-010) is
 quotable and payable from an injected EVM wallet; LN to USDC/USDT
 (`ln-to-erc20/v1`) supports indicative comparison, external Lightning
-payment, and a direct claim from an injected EVM wallet. Unavailable pairs explain
+payment, and a claim to a typed address through a gas sponsor (or, without a
+sponsor, a direct claim from an injected EVM wallet). Unavailable pairs explain
 why and never connect anywhere.
 
 Stablecoin to LN (`src/swap/erc20Swap.ts`, `src/erc20Ui.ts`) discovers
@@ -184,9 +185,20 @@ wallet keeps the refund key. Reopening the swap link shows the lock, checks it
 on request, and offers a wallet refund once the timelock block has passed.
 
 LN to stablecoin (`src/swap/lnErc20Swap.ts`) quotes the token payout before
-connecting a wallet or creating a hold invoice. The selected firm price may
-not exceed the estimate. Direct receive currently uses the connected EVM
-wallet's address as the destination and needs native gas. Pay the QR invoice
+creating a hold invoice. The selected firm price may not exceed the estimate.
+With a configured **Gas sponsor** (`VITE_RILLSWAP_EVM_SPONSOR` plus the
+pinned `VITE_RILLSWAP_EVM_ENTRY_POINT` and `VITE_RILLSWAP_EVM_7702_DELEGATE`,
+all three or none; the dev stack sets them) the user only types the receiving
+address: the browser generates a per-swap claim key, names its address as the
+HTLC claim address, and after the lock confirms submits one sponsored ERC-4337
+user operation from that address as an EIP-7702 account that claims and
+forwards the tokens (`src/swap/gasSponsor.ts`). The sponsor is untrusted: the
+page recomputes the EIP-7702 authorization digest and the EntryPoint v0.7 user
+operation hash over calldata it built, pins chain, delegate, and EntryPoint,
+refuses any other signature request, and confirms the destination's Transfer
+in the included transaction. The sponsor learns the preimage and destination.
+Without a sponsor, the connected EVM wallet's address is the destination and
+it needs native gas for the claim. Pay the QR invoice
 from any Lightning wallet, without configuring a Lightning node. The browser
 stores the encrypted preimage before the firm request, then commits the signed
 terms and invoice in IndexedDB before accepting or displaying the invoice.

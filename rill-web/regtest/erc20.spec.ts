@@ -11,6 +11,8 @@ const enabled = process.env.RILLSWAP_RUN_BROWSER_ERC20_REGTEST === "1";
 const project = process.env.COMPOSE_PROJECT_NAME ?? "rillswap-dev";
 const webPort = process.env.RILL_DEV_WEB_PORT ?? "5273", anvilPort = process.env.RILL_DEV_ANVIL_PORT ?? "8545";
 const USER = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"; // Anvil account 1, funded with fUSDC by bootstrap
+const TOKEN = JSON.parse(execFileSync("docker", ["exec", `${process.env.COMPOSE_PROJECT_NAME ?? "rillswap-dev"}-tools-1`, "cat", "/state/evm/contracts.json"],
+  { encoding: "utf8", timeout: 10000 })).token_contract as string;
 const command = (...args: string[]): string => execFileSync(resolve(root, "dev/devctl"), args, { cwd: root, env: process.env, encoding: "utf8", timeout: 30000 }).trim();
 const makerState = (lockTxHash: string): string => execFileSync("docker", ["exec", `${project}-tools-1`, "python", "-c",
   "import sqlite3,sys; c=sqlite3.connect('file:/state/makers/erc20-to-ln/provider-store/live.sqlite?mode=ro',uri=True); "
@@ -37,6 +39,13 @@ async function injectWallet(page: Page): Promise<string[]> {
     };
   }, { rpc: `http://127.0.0.1:${anvilPort}`, account: USER });
   return walletCalls;
+}
+
+/** The dev build configures the gas sponsor; wallet-claim tests opt out of it explicitly. */
+async function disableSponsor(page: Page): Promise<void> {
+  await page.locator("#swap-settings-toggle").click();
+  for (const id of ["swap-evm-sponsor", "swap-evm-entry-point", "swap-evm-delegate"]) await page.locator(`#${id}`).fill("");
+  await page.locator("#swap-settings-close").click();
 }
 
 test("browser locks fUSDC through an injected wallet and the provider pays the invoice", async ({ page }) => {
@@ -80,7 +89,7 @@ test("browser locks fUSDC through an injected wallet and the provider pays the i
 test("unexposed reverse recovery resumes explicitly after reload without creating another hold invoice", async ({ page }) => {
   test.skip(!enabled, "Explicit dev-stack opt-in required");
   const calls = await injectWallet(page);
-  await page.goto(`http://127.0.0.1:${webPort}/swap.html`);
+  await page.goto(`http://127.0.0.1:${webPort}/swap.html`); await disableSponsor(page);
   await page.locator("#swap-from").selectOption("ln"); await page.locator("#swap-to").selectOption("usdc");
   await page.locator("#swap-receive-amount").fill("20"); await page.locator("#swap-start").click();
   await page.locator("#swap-quote-accept").click({ timeout: 60000 });
@@ -109,7 +118,7 @@ test("browser pays Lightning from an external wallet and claims the provider's f
   test.skip(!enabled, "Explicit dev-stack opt-in required");
   const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
   const calls = await injectWallet(page);
-  await page.goto(`http://127.0.0.1:${webPort}/swap.html`);
+  await page.goto(`http://127.0.0.1:${webPort}/swap.html`); await disableSponsor(page);
   await page.locator("#swap-from").selectOption("ln"); await page.locator("#swap-to").selectOption("usdc");
   await page.locator("#swap-receive-amount").fill("20"); await page.locator("#swap-start").click();
   await expect(page.locator("#swap-quote-accept")).toBeVisible({ timeout: 60000 });
@@ -129,6 +138,42 @@ test("browser pays Lightning from an external wallet and claims the provider's f
   await expect(page.locator('#swap-erc20-files a[download="rillswap-ln-to-fusdc-claimed.age"]')).toBeVisible();
   await page.reload();
   await expect(page.locator("#swap-recovery-result h3")).toHaveText("Lightning to fUSDC recovery verified");
+  await page.locator("#swap-evm-recovery-check").click();
+  await expect(page.locator("#swap-evm-recovery-message")).toContainText("Tokens claimed");
+  await expect(page.locator("#swap-evm-recovery-claim")).toBeDisabled();
+  expect(errors).toEqual([]);
+});
+
+test("browser receives fUSDC at a typed address with no wallet extension, through the gas sponsor", async ({ page }) => {
+  test.skip(!enabled, "Explicit dev-stack opt-in required");
+  const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
+  const destination = `0x${"d0".repeat(19)}${Math.floor(Math.random() * 256).toString(16).padStart(2, "0")}`;
+  const balanceOf = async (): Promise<bigint> => {
+    const response = await fetch(`http://127.0.0.1:${anvilPort}`, { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ to: TOKEN, data: `0x70a08231${destination.slice(2).padStart(64, "0")}` }, "latest"] }) });
+    return BigInt(((await response.json()) as { result: string }).result);
+  };
+  const before = await balanceOf();
+  await page.goto(`http://127.0.0.1:${webPort}/swap.html`);
+  await page.locator("#swap-from").selectOption("ln"); await page.locator("#swap-to").selectOption("usdc");
+  await expect(page.locator('label[for="swap-receive-address"]')).toHaveText("EVM address to receive USDC");
+  await page.locator("#swap-receive-address").fill(destination);
+  await page.locator("#swap-receive-amount").fill("20"); await page.locator("#swap-start").click();
+  await expect(page.locator("#swap-quote-accept")).toBeVisible({ timeout: 60000 });
+  await expect(page.locator("#swap-quote-review")).toContainText(`sent to ${destination}`);
+  await page.locator("#swap-quote-accept").click();
+  await expect(page.locator("#swap-reverse-invoice")).toBeVisible({ timeout: 60000 });
+  const invoice = (await page.locator("#swap-reverse-invoice").textContent())!;
+  const payment = new Promise<string>((resolve, reject) => execFile(`${root}/dev/devctl`, ["pay", invoice, "--node", "user"],
+    { cwd: root, env: process.env, encoding: "utf8", timeout: 150000 }, (error, stdout, stderr) => error ? reject(new Error(stderr || error.message)) : resolve(stdout)));
+  const paid = payment.then((output) => ({ output, error: null }), (error: unknown) => ({ output: "", error }));
+  await expect(page.locator("#swap-status")).toContainText("Stablecoins received", { timeout: 150000 });
+  const result = await paid; if (result.error) throw result.error;
+  expect(result.output).toContain("paid, preimage");
+  expect(await balanceOf() - before).toBe(20_000_000n); // 20 fUSDC, six decimals, forwarded in the claim batch
+  await page.reload();
+  await expect(page.locator("#swap-recovery-result h3")).toHaveText("Lightning to fUSDC recovery verified");
+  await expect(page.locator("#swap-recovery-result")).toContainText(`forwarded to ${destination}`);
   await page.locator("#swap-evm-recovery-check").click();
   await expect(page.locator("#swap-evm-recovery-message")).toContainText("Tokens claimed");
   await expect(page.locator("#swap-evm-recovery-claim")).toBeDisabled();

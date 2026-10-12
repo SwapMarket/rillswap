@@ -11,6 +11,21 @@ export interface SwapDefaults {
   readonly nodeApi?: string;
   /** RS-010: JSON-RPC endpoint for reading the EVM chain; the user's wallet signs. */
   readonly evmRpc?: string;
+  /** Alchemy-compatible gas sponsor for receiving stablecoins without a wallet extension (all three or none). */
+  readonly evmSponsor?: EvmSponsorDefaults;
+}
+export interface EvmSponsorDefaults {
+  readonly url: string;
+  /** ERC-4337 EntryPoint v0.7 the sponsor's user operations are bound to. */
+  readonly entryPoint: string;
+  /** The only EIP-7702 delegate the browser-held claim key may authorize. */
+  readonly delegate: string;
+}
+
+const EVM_ADDRESS = /^0x[0-9a-f]{40}$/;
+export function validateEvmSponsor(url: string, entryPoint: string, delegate: string, network: NetworkName): EvmSponsorDefaults {
+  if (!EVM_ADDRESS.test(entryPoint) || !EVM_ADDRESS.test(delegate)) throw new Error("EntryPoint and delegate must be lowercase 0x addresses");
+  return { url: validateMempoolApi(url, network), entryPoint, delegate };
 }
 
 export const MAX_RELAYS = 4;
@@ -69,7 +84,15 @@ export function resolveSwapDefaults(env: Record<string, string | undefined>): Sw
     ...(env.VITE_RILLSWAP_EVM_RPC !== undefined || name === "regtest" ? {
       evmRpc: validateMempoolApi(env.VITE_RILLSWAP_EVM_RPC ?? "http://127.0.0.1:8545", name),
     } : {}),
+    ...(sponsorDefaults(env, name)),
   };
+}
+
+function sponsorDefaults(env: Record<string, string | undefined>, name: NetworkName): { evmSponsor?: EvmSponsorDefaults } {
+  const values = [env.VITE_RILLSWAP_EVM_SPONSOR, env.VITE_RILLSWAP_EVM_ENTRY_POINT, env.VITE_RILLSWAP_EVM_7702_DELEGATE];
+  if (values.every((value) => value === undefined)) return {};
+  if (values.some((value) => value === undefined)) throw new Error("Set VITE_RILLSWAP_EVM_SPONSOR, VITE_RILLSWAP_EVM_ENTRY_POINT, and VITE_RILLSWAP_EVM_7702_DELEGATE together");
+  return { evmSponsor: validateEvmSponsor(values[0]!, values[1]!.toLowerCase(), values[2]!.toLowerCase(), name) };
 }
 
 export const relaysForNetwork = (network: NetworkName, deployment?: SwapDefaults): readonly string[] =>

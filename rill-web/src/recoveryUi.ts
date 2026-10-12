@@ -7,7 +7,7 @@ import { reverseRecoveryControls } from "./reverseRecoveryUi";
 import { evmRecoveryControls } from "./erc20Ui";
 import { identityToRecipient } from "age-encryption";
 import { parseRecoveryPlaintext } from "./recoveryDocument";
-import type { NetworkName } from "./swap/config";
+import type { EvmSponsorDefaults, NetworkName } from "./swap/config";
 import { scriptAddress } from "./swap/address";
 import { prepareBrowserRefund, exportBrowserRefund, broadcastBrowserRefund } from "./browserRefund";
 import type { RefundJournalRecord } from "./browserRefundJournal";
@@ -21,6 +21,7 @@ interface RecoveryUiOptions {
   readonly selectedRelays?: () => readonly string[];
   /** RS-010 records check and refund through this endpoint and the injected wallet. */
   readonly selectedEvmRpc?: () => string;
+  readonly selectedEvmSponsor?: () => EvmSponsorDefaults | null;
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, text = "", id?: string): HTMLElementTagNameMap[K] {
@@ -160,7 +161,7 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
           const assertCurrent = (): void => { if (pendingInvalidated || options.selectedNetwork().name !== selected.name || file.files?.[0] !== selectedFile || keyFile.files?.[0] !== selectedKey) throw new Error("Recovery selection changed"); };
           assertCurrent();
           disposeReverse = evmRecoveryControls(result, { plaintext, network: expectedNetwork, evmRpc: options.selectedEvmRpc ?? (() => ""),
-            ageRecipient: () => identityToRecipient(identity), assertCurrent });
+            ...(options.selectedEvmSponsor ? { sponsor: options.selectedEvmSponsor } : {}), ageRecipient: () => identityToRecipient(identity), assertCurrent });
           return;
         }
         if (parseRecoveryPlaintext(plaintext).document.profile_id === "ln-to-btc/v1") {

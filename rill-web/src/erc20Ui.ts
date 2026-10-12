@@ -5,13 +5,16 @@
  */
 import { type Erc20SwapOutcome, type EvmRecoveryRecord, parseEvmRecovery, type PreparedErc20Swap } from "./swap/erc20Swap";
 import {
-  awaitReceipt, encodeApprove, encodeClaim, encodeLock, encodeRefund, EvmError, EvmRpc, EvmWallet, type HtlcLock, injectedProvider,
+  awaitReceipt, encodeApprove, encodeClaim, encodeLock, encodeRefund, encodeTransfer, EvmError, EvmRpc, EvmWallet, type HtlcLock, injectedProvider,
 } from "./swap/evmHtlc";
+import { GasSponsor, type SponsorConfig } from "./swap/gasSponsor";
+import type { EvmSponsorDefaults } from "./swap/config";
 import type { EvmAssetIdentity } from "./manualProviderAdvertisement";
 import { assertFreshEvmClaim, assertSafeEvmClaim, type PreparedLnErc20Execution } from "./swap/lnErc20Swap";
 import { EvmClaimJournal } from "./evmClaimJournal";
 import { qrSvg } from "./qr";
 import canonicalize from "canonicalize";
+import { hexToBytes } from "@noble/hashes/utils.js";
 import { encryptCanonicalRecoveryForRecipient } from "./recoveryAgeContainer";
 
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, text = "", id = ""): HTMLElementTagNameMap[K] {
@@ -117,6 +120,31 @@ export interface EvmRecoveryOptions {
   readonly assertCurrent: () => void;
   readonly rpcFactory?: (url: string) => EvmRpc;
   readonly ageRecipient?: () => Promise<string>;
+  /** Gas sponsor for records whose claim key this browser holds; null when none is configured. */
+  readonly sponsor?: () => EvmSponsorDefaults | null;
+  readonly sponsorFactory?: (config: SponsorConfig) => GasSponsor;
+}
+
+/** Who submits the reverse claim: the user's wallet account, or a gas sponsor for a browser-held claim key. */
+export type LnErc20Claimer =
+  | { readonly kind: "wallet"; readonly wallet: EvmWallet; readonly account: string }
+  | { readonly kind: "sponsored"; readonly sponsor: GasSponsor; readonly secret: Uint8Array; readonly destination: string };
+
+/**
+ * Claim and forward in one atomic batch from the staging account, then confirm the destination
+ * received the payout from that very transaction. The sponsor's own status is not trusted for that.
+ */
+async function sponsoredClaim(rpc: EvmRpc, claimer: Extract<LnErc20Claimer, { kind: "sponsored" }>, lock: HtlcLock, preimage: string, htlc: string,
+  report: (line: string) => void, signal?: AbortSignal): Promise<string> {
+  const { callId } = await claimer.sponsor.submit(rpc, claimer.secret, [
+    { to: htlc, data: encodeClaim(lock, preimage) }, { to: lock.token, data: encodeTransfer(claimer.destination, lock.amount) },
+  ]);
+  report(`Claim submitted to the gas sponsor (call ${callId}); waiting for inclusion`);
+  const txHash = await claimer.sponsor.awaitInclusion(callId, signal ? { signal } : {});
+  if (await rpc.transferred(txHash, lock.token, claimer.destination) < lock.amount) {
+    throw new EvmError(`Sponsored transaction ${txHash} did not deliver the tokens to ${claimer.destination}. Inspect the chain before any retry`);
+  }
+  return txHash;
 }
 
 /** Reopen an RS-010 record: show the signed lock, check it on request, and refund through the wallet after the timelock. */
@@ -201,10 +229,13 @@ function reverseEvmRecoveryControls(root: HTMLElement, record: EvmRecoveryRecord
   const current = (): void => { if (disposed) throw new Error("Recovery view closed"); options.assertCurrent(); };
   const message = node("p", "Payment and claim status are unknown until you explicitly check the chain.", "swap-evm-recovery-message");
   const check = node("button", "Check lock status", "swap-evm-recovery-check"); check.type = "button";
-  const claim = node("button", "Claim with your EVM wallet", "swap-evm-recovery-claim"); claim.type = "button"; claim.disabled = true;
+  const sponsorConfig = record.claimKey !== null ? options.sponsor?.() ?? null : null;
+  const claim = node("button", sponsorConfig ? "Claim through the gas sponsor" : "Claim with your EVM wallet", "swap-evm-recovery-claim"); claim.type = "button"; claim.disabled = true;
   root.replaceChildren(node("h3", `Lightning to ${terms.evm_asset.token_symbol} recovery verified`),
-    node("p", `${tokenLabel(record.lock.amount, terms.evm_asset)} to ${record.lock.claimAddress}. Provider refund block ${record.lock.timelock}. ` +
-      "Keep the preimage private until a confirmed token lock has enough time left. A failed wallet request may still disclose it."), message, check, claim);
+    node("p", `${tokenLabel(record.lock.amount, terms.evm_asset)} to ${record.lock.claimAddress}` +
+      (record.claimDestination ? `, forwarded to ${record.claimDestination}` : "") + `. Provider refund block ${record.lock.timelock}. ` +
+      "Keep the preimage private until a confirmed token lock has enough time left. A failed claim request may still disclose it."), message, check, claim);
+  if (record.claimKey !== null && !sponsorConfig) root.append(node("p", "This record's claim key lives in this browser; configure the gas sponsor in Settings to claim without a wallet.", "swap-evm-recovery-note"));
   // Do not redisplay an old hold invoice on reload: it may have been paid already.
   const rpc = (): EvmRpc => (options.rpcFactory ?? ((url) => new EvmRpc(url)))(options.evmRpc());
   check.onclick = () => {
@@ -222,9 +253,10 @@ function reverseEvmRecoveryControls(root: HTMLElement, record: EvmRecoveryRecord
         message.textContent = "Claim exposure is unknown (or this browser has no exposure journal). No automatic retry is allowed. Keep the recovery file and inspect any pending wallet transaction.";
         return;
       }
-      await assertSafeEvmClaim(chain, terms, record.preimage!); current();
-      message.textContent = "Exact confirmed token lock is active with a safe claim window. Connect the wallet that receives the tokens to claim.";
-      claim.disabled = false;
+      await assertSafeEvmClaim(chain, terms, record.preimage!, sponsorConfig ? "sponsored" : "wallet"); current();
+      message.textContent = sponsorConfig ? "Exact confirmed token lock is active with a safe claim window. Claim through the gas sponsor."
+        : "Exact confirmed token lock is active with a safe claim window. Connect the wallet that receives the tokens to claim.";
+      claim.disabled = !(sponsorConfig || record.claimKey === null);
     })().catch((error: unknown) => { if (!disposed) message.textContent = `Check stopped: ${error instanceof Error ? error.message : "unknown error"}`; })
       .finally(() => { busy = false; if (!disposed) check.disabled = false; });
   };
@@ -232,16 +264,25 @@ function reverseEvmRecoveryControls(root: HTMLElement, record: EvmRecoveryRecord
     if (busy) return; busy = true; check.disabled = claim.disabled = true;
     void (async () => {
       current(); const chain = rpc();
-      const { wallet, account } = await connectEvmWallet(chain, terms.evm_asset);
-      if (account !== terms.client_evm_address) throw new Error("Connect the signed token destination's wallet account");
+      let claimer: LnErc20Claimer;
+      if (sponsorConfig) {
+        if (!record.claimDestination) throw new Error("Recovery record has no token destination");
+        claimer = { kind: "sponsored", sponsor: (options.sponsorFactory ?? ((config) => new GasSponsor(config)))({ ...sponsorConfig, chainId: terms.evm_asset.chain_id }), secret: hexToBytes(record.claimKey!), destination: record.claimDestination };
+      } else {
+        const { wallet, account } = await connectEvmWallet(chain, terms.evm_asset);
+        if (account !== terms.client_evm_address) throw new Error("Connect the signed token destination's wallet account");
+        claimer = { kind: "wallet", wallet, account };
+      }
       if (!options.ageRecipient) throw new Error("Recovery encryption key unavailable");
       const recipient = await options.ageRecipient(); current();
-      const safety = await assertSafeEvmClaim(chain, terms, record.preimage!);
-      await wallet.assertAccount(terms.evm_asset.chain_id, account); current();
+      const safety = await assertSafeEvmClaim(chain, terms, record.preimage!, claimer.kind);
+      if (claimer.kind === "wallet") await claimer.wallet.assertAccount(terms.evm_asset.chain_id, claimer.account); current();
       await journal.expose(record.contractHash); current();
       assertFreshEvmClaim(safety);
-      message.textContent = "Confirm the claim in your wallet. The preimage may be disclosed even if the request fails.";
-      const hash = await wallet.send(account, terms.evm_asset.htlc_contract, encodeClaim(record.lock, record.preimage!));
+      message.textContent = claimer.kind === "wallet" ? "Confirm the claim in your wallet. The preimage may be disclosed even if the request fails."
+        : "Claiming through the gas sponsor. The preimage is disclosed to it even if the request fails.";
+      const hash = claimer.kind === "wallet" ? await claimer.wallet.send(claimer.account, terms.evm_asset.htlc_contract, encodeClaim(record.lock, record.preimage!))
+        : await sponsoredClaim(chain, claimer, record.lock, record.preimage!, terms.evm_asset.htlc_contract, (line) => { message.textContent = line; });
       const document = JSON.parse(new TextDecoder().decode(plaintext)) as Record<string, unknown>;
       document.claim_tx_hash = hash; document.updated_at = Math.floor(Date.now() / 1000);
       await journal.save(record.contractHash, await encryptCanonicalRecoveryForRecipient(new TextEncoder().encode(canonicalize(document)!), recipient));
@@ -255,11 +296,12 @@ function reverseEvmRecoveryControls(root: HTMLElement, record: EvmRecoveryRecord
 }
 
 export async function mountLnErc20Execution(panel: HTMLElement, options: {
-  readonly prepared: PreparedLnErc20Execution; readonly rpc: EvmRpc; readonly wallet: EvmWallet; readonly account: string;
+  readonly prepared: PreparedLnErc20Execution; readonly rpc: EvmRpc; readonly claimer: LnErc20Claimer;
   readonly journal: EvmClaimJournal; readonly status: (message: string, step: number, state?: string) => void;
   readonly report: (line: string) => void; readonly download: (root: HTMLElement, file: Uint8Array, name: string) => void;
+  readonly signal?: AbortSignal;
 }): Promise<void> {
-  const { prepared, rpc, wallet, account, journal } = options, asset = prepared.terms.evm_asset;
+  const { prepared, rpc, claimer, journal } = options, asset = prepared.terms.evm_asset;
   const files = node("section", "", "swap-erc20-files"), invoice = node("section"), message = node("p", "Preparing durable recovery before exposing the invoice");
   panel.replaceChildren(message, invoice, files);
   const outcome = await prepared.execute({
@@ -275,9 +317,11 @@ export async function mountLnErc20Execution(panel: HTMLElement, options: {
         node("code", bolt11, "swap-reverse-invoice"));
       const open = node("a", "Open in Lightning wallet"); open.href = `lightning:${bolt11}`; invoice.append(open);
     },
-    checkWallet: () => wallet.assertAccount(asset.chain_id, account),
+    checkWallet: async () => { if (claimer.kind === "wallet") await claimer.wallet.assertAccount(asset.chain_id, claimer.account); },
     markExposure: (contract) => journal.expose(contract),
-    claim: (lock, preimage, htlc) => wallet.send(account, htlc, encodeClaim(lock, preimage)),
+    claimGas: claimer.kind,
+    claim: (lock, preimage, htlc) => claimer.kind === "wallet" ? claimer.wallet.send(claimer.account, htlc, encodeClaim(lock, preimage))
+      : sponsoredClaim(rpc, claimer, lock, preimage, htlc, (line) => { options.report(line); message.textContent = line; }, options.signal),
   });
   invoice.replaceChildren();
   message.textContent = `${tokenLabel(BigInt(prepared.terms.economics.payout_token_base), asset)} received in ${outcome.claimTxHash}.`;

@@ -22,6 +22,10 @@ test("lost wallet response follows the durable exposure grant and never automati
   expect(result.events.indexOf("exposure:commit")).toBeLessThan(result.events.indexOf("wallet:claim"));
   expect(result.events.filter((event) => event === "wallet:claim")).toHaveLength(1);
 });
+test("a confirmed claim transaction that leaves the lock active is a failure, not a success", async () => {
+  const result = await run("ineffective"); expect(result.error).toContain("token lock is still active");
+  expect(result.events).toContain("recovery:claim-submitted"); expect(result.events).not.toContain("recovery:claimed");
+});
 test("a delayed exposure commit leaves UNKNOWN but sends no stale claim", async () => {
   const result = await run("stale"); expect(result.error).toContain("safety check became stale");
   expect(result.events).toContain("exposure:commit"); expect(result.events).not.toContain("wallet:claim");

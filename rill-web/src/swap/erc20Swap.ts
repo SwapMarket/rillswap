@@ -12,6 +12,7 @@ import canonicalize from "canonicalize";
 import { type InvoiceBinding, invoiceBinding } from "./bolt11";
 import { type AnnouncementSource, discoverProvider } from "./discovery";
 import { awaitReceipt, checkEvmAddress, type EvmRpc, type HtlcLock } from "./evmHtlc";
+import { stagingAddress } from "./gasSponsor";
 import { clientAcceptanceHash } from "./hashes";
 import { handshake, newKeyPair } from "./handshake";
 import { type RelayLink, Session, SwapError } from "./session";
@@ -198,6 +199,10 @@ export interface EvmRecoveryParts {
   readonly lockTxHash: string | null;
   readonly preimage: string | null;
   readonly claimTxHash?: string | null;
+  /** Browser-held claim key (hex) for sponsored reverse claims; absent for wallet-held claim accounts. */
+  readonly claimKey?: string | null;
+  /** Where a sponsored claim forwards the tokens (user-chosen, not part of the signed terms). */
+  readonly claimDestination?: string | null;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -215,6 +220,7 @@ export function evmRecoveryDocument(parts: EvmRecoveryParts): Uint8Array {
     lock_tx_hash: parts.lockTxHash,
     preimage: parts.preimage,
     ...(parts.offer.terms.contract_terms.profile_id === "ln-to-erc20/v1" ? { claim_tx_hash: parts.claimTxHash ?? null } : {}),
+    ...(parts.claimKey ? { claim_key: parts.claimKey, claim_destination: parts.claimDestination ?? null } : {}),
     created_at: parts.createdAt,
     updated_at: parts.updatedAt,
   });
@@ -234,6 +240,9 @@ export interface EvmRecoveryRecord {
   readonly updatedAt: number;
   readonly holdInvoice: string | null;
   readonly claimTxHash: string | null;
+  /** Present when this browser (not a wallet) holds the key of the claim address. */
+  readonly claimKey: string | null;
+  readonly claimDestination: string | null;
 }
 
 /** Authenticate a decrypted EVM recovery record for `network`: the provider's signature binds the terms. */
@@ -254,8 +263,10 @@ export function parseEvmRecovery(plaintext: Uint8Array, network: unknown, now: n
   // Expiry is irrelevant for a refund: bind identity, network, and hash only.
   checkSignedOfferBinding(offer, { identity: terms.provider_identity_key, envelopeContractHash: offer.terms.contract_hash, network, now: Math.min(now, terms.terms_expiry - 1) });
   const lockTxHash = parsed.lock_tx_hash, preimage = parsed.preimage, updatedAt = parsed.updated_at;
-  const claimTxHash = parsed.claim_tx_hash ?? null;
-  if ((lockTxHash !== null && (typeof lockTxHash !== "string" || !/^[0-9a-f]{64}$/.test(lockTxHash))) ||
+  const claimTxHash = parsed.claim_tx_hash ?? null, claimKey = parsed.claim_key ?? null, claimDestination = parsed.claim_destination ?? null;
+  if ((claimKey !== null && (!reverse || typeof claimKey !== "string" || !/^[0-9a-f]{64}$/.test(claimKey) || stagingAddress(hexToBytes(claimKey)) !== terms.client_evm_address)) ||
+      (claimDestination !== null && (claimKey === null || typeof claimDestination !== "string" || !/^0x[0-9a-f]{40}$/.test(claimDestination))) ||
+      (lockTxHash !== null && (typeof lockTxHash !== "string" || !/^[0-9a-f]{64}$/.test(lockTxHash))) ||
       (preimage !== null && (typeof preimage !== "string" || !/^[0-9a-f]{64}$/.test(preimage))) ||
        (claimTxHash !== null && (typeof claimTxHash !== "string" || !/^[0-9a-f]{64}$/.test(claimTxHash))) ||
        !Number.isSafeInteger(updatedAt)) {
@@ -269,7 +280,8 @@ export function parseEvmRecovery(plaintext: Uint8Array, network: unknown, now: n
     if (!same(invoiceBinding(holdInvoice, (network as { name: string }).name), terms.invoice_binding)) throw new SwapError("recovery invoice binding mismatch");
   }
   return Object.freeze({ terms, contractHash: offer.terms.contract_hash, lock: lockOf(terms), lockTxHash: lockTxHash as string | null, preimage: preimage as string | null,
-    updatedAt: updatedAt as number, holdInvoice, claimTxHash: claimTxHash as string | null });
+    updatedAt: updatedAt as number, holdInvoice, claimTxHash: claimTxHash as string | null, claimKey: claimKey as string | null,
+    claimDestination: claimDestination as string | null });
 }
 
 // Preparation and execution.

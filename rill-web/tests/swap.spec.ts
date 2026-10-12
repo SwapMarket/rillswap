@@ -89,6 +89,21 @@ test("direction flips between Bitcoin and Lightning, and stablecoins pair with L
   await expect(page.locator("#swap-receive-amount")).toBeVisible();
   await expect(page.locator("#swap-receive-address")).not.toBeVisible();
   await expect(page.locator('label[for="swap-receive-amount"]')).toHaveText("Amount to receive (USDC)");
+  // A configured gas sponsor turns receiving into "amount plus address": no wallet extension, no gas.
+  await page.locator("#swap-settings-toggle").click();
+  await page.locator("#swap-evm-sponsor").fill("http://127.0.0.1:8094");
+  await page.locator("#swap-evm-entry-point").fill("0x0000000071727de22e5e9d8baf0edac6f37da032");
+  await page.locator("#swap-evm-delegate").fill("0x77021100bd87b7008e5e1989d0eb38555d0d0000");
+  await page.locator("#swap-settings-close").click();
+  await page.locator("#swap-to").selectOption("usdc");
+  await expect(page.locator("#swap-receive-address")).toBeVisible();
+  await expect(page.locator('label[for="swap-receive-address"]')).toHaveText("EVM address to receive USDC");
+  await expect(page.locator("#swap-pair-note")).not.toBeVisible();
+  await page.locator("#swap-receive-amount").fill("20"); await page.locator("#swap-start").click();
+  await expect(page.locator("#swap-status")).toContainText("Enter the 0x address that should receive USDC");
+  expect(sockets).toEqual([]);
+  await page.locator("#swap-to").selectOption("btc");
+  await expect(page.locator('label[for="swap-receive-address"]')).toHaveText("Bitcoin address to receive");
 
   await page.locator("#swap-from").selectOption("btc");
   await page.locator("#swap-to").selectOption("ln");

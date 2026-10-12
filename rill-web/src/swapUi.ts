@@ -15,14 +15,15 @@ import { type FundingRequest, type FundingSource, type SwapRequest } from "./swa
 import { observeDeposit } from "./swap/depositWatch";
 import { qrSvg } from "./qr";
 import { TransactionRefusedError } from "./swap/transaction";
-import { mempoolApiForNetwork, relaysForNetwork, validateMempoolApi, validateRelays, type NetworkName } from "./swap/config";
+import { mempoolApiForNetwork, relaysForNetwork, validateEvmSponsor, validateMempoolApi, validateRelays, type EvmSponsorDefaults, type NetworkName } from "./swap/config";
+import { GasSponsor, newStagingSecret, stagingAddress } from "./swap/gasSponsor";
 import { readChainTip } from "./swap/chainTip";
 import { BrowserRecoveryWallet } from "./browserRecoveryWallet";
 import { type DirectoryEntry, discoverDirectory, discoverMarketplace, eligibleProviders, indicativeFee, ineligibilityReason, quoteProviders, quoteReverseProviders,
   estimateFromDirectory, providerLimits, type LocatedQuote, MAX_QUOTE_PROVIDERS, quoteErc20Providers, quoteLnErc20Providers, selectEvmAsset } from "./swap/marketplace";
 import type { Erc20SwapRequest, PreparedErc20Swap } from "./swap/erc20Swap";
 import { EvmRpc } from "./swap/evmHtlc";
-import { connectEvmWallet, mountErc20Execution, mountLnErc20Execution, parseTokenAmount, tokenLabel } from "./erc20Ui";
+import { connectEvmWallet, mountErc20Execution, mountLnErc20Execution, parseTokenAmount, tokenLabel, type LnErc20Claimer } from "./erc20Ui";
 import { EvmClaimJournal } from "./evmClaimJournal";
 import type { PreparedLnErc20Quote } from "./swap/lnErc20Swap";
 import type { PreparedReverseQuote, ReverseSwapRequest } from "./swap/reverseSwap";
@@ -125,6 +126,15 @@ function mount(root: HTMLElement): void {
     "Used only after explicit refund or claim approval and a broadcast click. Custom origins need a deployment CSP allowance.");
   const evmRpc = field(settings, "swap-evm-rpc", "EVM RPC (stablecoin swaps)", __SWAP_DEFAULTS__.evmRpc ?? "",
     "Read-only chain access for stablecoin swaps; your wallet extension signs. This operator sees your IP and the swap's addresses. Custom origins need a deployment CSP allowance.");
+  const evmSponsor = field(settings, "swap-evm-sponsor", "Gas sponsor (receive stablecoins without a wallet)", __SWAP_DEFAULTS__.evmSponsor?.url ?? "",
+    "Alchemy-compatible wallet API that pays claim gas. Leave empty to claim from your own wallet extension. The sponsor learns the claim preimage and your destination address.");
+  const evmEntryPoint = field(settings, "swap-evm-entry-point", "ERC-4337 EntryPoint v0.7", __SWAP_DEFAULTS__.evmSponsor?.entryPoint ?? "",
+    "Sponsored claims are bound to this EntryPoint; the browser recomputes every hash it signs.");
+  const evmDelegate = field(settings, "swap-evm-delegate", "EIP-7702 account delegate", __SWAP_DEFAULTS__.evmSponsor?.delegate ?? "",
+    "The only contract the browser-held claim key will delegate to. Changing it moves trust to that contract's code.");
+  const sponsorConfigured = (): boolean => [evmSponsor, evmEntryPoint, evmDelegate].some((input) => input.value.trim() !== "");
+  const selectedSponsor = (): EvmSponsorDefaults | null => sponsorConfigured()
+    ? validateEvmSponsor(evmSponsor.value.trim(), evmEntryPoint.value.trim().toLowerCase(), evmDelegate.value.trim().toLowerCase(), network.value as NetworkName) : null;
   const identity = field(settings, "swap-provider", "Provider identity", "",
     "Automatic by default. Optionally pin a provider's 64-character public identity key, or choose one under Providers.");
   identity.placeholder = "Automatic (lowest verified provider price)";
@@ -422,6 +432,7 @@ function mount(root: HTMLElement): void {
     selectedBroadcastApi: () => validateMempoolApi(broadcastApi.value.trim(), network.value as NetworkName),
     selectedRelays: () => validateRelays(relay.value.trim(), network.value as NetworkName),
     selectedEvmRpc: () => validateMempoolApi(evmRpc.value.trim(), network.value as NetworkName),
+    selectedEvmSponsor: selectedSponsor,
   });
   card.insertBefore(recovery.element, safety);
   // Register failure handling immediately so blocked storage never becomes an unhandled rejection.
@@ -464,11 +475,14 @@ function mount(root: HTMLElement): void {
         ? `This flow needs an EVM wallet extension (MetaMask or similar) holding ${route.from.symbol} plus gas on the provider's chain. ` +
           "The wallet keeps the refund key; your browser recovery key encrypts the swap record."
         : route.profile === "ln-to-erc20/v1"
-          ? "Pay from any Lightning wallet. For direct receive, connect an EVM wallet with gas to claim the tokens. Recovery is saved before the invoice is shown."
+          ? (sponsorConfigured() ? "Pay from any Lightning wallet; the tokens arrive at the address you enter, with claim gas paid by the configured sponsor. Recovery is saved before the invoice is shown."
+            : "Pay from any Lightning wallet. For direct receive, connect an EVM wallet with gas to claim the tokens. Recovery is saved before the invoice is shown.")
           : "Your browser recovery key is created automatically and covers every swap started here.";
     receiveBox.hidden = route.profile !== "ln-to-btc/v1" && route.profile !== "ln-to-erc20/v1";
-    receiveAddress.hidden = route.profile === "ln-to-erc20/v1";
+    receiveAddress.hidden = route.profile === "ln-to-erc20/v1" && !sponsorConfigured();
     receiveBox.querySelector<HTMLLabelElement>('label[for="swap-receive-address"]')!.hidden = receiveAddress.hidden;
+    receiveBox.querySelector<HTMLLabelElement>('label[for="swap-receive-address"]')!.textContent =
+      route.profile === "ln-to-erc20/v1" ? `EVM address to receive ${route.to.symbol}` : "Bitcoin address to receive";
     receiveBox.querySelector<HTMLLabelElement>('label[for="swap-receive-amount"]')!.textContent = `Amount to receive (${route.profile === "ln-to-erc20/v1" ? route.to.symbol : "sat"})`;
     receiveAmount.inputMode = route.profile === "ln-to-erc20/v1" ? "decimal" : "numeric";
     start.disabled = main || route.unavailable !== null;
@@ -678,12 +692,14 @@ function mount(root: HTMLElement): void {
 
   /** Token amounts can be priced without a destination or a connected Lightning node. */
   const lnErc20Quote = (name: NetworkName, symbol: "USDC" | "USDT"): void => {
-    let urls: readonly string[], rpcUrl: string, api: string;
-    const pinned = identity.value.trim(), amount = receiveAmount.value.trim();
+    let urls: readonly string[], rpcUrl: string, api: string, sponsor: EvmSponsorDefaults | null;
+    const pinned = identity.value.trim(), amount = receiveAmount.value.trim(), destination = receiveAddress.value.trim().toLowerCase();
     try {
       urls = validateRelays(relay.value.trim(), name);
       rpcUrl = validateMempoolApi(evmRpc.value.trim(), name);
       api = validateMempoolApi(chainApi.value.trim(), name);
+      sponsor = selectedSponsor();
+      if (sponsor && !/^0x[0-9a-f]{40}$/.test(destination)) throw new Error(`Enter the 0x address that should receive ${symbol}`);
       if (pinned && !/^[0-9a-f]{64}$/.test(pinned)) throw new Error("Provider identity must be 64 lowercase hex characters");
       if (parseTokenAmount(amount, 18, "Amount to receive") <= 0n) throw new Error("Amount to receive must be positive");
     } catch (error) { report(`refused: ${(error as Error).message}`); return; }
@@ -736,7 +752,8 @@ function mount(root: HTMLElement): void {
         }
         const accept = node("button", "Swap with this quote", "swap-quote-accept"); accept.type = "button";
         review.append(choices, node("p", "By continuing you accept the selected provider's signed terms and test-funds-only conditions. " +
-          "Connect an EVM wallet to receive the tokens; pay the invoice from any Lightning wallet. The firm price cannot exceed this estimate."), accept, edit);
+          (sponsor ? `The tokens are sent to ${destination}; the gas sponsor pays the claim. ` : "Connect an EVM wallet to receive the tokens; ") +
+          "Pay the invoice from any Lightning wallet. The firm price cannot exceed this estimate."), accept, edit);
         if (result.failures || directory.warnings.length || selection.providers.length > MAX_QUOTE_PROVIDERS) review.append(node("small", "Incomplete provider results; this is not a market-wide best-price guarantee."));
         panel.replaceChildren(review); setStatus("Quote ready. Review before continuing", 1);
         const chosen = await new Promise<LocatedQuote<PreparedLnErc20Quote> | null>((resolve) => {
@@ -745,16 +762,26 @@ function mount(root: HTMLElement): void {
         });
         if (!chosen) return; current(); executing = true;
         for (const quote of arrivals) if (quote !== chosen) quote.dispose();
-        const rpc = new EvmRpc(rpcUrl), { wallet, account } = await connectEvmWallet(rpc, asset); current();
-        await rpc.verifyHtlc(asset.htlc_contract); current();
+        const rpc = new EvmRpc(rpcUrl);
+        let claimer: LnErc20Claimer;
+        if (sponsor) {
+          if (await rpc.chainId() !== asset.chain_id) throw new Error(`The configured EVM RPC does not serve ${asset.name} (chain ${asset.chain_id}). Change it in Settings.`);
+          const secret = newStagingSecret();
+          claimer = { kind: "sponsored", sponsor: new GasSponsor({ ...sponsor, chainId: asset.chain_id }), secret, destination };
+        } else {
+          const { wallet, account } = await connectEvmWallet(rpc, asset); claimer = { kind: "wallet", wallet, account };
+        }
+        current(); await rpc.verifyHtlc(asset.htlc_contract); current();
         const recoveryWallet = await walletPromise, info = await recoveryWallet.info(); current();
         const journal = new EvmClaimJournal();
         const btcTip = await readChainTip(api, { name, genesis_hash: NETWORKS[name].genesis_hash as string }, { signal: cancellation.signal }); current();
-        const prepared = await chosen.prepared.prepareExecution({ clientEvmAddress: account, btcTip: btcTip.height,
-          evmTip: await rpc.blockNumber(), ageRecipient: info.recipient, saveSecrets: (file, sessionId) => journal.create(`secrets:${sessionId}`, file) });
+        const prepared = await chosen.prepared.prepareExecution({
+          clientEvmAddress: claimer.kind === "wallet" ? claimer.account : stagingAddress(claimer.secret),
+          ...(claimer.kind === "sponsored" ? { claimKey: claimer.secret, claimDestination: claimer.destination } : {}),
+          btcTip: btcTip.height, evmTip: await rpc.blockNumber(), ageRecipient: info.recipient, saveSecrets: (file, sessionId) => journal.create(`secrets:${sessionId}`, file) });
         if ((await recoveryWallet.info()).fingerprint !== info.fingerprint) { prepared.dispose(); throw new Error("Recovery identity changed; request fresh terms"); }
         showTracking(`Lightning to ${asset.token_symbol} swap`);
-        await mountLnErc20Execution(panel, { prepared, rpc, wallet, account, journal, status: setStatus, report,
+        await mountLnErc20Execution(panel, { prepared, rpc, claimer, journal, status: setStatus, report, signal: cancellation.signal,
           download: (root, file, fileName) => { offerDownload(root, file, fileName); publishLink(file, name); } });
       } catch (error) {
         if (!cancellation.signal.aborted) { panel.append(node("p", (error as Error).message, "swap-error"), edit); report(`stopped: ${(error as Error).message}`); }

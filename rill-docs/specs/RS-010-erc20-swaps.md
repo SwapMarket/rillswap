@@ -99,6 +99,9 @@ satoshi. Both objects carry every term of their equation so that any party
 can recompute it. Gas is paid by the party sending each transaction: the
 client pays lock gas (erc20-to-ln) or claim gas (ln-to-erc20); the provider
 pays its own claim, lock, and refund gas and prices it into the success fee.
+A client may instead have its claim gas paid by a third-party sponsor (see
+Recovery); that arrangement is outside the signed terms and invisible to the
+provider, which only ever sees `client_evm_address`.
 
 ## Contract terms
 
@@ -235,5 +238,20 @@ EVM asset, both EVM addresses, and the lock parameters. For `ln-to-erc20` it
 also stores the encrypted preimage. A wallet that controls
 `client_evm_address` can always refund (erc20-to-ln) or claim (ln-to-erc20)
 from the container alone, without the provider. No EVM private key is
-stored for the direct-wallet mode; a later increment adds a browser-held
-claim key with provider-relayed claims for wallets that cannot sign.
+stored for the direct-wallet mode.
+
+For gas-sponsored receiving, the client generates a fresh secp256k1 claim
+key per swap, names its address as `client_evm_address`, and stores the key
+(`claim_key`) and the user's token destination (`claim_destination`) in the
+container next to the preimage. The claim is an ERC-4337 v0.7 user operation
+from that address as an EIP-7702 account (delegated to a pinned contract),
+batching `claim` and the ERC20 `transfer` to the destination, submitted via
+an Alchemy-compatible sponsor API (`wallet_prepareCalls`,
+`wallet_sendPreparedCalls`, `wallet_getCallsStatus`). The sponsor is
+untrusted: the client recomputes the EIP-7702 authorization digest and the
+EntryPoint user operation hash from calldata it built itself, requires the
+pinned chain, delegate, EntryPoint, and live nonces, and signs nothing
+opaque. The staging account never holds native coin. The sponsor learns the
+preimage and the destination; the client records its exposure marker before
+the first request that carries the preimage. A container holding
+`claim_key` can repeat the sponsored claim without a wallet.

@@ -3,6 +3,8 @@ import canonicalize from "canonicalize";
 import { evmRecoveryDocument, lockOf, parseEvmRecovery } from "../src/swap/erc20Swap";
 import { assertFreshEvmClaim, assertSafeEvmClaim, checkLnErc20QuoteOffer, checkLnErc20TermsOffer, payoutSatEquivalent, type LnErc20FirmRequest } from "../src/swap/lnErc20Swap";
 import { EvmRpc, isErc20SwapCode } from "../src/swap/evmHtlc";
+import { hexToBytes } from "@noble/hashes/utils.js";
+import { stagingAddress } from "../src/swap/gasSponsor";
 import { ASSET, CLIENT, HOLD_INVOICE, NOW, PAYMENT_HASH, PREIMAGE, TERMS, signedReverse, testHoldInvoice } from "./fixtures/lnErc20Cases";
 import fixture from "./fixtures/initial-btc-to-ln-v1.json";
 import artifact from "../../rill-contracts/artifacts/erc20-swap-v6.json";
@@ -84,6 +86,28 @@ test("claim safety guards refuse wrong chain, contract, lock, depth, active stat
     await expect(assertSafeEvmClaim(rpc, TERMS, PREIMAGE)).rejects.toThrow();
   }
   await expect(assertSafeEvmClaim(safeRpc(), TERMS, "ab".repeat(32))).rejects.toThrow("preimage mismatch");
+  // A sponsored claim account never holds gas; every other guard still applies.
+  await assertSafeEvmClaim(safeRpc({ nativeBalance: async () => 0n }), TERMS, PREIMAGE, "sponsored");
+  await expect(assertSafeEvmClaim(safeRpc({ nativeBalance: async () => 0n, lockActive: async () => false }), TERMS, PREIMAGE, "sponsored")).rejects.toThrow();
+});
+
+test("browser-held claim keys travel with the preimage and must control the signed claim address", () => {
+  const secret = hexToBytes("11".repeat(32)), staging = stagingAddress(secret);
+  const offer = signedReverse({ ...TERMS, client_evm_address: staging });
+  const base = { network: TERMS.network_identity, init: fixture.verification_context.handshake_init as never,
+    accept: fixture.verification_context.handshake_accept as never, acceptSignature: "11".repeat(64), offer,
+    acceptanceSignature: "22".repeat(64), clientSessionKey: "33".repeat(32), lockTxHash: null, preimage: PREIMAGE, createdAt: NOW, updatedAt: NOW };
+  const plain = parseEvmRecovery(evmRecoveryDocument(base), TERMS.network_identity, NOW);
+  expect(plain.claimKey).toBeNull(); expect(plain.claimDestination).toBeNull();
+  const file = evmRecoveryDocument({ ...base, claimKey: "11".repeat(32), claimDestination: CLIENT });
+  const record = parseEvmRecovery(file, TERMS.network_identity, NOW);
+  expect(record.claimKey).toBe("11".repeat(32)); expect(record.claimDestination).toBe(CLIENT); expect(record.lock.claimAddress).toBe(staging);
+  const document = JSON.parse(new TextDecoder().decode(file)) as Record<string, unknown>;
+  expect(Object.keys(document)).toContain("claim_destination");
+  for (const change of [{ claim_key: "22".repeat(32) }, { claim_key: "zz" }, { claim_destination: "not-an-address" }, { claim_key: null }]) {
+    const bad = { ...document, ...change };
+    expect(() => parseEvmRecovery(new TextEncoder().encode(canonicalize(bad)!), TERMS.network_identity, NOW)).toThrow();
+  }
 });
 
 test("bytecode identity masks only compiler immutables, not arbitrary code", () => {
