@@ -189,3 +189,36 @@ def test_settlement_vectors_match_schema(definition: str) -> None:
         validator.validate(case)
     for case in SETTLEMENT_VECTORS["invalid"][definition]:
         assert not validator.is_valid(case), case
+
+
+def test_rs010_asset_extension_fits_the_advertisement_schema() -> None:
+    """The RS-010 extension key and its EvmAssetIdentity entries validate as announced."""
+    registry, _schemas = schema_registry()
+    validator = jsonschema.Draft202012Validator(
+        {
+            "$ref": "https://spec.rillswap.invalid/schemas/advertisements/advertisement-v1.schema.json"
+        },
+        registry=registry,
+    )
+    fixture = load_json(ROOT / "vectors/discovery/manual-advertisement-regtest-v1.json")
+    fixture["advertisement"]["profiles"] = ["erc20-to-ln/v1", "ln-to-erc20/v1"]
+    fixture["advertisement"]["extensions"]["rillswap/evm-assets-v1"] = [
+        {
+            "family": "evm",
+            "chain_id": 31337,
+            "name": "anvil-dev",
+            "htlc_contract": "0x" + "1a" * 20,
+            "htlc_version": 6,
+            "token_contract": "0x" + "2b" * 20,
+            "token_symbol": "fUSDC",
+            "token_decimals": 6,
+            "block_seconds": 2,
+            "deployment_namespace": "dev",
+        }
+    ]
+    validator.validate(fixture)
+    spec = (ROOT / "specs/RS-010-erc20-swaps.md").read_text()
+    assert "`rillswap/evm-assets-v1`" in spec
+    with pytest.raises(jsonschema.ValidationError):
+        fixture["advertisement"]["extensions"]["org.rillswap/evm-assets/v1"] = []
+        validator.validate(fixture)

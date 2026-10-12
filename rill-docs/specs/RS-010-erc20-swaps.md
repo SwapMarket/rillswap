@@ -72,7 +72,7 @@ decimal strings of at most 39 digits (`decimalTokenUnits`); they are never
 JSON numbers.
 
 Providers announce supported assets in the advertisement extension
-`org.rillswap/evm-assets/v1`, whose value is an array of `EvmAssetIdentity`.
+`rillswap/evm-assets-v1`, whose value is an array of `EvmAssetIdentity`.
 Clients MUST ignore assets whose `htlc_version` they do not implement.
 
 ## Economics

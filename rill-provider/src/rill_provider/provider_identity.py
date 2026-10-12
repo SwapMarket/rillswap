@@ -72,7 +72,7 @@ class AnnouncementTerms:
     evm_assets: tuple[EvmAssetIdentity, ...] = ()  # RS-010 served assets
 
 
-EVM_ASSETS_EXTENSION = "org.rillswap/evm-assets/v1"
+EVM_ASSETS_EXTENSION = "rillswap/evm-assets-v1"
 
 
 def _xonly(public_keys: Context, scalar: bytes) -> str:
