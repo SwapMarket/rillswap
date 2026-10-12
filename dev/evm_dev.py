@@ -4,7 +4,7 @@ Addresses are recorded in ``/state/evm/contracts.json``. Existing records are
 reused while their code is still on the chain; a chain reset (Anvil volume
 removed) redeploys. Accounts are Anvil's deterministic development keys:
 0 deploys, 1 is the user (same as the demo shop's buyer), 3 is the maker's
-HTLC signer. Nothing here holds real value.
+HTLC signer, 4 pays gas for sponsored claims. Nothing here holds real value.
 """
 
 from __future__ import annotations
@@ -27,8 +27,16 @@ ANVIL_KEYS = (
     "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
     "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a",
     "0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6",
+    "0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a",
 )
-DEPLOYER, USER, _SHOP, MAKER = range(4)
+# Canonical ERC-4337 / EIP-7702 contracts, deployed through Anvil's built-in CREATE2 factory so
+# they land at the same addresses (and bytecode) as on public chains.
+AA_ARTIFACTS = tuple(
+    SRC / "rill-contracts/artifacts" / name
+    for name in ("entry-point-v0.7.json", "execution-install-delegate.json", "sma7702.json")
+)
+CREATE2_FACTORY = "0x4e59b44847b379578588920ca78fbf26c0b4956c"
+DEPLOYER, USER, _SHOP, MAKER, SPONSOR = range(5)
 TOKEN = {"name": "Fake USD Coin", "symbol": "fUSDC", "decimals": 6}
 GRANT = 1_000_000 * 10 ** TOKEN["decimals"]  # one million tokens each
 # Fixed dev price: 1 BTC = 100,000 fUSDC, in base units per BTC.
@@ -85,6 +93,46 @@ def _has_code(w3: Web3, address: str) -> bool:
     return len(w3.eth.get_code(Web3.to_checksum_address(address))) > 0
 
 
+def _create2(w3: Web3, artifact: dict[str, Any]) -> str:
+    """Deploy an artifact at its canonical CREATE2 address (no-op once the code is there)."""
+    expected = artifact["create2"]["address"]
+    if _has_code(w3, expected):
+        return expected
+    args = Web3().codec.encode(
+        ["address"] * len(artifact["constructorArgs"]),
+        [Web3.to_checksum_address(a) for a in artifact["constructorArgs"]],
+    )
+    initcode = bytes.fromhex(artifact["bytecode"][2:]) + args
+    _send(
+        w3,
+        ANVIL_KEYS[DEPLOYER],
+        {
+            "to": Web3.to_checksum_address(CREATE2_FACTORY),
+            "data": bytes.fromhex(artifact["create2"]["salt"][2:]) + initcode,
+        },
+    )
+    if not _has_code(w3, expected):
+        raise SystemExit(f"{artifact['name']} did not land at its canonical address {expected}")
+    return expected
+
+
+def ensure_account_abstraction(w3: Web3, log: Any) -> dict[str, str]:
+    """EntryPoint v0.7 and the Alchemy EIP-7702 delegate, for gas-sponsored claims."""
+    record: dict[str, str] = {}
+    for path in AA_ARTIFACTS:
+        artifact = json.loads(path.read_text())
+        if not _has_code(w3, artifact["create2"]["address"]):
+            log(
+                f"deploying {artifact['name']} {artifact['version']} "
+                f"at {artifact['create2']['address']}"
+            )
+        record[artifact["name"]] = _create2(w3, artifact)
+    return {
+        "entry_point": record["EntryPoint"],
+        "account_delegate": record["SemiModularAccount7702"],
+    }
+
+
 def ensure_evm(state: Path, log: Any) -> dict[str, Any]:
     """Deploy (once) and return the dev chain's contract record."""
     record_path = state / "evm" / "contracts.json"
@@ -92,6 +140,13 @@ def ensure_evm(state: Path, log: Any) -> dict[str, Any]:
     if record_path.exists():
         record = json.loads(record_path.read_text())
         if _has_code(w3, record["htlc_contract"]) and _has_code(w3, record["token_contract"]):
+            aa = {
+                **ensure_account_abstraction(w3, log),
+                "sponsor_address": account_address(SPONSOR),
+            }
+            if any(record.get(key) != value for key, value in aa.items()):
+                record = {**record, **aa}
+                record_path.write_text(json.dumps(record, indent=1) + "\n")
             return record
         log("dev EVM contracts missing from the chain (reset?): redeploying")
     record_path.parent.mkdir(parents=True, exist_ok=True)
@@ -115,6 +170,8 @@ def ensure_evm(state: Path, log: Any) -> dict[str, Any]:
         "rate_token_base_per_btc": RATE_TOKEN_BASE_PER_BTC,
         "maker_address": account_address(MAKER),
         "user_address": account_address(USER),
+        "sponsor_address": account_address(SPONSOR),
+        **ensure_account_abstraction(w3, log),
     }
     record_path.write_text(json.dumps(record, indent=1) + "\n")
     return record

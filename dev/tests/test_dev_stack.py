@@ -172,12 +172,27 @@ def test_evm_makers_run_after_bootstrap_deploys_on_a_healthy_anvil():
     devtool = (ROOT / "dev/devtool.py").read_text()
     assert 'EVM_DIRECTIONS = ("erc20-to-ln", "ln-to-erc20")' in devtool
     evm = (ROOT / "dev/evm_dev.py").read_text()
-    # Distinct dev roles: the maker's HTLC signer is neither the deployer nor the user.
-    assert "DEPLOYER, USER, _SHOP, MAKER = range(4)" in evm
+    # Distinct dev roles: the maker's HTLC signer is not the deployer, user, or gas sponsor.
+    assert "DEPLOYER, USER, _SHOP, MAKER, SPONSOR = range(5)" in evm
     assert "ANVIL_KEYS[MAKER]" in devtool
+    sponsor = (ROOT / "dev/gas_sponsor.py").read_text()
+    assert "ANVIL_KEYS[SPONSOR]" in sponsor
     for artifact in (
         "rill-contracts/artifacts/erc20-swap-v6.json",
         "rill-payments/examples/demo-shop/dev-stablecoin.json",
     ):
         assert artifact in evm
         assert (ROOT / artifact).exists()
+    for artifact in ("entry-point-v0.7.json", "execution-install-delegate.json", "sma7702.json"):
+        assert f'"{artifact}"' in evm
+        assert (ROOT / "rill-contracts/artifacts" / artifact).exists()
+
+
+def test_gas_sponsor_serves_the_web_client_only_from_the_dev_stack():
+    service = compose_service("gas-sponsor")
+    assert "command: [python, /src/dev/gas_sponsor.py]" in service
+    assert "bootstrap:\n        condition: service_completed_successfully" in service
+    assert "127.0.0.1:${RILL_DEV_SPONSOR_PORT:-8094}:8094" in service
+    web = compose_service("web")
+    assert "VITE_RILLSWAP_EVM_SPONSOR: http://127.0.0.1:${RILL_DEV_SPONSOR_PORT:-8094}" in web
+    assert "VITE_RILLSWAP_EVM_ENTRY_POINT" in web and "VITE_RILLSWAP_EVM_7702_DELEGATE" in web
