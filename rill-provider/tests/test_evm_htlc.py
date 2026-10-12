@@ -225,3 +225,43 @@ def test_anvil_lock_claim_and_refund_round_trip(anvil: dict[str, Any]) -> None: 
     )  # provider is claimAddress of the forward lock
     assert v in (27, 28)
     assert len(r) == len(s) == 64
+
+
+@pytest.mark.anvil
+def test_anvil_superseded_needs_our_nonce_mined_by_another_transaction(
+    anvil: dict[str, Any],
+) -> None:
+    """Only a mined other use of the nonce marks a recorded transaction as dead."""
+    from web3 import Web3  # noqa: PLC0415
+
+    web3 = anvil["web3"]
+    key = "0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e"  # Anvil #6
+    client = EvmHtlcClient(
+        rpc_url=web3.provider.endpoint_uri,
+        chain_id=31337,
+        htlc_contract=anvil["htlc"],
+        signer_private_key=key,
+    )
+    token = web3.eth.contract(
+        address=Web3.to_checksum_address(anvil["token"]), abi=anvil["token_abi"]
+    )
+    spender = Web3.to_checksum_address(anvil["htlc"])
+    recorded = client._prepare(token.functions.approve(spender, 1))  # noqa: SLF001 - never sent
+    assert not client.superseded(recorded.raw, 1)  # its nonce is still free
+    other = client._send(token.functions.approve(spender, 2))  # noqa: SLF001 - same nonce
+    _mined(client, other)
+    assert client.superseded(recorded.raw, 1)
+    mined_at = web3.eth.get_transaction_receipt(other)["blockNumber"]
+    before = client.block_number() - mined_at + 5  # a few blocks before it was mined
+    assert not client.superseded(recorded.raw, before)  # not that deep yet
+    assert not client.superseded(recorded.raw, 10**9)  # no such block: unproven
+    other_raw = bytes(web3.eth.get_raw_transaction(other))
+    assert not client.superseded(other_raw, 1)  # mined itself
+    stranger = EvmHtlcClient(
+        rpc_url=web3.provider.endpoint_uri,
+        chain_id=31337,
+        htlc_contract=anvil["htlc"],
+        signer_private_key=ANVIL_KEYS[2],
+    )
+    assert not stranger.superseded(recorded.raw, 1)  # not signed by this signer
+    assert not client.superseded(b"\x02not a transaction", 1)

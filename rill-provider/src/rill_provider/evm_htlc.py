@@ -16,7 +16,9 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from eth_account import Account
 from eth_account.messages import encode_typed_data
+from eth_account.typed_transactions.typed_transaction import TypedTransaction
 from eth_typing import HexStr
+from hexbytes import HexBytes
 from web3 import HTTPProvider, Web3
 
 if TYPE_CHECKING:
@@ -323,6 +325,37 @@ class EvmHtlcClient:
             if self.receipt(tx_hash) is not None or "already known" in str(error).lower():
                 return tx_hash
             raise EvmBackendError(f"broadcast refused: {error}") from error
+
+    def superseded(self, raw: bytes, depth: int) -> bool:  # noqa: PLR0911 - one guard per proof step
+        """Whether our recorded ``raw`` can no longer mine: its nonce went to another transaction.
+
+        True only on affirmative evidence: ``raw`` is our own EIP-1559 transaction
+        on this chain, it has no receipt (checked before and after the nonce read),
+        and the signer's mined nonce count ``depth`` blocks deep (counting the tip
+        as the first) is already above its nonce. Anything unexpected, including
+        a node without that block's state, is False, so the caller keeps
+        rebroadcasting. Receipt and nonce reads must come from one consistent node.
+        """
+        if depth < 1 or self._account is None:
+            return False
+        tx_hash = bytes(Web3.keccak(raw)).hex()
+        try:
+            fields = TypedTransaction.from_bytes(HexBytes(raw)).as_dict()
+            sender = Account.recover_transaction(raw)
+        except Exception:  # noqa: BLE001 - not a transaction we signed: never replace it
+            return False
+        if int(fields["chainId"]) != self.chain_id or sender.lower() != self.signer_address:
+            return False
+        if self.receipt(tx_hash) is not None:
+            return False
+        block = self.block_number() - depth + 1
+        if block < 0:
+            return False
+        try:
+            mined = int(self._web3.eth.get_transaction_count(sender, block))
+        except Exception:  # noqa: BLE001 - e.g. a pruned node: unproven, keep rebroadcasting
+            return False
+        return mined > int(fields["nonce"]) and self.receipt(tx_hash) is None
 
     def lock(self, params: LockParams) -> str:
         """Sign and send ``lock(...)``."""

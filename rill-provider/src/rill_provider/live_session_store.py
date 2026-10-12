@@ -6201,6 +6201,52 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - never echo storage or crypto details
             raise LiveSessionStoreError("swap transition refused") from None
 
+    def replace_evm_sent(  # noqa: PLR0913 - one atomic replacement's explicit parts
+        self,
+        session_id: str,
+        *,
+        state: str,
+        old_hash: str,
+        sent: tuple[str, bytes],
+        signer: EnvelopeSigner,
+        now: int,
+    ) -> None:
+        """Replace a recorded claim or refund whose nonce another transaction consumed.
+
+        Compare-and-swap on the state and the recorded hash, before any
+        broadcast of ``sent``. A claim also re-sends ``claim_broadcast`` naming
+        the new hash. Locks are never replaced: ``ERC20Swap`` forgets a swap
+        once it is claimed or refunded, so a second lock could fund it again.
+        """
+        column = {"CLAIMING": "claim", "REFUNDING": "refund"}.get(state)
+        if column is None:
+            raise LiveSessionStoreError("only a claim or refund may be replaced")
+        try:
+            with self._write() as connection:
+                updated = connection.execute(
+                    f"UPDATE evm_swaps SET {column}_tx_hash=?, {column}_tx=? "  # noqa: S608 - fixed names
+                    f"WHERE session_id=? AND {column}_tx_hash=? AND session_id IN "
+                    "(SELECT session_id FROM swaps WHERE session_id=? AND state=?)",
+                    (*sent, session_id, old_hash, session_id, state),
+                ).rowcount
+                if updated != 1:
+                    raise StaleSwapError("swap state changed")  # noqa: TRY301
+                connection.execute(
+                    "UPDATE swaps SET updated_at=? WHERE session_id=?", (now, session_id)
+                )
+                if state == "CLAIMING":
+                    self._record_observation(
+                        connection,
+                        session_id,
+                        {"kind": "claim_broadcast", "claim_txid": sent[0]},
+                        signer,
+                        now,
+                    )
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage or crypto details
+            raise LiveSessionStoreError("swap transition refused") from None
+
     def advance_swap(  # noqa: PLR0913 - one atomic transition's explicit parts
         self,
         session_id: str,

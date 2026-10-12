@@ -13,7 +13,13 @@ open EVM swaps and moves every one at most through its available steps:
 
 Every signed transaction is recorded in the store before it is broadcast so
 a restart repeats the broadcast instead of signing again. Backend trouble
-defers one swap for a tick and never stops the others.
+defers one swap for a tick and never stops the others, with one exception
+that serializes the signer's nonces: recorded transactions are rebroadcast
+first, and once the node refuses one, the tick signs nothing new (a fresh
+"pending" nonce would otherwise reuse the refused one's slot). A claim or
+refund whose nonce another transaction consumed anyway (e.g. a second
+process sharing the key) is re-signed on that affirmative chain evidence; a
+lock never is. One signer key must belong to exactly one provider process.
 """
 
 from __future__ import annotations
@@ -38,7 +44,7 @@ if TYPE_CHECKING:
     from rill_core.wire.messages import EvmContractTerms, InvoiceBinding
     from rill_core.wire.types import EvmAssetIdentity
 
-    from rill_provider.evm_htlc import EvmHtlcClient
+    from rill_provider.evm_htlc import EvmHtlcClient, SignedTx
     from rill_provider.evm_quote_policy import EvmSchedule
     from rill_provider.live_session_store import (
         EnvelopeSigner,
@@ -51,6 +57,7 @@ if TYPE_CHECKING:
 
 LOG = logging.getLogger(__name__)
 LOCKUP_SCAN_MARGIN_BLOCKS = 64  # look a little before the reference block for early locks
+SENT_STATES = ("CLAIMING", "FUNDING_SENT", "REFUNDING")  # a recorded transaction of ours
 
 
 class HoldInvoiceBackend(Protocol):
@@ -125,6 +132,9 @@ class EvmSettlementEngine:
         self._lightning = lightning
         self._hold = hold_invoices
         self._max_routing_fee_sat = max_routing_fee_sat
+        # Nonce gate: a tick signs nothing new once any recorded transaction was
+        # refused by the node, so a fresh "pending" nonce never reuses its slot.
+        self._may_sign = True
 
     # -- quoting support -------------------------------------------------
 
@@ -179,7 +189,11 @@ class EvmSettlementEngine:
     async def tick(self, now: int) -> dict[str, str]:
         """Advance each EVM swap at most through its available steps; return new states."""
         results: dict[str, str] = {}
-        for item in self._store.evm_settlement_work():
+        self._may_sign = True
+        # Recorded transactions first: their rebroadcasts decide whether this
+        # tick may take new nonces (see ``_broadcast``).
+        work = sorted(self._store.evm_settlement_work(), key=lambda w: w.state not in SENT_STATES)
+        for item in work:
             try:
                 state = await self._advance(item, now)
             except StaleOwnerError:
@@ -192,6 +206,50 @@ class EvmSettlementEngine:
             if state != item.state:
                 results[item.session_id] = state
         return results
+
+    async def _broadcast(self, raw: bytes) -> None:
+        """Submit recorded bytes; a refusal closes the nonce gate for the rest of the tick."""
+        try:
+            await asyncio.to_thread(self._htlc.broadcast, raw)
+        except Exception:
+            self._may_sign = False
+            raise
+
+    async def _replace_dead(
+        self,
+        item: EvmSettlementItem,
+        terms: EvmContractTerms,
+        now: int,
+        old_hash: str,
+        prepare: Callable[[], SignedTx],
+    ) -> str:
+        """Re-sign a claim or refund whose nonce another transaction took (RS-010)."""
+        if not self._may_sign:
+            return item.state
+        if not await asyncio.to_thread(self._htlc.lock_active, _lock_params(terms)):
+            LOG.error(
+                "EVM %s transaction superseded and the lock is gone: swap %s needs attention",
+                item.state,
+                item.session_id[:16],
+            )
+            return item.state
+        signed = await asyncio.to_thread(prepare)
+        self._store.replace_evm_sent(
+            item.session_id,
+            state=item.state,
+            old_hash=old_hash,
+            sent=(signed.tx_hash, signed.raw),
+            signer=self._signer,
+            now=now,
+        )
+        LOG.warning(
+            "EVM %s transaction %s superseded by another nonce use; re-signed as %s",
+            item.state,
+            old_hash[:16],
+            signed.tx_hash[:16],
+        )
+        await self._broadcast(signed.raw)
+        return item.state
 
     def _move(self, item: EvmSettlementItem, to_state: str, now: int, **fields: Any) -> str:  # noqa: ANN401
         self._store.advance_evm_swap(
@@ -294,6 +352,8 @@ class EvmSettlementEngine:
                 _with_state(item, "PAID", preimage=outcome.preimage), terms, now
             )
         if item.state == "PAID" and item.preimage is not None:
+            if not self._may_sign:
+                return item.state
             preimage = item.preimage
             signed = await asyncio.to_thread(
                 lambda: self._htlc.prepare_claim(_lock_params(terms), preimage)
@@ -305,7 +365,7 @@ class EvmSettlementEngine:
                 sent=(signed.tx_hash, signed.raw),
                 observation={"kind": "claim_broadcast", "claim_txid": signed.tx_hash},
             )
-            await asyncio.to_thread(self._htlc.broadcast, signed.raw)
+            await self._broadcast(signed.raw)
             return "CLAIMING"
         if (
             item.state == "CLAIMING"
@@ -314,7 +374,19 @@ class EvmSettlementEngine:
         ):
             receipt = await asyncio.to_thread(self._htlc.receipt, item.claim_tx_hash)
             if receipt is None:
-                await asyncio.to_thread(self._htlc.broadcast, item.claim_tx)
+                claim_tx, claim_hash = item.claim_tx, item.claim_tx_hash
+                if await asyncio.to_thread(
+                    self._htlc.superseded, claim_tx, terms.settlement_confirmations
+                ):
+                    preimage = item.preimage or ""
+                    return await self._replace_dead(
+                        item,
+                        terms,
+                        now,
+                        claim_hash,
+                        lambda: self._htlc.prepare_claim(_lock_params(terms), preimage),
+                    )
+                await self._broadcast(claim_tx)
                 return item.state
             if receipt.status == "success":
                 depth = await asyncio.to_thread(self._htlc.confirmations, item.claim_tx_hash)
@@ -451,18 +523,22 @@ class EvmSettlementEngine:
             problem = await self._held_problem(terms, status)
             if problem is not None:
                 return await self._abort(item, terms, now, problem)
-            if item.blocked:
+            if item.blocked or not self._may_sign:
                 return item.state
             params = _lock_params(terms)
-            approval = await asyncio.to_thread(
-                lambda: self._htlc.ensure_allowance(params.token, params.amount)
-            )
+            try:
+                approval = await asyncio.to_thread(
+                    lambda: self._htlc.ensure_allowance(params.token, params.amount)
+                )
+            except Exception:
+                self._may_sign = False  # the approval may hold a nonce the node refused
+                raise
             if approval is not None:
                 return item.state  # the approval must be mined before the lock can be estimated
             signed = await asyncio.to_thread(lambda: self._htlc.prepare_lock(params))
             # The grant is durable before any broadcast; FUNDING_SENT rebroadcasts.
             self._move(item, "FUNDING_SENT", now, sent=(signed.tx_hash, signed.raw))
-            await asyncio.to_thread(self._htlc.broadcast, signed.raw)
+            await self._broadcast(signed.raw)
             return "FUNDING_SENT"
         if (
             item.state == "FUNDING_SENT"
@@ -474,7 +550,17 @@ class EvmSettlementEngine:
                 return await self._settle(item, terms, now, claim.preimage, claim.tx_hash)
             receipt = await asyncio.to_thread(self._htlc.receipt, item.provider_tx_hash)
             if receipt is None:
-                await asyncio.to_thread(self._htlc.broadcast, item.provider_tx)
+                if await asyncio.to_thread(
+                    self._htlc.superseded, item.provider_tx, terms.funding_confirmations
+                ):
+                    # Never re-signed: ERC20Swap forgets a claimed or refunded swap,
+                    # so a second lock could fund it again.
+                    LOG.error(
+                        "EVM lock superseded by another nonce use: swap %s needs attention",
+                        item.session_id[:16],
+                    )
+                    return item.state
+                await self._broadcast(item.provider_tx)
                 return item.state
             if receipt.status != "success":
                 LOG.error("EVM lock reverted: swap %s needs attention", item.session_id[:16])
@@ -502,11 +588,13 @@ class EvmSettlementEngine:
             if evm_tip < terms.htlc_timelock_block:
                 return item.state
             params = _lock_params(terms)
+            if not self._may_sign:
+                return item.state
             if not await asyncio.to_thread(self._htlc.lock_active, params):
                 return item.state  # claimed in a block we have not scanned yet
             signed = await asyncio.to_thread(lambda: self._htlc.prepare_refund(params))
             self._move(item, "REFUNDING", now, sent=(signed.tx_hash, signed.raw))
-            await asyncio.to_thread(self._htlc.broadcast, signed.raw)
+            await self._broadcast(signed.raw)
             return "REFUNDING"
         if (
             item.state == "REFUNDING"
@@ -518,7 +606,18 @@ class EvmSettlementEngine:
                 return await self._settle(item, terms, now, claim.preimage, claim.tx_hash)
             receipt = await asyncio.to_thread(self._htlc.receipt, item.refund_tx_hash)
             if receipt is None:
-                await asyncio.to_thread(self._htlc.broadcast, item.refund_tx)
+                if await asyncio.to_thread(
+                    self._htlc.superseded, item.refund_tx, terms.settlement_confirmations
+                ):
+                    refund_params = _lock_params(terms)
+                    return await self._replace_dead(
+                        item,
+                        terms,
+                        now,
+                        item.refund_tx_hash,
+                        lambda: self._htlc.prepare_refund(refund_params),
+                    )
+                await self._broadcast(item.refund_tx)
                 return item.state
             if receipt.status != "success":
                 return item.state  # the claim must have won; the next tick finds its log

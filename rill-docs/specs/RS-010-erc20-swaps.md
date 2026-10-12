@@ -231,6 +231,21 @@ hashes are 32-byte lowercase hex without `0x`, like `claim_txid`. The new
 kind `evm_lockup_observed` carries `lock_tx_hash`, `log_index`, and
 `block_number`.
 
+### Provider signer nonces
+
+The provider's EVM signer must belong to exactly one provider process; two
+processes sharing a key race for the same account nonce. Every lock, claim,
+and refund is recorded before it is broadcast, and recorded transactions are
+rebroadcast before anything new is signed. Once the node refuses one, the
+provider signs nothing new until a later pass, so a fresh nonce never takes
+the slot of a recorded transaction that is not yet in the mempool. If a
+recorded claim or refund still loses its nonce to another transaction (no
+receipt, and the signer's nonce count at the settlement depth is already past
+it), the provider re-signs it, records the replacement first, and for a claim
+sends `claim_broadcast` again with the new hash. A lost lock is never re-signed:
+`ERC20Swap` forgets a swap once it is claimed or refunded, so a second lock
+could fund it again. Such a swap needs an operator.
+
 ## Recovery
 
 The recovery container (RS-007) stores the signed terms and acceptance, the

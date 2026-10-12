@@ -12,7 +12,14 @@ from evm_fixtures import PAYMENT_HASH, PREIMAGE, evm_terms
 from test_cooperation_burn import FixtureEnvelopeSigner
 from test_evm_swap_store import _accept_evm_swap
 
-from rill_provider.evm_htlc import ClaimEvent, LockupEvent, SignedTx, TxReceipt
+from rill_provider import live_session_store as live_store
+from rill_provider.evm_htlc import (
+    ClaimEvent,
+    EvmBackendError,
+    LockupEvent,
+    SignedTx,
+    TxReceipt,
+)
 from rill_provider.evm_quote_policy import EvmSchedule
 from rill_provider.evm_settlement import EvmSettlementEngine
 from rill_provider.lnd_hold_invoice import HeldHtlc, HoldInvoiceStatus
@@ -61,6 +68,8 @@ class FakeHtlc:
     broadcasts: list[bytes] = field(default_factory=list)
     allowance_pending: bool = False
     signed: int = 0
+    refused: set[bytes] = field(default_factory=set)  # raw bytes the node rejects
+    dead: set[bytes] = field(default_factory=set)  # raw bytes whose nonce another tx took
 
     def block_number(self) -> int:
         return self.tip
@@ -103,8 +112,14 @@ class FakeHtlc:
         return self._sign()
 
     def broadcast(self, raw: bytes) -> str:
+        if raw in self.refused or raw in self.dead:
+            raise EvmBackendError("broadcast refused: nonce too low")
         self.broadcasts.append(raw)
         return "00" * 32
+
+    def superseded(self, raw: bytes, depth: int) -> bool:
+        assert depth >= 1
+        return raw in self.dead
 
 
 def _lockup(terms: EvmContractTerms, block: int = 5) -> LockupEvent:
@@ -322,3 +337,130 @@ def test_reverse_swap_aborts_before_locking_when_the_hold_is_wrong(
         assert asyncio.run(engine.tick(now)) == {session: "ABORTED"}
         assert hold.cancel.called is canceled
         assert (htlc.signed, _reservation(store)) == (0, "RELEASED")
+
+
+def _recorded(store: live.LiveSessionStore, session: str, column: str) -> tuple[str, bytes]:
+    return store._connection.execute(  # noqa: SLF001
+        f"SELECT {column}_tx_hash, {column}_tx FROM evm_swaps WHERE session_id=?",  # noqa: S608
+        (session,),
+    ).fetchone()
+
+
+def test_a_refused_rebroadcast_stops_new_signing_for_the_rest_of_the_tick(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nonce gate: a recorded tx the node refused must not lose its slot to a new one."""
+    from dataclasses import replace  # noqa: PLC0415
+
+    terms = _forward_terms()
+    htlc = FakeHtlc(lockups=[_lockup(terms)], active=True, refused={b"stuck"})
+    lightning = _lightning(terms, PaymentOutcome("SUCCEEDED", preimage=PREIMAGE))
+    with harness.acquire() as store:
+        session = _accept_evm_swap(store, harness, terms)
+        (real,) = store.evm_settlement_work()
+        # Another swap's recorded claim, listed after ours: it is still handled first.
+        stuck = replace(
+            real, session_id="ff" * 32, state="CLAIMING", claim_tx_hash="aa" * 32, claim_tx=b"stuck"
+        )
+        work = store.evm_settlement_work
+        monkeypatch.setattr(store, "evm_settlement_work", lambda: (*work(), stuck))
+        engine = _engine(store, harness, htlc, lightning=lightning)
+        assert asyncio.run(engine.tick(1500)) == {session: "PAID"}  # paid, claim deferred
+        assert (htlc.signed, htlc.broadcasts) == (0, [])
+        htlc.refused.clear()
+        assert asyncio.run(engine.tick(1600)) == {session: "CLAIMING"}
+        assert htlc.broadcasts == [b"stuck", b"signed-1"]  # the old slot first, then ours
+
+
+def test_a_superseded_claim_is_re_signed_once_and_announced(harness: Harness) -> None:
+    terms = _forward_terms()
+    htlc = FakeHtlc(lockups=[_lockup(terms)], active=True)
+    lightning = _lightning(terms, PaymentOutcome("SUCCEEDED", preimage=PREIMAGE))
+    with harness.acquire() as store:
+        session = _accept_evm_swap(store, harness, terms)
+        engine = _engine(store, harness, htlc, lightning=lightning)
+        assert asyncio.run(engine.tick(1500)) == {session: "CLAIMING"}
+        htlc.dead.add(b"signed-1")
+        assert asyncio.run(engine.tick(1600)) == {}
+        assert _recorded(store, session, "claim") == ("02" * 32, b"signed-2")
+        assert htlc.broadcasts == [b"signed-1", b"signed-2"]
+        assert asyncio.run(engine.tick(1700)) == {}  # the replacement is only rebroadcast
+        assert (htlc.signed, htlc.broadcasts[-1]) == (2, b"signed-2")
+        announced = [
+            hash_
+            for hash_ in ("01" * 32, "02" * 32)
+            for (canonical,) in store._connection.execute(  # noqa: SLF001
+                "SELECT canonical_bytes FROM outbox WHERE session_id=?", (session,)
+            ).fetchall()
+            if b'"claim_broadcast"' in canonical and hash_.encode() in canonical
+        ]
+        assert announced == ["01" * 32, "02" * 32]  # the client learns the replacement hash
+        htlc.receipts["02" * 32] = TxReceipt("02" * 32, 12, "success")
+        htlc.tip = 12
+        assert asyncio.run(engine.tick(1800)) == {session: "CLAIMED"}
+
+
+def test_a_superseded_claim_on_a_vanished_lock_is_left_for_the_operator(
+    harness: Harness,
+) -> None:
+    terms = _forward_terms()
+    htlc = FakeHtlc(lockups=[_lockup(terms)], active=True)
+    lightning = _lightning(terms, PaymentOutcome("SUCCEEDED", preimage=PREIMAGE))
+    with harness.acquire() as store:
+        session = _accept_evm_swap(store, harness, terms)
+        engine = _engine(store, harness, htlc, lightning=lightning)
+        assert asyncio.run(engine.tick(1500)) == {session: "CLAIMING"}
+        htlc.dead.add(b"signed-1")
+        htlc.active = False
+        assert asyncio.run(engine.tick(1600)) == {}
+        assert (htlc.signed, _recorded(store, session, "claim")) == (1, ("01" * 32, b"signed-1"))
+
+
+def test_a_superseded_lock_is_never_re_signed(harness: Harness) -> None:
+    terms = evm_terms("ln-to-erc20/v1")
+    htlc = FakeHtlc()
+    with harness.acquire() as store:
+        session = _accept_evm_swap(store, harness, terms)
+        engine = _engine(store, harness, htlc, hold=_hold())
+        assert asyncio.run(engine.tick(1500)) == {session: "FUNDING_SENT"}
+        htlc.dead.add(b"signed-1")
+        assert asyncio.run(engine.tick(1600)) == {}
+        assert (htlc.signed, htlc.broadcasts) == (1, [b"signed-1"])
+        assert _recorded(store, session, "provider") == ("01" * 32, b"signed-1")
+        with pytest.raises(live_store.LiveSessionStoreError, match="claim or refund"):
+            store.replace_evm_sent(
+                session,
+                state="FUNDING_SENT",
+                old_hash="01" * 32,
+                sent=("09" * 32, b"x"),
+                signer=FixtureEnvelopeSigner(harness, store._public_keys),  # noqa: SLF001
+                now=1700,
+            )
+
+
+def test_a_superseded_refund_is_re_signed(harness: Harness) -> None:
+    terms = evm_terms("ln-to-erc20/v1")
+    htlc = FakeHtlc()
+    hold = _hold()
+    with harness.acquire() as store:
+        session = _accept_evm_swap(store, harness, terms)
+        engine = _engine(store, harness, htlc, hold=hold)
+        assert asyncio.run(engine.tick(1500)) == {session: "FUNDING_SENT"}
+        htlc.receipts["01" * 32] = TxReceipt("01" * 32, 11, "success")
+        htlc.tip, htlc.active = 11, True
+        assert asyncio.run(engine.tick(1600)) == {session: "FUNDED"}
+        htlc.tip = terms.htlc_timelock_block
+        assert asyncio.run(engine.tick(1700)) == {session: "REFUNDING"}
+        htlc.dead.add(b"signed-2")
+        assert asyncio.run(engine.tick(1800)) == {}
+        assert _recorded(store, session, "refund") == ("03" * 32, b"signed-3")
+        signer = FixtureEnvelopeSigner(harness, store._public_keys)  # noqa: SLF001
+        with pytest.raises(live_store.StaleSwapError):  # compare-and-swap on the old hash
+            store.replace_evm_sent(
+                session,
+                state="REFUNDING",
+                old_hash="02" * 32,
+                sent=("09" * 32, b"x"),
+                signer=signer,
+                now=1900,
+            )
