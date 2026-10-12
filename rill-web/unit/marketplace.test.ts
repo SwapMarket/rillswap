@@ -3,7 +3,7 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import canonicalize from "canonicalize";
 import { finalizeEvent, getPublicKey } from "nostr-tools";
-import { eligibleProviders, rankQuotes, scanAnnouncements, type LocatedQuote, type RelayObservation } from "../src/swap/marketplace";
+import { eligibleProviders, ineligibilityReason, rankQuotes, scanAnnouncements, type LocatedQuote, type RelayObservation } from "../src/swap/marketplace";
 import application from "./fixtures/manual-advertisement-regtest-v1.json";
 import vector from "./fixtures/nostr-announcement-regtest-v1.json";
 import network from "../src/networks/regtest-rillswap-e2e-v1.json";
@@ -72,6 +72,9 @@ test("highest revision replaces older transport provenance and amount bands filt
   expect(eligibleProviders(directory.providers, 99n)).toHaveLength(0);
   expect(eligibleProviders(directory.providers, 100n)).toHaveLength(1);
   expect(eligibleProviders(directory.providers, 10001n)).toHaveLength(0);
+  const identity = directory.providers[0]!.announcement.identityXOnlyKey.slice(0, 12);
+  expect(ineligibilityReason(directory.providers, 10001n)).toBe(`No provider accepts 10,001 sat. Announced limits: 100 to 10,000 sat (${identity}…).`);
+  expect(ineligibilityReason([], 10001n)).toContain("No provider announced this swap direction");
 });
 
 test("verified contract prices, not indicative prices, choose the winner with deterministic ties", () => {

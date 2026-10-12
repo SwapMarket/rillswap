@@ -15,8 +15,9 @@ function input(root: HTMLElement, label: string, id: string, value = ""): HTMLIn
   const caption = node("label", label), field = node("input", "", id); field.value = value; field.autocomplete = "off"; field.spellcheck = false;
   caption.htmlFor = id; root.append(caption, field); return field;
 }
-function check(root: HTMLElement, text: string, id: string): HTMLInputElement {
-  const label = node("label", "", id + "-label"), field = node("input", "", id); field.type = "checkbox"; label.append(field, document.createTextNode(text)); root.append(label); return field;
+/** Continuing is the acceptance; no checkbox gates the next action. */
+function consent(root: HTMLElement, text: string, id: string): void {
+  const note = node("p", text, id); note.className = "swap-consent"; root.append(note);
 }
 function button(root: HTMLElement, text: string, id: string): HTMLButtonElement {
   const control = node("button", text, id); control.type = "button"; root.append(control); return control;
@@ -60,11 +61,11 @@ export async function mountReverseExecution(root: HTMLElement, options: ReverseE
     download(e.recoveryFile, "terms");
     steps.append(node("h2", "Final signed price"), node("p", `Pay ${terms.economics.hold_invoice_sat} sat over Lightning, plus the routing fee, to receive at least ${terms.economics.nominal_payout_sat} sat on-chain.`),
       node("small", `Provider fee: ${terms.economics.success_fee_sat} sat. Claim reserve: ${terms.economics.claim_fee_reserve_sat} sat. Funding requires ${terms.funding_confirmations} confirmation(s). Provider refund height: ${terms.refund_lock_height}.`));
-    const saved = check(steps, "I saved the encrypted swap backup and verified my recovery-key backup.", "swap-reverse-backup-saved");
-    const accept = button(steps, "Accept signed terms", "swap-reverse-accept"); accept.disabled = true; saved.onchange = () => { accept.disabled = !saved.checked; };
-    const acknowledge = (): void => { current(); if (!saved.checked) throw new Error("Backup not acknowledged"); };
+    consent(steps, "By accepting you agree to these signed terms. The encrypted swap backup above and your browser recovery key are what let you recover; keep them.", "swap-reverse-consent-terms");
+    const accept = button(steps, "Accept signed terms", "swap-reverse-accept");
+    const acknowledge = (): void => { current(); };
     act(accept, async () => {
-      await e.accept(acknowledge); current(); saved.disabled = true;
+      await e.accept(acknowledge); current();
       options.status("Signed terms accepted. Connect your Lightning node", 2);
       const nodeSettings = node("details"); nodeSettings.append(node("summary", "Lightning node settings"));
       const endpoint = input(nodeSettings, "LND REST endpoint (direct browser access)", "swap-reverse-node-api", options.nodeApi);
@@ -101,17 +102,17 @@ export async function mountReverseExecution(root: HTMLElement, options: ReverseE
               options.status("Funding authenticated. Wait for confirmations, then approve your claim", 3);
               const feeMax = [BigInt(terms.economics.claim_fee_reserve_sat), BigInt(terms.max_claim_fee_sat)].reduce((a, b) => a < b ? a : b);
               const fee = input(steps, "Claim network fee (sat, maximum " + feeMax + ")", "swap-reverse-claim-fee", String(feeMax)); fee.inputMode = "numeric";
-              const approved = check(steps, `I approve a claim to the signed payout script ${terms.client_destination_script} at the fee above. Signing uses my private preimage.`, "swap-reverse-claim-approved");
+              consent(steps, `Preparing the claim approves a payment to the signed payout script ${terms.client_destination_script} at the fee above. Signing uses your private preimage.`, "swap-reverse-consent-claim");
               const prepare = button(steps, "Check confirmations and prepare claim", "swap-reverse-prepare-claim");
               let value = "";
-              const claimApproval = (): void => { current(); if (!approved.checked || fee.value.trim() !== value) throw new Error("Claim approval changed"); };
+              const claimApproval = (): void => { current(); if (fee.value.trim() !== value) throw new Error("Claim approval changed"); };
               act(prepare, async () => {
                 value = fee.value.trim(); if (!/^(0|[1-9][0-9]{0,15})$/.test(value)) throw new Error("Invalid fee"); claimApproval();
                 try {
                   const prepared = await e.prepareClaim(api, BigInt(value), claimApproval); current(); download(prepared.recoveryFile, "claim"); fee.disabled = true;
                   steps.append(node("p", `Prepared claim ${prepared.claim.txid}: ${prepared.claim.outputValueSat} sat to your payout, ${prepared.claim.feeSat} sat network fee (${prepared.claim.vsize} vbytes).`));
-                  const expose = check(steps, "I saved the claim backup and approve revealing the preimage in this exact signed transaction. Broadcast sends it to the configured API; downloads can be broadcast by anyone.", "swap-reverse-exposure-approved");
-                  const approveExposure = (): void => { claimApproval(); if (!expose.checked) throw new Error("Exposure not approved"); };
+                  consent(steps, "Broadcasting or downloading reveals the preimage in this exact signed transaction. Broadcast sends it to the configured API; downloads can be broadcast by anyone. The claim backup above records it.", "swap-reverse-consent-exposure");
+                  const approveExposure = (): void => { claimApproval(); };
                   const broadcast = button(steps, "Broadcast claim once", "swap-reverse-broadcast"), exportClaim = button(steps, "Download exact signed claim", "swap-reverse-export");
                   let confirmation: HTMLButtonElement | undefined;
                   const exposeAction = async (action: "download" | "broadcast"): Promise<void> => {

@@ -10,15 +10,6 @@ async function verifiedQuote(page: Page): Promise<void> {
   await mockTip(page);
   await page.goto(PAGE); await invoice(page);
   await page.locator("#swap-start").click();
-  await expect(page.locator("#swap-quote-accept")).toBeDisabled();
-  await page.evaluate(async () => {
-    const wallet = await window.uiFixture.wallet.open();
-    try { await wallet.verifyBackup(new TextDecoder().decode(await wallet.exportBackup())); }
-    finally { wallet.close(); }
-  });
-  // Re-quote using the same persisted identity, now verified.
-  await page.locator("#swap-edit").click();
-  await page.locator("#swap-start").click();
   await expect(page.locator("#swap-quote-accept")).toBeEnabled();
 }
 
@@ -52,7 +43,7 @@ async function mockTip(page: Page, genesis = regtest.genesis_hash): Promise<stri
   return requests;
 }
 
-test("defaults fetch a tip on quote action and block execution until a matching backup check", async ({ page }, info) => {
+test("defaults fetch a tip on quote action and the stored browser key approves acceptance without a backup check", async ({ page }) => {
   const requests = await mockTip(page);
   await page.goto(PAGE);
   expect(requests).toEqual([]);
@@ -64,7 +55,7 @@ test("defaults fetch a tip on quote action and block execution until a matching 
   await page.locator("#swap-privacy summary").click();
   await invoice(page);
   await page.locator("#swap-start").click();
-  await expect(page.locator("#swap-quote-accept")).toBeDisabled();
+  await expect(page.locator("#swap-quote-accept")).toBeEnabled();
   expect(requests).toHaveLength(5);
   const prepared = await page.evaluate(() => window.uiFixture.requests[0]) as {
     refundScript: string; tipHeight: number; ageRecipient: string; refundAllocation: { index: number; path: string };
@@ -74,21 +65,12 @@ test("defaults fetch a tip on quote action and block execution until a matching 
   expect(prepared.ageRecipient).toMatch(/^age1/);
   expect(prepared.refundAllocation).toMatchObject({ index: 0, path: "m/84'/1'/2'/0/0" });
   expect(JSON.stringify(prepared, (_key, value) => typeof value === "bigint" ? value.toString() : value)).not.toMatch(/mnemonic|privateKey|AGE-SECRET/);
-  const backupPanel = page.locator("#swap-quote-backup");
-  await backupPanel.locator("input[type=file]").setInputFiles({ name: "wrong.json", mimeType: "application/json",
-    buffer: Buffer.from(JSON.stringify({ format: "rillswap-browser-recovery", version: 1, scheme: "bip84-rillswap-v1",
-      mnemonic: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about" })) });
-  await expect(backupPanel).toContainText("different recovery key");
-  await expect(page.locator("#swap-quote-accept")).toBeDisabled();
-  expect(await page.evaluate(() => window.uiFixture.executed)).toBe(0);
-  const downloading = page.waitForEvent("download");
-  await backupPanel.getByRole("link").click();
-  const download = await downloading;
-  const file = `tmp/ui-backup-${info.workerIndex}-${info.retry}.json`;
-  await download.saveAs(file);
-  await expect(page.locator("#swap-quote-accept")).toBeDisabled();
-  await backupPanel.locator("input[type=file]").setInputFiles(file);
-  await expect(page.locator("#swap-quote-accept")).toBeEnabled();
+  // No checkbox or upload gate: continuing is the acceptance, and the stored key is the approval.
+  await expect(page.locator("#swap-quote-backup")).toHaveCount(0);
+  await expect(page.locator("#swap-quote-review input[type=checkbox]")).toHaveCount(0);
+  await expect(page.locator("#swap-quote-consent")).toContainText("By continuing you accept");
+  expect(await page.evaluate(async () => { const wallet = await window.uiFixture.wallet.open();
+    try { return (await wallet.info()).backupVerified; } finally { wallet.close(); } })).toBe(false);
   expect(await page.evaluate(() => window.uiFixture.executed)).toBe(0);
   await page.locator("#swap-quote-accept").click();
   await expect(page.locator("#swap-error")).toContainText("Fixture stopped before funding");
@@ -137,7 +119,7 @@ test("the accepted provider stays pinned while the final wallet check is pending
   expect(await page.evaluate(() => window.uiFixture.executedProviders)).toEqual(["4".repeat(64)]);
 });
 
-for (const mutation of ["unverified", "changed", "unreadable"]) {
+for (const mutation of ["changed", "unreadable"]) {
   test(`the final persisted wallet check refuses ${mutation} state before acceptance`, async ({ page }) => {
     await verifiedQuote(page);
     await page.evaluate(async (mutation) => {
@@ -145,7 +127,7 @@ for (const mutation of ["unverified", "changed", "unreadable"]) {
       await new Promise<void>((resolve) => {
         const tx = db.transaction("identity", "readwrite"), store = tx.objectStore("identity"), req = store.get("wallet");
         req.onsuccess = () => { store.put(mutation === "unreadable" ? { version: 99 } : { ...req.result,
-          ...(mutation === "unverified" ? { backupVerified: false } : { mnemonic: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about" }) }, "wallet"); };
+          mnemonic: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about" }, "wallet"); };
         tx.oncomplete = () => resolve();
       }); db.close();
     }, mutation);
@@ -171,8 +153,7 @@ test("Lightning to Bitcoin keeps estimates private and retains sessions only unt
   await page.goto(PAGE);
   await page.getByRole("button", { name: "Switch direction" }).click();
   await page.locator("#swap-receive-amount").fill("50000");
-  await page.locator("#swap-receive-address").fill(scriptAddress(`0014${"11".repeat(20)}`, "regtest"));
-  await page.locator("#swap-start").click();
+  await page.locator("#swap-start").click(); // the payout address is not needed for an estimate
   await expect(page.locator("#swap-quote-review h2")).toHaveText("51,006 sat");
   await expect(page.locator("#swap-quote-review")).toContainText("receive 50,000 sat on-chain");
   await expect(page.locator("#swap-quote-review")).toContainText("Estimated price");
@@ -188,9 +169,34 @@ test("Lightning to Bitcoin keeps estimates private and retains sessions only unt
   expect(request.payoutSat).toBe(50_000n);
   expect(Object.keys(request).sort()).toEqual(["limits", "network", "payoutSat"]);
   expect(request.limits).toMatchObject({ minRefundDelayBlocks: 72, maxIncomingHtlcDelayBlocks: 432, minClaimFeeReserveSat: 500n });
-  await expect(page.locator("#swap-reverse-continue")).toBeDisabled(); // matching key-backup gate still applies
+  await expect(page.locator("#swap-reverse-continue")).toBeEnabled(); // the stored browser key is the approval
+  await expect(page.locator("#swap-reverse-key-backup")).toHaveCount(0);
   await expect(page.locator("#swap-start")).toBeDisabled();
+  await expect(page.locator("#swap-receive-address")).toBeEnabled(); // still editable before continuation
+  await page.locator("#swap-reverse-continue").click();
+  await expect(page.locator("#swap-reverse-refusal")).toContainText("Enter the Bitcoin address");
+  expect(await page.evaluate(() => window.uiFixture.disposed)).toBe(0);
+  await page.locator("#swap-receive-address").fill("not-an-address");
+  await page.locator("#swap-reverse-continue").click();
+  await expect(page.locator("#swap-reverse-refusal")).not.toHaveText("");
+  expect(await page.evaluate(() => window.uiFixture.disposed)).toBe(0);
   await page.locator("#swap-edit").click();
   expect(await page.evaluate(() => window.uiFixture.disposed)).toBe(2);
   await expect(page.locator("#swap-start")).toBeEnabled();
+  await expect(page.locator("#swap-receive-address")).toBeEnabled();
+});
+
+test("continuing a Lightning to Bitcoin estimate sends only the address entered at continuation", async ({ page }) => {
+  await mockTip(page);
+  await page.goto(PAGE);
+  await page.getByRole("button", { name: "Switch direction" }).click();
+  await page.locator("#swap-receive-amount").fill("50000");
+  await page.locator("#swap-start").click();
+  await expect(page.locator("#swap-reverse-continue")).toBeEnabled();
+  await page.locator("#swap-receive-address").fill(scriptAddress(`0014${"11".repeat(20)}`, "regtest"));
+  await page.locator("#swap-reverse-continue").click();
+  await expect(page.locator("#swap-reverse-refusal")).toHaveText("");
+  await expect(page.locator("#swap-receive-address")).toBeDisabled();
+  await expect.poll(() => page.evaluate(() => window.uiFixture.disposed)).toBe(1); // the unselected estimate only
+  await expect(page.locator("#swap-reverse-continue")).toHaveCount(0); // execution replaced the estimate review
 });

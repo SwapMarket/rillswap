@@ -2,8 +2,8 @@
 export function stoppedSwapAdvice(fundsMayBeCommitted: boolean): string {
   return fundsMayBeCommitted
     ? "Do not fund this swap again. Keep the funded recovery file and its age key: if the invoice is " +
-      "not paid, the signed transaction may already be broadcast. Your funded recovery file records the " +
-      "refund height and funding attempt for rill recover watch-refund."
+      "not paid, the signed transaction may already be broadcast. After the refund height, open Recover a swap " +
+      "below with the funded recovery file to check funding and prepare your refund."
     : "This page has not shared your signed transaction. If you broadcast separately, do not fund again. " +
       "Otherwise, reload the page to start a new swap.";
 }

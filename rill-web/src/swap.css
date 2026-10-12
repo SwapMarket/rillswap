@@ -67,6 +67,8 @@ details { border-top: 1px solid #344347; margin-top: 1.35rem; padding-top: 1rem;
 summary { color: #b5c6ca; font-size: .82rem; }
 details p, #swap-release-notice { font-size: .78rem; color: #99abb1; }
 #swap-release-notice { margin: 1rem 0 0; }
+.swap-consent, #swap-quote-consent, #swap-reverse-consent, #swap-reverse-refusal, #swap-backups-intro { font-size: .78rem; color: #99abb1; }
+#swap-reverse-refusal:not(:empty) { color: #f0d8a8; }
 #swap-progress { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #344347; }
 #swap-status { color: #bdced2; font-size: .85rem; margin: 0 0 1rem; }
 #swap-progress[data-state="error"] #swap-status { color: #ffb0a1; }

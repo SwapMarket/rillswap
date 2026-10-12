@@ -15,7 +15,7 @@ import { type FundingRequest, type SwapRequest } from "./swap/swap";
 import { mempoolApiForNetwork, relaysForNetwork, validateMempoolApi, validateRelays, type NetworkName } from "./swap/config";
 import { readChainTip } from "./swap/chainTip";
 import { BrowserRecoveryWallet } from "./browserRecoveryWallet";
-import { discoverMarketplace, eligibleProviders, quoteProviders, quoteReverseProviders, type LocatedQuote, MAX_QUOTE_PROVIDERS } from "./swap/marketplace";
+import { discoverMarketplace, eligibleProviders, ineligibilityReason, quoteProviders, quoteReverseProviders, type LocatedQuote, MAX_QUOTE_PROVIDERS } from "./swap/marketplace";
 import type { PreparedReverseQuote, ReverseSwapRequest } from "./swap/reverseSwap";
 import { invoiceBinding } from "./swap/bolt11";
 import { quoteSelectionLabel, stoppedSwapAdvice } from "./swapUiStatus";
@@ -138,13 +138,6 @@ function mount(root: HTMLElement): void {
   form.append(pair, pairNote);
   const invoiceBox = node("div");
   const invoice = field(invoiceBox, "swap-invoice", "Lightning invoice to pay (BOLT11)");
-  // Merchant handoffs use a fragment, never a server-visible invoice query.
-  // Prefilling is inert: no quote, connection, or payment starts automatically.
-  const handoffInvoice = new URLSearchParams(location.hash.slice(1)).get("invoice");
-  if (handoffInvoice !== null) {
-    if (handoffInvoice.length > 0 && handoffInvoice.length <= 4096) invoice.value = handoffInvoice;
-    history.replaceState(null, "", location.pathname + location.search);
-  }
   invoice.placeholder = "Paste your Lightning invoice";
   const receiveBox = node("div");
   const receiveAddress = field(receiveBox, "swap-receive-address", "Bitcoin address to receive");
@@ -154,17 +147,19 @@ function mount(root: HTMLElement): void {
   receiveAmount.placeholder = "50000";
   form.append(invoiceBox, receiveBox);
   const setup = node("details", "", "swap-wallet-setup");
-  setup.append(node("summary", "Recovery key & advanced overrides"),
-    node("p", "This experimental flow needs a wallet that can sign a PSBT without broadcasting it, " +
-      "but creates your recovery key and refund address automatically.", "swap-prerequisites"));
+  const prerequisites = node("p", "", "swap-prerequisites");
+  setup.append(node("summary", "Recovery key & advanced overrides"), prerequisites);
   const walletStatus = node("p", "Preparing your browser recovery key...", "swap-wallet-status");
   const walletActions = node("div", "", "swap-wallet-actions");
   setup.append(walletStatus, walletActions, node("small", "Stored unencrypted in this browser. Same-origin scripts can read it. " +
     "Keep both the key backup and each encrypted swap recovery file. Clearing storage can lose access to refunds."));
-  const refund = field(setup, "swap-refund", "Refund address override (optional)", "",
+  // Overrides apply to Bitcoin to Lightning only; the recovery key serves both directions.
+  const overrides = node("div", "", "swap-forward-overrides");
+  setup.append(overrides);
+  const refund = field(overrides, "swap-refund", "Refund address override (optional)", "",
     "Leave empty for a fresh address derived from your browser recovery key. Otherwise use your own wallet's P2WPKH or P2TR address.");
-  const tip = field(setup, "swap-tip", "Block height override (optional)", "", "Leave empty to fetch the height from the configured mempool API.");
-  const age = field(setup, "swap-age", "Recovery encryption recipient override (optional, age1...)", "",
+  const tip = field(overrides, "swap-tip", "Block height override (optional)", "", "Leave empty to fetch the height from the configured mempool API.");
+  const age = field(overrides, "swap-age", "Recovery encryption recipient override (optional, age1...)", "",
     "Leave empty for the browser key. An override requires keeping its corresponding private age key yourself.");
   const privacy = node("details", "", "swap-privacy");
   const chainDisclosure = node("p", "", "swap-chain-disclosure");
@@ -290,7 +285,10 @@ function mount(root: HTMLElement): void {
     pairNote.textContent = route.unavailable ?? "";
     pairNote.hidden = !route.unavailable;
     invoiceBox.hidden = route.profile !== "btc-to-ln/v1";
-    setup.hidden = route.profile !== "btc-to-ln/v1";
+    overrides.hidden = route.profile !== "btc-to-ln/v1";
+    prerequisites.textContent = route.profile === "btc-to-ln/v1"
+      ? "This experimental flow needs a wallet that can sign a PSBT without broadcasting it, but creates your recovery key and refund address automatically."
+      : "Your browser recovery key is created automatically and covers every swap started here.";
     receiveBox.hidden = route.profile !== "ln-to-btc/v1";
     start.disabled = main || route.unavailable !== null;
     start.textContent = main ? "Mainnet swaps unavailable" : route.unavailable ? "Pair unavailable" : "Get quote";
@@ -319,6 +317,20 @@ function mount(root: HTMLElement): void {
     recovery.clearFundingObservation();
   };
   updateNetwork();
+  // Handoffs and shared links use a fragment, never a server-visible query. Prefilling is
+  // inert: no quote, connection, or payment starts automatically, and the fragment is dropped.
+  const handoff = new URLSearchParams(location.hash.slice(1));
+  if ([...handoff.keys()].length > 0) {
+    const text = (key: string, limit: number): string => { const value = handoff.get(key) ?? ""; return value.length <= limit ? value : ""; };
+    const prefill = { invoice: text("invoice", 4096), address: text("address", 128), amount: text("amount", 16) };
+    if (prefill.invoice) { fromAsset.value = "btc"; toAsset.value = "ln"; invoice.value = prefill.invoice; }
+    else if (prefill.address || prefill.amount) { fromAsset.value = "ln"; toAsset.value = "btc"; }
+    if (prefill.address) receiveAddress.value = prefill.address;
+    if (/^[0-9]{1,16}$/.test(prefill.amount)) receiveAmount.value = prefill.amount;
+    lastFrom = fromAsset.value; lastTo = toAsset.value;
+    history.replaceState(null, "", location.pathname + location.search);
+    updateNetwork();
+  }
 
   let busy = false;
   /** Indicative comparison first; only the selected provider can enter durable execution. */
@@ -326,15 +338,13 @@ function mount(root: HTMLElement): void {
     let request: Omit<ReverseSwapRequest, "identity">;
     let urls: readonly string[];
     const pinned = identity.value.trim();
-    const destination = receiveAddress.value.trim();
     try {
       urls = validateRelays(relay.value.trim(), name);
       if (pinned && !/^[0-9a-f]{64}$/.test(pinned)) {
         throw new Error("Provider identity must be 64 lowercase hex characters, or leave it empty for automatic selection");
       }
-      if (!receiveAddress.value.trim()) throw new Error("Enter the Bitcoin address that should receive the payout");
-      // Checked now so mistakes surface early; it is not sent until you continue with a swap.
-      addressScript(receiveAddress.value, name);
+      // The address is only needed, checked and sent when you continue with the selected provider.
+      if (receiveAddress.value.trim()) addressScript(receiveAddress.value.trim(), name);
       request = {
         network: NETWORKS[name],
         payoutSat: positive(receiveAmount, "Amount to receive"),
@@ -351,17 +361,19 @@ function mount(root: HTMLElement): void {
       report(`refused: ${(error as Error).message}`);
       return;
     }
-    const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button")];
+    // The payout address stays editable until continuation; everything else is frozen with the estimate.
+    const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button")].filter((control) => control !== receiveAddress);
     busy = true;
     for (const control of controls) (control as HTMLInputElement).disabled = true;
     settingsButton.disabled = true;
     const cancellation = new AbortController();
-    const captured = JSON.stringify([network.value, fromAsset.value, toAsset.value, receiveAddress.value, receiveAmount.value, relay.value, identity.value,
+    const selection = (): string => JSON.stringify([network.value, fromAsset.value, toAsset.value, receiveAmount.value, relay.value, identity.value,
       chainApi.value, broadcastApi.value, successFee.value, minReserve.value, claimFee.value, minRefundDelay.value, maxHold.value]);
+    const captured = selection();
+    let destination = "";
     const assertCurrent = (): void => {
       cancellation.signal.throwIfAborted();
-      if (captured !== JSON.stringify([network.value, fromAsset.value, toAsset.value, receiveAddress.value, receiveAmount.value, relay.value, identity.value,
-        chainApi.value, broadcastApi.value, successFee.value, minReserve.value, claimFee.value, minRefundDelay.value, maxHold.value])) throw new Error("Swap selection changed");
+      if (captured !== selection() || (destination && receiveAddress.value.trim() !== destination)) throw new Error("Swap selection changed");
     };
     let executing = false;
     let arrivals: readonly LocatedQuote<PreparedReverseQuote>[] = [];
@@ -371,6 +383,7 @@ function mount(root: HTMLElement): void {
       busy = false;
       for (const control of controls) (control as HTMLInputElement).disabled = false;
       settingsButton.disabled = false;
+      receiveAddress.disabled = false;
       updateNetwork();
     };
     done.onclick = () => {
@@ -388,13 +401,13 @@ function mount(root: HTMLElement): void {
         const directory = await discoverMarketplace(urls, request.network, pinned || undefined, cancellation.signal, "ln-to-btc/v1");
         for (const warning of directory.warnings) report(warning);
         const eligible = eligibleProviders(directory.providers, request.payoutSat);
-        if (eligible.length === 0) throw new Error("No eligible Lightning to Bitcoin provider found. Try another relay or amount.");
+        if (eligible.length === 0) throw new Error(ineligibilityReason(directory.providers, request.payoutSat));
         setStatus("Comparing provider estimates", 1);
         report(`Requesting up to ${MAX_QUOTE_PROVIDERS} eligible offers from ${eligible.length} announced providers`);
         const result = await quoteReverseProviders(eligible, request, cancellation.signal);
         arrivals = result.quotes;
         if (cancellation.signal.aborted) return;
-        if (arrivals.length === 0) throw new Error("No provider returned acceptable terms. Nothing was paid.");
+        if (arrivals.length === 0) throw new Error(`No provider returned acceptable terms (${result.reasons.join("; ")}). Nothing was paid.`);
         let selected = arrivals[0]!;
         const quote = selected.prepared.quote;
         const review = node("div", "", "swap-quote-review");
@@ -418,29 +431,36 @@ function mount(root: HTMLElement): void {
         }
         const wallet = await walletPromise; assertCurrent(); const info = await wallet.info(); assertCurrent();
         const continueSwap = node("button", "Continue with selected provider", "swap-reverse-continue"); continueSwap.type = "button";
-        const backup = node("section", "", "swap-reverse-key-backup");
-        const refresh = async (): Promise<void> => { const current = await wallet.info(); assertCurrent();
-          if (current.fingerprint !== info.fingerprint) throw new Error("Recovery identity changed"); continueSwap.disabled = !current.backupVerified; };
-        await refresh(); await walletBackupControls(backup, wallet, undefined, refresh); assertCurrent();
+        const refusal = node("p", "", "swap-reverse-refusal");
         continueSwap.onclick = () => {
           if (executing) return;
-          continueSwap.disabled = true;
-          void (async () => {
-            const current = await wallet.info(); assertCurrent();
-            if (!current.backupVerified || current.fingerprint !== info.fingerprint) throw new Error("A matching recovery-key backup must be verified");
+          let destinationScript: string;
+          try {
+            if (!receiveAddress.value.trim()) throw new Error("Enter the Bitcoin address that should receive the payout");
+            destinationScript = addressScript(receiveAddress.value.trim(), name);
             if (Date.now() / 1000 >= selected.prepared.quote.expiresAt) throw new Error("Estimate expired. Request a fresh quote.");
+          } catch (error) { refusal.textContent = (error as Error).message; return; }
+          refusal.textContent = "";
+          destination = receiveAddress.value.trim();
+          continueSwap.disabled = receiveAddress.disabled = true;
+          void (async () => {
+            // The browser-stored recovery key is the approval; only an identity change blocks continuation.
+            const current = await wallet.info(); assertCurrent();
+            if (current.fingerprint !== info.fingerprint) throw new Error("Recovery identity changed");
             executing = true; done.disabled = true;
             for (const quote of arrivals) if (quote !== selected) quote.dispose();
             arrivals = [selected];
-            await mountReverseExecution(panel, { prepared: selected.prepared, network: { ...NETWORKS[name], name }, destinationScript: addressScript(destination, name),
+            await mountReverseExecution(panel, { prepared: selected.prepared, network: { ...NETWORKS[name], name }, destinationScript,
               ageRecipient: info.recipient, chainApi: chainApi.value.trim(), broadcastApi: broadcastApi.value.trim(), assertCurrent,
               nodeApi: __SWAP_DEFAULTS__.network === name ? __SWAP_DEFAULTS__.nodeApi ?? "" : name === "regtest" ? "http://127.0.0.1:8093" : "",
               status: (message, step) => setStatus(message, step), download: offerDownload });
           })().catch(() => { report("stopped: Reverse execution could not continue. Keep backups; no uncertain payment will be retried."); });
         };
-        review.append(providers, chosen, backup, continueSwap, done);
+        review.append(providers, chosen, node("p", "By continuing you accept the selected provider's signed terms and this preview's test-funds-only conditions. " +
+          "Your browser recovery key covers this swap; download it from Recovery key & advanced overrides whenever you like.", "swap-reverse-consent"),
+          refusal, continueSwap, done);
         panel.replaceChildren(review);
-        setStatus("Estimate ready. Check your key backup, then continue", 1);
+        setStatus("Estimate ready. Enter your payout address, then continue", 1);
       } catch (error) {
         if (!cancellation.signal.aborted) {
           panel.replaceChildren(node("p", (error as Error).message, "swap-error"), done);
@@ -567,13 +587,13 @@ function mount(root: HTMLElement): void {
         for (const warning of directory.warnings) report(warning);
         const binding = invoiceBinding(request.invoice, name);
         const eligible = eligibleProviders(directory.providers, BigInt(binding.amount_msat) / 1000n);
-        if (eligible.length === 0) throw new Error("No eligible provider found. Try another relay or pin a provider in Settings.");
+        if (eligible.length === 0) throw new Error(ineligibilityReason(directory.providers, BigInt(binding.amount_msat) / 1000n));
         setStatus("Comparing verified provider quotes", 1);
         report(`Requesting up to ${MAX_QUOTE_PROVIDERS} eligible offers from ${eligible.length} announced providers`);
         const result = await quoteProviders(eligible, request, cancellation.signal);
         arrivals = result.quotes;
         if (cancelled) { for (const quote of arrivals) quote.dispose(); return; }
-        if (arrivals.length === 0) throw new Error("No provider returned acceptable terms. Nothing was accepted or funded.");
+        if (arrivals.length === 0) throw new Error(`No provider returned acceptable terms (${result.reasons.join("; ")}). Nothing was accepted or funded.`);
         let selected = arrivals[0]!;
         const review = node("div", "", "swap-quote-review");
         const quoteSummary = node("div", "", "swap-quote-summary");
@@ -607,20 +627,8 @@ function mount(root: HTMLElement): void {
         }
         const accept = node("button", "Use this quote", "swap-quote-accept");
         accept.type = "button";
-        if (wallet) {
-          const backupPanel = node("section", "", "swap-quote-backup");
-          review.append(backupPanel);
-          const refreshBackupGate = async (): Promise<void> => {
-            const info = await wallet!.info();
-            if (info.fingerprint !== walletFingerprint) throw new Error("Recovery identity changed. Request a fresh quote.");
-            accept.disabled = !info.backupVerified;
-          };
-          await refreshBackupGate();
-          if (cancelled) return;
-          await walletBackupControls(backupPanel, wallet, undefined, refreshBackupGate);
-          if (cancelled) return;
-        }
-        review.append(offers, accept, cancel);
+        review.append(offers, node("p", "By continuing you accept the selected provider's signed terms and this preview's test-funds-only conditions. " +
+          "Your browser recovery key covers this swap; download it from Recovery key & advanced overrides whenever you like.", "swap-quote-consent"), accept, cancel);
         panel.replaceChildren(review);
         setStatus("Quote ready. Review before continuing", 1);
         const accepted = await new Promise<LocatedQuote | null>((resolve) => {
@@ -633,10 +641,9 @@ function mount(root: HTMLElement): void {
         });
         if (!accepted || cancelled) return;
         if (wallet) {
+          // The browser-stored recovery key is the approval; only an identity change blocks acceptance.
           const info = await wallet.info();
-          if (!info.backupVerified || info.fingerprint !== walletFingerprint) {
-            throw new Error("A matching recovery-key backup must be verified before accepting this quote");
-          }
+          if (info.fingerprint !== walletFingerprint) throw new Error("Recovery identity changed. Request a fresh quote.");
         }
         if (cancelled) return;
         if (Date.now() / 1000 >= accepted.prepared.quote.expiresAt) throw new Error("Quote expired. Request a fresh quote.");
@@ -702,8 +709,7 @@ function fundingPrompt(panel: HTMLElement, networkName: NetworkName, request: Fu
     node("p", `Keep the network fee at or below ${request.maxFundingFeeSat} sat. Use only native segwit inputs. ` +
       "Sign and finalize in your wallet, then paste the finalized PSBT (base64 or hex) here. Do not broadcast yet. " +
       "In Sparrow: on the Send tab choose Create Transaction, then Finalize Transaction for Signing, then Sign; " +
-      "copy or save the signed PSBT as Base64 and do not click Broadcast Transaction. " +
-      "In Bitcoin Core, run walletcreatefundedpsbt, then walletprocesspsbt, and copy its psbt field."),
+      "copy or save the signed PSBT as Base64 and do not click Broadcast Transaction."),
     node("p", `If the provider does not pay, you can refund after block ${request.refundLockHeight}.`),
     node("p", "Pay this address once, in this one transaction. A second payment to it is not a new swap: " +
       "it is never paid over Lightning, the refund tools cover only the bound funding output, and once " +
@@ -724,18 +730,19 @@ async function run(
   report: (line: string) => void,
 ): Promise<boolean> {
   let fundsMayBeCommitted = false;
+  // Backups stay visible while the stage prompts below them change.
+  const backups = node("section", "", "swap-backups");
+  backups.append(node("p", "Encrypted recovery files for this swap. The funded file is what lets you refund; keep it with your recovery key.", "swap-backups-intro"));
+  const stage = node("div", "", "swap-stage");
+  panel.replaceChildren(backups, stage);
+  panel = stage;
   try {
     report(`Selected provider ${quote.prepared.quote.providerIdentity} via ${quote.relayUrl}`);
     const outcome = await quote.prepared.execute({
       report,
-      saveRecovery: async (file, stage) => {
-        const name = `rillswap-${stage}-recovery-${Math.floor(Date.now() / 1000)}.age`;
-        panel.replaceChildren(node("h2", stage === "terms" ? "Save the recovery file" : "Save the funded recovery file"),
-          node("p", stage === "terms"
-            ? "It proves the signed terms. Nothing is funded yet."
-            : "This file is what lets you refund. Save it before broadcasting."));
-        offerDownload(panel, file, name);
-        await waitForClick(panel, "I saved the file");
+      saveRecovery: async (file, kind) => {
+        offerDownload(backups, file, `rillswap-${kind}-recovery-${Math.floor(Date.now() / 1000)}.age`);
+        report(kind === "terms" ? "recovery file saved to the backups list" : "funded recovery file added to the backups list");
       },
       fundingPsbt: (funding) => fundingPrompt(panel, networkName, funding),
       beforeFundingCommit: async () => { fundsMayBeCommitted = true; },
@@ -746,7 +753,7 @@ async function run(
             "or node:"),
           node("pre", raw, "swap-funding-raw"),
           node("p", "Most wallets broadcast a finalized PSBT or raw transaction from a Broadcast or Send " +
-            "Transaction menu; with Bitcoin Core use sendrawtransaction."),
+            "Transaction menu."),
         );
         await waitForClick(panel, "I broadcast it");
         panel.replaceChildren(node("p", "Waiting for the provider to pay the invoice..."));
@@ -761,9 +768,9 @@ async function run(
         ? "You cosigned the provider's private key-path claim, so the swap leaves no script trace on chain."
         : "The provider claims with the preimage (cooperation was skipped). Nothing else is needed from you.",
         "swap-cooperation"),
-      node("p", "Optional: keep this paid recovery file as a record of the completed swap."),
+      node("p", "Optional: keep the paid recovery file from the backups list as a record of the completed swap."),
     );
-    offerDownload(panel, outcome.paidRecovery, `rillswap-paid-recovery-${Math.floor(Date.now() / 1000)}.age`);
+    offerDownload(backups, outcome.paidRecovery, `rillswap-paid-recovery-${Math.floor(Date.now() / 1000)}.age`);
     return true;
   } catch (error) {
     const message = (error as Error).message;

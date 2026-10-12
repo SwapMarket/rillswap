@@ -10,9 +10,10 @@ window.uiFixture = { requests: [], executed: 0, executedProviders: [], disposed:
 export const MAX_QUOTE_PROVIDERS = 8;
 export const discoverMarketplace = async () => ({ providers: [{}], warnings: [] });
 export const eligibleProviders = (providers: unknown[]) => providers;
+export const ineligibilityReason = () => "fixture ineligible";
 export const quoteProviders = async (_providers: unknown[], request: unknown) => {
   window.uiFixture.requests.push(structuredClone(request));
-  return { failures: 0, quotes: ["4", "5"].map((id) => ({ relayUrl: "ws://127.0.0.1:7777/",
+  return { failures: 0, reasons: [], quotes: ["4", "5"].map((id) => ({ relayUrl: "ws://127.0.0.1:7777/",
     dispose: () => { window.uiFixture.disposed++; },
     prepared: {
       quote: { providerIdentity: id.repeat(64), contractAmountSat: BigInt(1100 + Number(id)), successFeeSat: 100n,
@@ -24,7 +25,7 @@ export const quoteProviders = async (_providers: unknown[], request: unknown) =>
 };
 export const quoteReverseProviders = async (_providers: unknown[], request: unknown) => {
   window.uiFixture.requests.push(structuredClone(request));
-  return { failures: 0, quotes: ["6", "7"].map((id) => ({ relayUrl: "ws://127.0.0.1:7777/",
+  return { failures: 0, reasons: [], quotes: ["6", "7"].map((id) => ({ relayUrl: "ws://127.0.0.1:7777/",
     dispose: () => { window.uiFixture.disposed++; },
     prepared: {
       quote: { providerIdentity: id.repeat(64), payoutSat: 50_000n, holdInvoiceSat: BigInt(51_000 + Number(id)), successFeeSat: 500n,

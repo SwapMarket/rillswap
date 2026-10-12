@@ -11,6 +11,23 @@ test("merchant invoice fragments prefill locally without connecting and are remo
   await page.goto("http://127.0.0.1:18765/swap.html#invoice=" + "x".repeat(4097));
   await expect(page.locator("#swap-invoice")).toHaveValue(""); expect(new URL(page.url()).hash).toBe("");
 });
+
+test("address and amount fragments prefill a Lightning to Bitcoin swap locally and are removed from the address bar", async ({ page }) => {
+  const requests: string[] = [], sockets: string[] = [];
+  page.on("request", (request) => requests.push(request.url())); page.on("websocket", (socket) => sockets.push(socket.url()));
+  await page.goto("http://127.0.0.1:18765/swap.html#address=bcrt1qtest-handoff&amount=50000");
+  await expect(page.locator("#swap-from")).toHaveValue("ln"); await expect(page.locator("#swap-to")).toHaveValue("btc");
+  await expect(page.locator("#swap-receive-address")).toHaveValue("bcrt1qtest-handoff");
+  await expect(page.locator("#swap-receive-amount")).toHaveValue("50000");
+  await expect(page.locator("#swap-invoice")).toBeHidden();
+  expect(new URL(page.url()).hash).toBe(""); expect(sockets).toEqual([]);
+  for (const request of requests) { expect(request).not.toContain("test-handoff"); expect(new URL(request).host).toBe("127.0.0.1:18765"); }
+  await page.goto("about:blank");
+  await page.goto("http://127.0.0.1:18765/swap.html#amount=12.5&address=" + "x".repeat(129));
+  await expect(page.locator("#swap-from")).toHaveValue("ln");
+  await expect(page.locator("#swap-receive-amount")).toHaveValue(""); await expect(page.locator("#swap-receive-address")).toHaveValue("");
+  expect(new URL(page.url()).hash).toBe("");
+});
 import { testInvoice } from "../../rill-payments/tests/helpers";
 import { scriptAddress } from "../src/swap/address";
 
@@ -36,14 +53,15 @@ test("direction flips between Bitcoin and Lightning, and stablecoins are visible
   await expect(page.locator("#swap-to")).toHaveValue("btc");
   await expect(page.getByRole("heading", { name: "Lightning in. Bitcoin out." })).toBeVisible();
   await expect(page.locator("#swap-invoice")).not.toBeVisible();
-  await expect(page.locator("#swap-wallet-setup")).not.toBeVisible();
+  await expect(page.locator("#swap-wallet-setup")).toBeVisible(); // the recovery key serves both directions
+  await expect(page.locator("#swap-forward-overrides")).not.toBeVisible();
   await expect(page.locator("#swap-receive-address")).toBeVisible();
   await expect(page.locator("#swap-receive-amount")).toBeVisible();
   await expect(page.locator("#swap-pair-note")).not.toBeVisible();
   await expect(page.locator("#swap-start")).toBeEnabled();
   // Invalid reverse input is refused locally, before any connection.
   await page.locator("#swap-start").click();
-  await expect(page.locator("#swap-status")).toContainText("Enter the Bitcoin address");
+  await expect(page.locator("#swap-status")).toContainText("Amount to receive must be a whole number");
 
   // Choosing the asset already on the other side swaps them.
   await page.locator("#swap-to").selectOption("ln");
@@ -196,7 +214,7 @@ test("automatic discovery uses every configured relay and restores inputs when n
   await page.locator("#swap-refund").fill(scriptAddress("0014" + "11".repeat(20), "regtest"));
   await page.locator("#swap-tip").fill("1000");
   await page.locator("#swap-start").click();
-  await expect(page.locator("#swap-status")).toContainText("No eligible provider found");
+  await expect(page.locator("#swap-status")).toContainText("No provider announced this swap direction");
   await expect(page.locator("#swap-start")).toBeEnabled();
   expect(sockets.sort()).toEqual(["ws://127.0.0.1:7777/", "ws://127.0.0.1:7778/"]);
 });
@@ -228,7 +246,7 @@ test("canceling discovery closes its relay and a new search cannot show stale re
   await expect.poll(() => closed).toBe(1);
   await expect(page.locator("#swap-status")).toContainText("Ready for a new quote");
   await page.locator("#swap-start").click();
-  await expect(page.locator("#swap-status")).toContainText("No eligible provider found");
+  await expect(page.locator("#swap-status")).toContainText("No provider announced this swap direction");
   await expect(page.locator("#swap-start")).toBeEnabled();
   expect(requests).toBe(2);
 });

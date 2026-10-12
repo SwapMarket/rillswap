@@ -5,6 +5,7 @@ import { ANNOUNCEMENT_KIND, MAX_DISCOVERY_EVENTS } from "./discovery";
 import { MAX_RELAYS } from "./config";
 import { RelayConnection, type RelayQueryResult } from "./relay";
 import { SwapError } from "./session";
+import { ProtocolError } from "./wire";
 import { type PreparedReverseQuote, prepareReverseQuote, type ReverseSwapRequest } from "./reverseSwap";
 import { prepareSwap, type PreparedSwap, type SwapRequest } from "./swap";
 
@@ -118,6 +119,20 @@ export function eligibleProviders(providers: readonly LocatedProvider[], amount:
     });
 }
 
+const shortIdentity = (provider: LocatedProvider): string => `${provider.announcement.identityXOnlyKey.slice(0, 12)}…`;
+
+/** Why no announced provider serves `amount`, phrased for the user. */
+export function ineligibilityReason(providers: readonly LocatedProvider[], amount: bigint): string {
+  if (providers.length === 0) return "No provider announced this swap direction on your relays. Try another relay or pin a provider in Settings.";
+  const limits = providers.map((provider) => {
+    const bands = provider.announcement.amountBands;
+    const minimum = bands.reduce((low, band) => BigInt(band.minimum_sat) < low ? BigInt(band.minimum_sat) : low, BigInt(bands[0]!.minimum_sat));
+    const maximum = bands.reduce((high, band) => BigInt(band.maximum_sat) > high ? BigInt(band.maximum_sat) : high, 0n);
+    return `${minimum.toLocaleString()} to ${maximum.toLocaleString()} sat (${shortIdentity(provider)})`;
+  });
+  return `No provider accepts ${amount.toLocaleString()} sat. Announced limits: ${limits.join("; ")}.`;
+}
+
 export function rankQuotes(quotes: readonly LocatedQuote[]): readonly LocatedQuote[] {
   return [...quotes].sort((a, b) => {
     const left = a.prepared.quote, right = b.prepared.quote;
@@ -130,22 +145,22 @@ export function rankQuotes(quotes: readonly LocatedQuote[]): readonly LocatedQuo
 /** Each preparation owns its own inbox subscription and retains its exact offer. */
 export async function quoteProviders(
   providers: readonly LocatedProvider[], request: Omit<SwapRequest, "identity">, signal?: AbortSignal,
-): Promise<{ quotes: readonly LocatedQuote[]; failures: number }> {
+): Promise<QuoteFanOut<PreparedSwap>> {
   const result = await fanOutQuotes(providers, (relay, provider) =>
     prepareSwap(relay, { ...request, identity: provider.announcement.identityXOnlyKey }, () => {}, {
       announcement: provider.rawAnnouncement, timeouts: { replyMs: 15_000, settleMs: 600_000 },
     }), signal);
-  return { quotes: rankQuotes(result.quotes), failures: result.failures };
+  return { ...result, quotes: rankQuotes(result.quotes) };
 }
 
 /** LN to BTC: the lowest hold invoice for the same payout wins. Quotes are not payable yet. */
 export async function quoteReverseProviders(
   providers: readonly LocatedProvider[], request: Omit<ReverseSwapRequest, "identity">, signal?: AbortSignal,
-): Promise<{ quotes: readonly LocatedQuote<PreparedReverseQuote>[]; failures: number }> {
+): Promise<QuoteFanOut<PreparedReverseQuote>> {
   const result = await fanOutQuotes(providers, (relay, provider) =>
     prepareReverseQuote(relay, { ...request, identity: provider.announcement.identityXOnlyKey },
       { announcement: provider.rawAnnouncement }), signal);
-  return { quotes: rankReverseQuotes(result.quotes), failures: result.failures };
+  return { ...result, quotes: rankReverseQuotes(result.quotes) };
 }
 
 export function rankReverseQuotes(quotes: readonly LocatedQuote<PreparedReverseQuote>[]): readonly LocatedQuote<PreparedReverseQuote>[] {
@@ -157,16 +172,30 @@ export function rankReverseQuotes(quotes: readonly LocatedQuote<PreparedReverseQ
   });
 }
 
+export interface QuoteFanOut<P extends { dispose(): void }> {
+  readonly quotes: readonly LocatedQuote<P>[];
+  readonly failures: number;
+  /** One line per provider that returned no acceptable offer, phrased for the user. */
+  readonly reasons: readonly string[];
+}
+
+/** Why a provider's offer was not usable; only our own typed refusals carry detail. */
+function failureReason(error: unknown): string {
+  return error instanceof SwapError || error instanceof ProtocolError ? error.message : "no usable reply";
+}
+
 async function fanOutQuotes<P extends { dispose(): void }>(
   providers: readonly LocatedProvider[],
   prepare: (relay: RelayConnection, provider: LocatedProvider) => Promise<P>,
   signal?: AbortSignal,
-): Promise<{ quotes: LocatedQuote<P>[]; failures: number }> {
+): Promise<QuoteFanOut<P>> {
   const completed = new Set<LocatedQuote<P>>();
+  const reasons: string[] = [];
   const cancel = (): void => { for (const quote of completed) quote.dispose(); };
   signal?.addEventListener("abort", cancel, { once: true });
   try {
   const results = await Promise.all(providers.slice(0, MAX_QUOTE_PROVIDERS).map(async (provider) => {
+    let reason = "no relay reachable";
     for (const url of provider.relayUrls) {
       if (signal?.aborted) return null;
       let relay: RelayConnection | undefined;
@@ -179,12 +208,13 @@ async function fanOutQuotes<P extends { dispose(): void }>(
         if (signal?.aborted) { quote.dispose(); return null; }
         completed.add(quote);
         return quote;
-      } catch { relay?.close(); }
+      } catch (error) { relay?.close(); reason = failureReason(error); }
     }
+    reasons.push(`${shortIdentity(provider)}: ${reason}`);
     return null;
   }));
   const quotes = results.filter((quote): quote is LocatedQuote<P> => quote !== null);
-  if (signal?.aborted) { cancel(); return { quotes: [], failures: results.length }; }
-  return { quotes, failures: results.length - quotes.length };
+  if (signal?.aborted) { cancel(); return { quotes: [], failures: results.length, reasons: [] }; }
+  return { quotes, failures: results.length - quotes.length, reasons };
   } finally { signal?.removeEventListener("abort", cancel); }
 }

@@ -33,27 +33,29 @@ test("real unilateral browser reverse swap pays once, claims nominal payout and 
     if (request.method() === "POST" && request.url().endsWith("/api/tx")) broadcasts++; });
   await page.goto(`http://127.0.0.1:${process.env.RILL_DEV_WEB_PORT}/swap.html`);
   await page.getByRole("button", { name: "Switch direction" }).click();
-  await page.locator("#swap-receive-address").fill(address); await page.locator("#swap-receive-amount").fill("50000");
+  await page.locator("#swap-receive-amount").fill("50000");
   await page.locator("#swap-start").click();
-  const wallet = await download(page, '#swap-reverse-key-backup a[download="rillswap-recovery-key.json"]', "wallet.json");
-  await page.locator("#swap-reverse-key-backup input[type=file]").setInputFiles(wallet); await expect(page.locator("#swap-reverse-continue")).toBeEnabled();
+  await expect(page.locator("#swap-reverse-continue")).toBeEnabled(); // no backup check gate; the address is entered before continuing
+  await page.locator("#swap-wallet-setup summary").click();
+  const wallet = await download(page, '#swap-wallet-actions a[download="rillswap-recovery-key.json"]', "wallet.json");
+  await page.locator("#swap-receive-address").fill(address);
   await page.locator("#swap-reverse-continue").click();
   await expect(page.locator('#swap-reverse-backups a[download="rillswap-ln-to-btc-terms.age"]')).toBeVisible();
   const backup = await download(page, '#swap-reverse-backups a[download="rillswap-ln-to-btc-terms.age"]', "terms.age"), signed = inspectBackup(wallet, backup);
-  await page.locator("#swap-reverse-backup-saved").check(); await page.locator("#swap-reverse-accept").click();
+  await page.locator("#swap-reverse-accept").click();
   await page.locator("#swap-reverse-connect").click(); await expect(page.locator("#swap-reverse-pay")).toBeVisible();
   await page.locator("#swap-reverse-pay").click();
   await expect(page.locator("#swap-reverse-funding")).toBeVisible();
   await expect.poll(async () => {
-    if (await page.locator("#swap-reverse-claim-approved").isVisible()) return true;
+    if (await page.locator("#swap-reverse-prepare-claim").isVisible()) return true;
     if (await page.locator("#swap-reverse-funding").isEnabled()) await page.locator("#swap-reverse-funding").click();
     return false;
   }, { timeout: 90000, intervals: [1000] }).toBe(true);
   await download(page, '#swap-reverse-backups a[download="rillswap-ln-to-btc-funded.age"]', "funded.age");
   command("mine", String(signed.requiredDepth));
-  await page.locator("#swap-reverse-claim-approved").check(); await page.locator("#swap-reverse-prepare-claim").click();
+  await page.locator("#swap-reverse-prepare-claim").click();
   await download(page, '#swap-reverse-backups a[download="rillswap-ln-to-btc-claim.age"]', "claim.age");
-  await page.locator("#swap-reverse-exposure-approved").check(); await page.locator("#swap-reverse-broadcast").click();
+  await page.locator("#swap-reverse-broadcast").click();
   await expect(page.locator("#swap-status")).toContainText("Claim accepted:");
   const text = await page.locator("#swap-status").textContent(), txid = text!.match(/Claim accepted: ([0-9a-f]{64})/)![1]!;
   command("mine", "1");

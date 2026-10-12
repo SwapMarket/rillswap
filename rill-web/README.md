@@ -187,6 +187,17 @@ through recovery saves and every acceptance/funding publish attempt.
 
 Quote requests disclose the invoice to the queried providers. Partial relay
 results and failed providers are disclosed, not treated as complete discovery.
+When no announced provider serves the amount, the status lists each provider's
+announced limits (`ineligibilityReason`); when providers answer but none
+returns acceptable terms, the status lists each provider's typed refusal
+(`QuoteFanOut.reasons`, from `SwapError`/`ProtocolError` only, never raw
+transport details).
+
+Links can prefill the form through a URL fragment, never a server-visible
+query: `#invoice=` selects BTC to LN, and `#address=`/`#amount=` (whole sats)
+select LN to BTC. Prefilling is inert (no connection or quote starts) and the
+fragment is removed from the address bar; oversized or malformed values are
+ignored.
 Provider-advertised endpoints are never automatically contacted. Existing
 manual `runSwap` callers retain their prepare-and-execute behavior, and no
 persisted state or journal schema changes.
@@ -414,8 +425,13 @@ Fake-money encrypted backups and diagnostics remain under repository `tmp/`.
 Ordinary CI runs the unit, disconnected browser, and Pages regressions; the
 real-node check requires this explicit opt-in and isolated resources.
 
-The reverse execution UI connects only after signed terms, checked key backup,
-acknowledged per-swap backup, and an explicit node-connect action. The route
+The reverse execution UI connects only after signed terms are accepted and an
+explicit node-connect action. The browser-stored recovery key is the approval
+for a swap: no key-backup upload or acknowledgment checkbox gates acceptance,
+claims, or preimage exposure; the consent text next to each action states what
+continuing authorizes, and per-swap backups stay downloadable above the steps.
+The payout address is only required, checked, and sent at continuation, not
+for an estimate. The route
 and routing fee require a separate one-shot payment approval. The controller
 binds the approved transport to the payer's immutable normalized endpoint.
 Its initial private intent is encrypted before a firm request; native terms,

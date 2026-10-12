@@ -281,9 +281,8 @@ export async function prepareSwap(
           await hooks.broadcast(funding.raw, funding.txid);
           hooks.report(`funding ${funding.txid} broadcast; waiting for the provider to pay`);
           const hint =
-            `funds are committed; after block ${terms.refund_lock_height} refund with rill-cli and your own ` +
-            `Bitcoin Core: \`rill recover watch-refund --chain-only --funding-attempt-id ${binding.funding_attempt_id} ` +
-            "--binding-revision 0` on the funded recovery file (see the rill-web README for the full command)";
+            `funds are committed; after block ${terms.refund_lock_height} open Recover a swap with the funded ` +
+            `recovery file (funding attempt ${binding.funding_attempt_id}) to check funding and prepare your refund`;
           const settled = await settle(
             { session, providerKey, terms, contractHash, binding, contractSecret: contract.secret,
               tipHeight: request.tipHeight, settleMs: timeouts.settleMs, cosigner: hooks.cosigner, report: hooks.report },
