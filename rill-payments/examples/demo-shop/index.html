@@ -12,7 +12,6 @@
   .price { font-size: 1.3rem; font-weight: 600; } .muted { color: #667085; font-size: .9em; }
   button, .pay-link { font: inherit; padding: .65rem 1rem; border-radius: 12px; border: 1px solid #174b3b; background: #174b3b; color: #fff; cursor: pointer; text-decoration: none; display: inline-block; }
   button.secondary { background: #fff; color: #174b3b; }
-  #checkout { padding: 0; border: 0; background: transparent; box-shadow: none; }
   details { margin-top: 1rem; } summary { color: #526e62; cursor: pointer; }
   label.rail { display: block; margin: .3rem 0; }
   textarea, pre { width: 100%; box-sizing: border-box; font: 12px/1.4 ui-monospace, monospace; background: #f5f7fa; border: 1px solid #d8dde6; border-radius: 6px; padding: .5rem; white-space: pre-wrap; word-break: break-all; }
@@ -27,7 +26,7 @@
 
 <div class="grid" id="products"></div>
 
-<div id="checkout" hidden></div>
+<div id="checkout"></div>
 
 <div class="panel" id="order" hidden>
   <h2>Order <span id="order-id"></span>: <span class="status" id="order-status"></span></h2>
@@ -66,13 +65,18 @@ for (const product of catalog.products) {
   $("products").append(card);
 }
 
+function closeCheckout() {
+  checkoutView?.destroy();
+  checkoutView = null;
+}
+
 function choose(product) {
   if (preparingOrder) return;
   selected = product;
-  checkoutView?.destroy();
+  closeCheckout();
   checkoutView = mountRillPay($("checkout"), { merchant: "Rill demo shop · regtest", item: product.name,
     total: `$${(product.usdCents / 100).toFixed(2)}`, methods: product.methods,
-    onCancel: () => { $("checkout").hidden = true; },
+    onCancel: closeCheckout,
     onPay: async (rail) => {
       if (preparingOrder) throw new Error("Order preparation already pending");
       preparingOrder = true; productButtons.forEach((button) => { button.disabled = true; });
@@ -80,14 +84,12 @@ function choose(product) {
         const response = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ productId: product.id, rail }) });
         const order = await response.json(); if (!response.ok) throw new Error("Order could not be created");
-        $("checkout").hidden = true; show(order);
+        closeCheckout(); show(order);
       } finally {
         preparingOrder = false; productButtons.forEach((button) => { button.disabled = false; });
       }
     },
   });
-  $("checkout").hidden = false;
-  $("checkout").scrollIntoView({ behavior: "smooth" });
 }
 
 function instructions(order) {

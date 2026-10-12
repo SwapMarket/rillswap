@@ -30,19 +30,32 @@ an `onPay(methodId)` callback that creates and displays merchant payment
 instructions. It does not itself contact a wallet, create an order, send funds,
 persist state, or establish acceptance.
 
+The checkout renders as a modal: a fixed overlay blurs the host page behind a
+labeled dialog (`role="dialog"`, "RillPay checkout") with a recognizable RillPay
+header. Focus moves into the dialog and wraps on Tab; Escape, the Cancel
+button, and clicks outside the dialog call `onCancel` (nothing dismisses it
+while a payment is being prepared, and without `onCancel` there is no Cancel
+button). The host closes it by calling `destroy()`, which also restores focus.
+
 Each row declares eligibility and an unavailable reason, price, merchant fee,
-provider fee, wallet/network fee, and confirmation time. Use `null` for unknown
-values; they remain visibly unknown, never silently zero. The merchant owns
-eligibility and must enforce it again on order creation. All methods remain
-visible, including amount-restricted or unavailable methods. Text is rendered
-inertly, pending selection is pinned, errors are redacted, and all-ineligible
-checkouts disable the payment action. `destroy()` removes the mounted view.
+provider fee, wallet/network fee, confirmation time text, an estimated total
+cost in USD cents (`usdCents`, including provider or swap fees), and an
+approximate `minutesToConfirmation` (0 means under a minute). Use `null` for
+unknown values; they remain visibly unknown, never silently zero. Every row
+shows its USD estimate; the available rows sharing the lowest known USD cost
+get a "Cheapest" badge and the first of them is preselected (`cheapestMethods`
+exposes the same rule). The merchant owns eligibility and must enforce it again
+on order creation. All methods remain visible, including amount-restricted or
+unavailable methods. Text is rendered inertly, pending selection is pinned,
+errors are redacted, and all-ineligible checkouts disable the payment action.
 The scoped built-in stylesheet requires the host's inline-style CSP allowance
 (or an approved stylesheet policy); it does not modify global document styles.
 
-Demo prices are fixed-rate fake-money prices, not live exchange quotes. Bitcoin
-swap costs/confirmation targets come from the provider quote; wallet fees stay
-unknown until the wallet supplies them. Native token confirmations are local
+Demo prices are fixed-rate fake-money prices, not live exchange quotes. The
+Bitcoin option prefills the dev provider's swap fee (50 sat + 0.1%, matching
+`dev/devtool.py`) in its price and USD estimate; the signed quote on the swap
+page sets the final cost and confirmation target. Wallet fees stay unknown
+until the wallet supplies them. Native token confirmations are local
 Anvil targets, not production timing guarantees. The Bitcoin handoff uses an
 invoice URL fragment, not a server-visible query; RillSwap removes it after
 inertly prefilling, without automatically requesting a quote or moving funds.
