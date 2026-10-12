@@ -227,6 +227,8 @@ services:
         condition: service_healthy
       monero-wallet-buyer:
         condition: service_healthy
+      anvil:
+        condition: service_healthy
       relay:
         condition: service_started
 
@@ -252,6 +254,27 @@ services:
   maker-ln-to-btc:
     <<: *rill
     command: [rill-provider, serve, --config, /state/makers/ln-to-btc/provider.json]
+    environment:
+      RILL_FORWARD: 18443=bitcoind:18443 10009=lnd-maker:10009
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+
+  # RS-010 stablecoin makers on the Anvil chain (ERC20Swap v6 HTLC, fUSDC).
+  # They reach Anvil directly over HTTP; Bitcoin Core and LND still provide the
+  # Bitcoin tip and the Lightning leg.
+  maker-erc20-to-ln:
+    <<: *rill
+    command: [rill-provider, serve, --config, /state/makers/erc20-to-ln/provider.json]
+    environment:
+      RILL_FORWARD: 18443=bitcoind:18443 10009=lnd-maker:10009
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+
+  maker-ln-to-erc20:
+    <<: *rill
+    command: [rill-provider, serve, --config, /state/makers/ln-to-erc20/provider.json]
     environment:
       RILL_FORWARD: 18443=bitcoind:18443 10009=lnd-maker:10009
     depends_on:

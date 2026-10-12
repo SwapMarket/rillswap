@@ -104,7 +104,7 @@ case "$cmd" in
         compose exec $(tty_flag) -e ETH_RPC_URL=http://127.0.0.1:8545 anvil cast "$@"
         ;;
     maker-swaps)
-        direction=${1:?usage: devctl maker-swaps <btc-to-ln|ln-to-btc> [inspect-swaps flags]}
+        direction=${1:?usage: devctl maker-swaps <btc-to-ln|ln-to-btc|erc20-to-ln|ln-to-erc20> [inspect-swaps flags]}
         shift
         # inspect-swaps takes the store owner lock, so pause that maker meanwhile.
         compose stop "maker-$direction" >/dev/null 2>&1

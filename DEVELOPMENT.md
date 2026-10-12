@@ -142,6 +142,7 @@ its durable payment/claim lifecycle before this transport becomes a UI action.
 | `miner` | Mines one Bitcoin block every `RILL_DEV_BLOCK_SECONDS` and one Monero block (to the buyer) every `RILL_DEV_MONERO_BLOCK_SECONDS`. |
 | `maker-btc-to-ln` | `rill-provider serve`: takes on-chain BTC, pays the user's Lightning invoice. |
 | `maker-ln-to-btc` | `rill-provider serve`: takes a Lightning hold payment, pays on-chain BTC. |
+| `maker-erc20-to-ln`, `maker-ln-to-erc20` | `rill-provider serve` for the RS-010 stablecoin profiles on Anvil (ERC20Swap v6 HTLC, fUSDC at a fixed 100,000 fUSDC/BTC). The maker's HTLC signer is Anvil account 3. |
 | `tools` | User toolbox. `devctl swap`, `devctl rill`, `devctl shell` run here. |
 | `web` | Builds `rill-web` (rebuilding on change) and serves `dist/`. |
 | `merchant` | `rill-payments` merchant API (`bun src/cli.ts serve`) on `lnd-merchant`. |
@@ -154,7 +155,9 @@ its durable payment/claim lifecycle before this transport becomes a UI action.
 completes an interrupted attempt. It creates the wallets, mines to 150 blocks,
 funds both LND nodes and the `user`/`maker` Core wallets (10 BTC each), opens
 the channels, provisions one maker identity, custody key, config and store per
-direction, writes the user's age key, and prepares the merchant's keys, admin
+direction, deploys the ERC20Swap v6 HTLC and the fUSDC dev token on Anvil
+once (one million fUSDC each to the user, Anvil account 1, and the maker
+signer) and provisions the two stablecoin makers, writes the user's age key, and prepares the merchant's keys, admin
 token, scoped invoice macaroon and config (the merchant provisions its own
 ledger on first start), and creates the two Monero wallets and mines the
 Monero chain to 130 blocks to the buyer (100 coinbase outputs: spendable
@@ -163,6 +166,7 @@ funds and enough ring decoys). Results land in the `state` volume:
 ```
 /state/info.json                 maker keys, relay URLs, LND pubkeys
 /state/makers/<direction>/       provider.json, identity, custody key, store
+/state/evm/contracts.json        Anvil HTLC and fUSDC addresses, maker/user accounts
 /state/user/                     age.key, network.json, Core/LND credentials
 /state/user/swaps/<time>-<dir>/  recovery files from `devctl swap`
 /state/merchant/                 merchant config, keys, admin token, ledger
@@ -351,7 +355,7 @@ published to the host: use `docker compose exec` as above (daemon on
 The repository is mounted read-only at `/src`, and the Python packages are
 installed editable from it. After editing:
 
-- provider code: `dev/devctl restart maker-btc-to-ln maker-ln-to-btc`
+- provider code: `dev/devctl restart maker-btc-to-ln maker-ln-to-btc maker-erc20-to-ln maker-ln-to-erc20`
 - CLI code: nothing (each `rill` run starts fresh)
 - `rill-web/src`, `swap.html`, `index.html`: the `web` service rebuilds; reload
   the page

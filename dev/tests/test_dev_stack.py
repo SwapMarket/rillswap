@@ -160,3 +160,24 @@ def test_monero_wallet_created_only_in_an_empty_volume(tmp_path, monkeypatch):
     (tmp_path / "state/shop/monero/ledger.sqlite-wal").write_text("")
     with pytest.raises(SystemExit, match="shop's Monero state"):
         devtool.ensure_monero_wallet("merchant")
+
+
+def test_evm_makers_run_after_bootstrap_deploys_on_a_healthy_anvil():
+    bootstrap = compose_service("bootstrap")
+    assert "anvil:\n        condition: service_healthy" in bootstrap
+    for direction in ("erc20-to-ln", "ln-to-erc20"):
+        maker = compose_service(f"maker-{direction}")
+        assert f"/state/makers/{direction}/provider.json" in maker
+        assert "bootstrap:\n        condition: service_completed_successfully" in maker
+    devtool = (ROOT / "dev/devtool.py").read_text()
+    assert 'EVM_DIRECTIONS = ("erc20-to-ln", "ln-to-erc20")' in devtool
+    evm = (ROOT / "dev/evm_dev.py").read_text()
+    # Distinct dev roles: the maker's HTLC signer is neither the deployer nor the user.
+    assert "DEPLOYER, USER, _SHOP, MAKER = range(4)" in evm
+    assert "ANVIL_KEYS[MAKER]" in devtool
+    for artifact in (
+        "rill-contracts/artifacts/erc20-swap-v6.json",
+        "rill-payments/examples/demo-shop/dev-stablecoin.json",
+    ):
+        assert artifact in evm
+        assert (ROOT / artifact).exists()

@@ -48,6 +48,7 @@ MERCHANT_ORIGIN = "https://shop.rillswap.test"
 MERCHANT_DIR = STATE / "merchant"
 SHOP_URL = os.environ.get("RILL_DEV_SHOP_INTERNAL", "http://shop:8090")
 DIRECTIONS = ("btc-to-ln", "ln-to-btc")
+EVM_DIRECTIONS = ("erc20-to-ln", "ln-to-erc20")  # RS-010 makers on the Anvil chain
 CHANNEL_SAT = 5_000_000
 LND_FUND_BTC = 10
 CORE_FUND_BTC = 10
@@ -423,7 +424,9 @@ def ensure_channels(lnds: dict[str, Lnd]) -> None:
     wait_for("active channels", all_active, timeout=120)
 
 
-def provision_maker(direction: str, xonly_by_direction: dict[str, str]) -> None:
+def provision_maker(
+    direction: str, xonly_by_direction: dict[str, str], evm: dict[str, Any] | None = None
+) -> None:
     home = STATE / "makers" / direction
     home.mkdir(parents=True, exist_ok=True)
     home.chmod(0o700)
@@ -467,6 +470,10 @@ def provision_maker(direction: str, xonly_by_direction: dict[str, str]) -> None:
     xonly_by_direction[direction] = xonly
 
     config_path = home / "provider.json"
+    if evm is not None:
+        from evm_dev import ANVIL_KEYS, ANVIL_RPC, MAKER
+
+        private_write(home / "evm-signer.key", ANVIL_KEYS[MAKER] + "\n")
     if not config_path.exists():
         maker_wallet = Core("maker")
         address = maker_wallet("getnewaddress", f"{direction}-destination", "bech32m")
@@ -510,6 +517,36 @@ def provision_maker(direction: str, xonly_by_direction: dict[str, str]) -> None:
         if direction == "ln-to-btc":
             config["bitcoin_core"]["wallet"] = "maker"
             config["lnd"]["invoices_macaroon"] = "admin.macaroon"
+        if evm is not None:
+            # RS-010: no Taproot contract, so no destination script and no
+            # cooperative claim feature; the HTLC signer is a dev Anvil key.
+            del config["provider_destination_script"]
+            config["handshake"]["features"] = []
+            config["lnd"]["invoices_macaroon"] = "admin.macaroon"
+            config["evm"] = {
+                "rpc_url": ANVIL_RPC,
+                "chain_id": evm["chain_id"],
+                "name": "anvil-dev",
+                "htlc_contract": evm["htlc_contract"],
+                "block_seconds": int(os.environ.get("RILL_DEV_ANVIL_BLOCK_SECONDS", "2")),
+                "deployment_namespace": network_identity()["deployment_namespace"],
+                "signer_key_file": "evm-signer.key",
+                "tokens": [
+                    {
+                        "token_contract": evm["token_contract"],
+                        "token_symbol": evm["token_symbol"],
+                        "token_decimals": evm["token_decimals"],
+                        "rate_token_base_per_btc": evm["rate_token_base_per_btc"],
+                    }
+                ],
+                "funding_confirmations": 1,
+                "settlement_confirmations": 1,
+                # 2 s blocks: the client's lock is refundable after ~4 h, ours after ~1 h.
+                "forward_timelock_delay_blocks": 7200,
+                "reverse_timelock_delay_blocks": 1800,
+                "learn_and_claim_seconds": 600,
+                "refund_and_ln_resolution_seconds": 600,
+            }
         private_write(config_path, json.dumps(config, indent=1) + "\n")
 
     store = home / "provider-store"
@@ -623,10 +660,11 @@ def provision_merchant(lnd: Lnd) -> None:
 
 
 def write_info(
-    lnds: dict[str, Lnd], makers: dict[str, str], monero: dict[str, str]
+    lnds: dict[str, Lnd], makers: dict[str, str], monero: dict[str, str], evm: dict[str, Any]
 ) -> dict[str, Any]:
     info = {
         "makers": makers,
+        "evm": evm,
         "relay": {"containers": RELAY_INTERNAL, "host": RELAY_HOST},
         "lnd_pubkeys": {node: lnd.pubkey() for node, lnd in lnds.items()},
         "user_age_recipient": (STATE / "user/age.recipient").read_text().strip(),
@@ -650,11 +688,16 @@ def cmd_bootstrap(_: argparse.Namespace) -> None:
     makers: dict[str, str] = {}
     for direction in DIRECTIONS:
         provision_maker(direction, makers)
+    from evm_dev import ensure_evm
+
+    evm = ensure_evm(STATE, log)
+    for direction in EVM_DIRECTIONS:
+        provision_maker(direction, makers, evm)
     provision_user()
     provision_browser_node()
     provision_merchant(lnds["merchant"])
     monero = ensure_monero()
-    write_info(lnds, makers, monero)
+    write_info(lnds, makers, monero, evm)
     log(f"bootstrap complete at height {Core()('getblockcount')}")
 
 
@@ -755,8 +798,13 @@ def cmd_info(args: argparse.Namespace) -> None:
     print(f"relay (host)    {info['relay']['host']}")
     print(f"relay (stack)   {info['relay']['containers']}")
     for direction, xonly in info["makers"].items():
-        print(f"maker {direction:<9} {xonly}")
+        print(f"maker {direction:<11} {xonly}")
     print(f"user age key    {info['user_age_recipient']}")
+    evm = info.get("evm", {})
+    if evm:
+        print(f"evm htlc        {evm['htlc_contract']} (chain {evm['chain_id']})")
+        print(f"evm token       {evm['token_contract']} {evm['token_symbol']}")
+        print(f"evm user        {evm['user_address']}")
     for name, value in info["balances"].items():
         print(f"{name:<15} {json.dumps(value)}")
 
