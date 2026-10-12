@@ -541,8 +541,10 @@ def provision_maker(
                 ],
                 "funding_confirmations": 1,
                 "settlement_confirmations": 1,
-                # 2 s blocks: the client's lock is refundable after ~4 h, ours after ~1 h.
-                "forward_timelock_delay_blocks": 7200,
+                # 2 s blocks. RS-010 requires the client's lock to outlast the outgoing
+                # Lightning budget (144 BTC blocks at 600 s) plus learn_and_claim_seconds,
+                # so the forward lock is refundable after ~25 h; ours after ~1 h.
+                "forward_timelock_delay_blocks": 45_000,
                 "reverse_timelock_delay_blocks": 1800,
                 "learn_and_claim_seconds": 600,
                 "refund_and_ln_resolution_seconds": 600,

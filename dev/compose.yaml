@@ -391,6 +391,7 @@ services:
       VITE_RILLSWAP_MEMPOOL_API: http://127.0.0.1:${RILL_DEV_CHAIN_PORT:-8091}/api
       VITE_RILLSWAP_BROADCAST_API: http://127.0.0.1:${RILL_DEV_BROADCAST_PORT:-8092}/api
       VITE_RILLSWAP_NODE_API: http://127.0.0.1:${RILL_DEV_NODE_PORT:-8093}
+      VITE_RILLSWAP_EVM_RPC: http://127.0.0.1:${RILL_DEV_ANVIL_PORT:-8545}
     # The swap page's CSP and dependencies need the production bundle, so
     # build once, rebuild on change, and serve dist/ (refresh after edits).
     command:
