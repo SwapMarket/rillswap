@@ -1,6 +1,6 @@
 /** Opt-in isolated real node acceptance. Never resets or mines the default dev project. */
 import { test, expect, type Page } from "@playwright/test";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -42,15 +42,11 @@ test("real unilateral browser reverse swap pays once, claims nominal payout and 
   await page.locator("#swap-reverse-continue").click();
   await expect(page.locator('#swap-reverse-backups a[download="rillswap-ln-to-btc-terms.age"]')).toBeVisible();
   const backup = await download(page, '#swap-reverse-backups a[download="rillswap-ln-to-btc-terms.age"]', "terms.age"), signed = inspectBackup(wallet, backup);
+  // Default path: the page shows the hold invoice and any wallet pays it; here the user's regtest LND does, from the CLI.
   await page.locator("#swap-reverse-accept").click();
-  await page.locator("#swap-reverse-connect").click(); await expect(page.locator("#swap-reverse-pay")).toBeVisible();
-  await page.locator("#swap-reverse-pay").click();
-  await expect(page.locator("#swap-reverse-funding")).toBeVisible();
-  await expect.poll(async () => {
-    if (await page.locator("#swap-reverse-prepare-claim").isVisible()) return true;
-    if (await page.locator("#swap-reverse-funding").isEnabled()) await page.locator("#swap-reverse-funding").click();
-    return false;
-  }, { timeout: 90000, intervals: [1000] }).toBe(true);
+  const invoice = (await page.locator("#swap-reverse-invoice").textContent())!.trim();
+  const payer = execFile(resolve(root, "dev/devctl"), ["lncli", "user", "payinvoice", "--force", invoice], { cwd: root, env: process.env });
+  await expect(page.locator("#swap-reverse-prepare-claim")).toBeVisible({ timeout: 90000 }); // the page listens by itself
   await download(page, '#swap-reverse-backups a[download="rillswap-ln-to-btc-funded.age"]', "funded.age");
   command("mine", String(signed.requiredDepth));
   await page.locator("#swap-reverse-prepare-claim").click();
@@ -69,8 +65,9 @@ test("real unilateral browser reverse swap pays once, claims nominal payout and 
   const raw = JSON.parse(command("bitcoin-cli", "getrawtransaction", txid, "true")); expect(raw.confirmations).toBeGreaterThanOrEqual(1);
   expect(raw.vout).toHaveLength(1); expect(Math.round(Number(raw.vout[0].value) * 1e8)).toBeGreaterThanOrEqual(50000); expect(raw.vout[0].scriptPubKey.address).toBe(address);
   expect(raw.vin[0].txinwitness).toHaveLength(4); expect(raw.vin[0].txinwitness[1]).toMatch(/^[0-9a-f]{64}$/);
-  expect(payments).toBe(1); expect(broadcasts).toBe(1); expect(errors).toEqual([]);
-  await page.locator("#swap-reverse-settlement").click(); await expect(page.locator("#swap-status")).toContainText("Swap complete");
+  expect(payments).toBe(0); expect(broadcasts).toBe(1); expect(errors).toEqual([]); // no node dispatch from the browser
+  await page.locator("#swap-reverse-settlement").click(); await expect(page.locator("#swap-status")).toContainText("Bitcoin claim confirmed");
+  await new Promise<void>((done) => { if (payer.exitCode !== null) done(); else payer.once("exit", () => done()); });
   // Reload never renews payment or claim submission. Recover the exact saved
   // bytes through the real page and persistent browser identity/journal.
   await page.reload(); await page.locator("#swap-recovery summary").first().click();
@@ -82,5 +79,5 @@ test("real unilateral browser reverse swap pays once, claims nominal payout and 
   const savedClaim = page.locator('a[download="rillswap-recovered-claim.hex"]'); await expect(savedClaim).toBeVisible();
   const exportedPath = await download(page, 'a[download="rillswap-recovered-claim.hex"]', "recovered-claim.hex");
   expect(readFileSync(exportedPath, "utf8")).toBe(raw.hex);
-  expect(payments).toBe(1); expect(broadcasts).toBe(1); expect(errors).toEqual([]);
+  expect(payments).toBe(0); expect(broadcasts).toBe(1); expect(errors).toEqual([]);
 });

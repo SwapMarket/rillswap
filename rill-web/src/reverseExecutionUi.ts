@@ -62,98 +62,133 @@ export async function mountReverseExecution(root: HTMLElement, options: ReverseE
     steps.append(node("h2", "Final signed price"), node("p", `Pay ${terms.economics.hold_invoice_sat} sat over Lightning, plus the routing fee, to receive at least ${terms.economics.nominal_payout_sat} sat on-chain.`),
       node("small", `Provider fee: ${terms.economics.success_fee_sat} sat. Claim reserve: ${terms.economics.claim_fee_reserve_sat} sat. Funding requires ${terms.funding_confirmations} confirmation(s). Provider refund height: ${terms.refund_lock_height}.`));
     consent(steps, "By accepting you agree to these signed terms. The encrypted swap backup above and your browser recovery key are what let you recover; keep them.", "swap-reverse-consent-terms");
-    const accept = button(steps, "Accept signed terms", "swap-reverse-accept");
     const acknowledge = (): void => { current(); };
+    /** From here the steps are the same whichever way the invoice was paid; `settlement` reports the payer's view, if any. */
+    const afterPayment = (settlement: () => Promise<string | null>): void => {
+      steps.append(node("p", "The payment is durably UNKNOWN to this page until the provider's signed funding arrives. Never pay another invoice to recover it. Funding checks and claims are separate explicit actions.", "swap-reverse-payment-note"));
+      const waiting = node("p", "Waiting for the provider to lock the Bitcoin (it does so once it holds your payment). This page keeps listening.", "swap-reverse-funding-status");
+      waiting.setAttribute("role", "status"); steps.append(waiting);
+      const funding = button(steps, "Check provider funding", "swap-reverse-funding");
+      const inspectFunding = async (): Promise<boolean> => {
+        try {
+          const file = await e.receiveFunding(30000); current(); download(file, "funded"); funding.disabled = true; waiting.remove();
+          options.status("Funding authenticated. Wait for confirmations, then approve your claim", 3);
+          const feeMax = [BigInt(terms.economics.claim_fee_reserve_sat), BigInt(terms.max_claim_fee_sat)].reduce((a, b) => a < b ? a : b);
+          const fee = input(steps, "Claim network fee (sat, maximum " + feeMax + ")", "swap-reverse-claim-fee", String(feeMax)); fee.inputMode = "numeric";
+          consent(steps, `Preparing the claim approves a payment to the signed payout script ${terms.client_destination_script} at the fee above. Signing uses your private preimage.`, "swap-reverse-consent-claim");
+          const prepare = button(steps, "Check confirmations and prepare claim", "swap-reverse-prepare-claim");
+          let value = "";
+          const claimApproval = (): void => { current(); if (fee.value.trim() !== value) throw new Error("Claim approval changed"); };
+          act(prepare, async () => {
+            value = fee.value.trim(); if (!/^(0|[1-9][0-9]{0,15})$/.test(value)) throw new Error("Invalid fee"); claimApproval();
+            try {
+              const prepared = await e.prepareClaim(api, BigInt(value), claimApproval); current(); download(prepared.recoveryFile, "claim"); fee.disabled = true;
+              steps.append(node("p", `Prepared claim ${prepared.claim.txid}: ${prepared.claim.outputValueSat} sat to your payout, ${prepared.claim.feeSat} sat network fee (${prepared.claim.vsize} vbytes).`));
+              consent(steps, "Broadcasting or downloading reveals the preimage in this exact signed transaction. Broadcast sends it to the configured API; downloads can be broadcast by anyone. The claim backup above records it.", "swap-reverse-consent-exposure");
+              const approveExposure = (): void => { claimApproval(); };
+              const broadcast = button(steps, "Broadcast claim once", "swap-reverse-broadcast"), exportClaim = button(steps, "Download exact signed claim", "swap-reverse-export");
+              let confirmation: HTMLButtonElement | undefined;
+              const exposeAction = async (action: "download" | "broadcast"): Promise<void> => {
+                approveExposure(); const result = await e.exposeClaim(api, broadcastApi, action, approveExposure); current();
+                broadcast.disabled = true;
+                if (result.transactionHex) options.download(backups, new TextEncoder().encode(result.transactionHex), "rillswap-signed-claim.hex");
+                // Only identical manual re-export stays available after exposure.
+                exportClaim.disabled = false;
+                options.status(`Claim ${result.outcome}: ${result.txid}`, result.outcome === "accepted" ? 4 : 3);
+                message.textContent = result.outcome === "accepted" ? "Claim broadcast accepted. Chain confirmation and Lightning settlement still need verification." : "Claim exposure outcome is unknown or exported. The app will not submit it again. Preserve these exact bytes.";
+                if (!confirmation) {
+                  confirmation = button(steps, "Check claim confirmation and Lightning settlement", "swap-reverse-settlement");
+                  const check = confirmation;
+                  act(check, async () => {
+                    try {
+                      current(); const signal = AbortSignal.timeout(15000), tip = await readChainTip(api, options.network, { signal }); current();
+                      const response = await fetch(`${api}/tx/${result.txid}/status`, { signal, credentials: "omit", redirect: "error", cache: "no-store", referrerPolicy: "no-referrer" });
+                      const inclusion = parseStrictEventJson(await readBoundedChainText(response, signal, 4096), 4096) as Record<string, unknown>; current();
+                      if (inclusion.confirmed !== true || typeof inclusion.block_height !== "number" || !Number.isSafeInteger(inclusion.block_height) || inclusion.block_height < 1 ||
+                        inclusion.block_height > tip.height || typeof inclusion.block_hash !== "string" || !/^[0-9a-f]{64}$/.test(inclusion.block_hash)) throw new Error("Claim not confirmed");
+                      const blockResponse = await fetch(`${api}/block-height/${inclusion.block_height}`, { signal, credentials: "omit", redirect: "error", cache: "no-store", referrerPolicy: "no-referrer" });
+                      if (await readBoundedChainText(blockResponse, signal, 64) !== inclusion.block_hash) throw new Error("Claim chain mismatch");
+                      const payment = await settlement(); current();
+                      const confirmations = `Trusted API observed ${tip.height - inclusion.block_height + 1} claim confirmation(s).`;
+                      if (payment === null) {
+                        // An external wallet reports its own settlement; the claim's confirmation is what this page can verify.
+                        options.status("Bitcoin claim confirmed. Your wallet shows the Lightning payment as settled once the provider learns the preimage", 4);
+                        message.textContent = `${confirmations} The provider settles your Lightning payment with the preimage revealed by this claim; your wallet reports that. Keep all recovery backups.`;
+                      } else if (payment === "SUCCEEDED") {
+                        options.status("Swap complete. Bitcoin claim confirmed and Lightning payment settled", 4);
+                        message.textContent = `${confirmations} Your pinned Lightning node reports payment succeeded. Keep all recovery backups.`;
+                      } else message.textContent = `Claim confirmed according to the trusted API. Lightning payment: ${payment.toLowerCase()}. No payment will be retried.`;
+                    } catch { message.textContent = "Confirmation or settlement evidence is not available yet. Check again without resubmitting the payment or claim."; }
+                    finally { check.disabled = false; }
+                  });
+                }
+              };
+              act(broadcast, () => exposeAction("broadcast")); act(exportClaim, () => exposeAction("download"));
+            } catch { error(); if (e.record.stage === "funded") prepare.disabled = false; }
+          });
+          return true;
+        } catch { funding.disabled = false; message.textContent = "No usable signed funding evidence yet. Check again without making another payment."; return false; }
+      };
+      act(funding, async () => { await inspectFunding(); });
+      // Receive-only waiting follows payment; it cannot pay, sign or broadcast. The page keeps
+      // listening by itself; the button remains for a manual check after the invoice expiry.
+      void (async () => {
+        const until = terms.invoice_binding.expires_at + 600;
+        while (!disposed && e.record.stage === "payment-unknown" && Math.floor(Date.now() / 1000) < until) {
+          funding.disabled = true; message.textContent = "";
+          if (await inspectFunding()) return;
+        }
+        if (!disposed && e.record.stage === "payment-unknown") waiting.textContent = "The invoice has expired. If your wallet paid it, the provider may still fund; check again. If the payment failed or was never sent, nothing was lost.";
+      })();
+    };
+    // Default: show the invoice for any Lightning wallet. Advanced: dispatch one exact route from the user's own LND node.
+    consent(steps, "Accepting shows the invoice; from then on your wallet owns the routing fee and how long its payment may stay pending. The provider locks Bitcoin only while it holds your payment.", "swap-reverse-consent-wallet");
+    const accept = button(steps, "Accept and show the invoice", "swap-reverse-accept");
+    let acceptedOnce = false;
     act(accept, async () => {
       await e.accept(acknowledge); current();
-      options.status("Signed terms accepted. Connect your Lightning node", 2);
-      const nodeSettings = node("details"); nodeSettings.append(node("summary", "Lightning node settings"));
-      const endpoint = input(nodeSettings, "LND REST endpoint (direct browser access)", "swap-reverse-node-api", options.nodeApi);
-      const identity = input(nodeSettings, "Pinned node compressed public key", "swap-reverse-node-identity"), credential = input(nodeSettings, "Scoped macaroon (hex, this tab only)", "swap-reverse-macaroon"); credential.type = "password";
-      const routingFee = input(nodeSettings, "Maximum routing fee (sat)", "swap-reverse-routing-fee", "1000"); routingFee.inputMode = "numeric";
-      steps.append(node("p", options.network.name === "regtest" ? "Connect authorizes the disposable regtest node adapter to disclose its scoped credential to this tab. It can spend test Lightning funds. Nothing is paid until you approve the exact route." :
-        "Use an LND node with browser-trusted TLS, explicit CORS, and scoped permissions. The credential stays in this tab. No public remote node is supplied."), nodeSettings);
-      const connect = button(steps, options.network.name === "regtest" ? "Connect regtest test node" : "Connect configured Lightning node", "swap-reverse-connect");
-      act(connect, async () => {
-        acknowledge(); const nodeApi = validateMempoolApi(endpoint.value.trim(), options.network.name);
-        const feeValue = routingFee.value.trim(); if (!/^(0|[1-9][0-9]{0,15})$/.test(feeValue)) throw new Error("Invalid routing fee");
-        let macaroon = credential.value.trim(), key = identity.value.trim();
-        if (options.network.name === "regtest" && !macaroon && !key) {
-          const signal = AbortSignal.timeout(10000), response = await fetch(nodeApi + "/configuration", { signal, method: "GET", credentials: "omit", redirect: "error", cache: "no-store", referrerPolicy: "no-referrer" });
-          const data = parseStrictEventJson(await readBoundedChainText(response, signal, 16384), 16384) as Record<string, unknown>;
-          acknowledge(); if (Object.keys(data).sort().join() !== "macaroon,network_identity,node_identity" || canonicalize(data.network_identity) !== canonicalize(options.network) ||
-            typeof data.macaroon !== "string" || typeof data.node_identity !== "string") throw new Error("Node configuration mismatch");
-          macaroon = data.macaroon; key = data.node_identity;
-        }
-        acknowledge(); const payer = new BrowserHoldPayer({ endpoint: nodeApi, macaroon, nodeIdentity: key, network: options.network }); credential.value = "";
-        endpoint.disabled = identity.disabled = credential.disabled = routingFee.disabled = true;
-        const approval = (): void => { acknowledge(); if (endpoint.value.trim() !== nodeApi || routingFee.value.trim() !== feeValue) throw new Error("Node selection changed"); };
-        const plan = await e.planPayment(payer, nodeApi, BigInt(feeValue), approval); approval();
-        steps.append(node("p", `Exact route: ${terms.economics.hold_invoice_sat} sat plus ${(BigInt(plan.feeMsat) / 1000n).toString()} sat (${plan.feeMsat} msat) routing fee. Maximum absolute HTLC expiry: block ${plan.limits.maxExpiryHeight}.`));
-        const pay = button(steps, "Pay this exact Lightning route once", "swap-reverse-pay");
-        act(pay, async () => {
-          const result = await e.pay(payer, plan, nodeApi, approval); current();
-          options.status(`Payment ${result.toLowerCase().replaceAll("_", " ")}. Checking signed funding evidence`, 3);
-          steps.append(node("p", "The payment attempt is durably UNKNOWN even while tracking. Never pay another invoice to recover it. Funding checks and claims are separate explicit actions."));
-          const funding = button(steps, "Check provider funding", "swap-reverse-funding");
-          const inspectFunding = async (): Promise<void> => {
-            try {
-              const file = await e.receiveFunding(30000); current(); download(file, "funded"); funding.disabled = true;
-              options.status("Funding authenticated. Wait for confirmations, then approve your claim", 3);
-              const feeMax = [BigInt(terms.economics.claim_fee_reserve_sat), BigInt(terms.max_claim_fee_sat)].reduce((a, b) => a < b ? a : b);
-              const fee = input(steps, "Claim network fee (sat, maximum " + feeMax + ")", "swap-reverse-claim-fee", String(feeMax)); fee.inputMode = "numeric";
-              consent(steps, `Preparing the claim approves a payment to the signed payout script ${terms.client_destination_script} at the fee above. Signing uses your private preimage.`, "swap-reverse-consent-claim");
-              const prepare = button(steps, "Check confirmations and prepare claim", "swap-reverse-prepare-claim");
-              let value = "";
-              const claimApproval = (): void => { current(); if (fee.value.trim() !== value) throw new Error("Claim approval changed"); };
-              act(prepare, async () => {
-                value = fee.value.trim(); if (!/^(0|[1-9][0-9]{0,15})$/.test(value)) throw new Error("Invalid fee"); claimApproval();
-                try {
-                  const prepared = await e.prepareClaim(api, BigInt(value), claimApproval); current(); download(prepared.recoveryFile, "claim"); fee.disabled = true;
-                  steps.append(node("p", `Prepared claim ${prepared.claim.txid}: ${prepared.claim.outputValueSat} sat to your payout, ${prepared.claim.feeSat} sat network fee (${prepared.claim.vsize} vbytes).`));
-                  consent(steps, "Broadcasting or downloading reveals the preimage in this exact signed transaction. Broadcast sends it to the configured API; downloads can be broadcast by anyone. The claim backup above records it.", "swap-reverse-consent-exposure");
-                  const approveExposure = (): void => { claimApproval(); };
-                  const broadcast = button(steps, "Broadcast claim once", "swap-reverse-broadcast"), exportClaim = button(steps, "Download exact signed claim", "swap-reverse-export");
-                  let confirmation: HTMLButtonElement | undefined;
-                  const exposeAction = async (action: "download" | "broadcast"): Promise<void> => {
-                    approveExposure(); const result = await e.exposeClaim(api, broadcastApi, action, approveExposure); current();
-                    broadcast.disabled = true;
-                    if (result.transactionHex) options.download(backups, new TextEncoder().encode(result.transactionHex), "rillswap-signed-claim.hex");
-                    // Only identical manual re-export stays available after exposure.
-                    exportClaim.disabled = false;
-                    options.status(`Claim ${result.outcome}: ${result.txid}`, result.outcome === "accepted" ? 4 : 3);
-                    message.textContent = result.outcome === "accepted" ? "Claim broadcast accepted. Chain confirmation and Lightning settlement still need verification." : "Claim exposure outcome is unknown or exported. The app will not submit it again. Preserve these exact bytes.";
-                    if (!confirmation) {
-                      confirmation = button(steps, "Check claim confirmation and Lightning settlement", "swap-reverse-settlement");
-                      const check = confirmation;
-                      act(check, async () => {
-                        try {
-                          current(); const signal = AbortSignal.timeout(15000), tip = await readChainTip(api, options.network, { signal }); current();
-                          const response = await fetch(`${api}/tx/${result.txid}/status`, { signal, credentials: "omit", redirect: "error", cache: "no-store", referrerPolicy: "no-referrer" });
-                          const inclusion = parseStrictEventJson(await readBoundedChainText(response, signal, 4096), 4096) as Record<string, unknown>; current();
-                          if (inclusion.confirmed !== true || typeof inclusion.block_height !== "number" || !Number.isSafeInteger(inclusion.block_height) || inclusion.block_height < 1 ||
-                            inclusion.block_height > tip.height || typeof inclusion.block_hash !== "string" || !/^[0-9a-f]{64}$/.test(inclusion.block_hash)) throw new Error("Claim not confirmed");
-                          const blockResponse = await fetch(`${api}/block-height/${inclusion.block_height}`, { signal, credentials: "omit", redirect: "error", cache: "no-store", referrerPolicy: "no-referrer" });
-                          if (await readBoundedChainText(blockResponse, signal, 64) !== inclusion.block_hash) throw new Error("Claim chain mismatch");
-                          const payment = await payer.status(plan.paymentHash, plan.invoiceBinding.amount_msat); current();
-                          if (payment === "SUCCEEDED") {
-                            options.status("Swap complete. Bitcoin claim confirmed and Lightning payment settled", 4);
-                            message.textContent = `Trusted API observed ${tip.height - inclusion.block_height + 1} claim confirmation(s). Your pinned Lightning node reports payment succeeded. Keep all recovery backups.`;
-                          } else message.textContent = `Claim confirmed according to the trusted API. Lightning payment: ${payment.toLowerCase()}. No payment will be retried.`;
-                        } catch { message.textContent = "Confirmation or settlement evidence is not available yet. Check again without resubmitting the payment or claim."; }
-                        finally { check.disabled = false; }
-                      });
-                    }
-                  };
-                  act(broadcast, () => exposeAction("broadcast")); act(exportClaim, () => exposeAction("download"));
-                } catch { error(); if (e.record.stage === "funded") prepare.disabled = false; }
-              });
-            } catch { funding.disabled = false; message.textContent = "No usable signed funding evidence yet. Check again without making another payment."; }
-          };
-          act(funding, inspectFunding);
-          // Receive-only waiting follows payment; it cannot pay, sign or broadcast.
-          funding.disabled = true; await inspectFunding();
-        });
+      const exposure = await e.exposeInvoice(acknowledge); current(); advanced.remove();
+      options.status("Signed terms accepted. Pay the invoice from your Lightning wallet", 2);
+      const open = node("a", "Open in your wallet", "swap-reverse-invoice-uri"); open.href = `lightning:${exposure.bolt11}`;
+      const copy = node("button", "Copy invoice", "swap-reverse-invoice-copy"); copy.type = "button";
+      copy.onclick = () => { void navigator.clipboard?.writeText(exposure.bolt11).then(() => { copy.textContent = "Copied"; }, () => {}); };
+      steps.append(node("h3", `Pay ${terms.economics.hold_invoice_sat} sat from any Lightning wallet`),
+        node("pre", exposure.bolt11, "swap-reverse-invoice"), open, copy,
+        node("p", `Pay it once, before ${new Date(exposure.expiresAt * 1000).toLocaleString()}. Your wallet may show the payment as pending until the provider locks the Bitcoin and this page claims it; that is expected.`, "swap-reverse-invoice-notes"));
+      afterPayment(async () => null);
+    });
+    const advanced = node("details", "", "swap-reverse-advanced");
+    advanced.append(node("summary", "Advanced: pay from your own LND node instead"));
+    const endpoint = input(advanced, "LND REST endpoint (direct browser access)", "swap-reverse-node-api", options.nodeApi);
+    const identity = input(advanced, "Pinned node compressed public key", "swap-reverse-node-identity"), credential = input(advanced, "Scoped macaroon (hex, this tab only)", "swap-reverse-macaroon"); credential.type = "password";
+    const routingFee = input(advanced, "Maximum routing fee (sat)", "swap-reverse-routing-fee", "1000"); routingFee.inputMode = "numeric";
+    advanced.append(node("p", options.network.name === "regtest" ? "Connect authorizes the disposable regtest node adapter to disclose its scoped credential to this tab. It can spend test Lightning funds. Nothing is paid until you approve the exact route." :
+      "Use an LND node with browser-trusted TLS, explicit CORS, and scoped permissions. The credential stays in this tab. No public remote node is supplied."));
+    const connect = button(advanced, options.network.name === "regtest" ? "Accept and connect regtest test node" : "Accept and connect configured Lightning node", "swap-reverse-connect");
+    steps.append(advanced);
+    act(connect, async () => {
+      acknowledge(); const nodeApi = validateMempoolApi(endpoint.value.trim(), options.network.name);
+      const feeValue = routingFee.value.trim(); if (!/^(0|[1-9][0-9]{0,15})$/.test(feeValue)) throw new Error("Invalid routing fee");
+      let macaroon = credential.value.trim(), key = identity.value.trim();
+      if (options.network.name === "regtest" && !macaroon && !key) {
+        const signal = AbortSignal.timeout(10000), response = await fetch(nodeApi + "/configuration", { signal, method: "GET", credentials: "omit", redirect: "error", cache: "no-store", referrerPolicy: "no-referrer" });
+        const data = parseStrictEventJson(await readBoundedChainText(response, signal, 16384), 16384) as Record<string, unknown>;
+        acknowledge(); if (Object.keys(data).sort().join() !== "macaroon,network_identity,node_identity" || canonicalize(data.network_identity) !== canonicalize(options.network) ||
+          typeof data.macaroon !== "string" || typeof data.node_identity !== "string") throw new Error("Node configuration mismatch");
+        macaroon = data.macaroon; key = data.node_identity;
+      }
+      acknowledge(); const payer = new BrowserHoldPayer({ endpoint: nodeApi, macaroon, nodeIdentity: key, network: options.network }); credential.value = "";
+      endpoint.disabled = identity.disabled = credential.disabled = routingFee.disabled = true; accept.disabled = true;
+      if (e.record.stage === "terms-ready" && !acceptedOnce) { await e.accept(acknowledge); current(); acceptedOnce = true; }
+      options.status("Signed terms accepted. Approve the exact route from your node", 2);
+      const approval = (): void => { acknowledge(); if (endpoint.value.trim() !== nodeApi || routingFee.value.trim() !== feeValue) throw new Error("Node selection changed"); };
+      const plan = await e.planPayment(payer, nodeApi, BigInt(feeValue), approval); approval();
+      steps.append(node("p", `Exact route: ${terms.economics.hold_invoice_sat} sat plus ${(BigInt(plan.feeMsat) / 1000n).toString()} sat (${plan.feeMsat} msat) routing fee. Maximum absolute HTLC expiry: block ${plan.limits.maxExpiryHeight}.`));
+      const pay = button(steps, "Pay this exact Lightning route once", "swap-reverse-pay");
+      act(pay, async () => {
+        const result = await e.pay(payer, plan, nodeApi, approval); current();
+        options.status(`Payment ${result.toLowerCase().replaceAll("_", " ")}. Checking signed funding evidence`, 3);
+        afterPayment(() => payer.status(plan.paymentHash, plan.invoiceBinding.amount_msat));
       });
     });
     return stopped;

@@ -4,6 +4,7 @@ declare global {
   interface Window {
     uiFixture: { requests: unknown[]; executed: number; executedProviders: string[]; disposed: number;
       fundingScript?: string; fundingSource?: { psbt: string } | { depositTxid: string };
+      reverseEvents?: string[]; reverseFunded?: boolean;
       wallet: typeof BrowserRecoveryWallet; releaseInfo?: () => void; infoPending: boolean };
   }
 }
@@ -56,6 +57,27 @@ export const quoteReverseProviders = async (_providers: unknown[], request: unkn
     prepared: {
       quote: { providerIdentity: id.repeat(64), payoutSat: 50_000n, holdInvoiceSat: BigInt(51_000 + Number(id)), successFeeSat: 500n,
         claimFeeReserveSat: 500n, fundingConfirmations: 2, refundDelayBlocks: 144, incomingHtlcExpiryDeltaBlocks: 288, expiresAt: Math.floor(Date.now() / 1000) + 3600 },
+      // A stand-in execution: enough for the execution UI to accept, show the invoice, and receive fixture funding.
+      prepareExecution: async () => {
+        window.uiFixture.reverseEvents = [];
+        const events = window.uiFixture.reverseEvents, record = { stage: "terms-ready" };
+        const expiresAt = Math.floor(Date.now() / 1000) + 1800;
+        return {
+          terms: { economics: { hold_invoice_sat: String(51_000 + Number(id)), nominal_payout_sat: "50000", success_fee_sat: "500", claim_fee_reserve_sat: "500" },
+            funding_confirmations: 2, refund_lock_height: 400, max_claim_fee_sat: "800", client_destination_script: "0014" + "11".repeat(20),
+            invoice_binding: { expires_at: expiresAt } },
+          recoveryFile: new Uint8Array([8, 8, 8]), record,
+          accept: async () => { events.push("accept"); },
+          exposeInvoice: async () => { events.push("expose"); record.stage = "payment-unknown"; return { bolt11: "lnbcrt510010n1fixture", expiresAt }; },
+          planPayment: async () => { events.push("plan"); throw new Error("fixture has no node"); },
+          receiveFunding: async () => {
+            events.push("receive");
+            if (!window.uiFixture.reverseFunded) { await new Promise((resolve) => setTimeout(resolve, 200)); throw new Error("no funding yet"); }
+            record.stage = "funded"; return new Uint8Array([9, 9, 9]);
+          },
+          dispose: () => { events.push("dispose"); },
+        };
+      },
       dispose: () => { window.uiFixture.disposed++; },
     },
   })) };

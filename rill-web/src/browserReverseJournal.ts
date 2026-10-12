@@ -6,6 +6,7 @@ import { isSupportedRecoveryNetwork } from "./recoveryInspection";
 import { checkReverseFirmQuoteRequest, type ReverseFirmQuoteRequest } from "./swap/wire";
 import { validateMempoolApi, type NetworkName } from "./swap/config";
 import { validateStoredHoldPlan, type BoundedHoldPlan } from "./swap/browserHoldPayer";
+import type { InvoiceBinding } from "./swap/bolt11";
 
 const DATABASE = "rillswap-reverse-execution";
 const STORES = ["sessions", "payments", "claims"] as const;
@@ -27,7 +28,14 @@ export interface ReverseIntentContext {
   readonly deadlineAt: number;
 }
 interface Snapshot { readonly stage: typeof SNAPSHOT_STAGES[number]; readonly ciphertextHex: string; readonly digest: string }
-interface PaymentIntent { readonly state: "submission-unknown"; readonly endpoint: string; readonly plan: BoundedHoldPlan }
+/**
+ * Either the browser dispatched one exact route through a pinned node, or it showed the
+ * invoice for an external wallet to pay. Both are UNKNOWN payments from that moment on.
+ */
+type PaymentIntent =
+  | { readonly state: "submission-unknown"; readonly endpoint: string; readonly plan: BoundedHoldPlan }
+  | { readonly state: "external-wallet"; readonly paymentHash: string; readonly invoiceBinding: InvoiceBinding };
+const BINDING_KEYS = ["bolt11_sha256", "payment_hash", "amount_msat", "payee_compressed_pubkey", "created_at", "expires_at", "min_final_cltv_delta"];
 export interface ReverseClaimIntent {
   readonly fundingTxid: string;
   readonly fundingVout: number;
@@ -107,14 +115,19 @@ function recordSnapshot(value: unknown): ReverseJournalRecord {
     const bytes = hexToBytes(s.ciphertextHex as string);
     const verified = snapshot(SNAPSHOT_STAGES[index]!, bytes); require(verified.digest === s.digest);
   }
-  if (length >= 2) {
+  if (length >= 2 && (o.payment as { state?: unknown } | null)?.state === "external-wallet") {
+    const payment = object(o.payment, ["state", "paymentHash", "invoiceBinding"]);
+    require(payment.paymentHash === context.request.payment_hash);
+    const binding = object(payment.invoiceBinding, BINDING_KEYS);
+    require(binding.payment_hash === context.request.payment_hash);
+  } else if (length >= 2) {
     const payment = object(o.payment, ["state", "endpoint", "plan"]), plan = object(payment.plan, ["nodeIdentity", "networkIdentity", "paymentHash", "invoiceBinding", "route", "feeMsat", "limits"]);
     validateStoredHoldPlan(plan as unknown as BoundedHoldPlan);
     require(payment.state === "submission-unknown" && typeof payment.endpoint === "string" &&
       validateMempoolApi(payment.endpoint, (context.networkIdentity as { name: NetworkName }).name) === payment.endpoint);
     require(typeof plan.nodeIdentity === "string" && KEY.test(plan.nodeIdentity) && plan.paymentHash === context.request.payment_hash &&
       canonicalize(plan.networkIdentity) === canonicalize(context.networkIdentity));
-    const binding = object(plan.invoiceBinding, ["bolt11_sha256", "payment_hash", "amount_msat", "payee_compressed_pubkey", "created_at", "expires_at", "min_final_cltv_delta"]);
+    const binding = object(plan.invoiceBinding, BINDING_KEYS);
     require(binding.payment_hash === context.request.payment_hash);
     const limits = object(plan.limits, ["feeLimitSat", "minFinalExpiryHeight", "maxExpiryHeight", "deadlineAt"]);
     require(typeof limits.deadlineAt === "number" && limits.deadlineAt <= context.deadlineAt);
@@ -232,10 +245,19 @@ export class BrowserReverseJournal {
     const next = seal({ ...old, stage: "payment-unknown", payment, snapshots: [...old.snapshots, snapshot("payment-unknown", ciphertext)] });
     return this.#write(old, next, { store: "payments", previous: null, entry: this.#paymentElection(next) });
   }
+  /** Invoice shown for an external wallet: the payment is UNKNOWN from now on, exactly like a dispatched route. */
+  async exposeInvoice(expected: ReverseJournalRecord, invoiceBinding: InvoiceBinding, ciphertext: Uint8Array): Promise<ReverseJournalRecord> {
+    const old = recordSnapshot(expected); require(old.stage === "terms-ready");
+    const payment = structuredClone({ state: "external-wallet" as const, paymentHash: old.context.request.payment_hash, invoiceBinding });
+    const next = seal({ ...old, stage: "payment-unknown", payment, snapshots: [...old.snapshots, snapshot("payment-unknown", ciphertext)] });
+    return this.#write(old, next, { store: "payments", previous: null, entry: this.#paymentElection(next) });
+  }
   #paymentElection(record: ReverseJournalRecord): Election {
     require(record.payment !== null);
     const payment = record.payment!;
-    return { id: digest({ network: record.context.networkIdentity, payer: payment.plan.nodeIdentity, paymentHash: record.context.request.payment_hash }),
+    // One payer per payment hash across tabs: a node identity, or the single external exposure.
+    const payer = payment.state === "external-wallet" ? "external-wallet" : payment.plan.nodeIdentity;
+    return { id: digest({ network: record.context.networkIdentity, payer, paymentHash: record.context.request.payment_hash }),
       owner: record.id, digest: digest(payment), state: "submission-unknown" };
   }
   async saveFunding(expected: ReverseJournalRecord, ciphertext: Uint8Array): Promise<ReverseJournalRecord> {

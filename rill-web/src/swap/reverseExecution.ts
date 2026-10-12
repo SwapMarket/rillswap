@@ -38,6 +38,12 @@ export interface PreparedReverseExecution {
   accept(acknowledgeRecovery: () => void): Promise<void>;
   planPayment(payer: BrowserHoldPayer, endpoint: string, feeLimitSat: bigint, approve: () => void): Promise<BoundedHoldPlan>;
   pay(payer: BrowserHoldPayer, plan: BoundedHoldPlan, endpoint: string, approve: () => void): Promise<HoldPaymentStatus>;
+  /**
+   * Default payment path: journal the exposure, then return the authenticated hold invoice
+   * for any Lightning wallet to pay. The wallet owns routing fees and HTLC expiry from here;
+   * the payment is UNKNOWN to this page until the provider's signed funding arrives.
+   */
+  exposeInvoice(approve: () => void): Promise<{ readonly bolt11: string; readonly expiresAt: number }>;
   receiveFunding(timeoutMs?: number): Promise<Uint8Array>;
   prepareClaim(chainApi: string, feeSat: bigint, approve: () => void): Promise<{ readonly claim: Omit<ConstructedReverseClaim, "transactionHex">; readonly recoveryFile: Uint8Array }>;
   exposeClaim(chainApi: string, broadcastApi: string, action: "download" | "broadcast", approve: () => void): Promise<{ readonly outcome: "exported" | "accepted" | "unknown"; readonly txid: string; readonly transactionHex?: string }>;
@@ -133,6 +139,12 @@ export async function prepareReverseExecution(session: Session, handshake: Hands
           record = await config.journal.beginPayment(record, payer.endpoint, plan, file);
           live(); approve();
         }, () => { live(); approve(); });
+      },
+      async exposeInvoice(approve: () => void): Promise<{ readonly bolt11: string; readonly expiresAt: number }> {
+        require(accepted && !paying && record.stage === "terms-ready"); live(); approve(); paying = true;
+        const file = await encrypt(document!); live(); approve();
+        record = await config.journal.exposeInvoice(record, terms.invoice_binding, file); live();
+        return { bolt11: holdInvoice, expiresAt: terms.invoice_binding.expires_at };
       },
       async receiveFunding(timeoutMs = 30000): Promise<Uint8Array> {
         current(); require(record.stage === "payment-unknown");

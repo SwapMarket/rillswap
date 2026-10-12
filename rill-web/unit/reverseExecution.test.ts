@@ -19,6 +19,24 @@ test("secrets precede firm request, durable authenticated terms precede acceptan
   expect(await e.pay(f.payer, plan, NODE, f.assertCurrent)).toBe("IN_FLIGHT");
   expect(f.events.slice(-2)).toEqual(["payment-unknown", "payment-post"]); await expect(e.pay(f.payer, plan, NODE, f.assertCurrent)).rejects.toThrow(); e.dispose();
 });
+test("the default path exposes the authenticated invoice after acceptance, journals it first, and excludes the node path", async () => {
+  const f = await executionFixture(), e = await f.prepare();
+  await expect(e.exposeInvoice(f.assertCurrent)).rejects.toThrow(); // acceptance first
+  await e.accept(f.assertCurrent);
+  const exposure = await e.exposeInvoice(f.assertCurrent);
+  expect(f.events.slice(-1)).toEqual(["payment-unknown"]); expect(f.record.payment).toMatchObject({ state: "external-wallet", paymentHash: f.terms.invoice_binding.payment_hash });
+  expect(exposure.bolt11.startsWith("lnbcrt")).toBe(true); expect(exposure.expiresAt).toBe(f.terms.invoice_binding.expires_at);
+  // The invoice is the one bound by the signed terms, so the wallet pays the hash whose preimage this page holds.
+  expect(f.record.payment?.state === "external-wallet" && f.record.payment.invoiceBinding).toEqual(f.terms.invoice_binding);
+  await expect(e.exposeInvoice(f.assertCurrent)).rejects.toThrow(); // shown once
+  await expect(e.planPayment(f.payer, NODE, 10n, f.assertCurrent)).rejects.toThrow(); expect(f.events).not.toContain("plan");
+  const file = await e.receiveFunding(); expect(f.events.slice(-1)).toEqual(["funded"]); expect(file.length).toBeGreaterThan(0); e.dispose();
+});
+test("a storage refusal while exposing the invoice keeps it private", async () => {
+  const f = await executionFixture(), e = await f.prepare(); await e.accept(f.assertCurrent); f.fail = "payment-unknown";
+  await expect(e.exposeInvoice(f.assertCurrent)).rejects.toThrow("storage unavailable");
+  await expect(e.receiveFunding()).rejects.toThrow(); e.dispose();
+});
 for (const stage of ["secrets-ready", "terms-ready"]) {
   test(`storage refusal at ${stage} prevents later external effects`, async () => {
     const f = await executionFixture(); f.fail = stage; await expect(f.prepare()).rejects.toThrow();
@@ -81,7 +99,7 @@ test("the journal and approval bind the actual immutable payer endpoint", async 
   await expect(e.planPayment(f.payer, "http://127.0.0.1:9000", 10n, f.assertCurrent)).rejects.toThrow(); expect(f.events).not.toContain("plan");
   const plan = await e.planPayment(f.payer, NODE, 10n, f.assertCurrent);
   await expect(e.pay(f.payer, plan, "http://127.0.0.1:9000", f.assertCurrent)).rejects.toThrow(); expect(f.events).not.toContain("payment-unknown");
-  await e.pay(f.payer, plan, NODE, f.assertCurrent); expect(f.record.payment?.endpoint).toBe(f.payer.endpoint); e.dispose();
+  await e.pay(f.payer, plan, NODE, f.assertCurrent); expect(f.record.payment?.state === "submission-unknown" && f.record.payment.endpoint).toBe(f.payer.endpoint); e.dispose();
 });
 test("payment election committed then rejected readback never renews dispatch authority", async () => {
   const f = await executionFixture(), e = await f.prepare(); await e.accept(f.assertCurrent);

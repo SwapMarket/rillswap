@@ -161,7 +161,8 @@ The card's **You send / You receive** selectors and the switch button choose
 the pair. `src/swapPairs.ts` is the single table mapping display assets to
 protocol profiles: BTC to LN (`btc-to-ln/v1`) is quotable and payable; LN to
 BTC (`ln-to-btc/v1`) supports indicative comparison followed by explicitly
-approved execution through a configured LND node; USDT and USDC are
+approved execution paid from any Lightning wallet (or, under Advanced, a
+configured LND node); USDT and USDC are
 listed in both directions as unavailable placeholders with no protocol
 profile. Unavailable pairs explain why and never connect anywhere.
 
@@ -413,8 +414,25 @@ identical-byte download, and broadcast, including existing mainnet contracts.
 New mainnet funding remains blocked. Reverse execution uses the separate
 explicit-action controller described below.
 
+By default the reverse execution exposes the provider's hold invoice
+(`exposeInvoice` in `swap/reverseExecution.ts`) for any Lightning wallet:
+the page journals an `external-wallet` payment intent (one per payment hash
+across tabs) and encrypts the terms snapshot before the invoice, its
+`lightning:` link, and a copy button appear. The invoice is the one bound by
+the signed terms, so the wallet pays the hash whose preimage the browser
+holds. From then on the wallet owns the routing fee and how long its payment
+may stay pending: the browser's maximum HTLC expiry bound applies only to the
+node path, while the provider still enforces the minimum earliest HTLC expiry
+before locking. The page then listens for the provider's signed
+`funding_binding` on its own (the funding button stays for a manual check
+after the invoice expiry). Expiry alone never ends a swap as unpaid: a paid
+invoice may still be held or funded. One invoice per swap; nothing is renewed.
+Settlement for an external payment is reported by the wallet; the page verifies
+the claim's confirmation and explains that the preimage it revealed settles the
+Lightning payment.
+
 `swap/browserHoldPayer.ts` implements exact-route LND planning
-and one-shot dispatch for reverse execution. Construction never
+and one-shot dispatch for the Advanced node path. Construction never
 connects. Planning independently checks the original signed invoice against
 LND, pins the node/network, validates one full-amount route under absolute
 expiry/fee limits, and sets its final MPP record. Dispatch refreshes node and
@@ -477,13 +495,14 @@ Fake-money encrypted backups and diagnostics remain under repository `tmp/`.
 Ordinary CI runs the unit, disconnected browser, and Pages regressions; the
 real-node check requires this explicit opt-in and isolated resources.
 
-The reverse execution UI connects only after signed terms are accepted and an
-explicit node-connect action. The browser-stored recovery key is the approval
+The reverse execution UI connects to a node only through the Advanced
+node-connect action; the default path connects nowhere but the relays and the
+configured chain API. The browser-stored recovery key is the approval
 for a swap: no key-backup upload or acknowledgment checkbox gates acceptance,
 claims, or preimage exposure; the consent text next to each action states what
 continuing authorizes, and per-swap backups stay downloadable above the steps.
 The payout address is only required, checked, and sent at continuation, not
-for an estimate. The route
+for an estimate. On the node path, the route
 and routing fee require a separate one-shot payment approval. The controller
 binds the approved transport to the payer's immutable normalized endpoint.
 Its initial private intent is encrypted before a firm request; native terms,

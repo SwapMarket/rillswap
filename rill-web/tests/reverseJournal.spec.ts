@@ -43,6 +43,35 @@ test("two tabs and recreated sessions for the same payer/payment hash elect only
   expect(await attempt(secondPage, outcomes[0] ? second : first)).toBeNull();
 });
 
+test("an invoice shown for an external wallet is one UNKNOWN payment per hash, restored as such, and funds like a dispatched route", async ({ page, context }) => {
+  await ready(page); const first = await prepare(page);
+  const secondPage = await context.newPage(); await ready(secondPage);
+  const second = await prepare(secondPage, { ...draft().context, sessionId: "d".repeat(64) });
+  const expose = (tab: Page, record: ReverseJournalRecord) => tab.evaluate(async ({ record, binding }) => {
+    const journal = await window.BrowserReverseJournal.open();
+    try { return await journal.exposeInvoice(record, binding, new TextEncoder().encode("age-encryption.org/v1\n" + "public-cipher-placeholder".repeat(4))); }
+    catch { return null; } finally { journal.close(); }
+  }, { record, binding: draft().plan.invoiceBinding });
+  const outcomes = await Promise.all([expose(page, first), expose(secondPage, second)]);
+  expect(outcomes.filter(Boolean)).toHaveLength(1);
+  const winner = outcomes.find(Boolean)!; expect(winner.stage).toBe("payment-unknown");
+  expect(winner.payment).toEqual({ state: "external-wallet", paymentHash: draft().context.request.payment_hash, invoiceBinding: draft().plan.invoiceBinding });
+  // A node dispatch for the same hash is a different payer and is not blocked by storage; the execution object refuses it instead.
+  await page.reload(); await page.waitForFunction(() => window.reverseJournalReady);
+  const restored = await page.evaluate(async ({ context, cipher }) => {
+    const journal = await window.BrowserReverseJournal.open();
+    try { const record = (await journal.get(context.networkIdentity, context.sessionId))!; return await journal.saveFunding(record, new TextEncoder().encode(cipher)); }
+    finally { journal.close(); }
+  }, { context: winner.context, cipher: "age-encryption.org/v1\n" + "public-cipher-placeholder".repeat(4) });
+  expect(restored.stage).toBe("funded"); expect(restored.payment).toEqual(winner.payment);
+  const wrongHash = await page.evaluate(async ({ record, binding }) => {
+    const journal = await window.BrowserReverseJournal.open();
+    try { await journal.exposeInvoice(record, { ...binding, payment_hash: "e".repeat(64) }, new TextEncoder().encode("age-encryption.org/v1\n" + "public-cipher-placeholder".repeat(4))); return false; }
+    catch { return true; } finally { journal.close(); }
+  }, { record: outcomes[0] ? second : first, binding: draft().plan.invoiceBinding });
+  expect(wrongHash).toBe(true);
+});
+
 test("funding preserves UNKNOWN and precedes the immutable fallback, whose exposure has one winner", async ({ page, context }) => {
   await ready(page); const prepared = await prepare(page);
   const claimReady = await page.evaluate(async ({ prepared, draft }) => {
