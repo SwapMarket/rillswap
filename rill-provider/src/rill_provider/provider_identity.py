@@ -30,7 +30,7 @@ from rill_core.wire.hashes import (
     tagged_hash,
 )
 from rill_core.wire.messages import HandshakeAccept, ProviderTerms
-from rill_core.wire.types import NetworkIdentity
+from rill_core.wire.types import EvmAssetIdentity, NetworkIdentity
 
 from rill_provider import _nip01_event as nip01
 
@@ -69,6 +69,10 @@ class AnnouncementTerms:
     created_at: int
     expires_at: int
     epoch_bound_sessions: bool = False
+    evm_assets: tuple[EvmAssetIdentity, ...] = ()  # RS-010 served assets
+
+
+EVM_ASSETS_EXTENSION = "org.rillswap/evm-assets/v1"
 
 
 def _xonly(public_keys: Context, scalar: bytes) -> str:
@@ -238,6 +242,8 @@ def _advertisement(identity: str, terms: AnnouncementTerms) -> dict[str, Any]:
         and len(set(terms.profiles)) == len(terms.profiles)
         and set(terms.profiles)
         <= {"btc-to-ln/v1", "ln-to-btc/v1", "erc20-to-ln/v1", "ln-to-erc20/v1"}
+        and len(terms.evm_assets) <= 16  # noqa: PLR2004
+        and all(type(asset) is EvmAssetIdentity for asset in terms.evm_assets)
         and 1 <= len(bands) <= 16  # noqa: PLR2004
         and all(0 < low <= high for low, high in bands)
         and terms.base_fee_sat >= 0
@@ -272,9 +278,16 @@ def _advertisement(identity: str, terms: AnnouncementTerms) -> dict[str, Any]:
         "revision": terms.created_at,
         "created_at": terms.created_at,
         "expires_at": terms.expires_at,
-        "extensions": (
-            {HANDSHAKE_FEATURES_EXTENSION: [EPOCH_SESSION_FEATURE]}
-            if terms.epoch_bound_sessions
-            else {}
-        ),
+        "extensions": {
+            **(
+                {HANDSHAKE_FEATURES_EXTENSION: [EPOCH_SESSION_FEATURE]}
+                if terms.epoch_bound_sessions
+                else {}
+            ),
+            **(
+                {EVM_ASSETS_EXTENSION: [a.model_dump(mode="json") for a in terms.evm_assets]}
+                if terms.evm_assets
+                else {}
+            ),
+        },
     }

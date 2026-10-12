@@ -258,6 +258,7 @@ class OperatorConfig(_Strict):
             quote=QuoteSchedule(**self.quote.model_dump()),
             profile=self.handshake.profile,  # type: ignore[arg-type]
             provider_destination_script=self.provider_destination_script,
+            evm_assets=self.evm.assets() if self.evm is not None else (),
         )
 
 

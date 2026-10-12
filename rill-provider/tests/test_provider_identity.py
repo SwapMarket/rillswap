@@ -358,3 +358,21 @@ def test_public_announcement_passes_the_web_verifier(tmp_path: Path, name: str) 
         network = _public(name).model_dump(mode="json")
         verified = _web_verify(bun, signer.build_announcement(terms), xonly, network)
     assert verified["addressD"] == identity.announcement_address(terms.network, terms.slot)
+
+
+def test_evm_assets_are_advertised_in_the_rs010_extension() -> None:
+    from evm_fixtures import evm_terms  # noqa: PLC0415
+    from rill_core.wire.types import EvmAssetIdentity  # noqa: PLC0415
+
+    manual, _event = _vectors()
+    asset = evm_terms("erc20-to-ln/v1").evm_asset
+    terms = _terms(manual["advertisement"], profiles=("erc20-to-ln/v1",), evm_assets=(asset,))
+    advertisement = identity._advertisement("bb" * 32, terms)  # noqa: SLF001
+    (advertised,) = advertisement["extensions"][identity.EVM_ASSETS_EXTENSION]
+    assert EvmAssetIdentity.model_validate(advertised) == asset
+    plain = identity._advertisement("bb" * 32, _terms(manual["advertisement"]))  # noqa: SLF001
+    assert identity.EVM_ASSETS_EXTENSION not in plain["extensions"]
+    with pytest.raises(ProviderIdentityError):
+        identity._advertisement(  # noqa: SLF001
+            "bb" * 32, _terms(manual["advertisement"], evm_assets=(asset.model_dump(),))
+        )

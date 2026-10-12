@@ -55,7 +55,7 @@ from rill_provider.settlement_policy import answer_client_request
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from rill_core.wire.types import NetworkIdentity, ProfileId
+    from rill_core.wire.types import EvmAssetIdentity, NetworkIdentity, ProfileId
     from rill_crypto import Context
 
     from rill_provider.evm_settlement import EvmSettlementEngine
@@ -112,6 +112,7 @@ class ServicePolicy:
     quote: QuoteSchedule = field(default_factory=QuoteSchedule)
     provider_destination_script: str | None = None  # required for firm offers
     profile: ProfileId = "btc-to-ln/v1"  # the one negotiated profile this service serves
+    evm_assets: tuple[EvmAssetIdentity, ...] = ()  # RS-010: announced served assets
     relay_proxy: str | None = None  # checked loopback CONNECT proxy, or direct
 
     def __post_init__(self) -> None:
@@ -610,6 +611,7 @@ class HandshakeService:
                 created_at=now,
                 expires_at=now + policy.announcement_lifetime,
                 epoch_bound_sessions=self._store.requires_epoch_bound_sessions,
+                evm_assets=policy.evm_assets,
             )
         )
         state.announced_keys, state.announced_at = epochs, now
