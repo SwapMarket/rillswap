@@ -50,9 +50,12 @@ def _ack(request: Envelope, contract: str, effect: AcceptSwap | BindFunding) -> 
 
 
 def offered_terms(offer_envelope: Envelope) -> ContractTerms:
-    """Return the contract terms of one of our recorded ``terms_offer`` envelopes."""
+    """Return the Bitcoin contract terms of one of our recorded ``terms_offer`` envelopes."""
     offer = parse_model_json(TermsOfferPayload, canonicalize(offer_envelope.payload))
-    return offer.terms.contract_terms
+    terms = offer.terms.contract_terms
+    if not isinstance(terms, ContractTerms):
+        raise TypeError("recorded terms offer is not a Bitcoin profile")
+    return terms
 
 
 def answer_client_request(

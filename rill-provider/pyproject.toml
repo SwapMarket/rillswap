@@ -19,6 +19,7 @@ dependencies = [
     "pycryptodomex==3.23.0",
     "aiohttp==3.14.3",
     "pydantic==2.13.5",
+    "web3==7.16.0",
 ]
 
 [project.scripts]
@@ -35,6 +36,7 @@ markers = [
     "lnd: opt-in isolated Core and LND diagnostics including a funded regtest channel",
     "native_crypto: opt-in real native signature check against pinned rill-crypto",
     "web_nip59_interop: opt-in disposable web-producer to native-provider interoperability",
+  "anvil: opt-in EVM HTLC round trip against a local Anvil (RILLSWAP_RUN_ANVIL=1)",
 ]
 
 [tool.ruff]

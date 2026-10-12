@@ -79,6 +79,7 @@ from rill_core.wire.hashes import (
     unsigned_envelope_hash,
 )
 from rill_core.wire.messages import (
+    ContractTerms,
     Envelope,
     FundingBinding,
     HandshakeAccept,
@@ -112,7 +113,6 @@ if TYPE_CHECKING:
 
     from rill_core.settlement.taproot import TaprootKeyOperations
     from rill_core.wire.envelope_authentication import EnvelopeSchnorrVerifier
-    from rill_core.wire.messages import ContractTerms
     from rill_crypto import Context
     from rill_crypto.binding import MusigAttempt
 
@@ -7807,10 +7807,13 @@ def _release_terminal(  # noqa: PLR0913 - explicit terminal evidence
 
 
 def _offer_terms(offer: bytes) -> ContractTerms:
-    """Return the contract terms of one retained canonical terms offer."""
-    return parse_model_json(
+    """Return the Bitcoin contract terms of one retained canonical terms offer."""
+    terms = parse_model_json(
         TermsOfferPayload, canonicalize(_canonical_envelope(offer).payload)
     ).terms.contract_terms
+    if not isinstance(terms, ContractTerms):
+        raise TypeError("retained terms offer is not a Bitcoin profile")
+    return terms
 
 
 def _cooperative_height_cutoff(terms: ContractTerms) -> int:

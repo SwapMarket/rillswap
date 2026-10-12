@@ -727,7 +727,7 @@ class HandshakeAcceptPayload(StrictModel):
 
 
 def require_supported_contract_features(
-    terms: ContractTerms, initiation: HandshakeInit, acceptance: HandshakeAccept
+    terms: AnyContractTerms, initiation: HandshakeInit, acceptance: HandshakeAccept
 ) -> None:
     """Bind supported signed contract features to both handshake commitments.
 
