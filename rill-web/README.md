@@ -594,7 +594,9 @@ Keep the original encrypted backups. Chromium fault/concurrency tests cover
 the journal, not a universal browser durability guarantee.
 
 Review the fixed signed destination and prefilled total fee, confirm ownership,
-then click **Approve and prepare refund**. Preparation reopens/authenticates the
+then click **Approve and prepare refund**. The button is the approval: a consent
+note states what it confirms, and no checkbox gates it (the same holds for the
+Lightning to Bitcoin claim buttons). Preparation reopens/authenticates the
 file and freshly checks mature, confirmed, unspent funding before signing.
 Saved plans are loaded and reauthorized, never re-signed or replaced. Fee and
 destination changes cannot replace an existing intent. No keys or plaintext

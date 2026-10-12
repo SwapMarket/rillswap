@@ -24,8 +24,8 @@ async function api(page: Page) {
 }
 async function mountedClaim(page: Page) {
   await ready(page); const transport = await api(page); await page.evaluate((data) => window.mountReverseRecovery(data), fixture());
-  await page.locator("#swap-reverse-recovery-fee").fill("100"); await page.locator("#swap-reverse-recovery-approved").check();
-  await page.locator("#swap-reverse-recovery-prepare").click(); await expect(page.locator("#swap-reverse-recovery-claim-saved")).toBeEnabled(); return transport;
+  await page.locator("#swap-reverse-recovery-fee").fill("100");
+  await page.locator("#swap-reverse-recovery-prepare").click(); await expect(page.locator("#swap-reverse-recovery-claim-status")).toContainText("backup for claim "); return transport;
 }
 const prepare = (page: Page) => page.evaluate(async ({ data, api }) => Array.from(await window.reverseRecovery.prepareRecoveredReverseClaim(new TextEncoder().encode(data.plaintext), data.identity, data.expectedNetwork, api, 100n, () => {})), { data: fixture(), api: BASE });
 
@@ -109,24 +109,26 @@ test("concurrent different identities cannot choose a fallback encrypted apart f
   expect(result.keys.filter(Boolean)).toHaveLength(1); expect(transport.posts).toBe(0);
 });
 
-test("recovery preparation alone cannot expose a claim without separate exact-backup acknowledgment", async ({ page }) => {
-  const transport = await mountedClaim(page);
+test("nothing can be exposed before a claim is prepared, and preparing is the only approval needed afterward", async ({ page }) => {
+  await ready(page); const transport = await api(page); await page.evaluate((data) => window.mountReverseRecovery(data), fixture());
+  await expect(page.locator("#swap-reverse-recovery-approved")).toHaveCount(0); await expect(page.locator("#swap-reverse-recovery-claim-saved")).toHaveCount(0);
+  await page.locator("#swap-reverse-recovery-fee").fill("100");
   await page.locator("#swap-reverse-recovery-broadcast").click(); await expect(page.locator("#swap-reverse-recovery-message")).toContainText("blocked");
   expect(transport.posts).toBe(0); await expect(page.locator("#swap-reverse-recovery-broadcast")).toBeEnabled();
-  await page.locator("#swap-reverse-recovery-claim-saved").check(); await page.locator("#swap-reverse-recovery-export").click();
+  await page.locator("#swap-reverse-recovery-prepare").click(); await expect(page.locator("#swap-reverse-recovery-claim-status")).toContainText("backup for claim ");
+  await page.locator("#swap-reverse-recovery-export").click();
   await expect(page.locator('a[download="rillswap-recovered-claim.hex"]')).toBeVisible(); await expect(page.locator("#swap-reverse-recovery-broadcast")).toBeDisabled();
   await page.locator("#swap-reverse-recovery-export").click(); await expect(page.locator('a[download="rillswap-recovered-claim.hex"]')).toHaveCount(2); expect(transport.posts).toBe(0);
 });
 
-for (const change of ["acknowledgment", "fee", "api", "file", "key", "network"]) {
+for (const change of ["fee", "api", "file", "key", "network"]) {
   test(`changing ${change} during deferred recovery exposure prevents private export and POST`, async ({ page }) => {
-    const transport = await mountedClaim(page); await page.locator("#swap-reverse-recovery-claim-saved").check();
+    const transport = await mountedClaim(page);
     let arrived!: () => void, release!: () => void;
     const pending = new Promise<void>((resolve) => { arrived = resolve; }), held = new Promise<void>((resolve) => { release = resolve; });
     await page.route(BASE + "/tx/*/outspend/*", async (route) => { arrived(); await held; await route.fulfill({ body: '{"spent":false}', headers: { "Access-Control-Allow-Origin": "*" } }); });
     await page.locator("#swap-reverse-recovery-export").click(); await pending;
-    if (change === "acknowledgment") await page.locator("#swap-reverse-recovery-claim-saved").uncheck();
-    else if (change === "fee") await page.locator("#swap-reverse-recovery-fee").fill("101");
+    if (change === "fee") await page.locator("#swap-reverse-recovery-fee").fill("101");
     else if (change === "api") await page.evaluate(() => { window.reverseUi.api = "http://127.0.0.1:18091/api"; });
     else await page.evaluate(() => { window.reverseUi.current = false; });
     release(); await expect(page.locator("#swap-reverse-recovery-message")).toContainText("blocked");
@@ -134,12 +136,12 @@ for (const change of ["acknowledgment", "fee", "api", "file", "key", "network"])
   });
 }
 test("ambiguous recovery broadcast stays visibly disabled while exact manual export remains available", async ({ page }) => {
-  const transport = await mountedClaim(page); await page.locator("#swap-reverse-recovery-claim-saved").check();
+  const transport = await mountedClaim(page);
   await page.locator("#swap-reverse-recovery-broadcast").click(); await expect(page.locator("#swap-reverse-recovery-message")).toContainText("Claim unknown:");
   await expect(page.locator("#swap-reverse-recovery-broadcast")).toBeDisabled(); expect(transport.posts).toBe(1);
   await page.locator("#swap-reverse-recovery-export").click(); await expect(page.locator('a[download="rillswap-recovered-claim.hex"]')).toBeVisible(); expect(transport.posts).toBe(1);
 });
-test("accepted recovery broadcast also stays disabled and exact claim acknowledgment cannot name another transaction", async ({ page }) => {
+test("accepted recovery broadcast also stays disabled and the saved claim cannot name another transaction", async ({ page }) => {
   const transport = await mountedClaim(page);
   const metadata = await page.evaluate(async (data) => {
     const bytes = new TextEncoder().encode(data.plaintext); let refused = false;
@@ -147,7 +149,7 @@ test("accepted recovery broadcast also stays disabled and exact claim acknowledg
     return { refused, saved: await window.reverseRecovery.loadBrowserReverseRecovery(bytes, data.identity, data.expectedNetwork) };
   }, fixture()); expect(metadata.refused).toBe(true); expect(metadata.saved.stage).toBe("claim-ready"); expect(transport.posts).toBe(0);
   transport.acceptedTxid = metadata.saved.claimTxid!;
-  await page.locator("#swap-reverse-recovery-claim-saved").check(); await page.locator("#swap-reverse-recovery-broadcast").click();
+  await page.locator("#swap-reverse-recovery-broadcast").click();
   await expect(page.locator("#swap-reverse-recovery-message")).toContainText("Claim accepted:"); await expect(page.locator("#swap-reverse-recovery-broadcast")).toBeDisabled(); expect(transport.posts).toBe(1);
 });
 
@@ -160,8 +162,8 @@ for (const change of ["file", "key", "network"]) {
     await page.locator("#swap-recovery summary").first().click(); await page.locator("#swap-recovery-file").setInputFiles(payload(encrypted, "original.age"));
     await page.locator("#swap-recovery-key-file").setInputFiles(payload(key.file, "original.key")); await page.locator("#swap-recovery-inspect").click();
     await expect(page.locator("#swap-recovery-result h3")).toHaveText("Lightning to Bitcoin recovery verified");
-    await page.locator("#swap-reverse-recovery-fee").fill("100"); await page.locator("#swap-reverse-recovery-approved").check();
-    await page.locator("#swap-reverse-recovery-prepare").click(); await expect(page.locator("#swap-reverse-recovery-claim-saved")).toBeEnabled(); await page.locator("#swap-reverse-recovery-claim-saved").check();
+    await page.locator("#swap-reverse-recovery-fee").fill("100");
+    await page.locator("#swap-reverse-recovery-prepare").click(); await expect(page.locator("#swap-reverse-recovery-claim-status")).toContainText("backup for claim ");
     let arrived!: () => void, release!: () => void, done!: () => void;
     const pending = new Promise<void>((resolve) => { arrived = resolve; }), held = new Promise<void>((resolve) => { release = resolve; }), completed = new Promise<void>((resolve) => { done = resolve; });
     let observations = 0;

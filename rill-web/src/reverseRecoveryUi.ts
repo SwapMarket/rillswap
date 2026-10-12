@@ -40,34 +40,34 @@ export function reverseRecoveryControls(root: HTMLElement, options: {
       if (options.chainApi() !== api) throw new Error("API changed"); message.textContent = `Trusted API: ${observation.confirmations} confirmations at block ${observation.tipHeight}. Required claim margin: ${report.claimConfirmationBlocks} blocks before first provider refund block ${report.refundLockHeight + 1}. This is not independent chain proof.`; });
     const feeLabel = node("label", "Claim network fee (sat)"), fee = node("input", "", "swap-reverse-recovery-fee"); fee.type = "number"; fee.min = "0";
     fee.value = report.fallbackFeeSat ?? String(BigInt(report.maxClaimFeeSat) < BigInt(report.claimFeeReserveSat) ? BigInt(report.maxClaimFeeSat) : BigInt(report.claimFeeReserveSat)); feeLabel.htmlFor = fee.id;
-    const approved = node("input", "", "swap-reverse-recovery-approved"); approved.type = "checkbox";
-    const label = node("label", "I recognize this file, control the fixed payout address and approve this fee. I saved the funded backup. Prior exposure may be UNKNOWN; exporting or broadcasting reveals my preimage."); label.htmlFor = approved.id;
-    controls.append(feeLabel, fee, approved, label);
+    // Each button is its own approval; the consent notes state what it approves. No checkbox gates them.
+    const consent = node("p", "By preparing the claim you confirm you recognize this file, control the fixed payout address, approve this fee, and keep the funded backup. Prior exposure may be UNKNOWN; exporting or broadcasting reveals your preimage.", "swap-reverse-recovery-consent");
+    consent.className = "swap-consent";
+    controls.append(feeLabel, fee, consent);
     const prepare = button(controls, "Approve and prepare recovery claim", "swap-reverse-recovery-prepare");
-    const claimSaved = node("input", "", "swap-reverse-recovery-claim-saved"); claimSaved.type = "checkbox"; claimSaved.disabled = true;
-    const claimSavedLabel = node("label", "First prepare a claim or inspect local execution state to obtain its exact encrypted backup."); claimSavedLabel.htmlFor = claimSaved.id;
-    controls.append(claimSaved, claimSavedLabel); let savedClaimTxid = "";
+    const claimStatus = node("p", "First prepare a claim or inspect local execution state to obtain its exact encrypted backup.", "swap-reverse-recovery-claim-status");
+    claimStatus.className = "swap-consent";
+    controls.append(claimStatus); let savedClaimTxid = "";
     confirmSaved = (saved) => {
-      claimSaved.checked = false; savedClaimTxid = saved.claimTxid ?? ""; claimSaved.disabled = !savedClaimTxid;
+      savedClaimTxid = saved.claimTxid ?? "";
       if (saved.claimFeeSat !== null) fee.value = saved.claimFeeSat;
-      claimSavedLabel.textContent = savedClaimTxid ? `I saved the exact encrypted backup for claim ${savedClaimTxid} and approve revealing its preimage by export or broadcast.` : "No exact claim backup is prepared yet.";
+      claimStatus.textContent = savedClaimTxid ? `The exact encrypted backup for claim ${savedClaimTxid} is in your backups above. Exporting or broadcasting reveals its preimage; keep that backup.` : "No exact claim backup is prepared yet.";
       if (saved.stage === "claim-unknown" || saved.stage === "accepted") { broadcast.dataset.locked = "true"; broadcast.disabled = true; }
     };
-    fee.oninput = approved.onchange = () => { claimSaved.checked = false; };
     const capturedApproval = (): { feeSat: bigint; api: string; broadcastApi: string; check: () => void } => {
       const value = fee.value, api = options.chainApi(), broadcastApi = options.broadcastApi();
       if (!/^(0|[1-9][0-9]{0,15})$/.test(value)) throw new Error("Invalid fee");
-      const check = (): void => { current(); if (!approved.checked || fee.value !== value || options.chainApi() !== api || options.broadcastApi() !== broadcastApi) throw new Error("Approval changed"); };
+      const check = (): void => { current(); if (fee.value !== value || options.chainApi() !== api || options.broadcastApi() !== broadcastApi) throw new Error("Approval changed"); };
       check(); return { feeSat: BigInt(value), api, broadcastApi, check };
     };
     act(prepare, async () => { const approval = capturedApproval();
       const file = await prepareRecoveredReverseClaim(document, options.identity, network, approval.api, approval.feeSat, approval.check); approval.check();
       download(files, file, "rillswap-reverse-claim.age");
       const saved = await loadBrowserReverseRecovery(document, options.identity, network); approval.check(); confirmSaved(saved);
-      message.textContent = "Exact claim bytes are saved, not yet exposed. Save the claim backup and acknowledge it separately before exporting or broadcasting."; });
+      message.textContent = "Exact claim bytes are saved, not yet exposed. Keep the claim backup; export or broadcast it when ready."; });
     const exportClaim = button(controls, "Approve and download exact saved claim", "swap-reverse-recovery-export"), broadcast = button(controls, "Approve and broadcast saved claim once", "swap-reverse-recovery-broadcast");
     const expose = async (action: "download" | "broadcast"): Promise<void> => { const approval = capturedApproval(), claimTxid = savedClaimTxid;
-      const exposureApproved = (): void => { approval.check(); if (!claimSaved.checked || !claimTxid || savedClaimTxid !== claimTxid) throw new Error("Exact claim backup not acknowledged"); };
+      const exposureApproved = (): void => { approval.check(); if (!claimTxid || savedClaimTxid !== claimTxid) throw new Error("No exact claim backup is prepared"); };
       exposureApproved(); broadcast.dataset.locked = "true"; broadcast.disabled = true;
       const result = await exposeRecoveredReverseClaim(document, options.identity, network, approval.api, approval.broadcastApi, approval.feeSat, claimTxid, action, exposureApproved); exposureApproved();
       if (result.transactionHex) download(files, new TextEncoder().encode(result.transactionHex), "rillswap-recovered-claim.hex");

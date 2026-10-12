@@ -77,16 +77,16 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
   const fee = element("input", "", "swap-refund-fee"); fee.type = "number"; fee.min = "0"; fee.step = "1";
   feeLabel.htmlFor = fee.id;
   const amount = element("p", "", "swap-refund-amount");
-  const approval = element("input", "", "swap-refund-approve"); approval.type = "checkbox";
-  const approvalLabel = element("label", "I recognize this recovery file and control the refund address above. I approve the displayed destination and fee.");
-  approvalLabel.htmlFor = approval.id;
-  const prepare = element("button", "Approve and prepare refund", "swap-refund-prepare"); prepare.type = "button"; prepare.disabled = true;
+  // Preparing is the approval; no checkbox gates it. The consent note states what the button approves.
+  const consent = element("p", "By preparing the refund you confirm you recognize this recovery file and control the refund address above, and approve the displayed destination and fee.", "swap-refund-consent");
+  consent.className = "swap-consent";
+  const prepare = element("button", "Approve and prepare refund", "swap-refund-prepare"); prepare.type = "button";
   const download = element("button", "Download signed transaction", "swap-refund-download"); download.type = "button"; download.hidden = true;
   const broadcast = element("button", "Broadcast refund", "swap-refund-broadcast"); broadcast.type = "button"; broadcast.hidden = true;
   const refundResult = element("section", "", "swap-refund-result"); refundResult.setAttribute("aria-live", "polite");
   refundControls.append(element("h3", "Refund to the signed destination"), destination, feeLabel, fee, amount,
     element("p", "An imported file cannot prove ownership of this address. Verify it in your wallet before approving. The signed destination cannot be changed."),
-    approval, approvalLabel, prepare, download, broadcast, refundResult);
+    consent, prepare, download, broadcast, refundResult);
   fundingControls.append(refundControls);
   details.append(olderKey, inspect, result, fundingControls);
   let busy = false;
@@ -94,7 +94,7 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
   let inspected: RecoveryInspection | undefined;
   let pendingInvalidated = false;
   let prepared: RefundJournalRecord | undefined;
-  const invalidateRefund = (): void => { approval.checked = false; prepare.disabled = true; prepared = undefined; download.hidden = broadcast.hidden = true; refundResult.replaceChildren(); };
+  const invalidateRefund = (): void => { prepared = undefined; download.hidden = broadcast.hidden = true; refundResult.replaceChildren(); };
 
   const clear = (): void => {
     disposeReverse?.(); disposeReverse = undefined;
@@ -173,7 +173,6 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
   };
   revision.onchange = () => { pendingInvalidated = true; fundingResult.replaceChildren(); invalidateRefund(); updateAmount(); };
   fee.oninput = () => { pendingInvalidated = true; invalidateRefund(); updateAmount(); };
-  approval.onchange = () => { if (!approval.checked) pendingInvalidated = true; prepare.disabled = !approval.checked || busy; };
   check.onclick = () => {
     if (busy || !inspected) return;
     const selectedFile = file.files?.[0], selectedKey = keyFile.files?.[0];
@@ -213,7 +212,7 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
     })();
   };
   const refundAction = (action: "prepare" | "export" | "broadcast"): void => {
-    if (busy || !inspected || !approval.checked || (action !== "prepare" && !prepared)) return;
+    if (busy || !inspected || (action !== "prepare" && !prepared)) return;
     const selectedFile = file.files?.[0], selectedKey = keyFile.files?.[0], selectedRevision = revision.value, feeText = fee.value;
     const selected = options.selectedNetwork(), network = structuredClone(selected.identity) as { name: NetworkName; genesis_hash: string };
     const binding = inspected.fundingHistory.find((item) => String(item.binding_revision) === selectedRevision);
@@ -224,10 +223,10 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
     catch { refundResult.replaceChildren(element("p", "Check your API settings before approving a refund.")); return; }
     const saved = prepared;
     pendingInvalidated = false; busy = true;
-    file.disabled = keyFile.disabled = inspect.disabled = check.disabled = revision.disabled = fee.disabled = approval.disabled = prepare.disabled = download.disabled = broadcast.disabled = true;
+    file.disabled = keyFile.disabled = inspect.disabled = check.disabled = revision.disabled = fee.disabled = prepare.disabled = download.disabled = broadcast.disabled = true;
     refundResult.replaceChildren(element("p", action === "prepare" ? "Checking funding and preparing your approved refund..." : "Rechecking the approved refund..."));
     const assertCurrent = (): void => {
-      if (pendingInvalidated || !approval.checked || file.files?.[0] !== selectedFile || keyFile.files?.[0] !== selectedKey || revision.value !== selectedRevision || fee.value !== feeText ||
+      if (pendingInvalidated || file.files?.[0] !== selectedFile || keyFile.files?.[0] !== selectedKey || revision.value !== selectedRevision || fee.value !== feeText ||
         options.selectedNetwork().name !== selected.name || options.selectedChainApi() !== api || options.selectedBroadcastApi() !== broadcastApi) throw new Error("Approval changed");
     };
     void (async () => {
@@ -266,8 +265,7 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
         refundResult.replaceChildren(element("p", "Refund action could not be completed. No automatic retry or replacement will occur. A saved intent may be prepared, unknown, or accepted; approve and load it again to inspect its state."));
       } finally {
         plaintext?.fill(0); busy = false;
-        file.disabled = keyFile.disabled = inspect.disabled = check.disabled = revision.disabled = fee.disabled = approval.disabled = download.disabled = broadcast.disabled = false;
-        prepare.disabled = !approval.checked;
+        file.disabled = keyFile.disabled = inspect.disabled = check.disabled = revision.disabled = fee.disabled = prepare.disabled = download.disabled = broadcast.disabled = false;
       }
     })();
   };

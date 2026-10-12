@@ -105,14 +105,15 @@ test("a coherent immature observation is a waiting state, not a refund authoriza
   await expect(page.locator("#swap-recovery-funding-result")).not.toContainText("refund lock has passed");
 });
 
-test("refund signing requires destination approval, export records exposure, and identical saved bytes remain recoverable", async ({ page }, testInfo) => {
+test("preparing is the destination approval, export records exposure, and identical saved bytes remain recoverable", async ({ page }, testInfo) => {
   const item = corpus()[0]!, calls = await chainApi(page, item);
   await page.goto("http://127.0.0.1:18765/test-only/swap.html"); await importRecord(page, item);
   await expect(page.locator("#swap-refund-destination")).toContainText("bcrt1");
-  await expect(page.locator("#swap-refund-prepare")).toBeDisabled();
+  await expect(page.locator("#swap-refund-approve")).toHaveCount(0);
+  await expect(page.locator("#swap-refund-consent")).toContainText("By preparing the refund you confirm");
   await expect(page.locator("#swap-refund-download")).not.toBeVisible();
   expect(calls).toEqual([]);
-  await page.locator("#swap-refund-approve").check(); await page.locator("#swap-refund-prepare").click();
+  await page.locator("#swap-refund-prepare").click();
   await expect(page.locator("#swap-refund-result h3")).toHaveText("Refund prepared and saved");
   await expect(page.locator("#swap-refund-broadcast")).toBeVisible();
   const download = page.waitForEvent("download"); await page.locator("#swap-refund-download").click();
@@ -144,7 +145,7 @@ test("a broadcast sends only the saved signed transaction after durable UNKNOWN 
     await route.fulfill({ status: 200, body: txid, headers: { "Access-Control-Allow-Origin": "http://127.0.0.1:18765" } });
   });
   await page.goto("http://127.0.0.1:18765/test-only/swap.html"); await importRecord(page, item);
-  await page.locator("#swap-refund-approve").check(); await page.locator("#swap-refund-prepare").click();
+  await page.locator("#swap-refund-prepare").click();
   await expect(page.locator("#swap-refund-result h3")).toHaveText("Refund prepared and saved");
   await page.locator("#swap-refund-broadcast").click();
   await expect(page.locator("#swap-refund-result h3")).toHaveText("Refund accepted by the API");
@@ -157,11 +158,11 @@ test("a broadcast sends only the saved signed transaction after durable UNKNOWN 
 test("changing settings after approval invalidates prepared exposure controls without broadcasting", async ({ page }) => {
   const item = corpus()[0]!; await chainApi(page, item);
   await page.goto("http://127.0.0.1:18765/test-only/swap.html"); await importRecord(page, item);
-  await page.locator("#swap-refund-approve").check(); await page.locator("#swap-refund-prepare").click();
+  await page.locator("#swap-refund-prepare").click();
   await expect(page.locator("#swap-refund-result h3")).toHaveText("Refund prepared and saved");
   await page.locator("#swap-settings-toggle").click(); await page.locator("#swap-broadcast-api").fill("https://mempool.space/api");
   await page.locator("#swap-settings-close").click();
-  await expect(page.locator("#swap-refund-approve")).not.toBeChecked(); await expect(page.locator("#swap-refund-broadcast")).not.toBeVisible();
+  await expect(page.locator("#swap-refund-broadcast")).not.toBeVisible();
   await expect(page.locator("#swap-refund-download")).not.toBeVisible();
 });
 
@@ -169,7 +170,7 @@ test("approval invalidated after export commitment but before its return prevent
   const item = corpus()[0]!; await chainApi(page, item); let downloads = 0;
   page.on("download", () => downloads++);
   await page.goto("http://127.0.0.1:18765/test-only/swap.html"); await importRecord(page, item);
-  await page.locator("#swap-refund-approve").check(); await page.locator("#swap-refund-prepare").click();
+  await page.locator("#swap-refund-prepare").click();
   await expect(page.locator("#swap-refund-result h3")).toHaveText("Refund prepared and saved");
   await page.evaluate(() => {
     const original = window.uiRefundJournal.prototype.beginExposure;

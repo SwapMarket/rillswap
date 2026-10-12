@@ -78,7 +78,6 @@ test("real unilateral browser reverse swap pays once, claims nominal payout and 
   await expect(page.locator("#swap-recovery-result h3")).toHaveText("Lightning to Bitcoin recovery verified");
   await page.locator("#swap-reverse-recovery-local").click(); await expect(page.locator("#swap-reverse-recovery-message")).toContainText("Local state: accepted");
   await expect(page.locator("#swap-reverse-recovery-broadcast")).toBeDisabled();
-  await page.locator("#swap-reverse-recovery-approved").check(); await page.locator("#swap-reverse-recovery-claim-saved").check();
   await page.locator("#swap-reverse-recovery-export").click();
   const savedClaim = page.locator('a[download="rillswap-recovered-claim.hex"]'); await expect(savedClaim).toBeVisible();
   const exportedPath = await download(page, 'a[download="rillswap-recovered-claim.hex"]', "recovered-claim.hex");
