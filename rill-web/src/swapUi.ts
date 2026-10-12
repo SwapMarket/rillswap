@@ -16,7 +16,7 @@ import { mempoolApiForNetwork, relaysForNetwork, validateMempoolApi, validateRel
 import { readChainTip } from "./swap/chainTip";
 import { BrowserRecoveryWallet } from "./browserRecoveryWallet";
 import { type DirectoryEntry, discoverDirectory, discoverMarketplace, eligibleProviders, indicativeFee, ineligibilityReason, quoteProviders, quoteReverseProviders,
-  type LocatedQuote, MAX_QUOTE_PROVIDERS } from "./swap/marketplace";
+  estimateFromDirectory, providerLimits, type LocatedQuote, MAX_QUOTE_PROVIDERS } from "./swap/marketplace";
 import type { PreparedReverseQuote, ReverseSwapRequest } from "./swap/reverseSwap";
 import { invoiceBinding } from "./swap/bolt11";
 import { quoteSelectionLabel, stoppedSwapAdvice } from "./swapUiStatus";
@@ -175,7 +175,9 @@ function mount(root: HTMLElement): void {
       providersList.append(article);
     }
   };
-  loadProviders.onclick = () => {
+  let directoryLoaded = false;
+  /** Explicit directory load; the estimate line and the Providers dialog share it. */
+  const loadDirectory = (): void => {
     const name = network.value as NetworkName;
     let urls: readonly string[];
     try { urls = validateRelays(relay.value.trim(), name); } catch (error) { providersStatus.textContent = (error as Error).message; return; }
@@ -183,13 +185,15 @@ function mount(root: HTMLElement): void {
     providersStatus.textContent = "Checking signed announcements on your relays...";
     void discoverDirectory(urls, NETWORKS[name]).then((directory) => {
       directoryEntries = directory.entries;
+      directoryLoaded = true;
       renderDirectory();
       providersStatus.textContent = directory.entries.length === 0 ? "No provider announced on these relays." :
         `${directory.entries.length} announced provider${directory.entries.length === 1 ? "" : "s"}.` +
         (directory.warnings.length ? ` Some relays were incomplete: ${directory.warnings.join("; ")}.` : "");
-    }, (error: Error) => { providersStatus.textContent = error.message; }).finally(() => { loadProviders.disabled = false; });
+    }, (error: Error) => { providersStatus.textContent = error.message; }).finally(() => { loadProviders.disabled = false; updateEstimate(); });
   };
-  identity.oninput = showProviderChoice;
+  loadProviders.onclick = loadDirectory;
+  identity.oninput = () => { showProviderChoice(); updateEstimate(); };
   renderDirectory();
   showProviderChoice();
   const pair = node("div", "", "swap-pair");
@@ -224,7 +228,35 @@ function mount(root: HTMLElement): void {
   const receiveAmount = field(receiveBox, "swap-receive-amount", "Amount to receive (sat)");
   receiveAmount.inputMode = "numeric";
   receiveAmount.placeholder = "50000";
-  form.append(invoiceBox, receiveBox);
+  // Live estimate from announced fees, so Swap can proceed without a separate review when the signed quote is no worse.
+  const estimate = node("p", "", "swap-estimate");
+  estimate.setAttribute("role", "status");
+  const estimateLoad = node("button", "Show fees", "swap-estimate-load");
+  estimateLoad.type = "button";
+  estimateLoad.onclick = () => { estimateLoad.disabled = true; loadDirectory(); };
+  let estimatedTotal: bigint | null = null;
+  const updateEstimate = (): void => {
+    estimatedTotal = null;
+    estimateLoad.hidden = directoryLoaded;
+    estimateLoad.disabled = false;
+    const route = routeFor(fromAsset.value, toAsset.value);
+    if (route.profile === null || route.unavailable) { estimate.textContent = ""; return; }
+    let amount: bigint;
+    try {
+      amount = route.profile === "btc-to-ln/v1"
+        ? BigInt(invoiceBinding(invoice.value.trim(), network.value as NetworkName).amount_msat) / 1000n
+        : positive(receiveAmount, "Amount to receive");
+    } catch { estimate.textContent = directoryLoaded ? "Enter an amount to see the fee." : "Load announced fees to see the estimate before you swap."; return; }
+    if (!directoryLoaded) { estimate.textContent = "Load announced fees to see the estimate before you swap."; return; }
+    const found = estimateFromDirectory(directoryEntries, route.profile, amount, identity.value.trim());
+    if ("reason" in found) { estimate.textContent = found.reason; return; }
+    estimatedTotal = amount + found.feeSat;
+    estimate.textContent = route.profile === "btc-to-ln/v1"
+      ? `You send about ${estimatedTotal.toLocaleString()} sat (${amount.toLocaleString()} sat invoice + ${found.feeSat.toLocaleString()} sat provider fee via ${found.identity.slice(0, 12)}…). Your wallet's network fee is extra.`
+      : `You pay about ${estimatedTotal.toLocaleString()} sat over Lightning (${found.feeSat.toLocaleString()} sat provider fee via ${found.identity.slice(0, 12)}…) to receive ${amount.toLocaleString()} sat.`;
+  };
+  invoice.oninput = receiveAmount.oninput = updateEstimate;
+  form.append(invoiceBox, receiveBox, estimate, estimateLoad);
   const setup = node("details", "", "swap-wallet-setup");
   const prerequisites = node("p", "", "swap-prerequisites");
   setup.append(node("summary", "Recovery key & advanced overrides"), prerequisites);
@@ -276,7 +308,7 @@ function mount(root: HTMLElement): void {
   settings.append(limits);
   const notice = node("p", "", "swap-release-notice");
   notice.setAttribute("role", "note");
-  const start = node("button", "Get quote", "swap-start");
+  const start = node("button", "Swap", "swap-start");
   start.type = "submit";
   start.className = "primary";
   form.append(setup, notice, start);
@@ -401,7 +433,8 @@ function mount(root: HTMLElement): void {
       : "Your browser recovery key is created automatically and covers every swap started here.";
     receiveBox.hidden = route.profile !== "ln-to-btc/v1";
     start.disabled = main || route.unavailable !== null;
-    start.textContent = main ? "Mainnet swaps unavailable" : route.unavailable ? "Pair unavailable" : "Get quote";
+    start.textContent = main ? "Mainnet swaps unavailable" : route.unavailable ? "Pair unavailable" : "Swap";
+    updateEstimate();
   };
   const changePair = (changed: HTMLSelectElement, other: HTMLSelectElement, previous: string): void => {
     // Picking the asset already on the other side swaps the two, like a flip.
@@ -425,7 +458,7 @@ function mount(root: HTMLElement): void {
     updateDisclosure();
     updateNetwork();
     recovery.clearFundingObservation();
-    directoryEntries = []; renderDirectory(); providersStatus.textContent = "";
+    directoryEntries = []; directoryLoaded = false; renderDirectory(); providersStatus.textContent = "";
   };
   network.onchange = applyNetwork;
   updateNetwork();
@@ -526,7 +559,7 @@ function mount(root: HTMLElement): void {
         const directory = await discoverMarketplace(urls, request.network, pinned || undefined, cancellation.signal, "ln-to-btc/v1");
         for (const warning of directory.warnings) report(warning);
         const eligible = eligibleProviders(directory.providers, request.payoutSat);
-        if (eligible.length === 0) throw new Error(ineligibilityReason(directory.providers, request.payoutSat));
+        if (eligible.length === 0) throw new Error(ineligibilityReason(providerLimits(directory.providers), request.payoutSat));
         setStatus("Comparing provider estimates", 1);
         report(`Requesting up to ${MAX_QUOTE_PROVIDERS} eligible offers from ${eligible.length} announced providers`);
         const result = await quoteReverseProviders(eligible, request, cancellation.signal);
@@ -557,14 +590,15 @@ function mount(root: HTMLElement): void {
         const wallet = await walletPromise; assertCurrent(); const info = await wallet.info(); assertCurrent();
         const continueSwap = node("button", "Continue with selected provider", "swap-reverse-continue"); continueSwap.type = "button";
         const refusal = node("p", "", "swap-reverse-refusal");
-        continueSwap.onclick = () => {
-          if (executing) return;
+        /** True once continuation started; false when the address or estimate blocks it (the review explains). */
+        const continueWith = (): boolean => {
+          if (executing) return false;
           let destinationScript: string;
           try {
             if (!receiveAddress.value.trim()) throw new Error("Enter the Bitcoin address that should receive the payout");
             destinationScript = addressScript(receiveAddress.value.trim(), name);
             if (Date.now() / 1000 >= selected.prepared.quote.expiresAt) throw new Error("Estimate expired. Request a fresh quote.");
-          } catch (error) { refusal.textContent = (error as Error).message; return; }
+          } catch (error) { refusal.textContent = (error as Error).message; return false; }
           refusal.textContent = "";
           destination = receiveAddress.value.trim();
           continueSwap.disabled = receiveAddress.disabled = true;
@@ -582,10 +616,17 @@ function mount(root: HTMLElement): void {
               status: (message, step) => setStatus(message, step),
               download: (root, file, fileName) => { offerDownload(root, file, fileName); if (fileName.endsWith(".age")) publishLink(file, name); } });
           })().catch(() => { report("stopped: Reverse execution could not continue. Keep backups; no uncertain payment will be retried."); });
+          return true;
         };
+        continueSwap.onclick = () => { continueWith(); };
         review.append(providers, chosen, node("p", "By continuing you accept the selected provider's signed terms and this preview's test-funds-only conditions. " +
           "Your browser recovery key covers this swap; download it from Recovery key & advanced overrides whenever you like.", "swap-reverse-consent"),
           refusal, continueSwap, done);
+        // One-step swap: a signed price no worse than the shown estimate, with the address already entered, continues directly.
+        if (estimatedTotal !== null && quote.holdInvoiceSat <= estimatedTotal && receiveAddress.value.trim()) {
+          report(`signed price ${quote.holdInvoiceSat} sat is within the shown estimate ${estimatedTotal} sat; continuing`);
+          if (continueWith()) return;
+        }
         panel.replaceChildren(review);
         setStatus("Estimate ready. Enter your payout address, then continue", 1);
       } catch (error) {
@@ -714,7 +755,7 @@ function mount(root: HTMLElement): void {
         for (const warning of directory.warnings) report(warning);
         const binding = invoiceBinding(request.invoice, name);
         const eligible = eligibleProviders(directory.providers, BigInt(binding.amount_msat) / 1000n);
-        if (eligible.length === 0) throw new Error(ineligibilityReason(directory.providers, BigInt(binding.amount_msat) / 1000n));
+        if (eligible.length === 0) throw new Error(ineligibilityReason(providerLimits(directory.providers), BigInt(binding.amount_msat) / 1000n));
         setStatus("Comparing verified provider quotes", 1);
         report(`Requesting up to ${MAX_QUOTE_PROVIDERS} eligible offers from ${eligible.length} announced providers`);
         const result = await quoteProviders(eligible, request, cancellation.signal);
@@ -756,9 +797,11 @@ function mount(root: HTMLElement): void {
         accept.type = "button";
         review.append(offers, node("p", "By continuing you accept the selected provider's signed terms and this preview's test-funds-only conditions. " +
           "Your browser recovery key covers this swap; download it from Recovery key & advanced overrides whenever you like.", "swap-quote-consent"), accept, cancel);
-        panel.replaceChildren(review);
-        setStatus("Quote ready. Review before continuing", 1);
-        const accepted = await new Promise<LocatedQuote | null>((resolve) => {
+        // One-step swap: a signed price no worse than the shown estimate is accepted without a separate review.
+        const direct = estimatedTotal !== null && selected.prepared.quote.contractAmountSat <= estimatedTotal;
+        if (direct) report(`signed price ${selected.prepared.quote.contractAmountSat} sat is within the shown estimate ${estimatedTotal} sat; continuing`);
+        else { panel.replaceChildren(review); setStatus("Quote ready. Review before continuing", 1); }
+        const accepted = direct ? selected : await new Promise<LocatedQuote | null>((resolve) => {
           accept.onclick = () => {
             for (const option of offers.querySelectorAll("input")) option.disabled = true;
             accept.disabled = true;

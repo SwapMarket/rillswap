@@ -208,3 +208,35 @@ test("continuing a Lightning to Bitcoin estimate sends only the address entered 
   await expect.poll(() => page.evaluate(() => window.uiFixture.disposed)).toBe(1); // the unselected estimate only
   await expect(page.locator("#swap-reverse-continue")).toHaveCount(0); // execution replaced the estimate review
 });
+
+test("with announced fees shown, Swap accepts a signed price within the estimate without a review step", async ({ page }) => {
+  const requests = await mockTip(page);
+  await page.goto(PAGE); await invoice(page);
+  await expect(page.locator("#swap-estimate")).toHaveText("Load announced fees to see the estimate before you swap.");
+  await page.locator("#swap-estimate-load").click();
+  await expect(page.locator("#swap-estimate")).toContainText("You send about 3,000 sat (1,000 sat invoice + 2,000 sat provider fee via 444444444444…)");
+  await expect(page.locator("#swap-estimate-load")).toBeHidden();
+  expect(requests).toEqual([]); // the directory uses relays only, never the chain API
+  await page.locator("#swap-start").click();
+  await expect(page.locator("#swap-error")).toContainText("Fixture stopped before funding");
+  await expect(page.locator("#swap-quote-accept")).toHaveCount(0);
+  await expect(page.locator("#swap-tracking h2")).toHaveText("Bitcoin to Lightning swap");
+  expect(await page.evaluate(() => window.uiFixture.executedProviders)).toEqual(["4".repeat(64)]);
+});
+
+test("with announced fees shown and the address entered, a Lightning to Bitcoin swap continues directly", async ({ page }) => {
+  await mockTip(page);
+  await page.goto(PAGE);
+  await page.getByRole("button", { name: "Switch direction" }).click();
+  await page.locator("#swap-receive-amount").fill("50000");
+  await page.locator("#swap-estimate-load").click();
+  await expect(page.locator("#swap-estimate")).toContainText("You pay about 52,000 sat over Lightning (2,000 sat provider fee via 444444444444…) to receive 50,000 sat.");
+  await page.locator("#swap-receive-amount").fill("500");
+  await expect(page.locator("#swap-estimate")).toHaveText("fixture ineligible"); // the directory's refusal reason replaces the estimate
+  await page.locator("#swap-receive-amount").fill("50000");
+  await page.locator("#swap-receive-address").fill(scriptAddress(`0014${"11".repeat(20)}`, "regtest"));
+  await page.locator("#swap-start").click();
+  await expect(page.locator("#swap-tracking h2")).toHaveText("Lightning to Bitcoin swap");
+  await expect(page.locator("#swap-reverse-continue")).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.uiFixture.disposed)).toBe(1);
+});

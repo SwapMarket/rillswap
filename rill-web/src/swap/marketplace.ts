@@ -154,8 +154,7 @@ export interface LocatedQuote<P extends { dispose(): void } = PreparedSwap> {
 const estimatedFee = (provider: LocatedProvider, amount: bigint): bigint => indicativeFee(provider.announcement.indicativeFeePolicy, amount);
 
 export function eligibleProviders(providers: readonly LocatedProvider[], amount: bigint): readonly LocatedProvider[] {
-  return providers.filter(({ announcement }) => announcement.amountBands.some((band) =>
-    amount >= BigInt(band.minimum_sat) && amount <= BigInt(band.maximum_sat)))
+  return providers.filter(({ announcement }) => withinBands(announcement.amountBands, amount))
     .sort((a, b) => {
       const difference = estimatedFee(a, amount) - estimatedFee(b, amount);
       return difference < 0n ? -1 : difference > 0n ? 1 :
@@ -165,16 +164,34 @@ export function eligibleProviders(providers: readonly LocatedProvider[], amount:
 
 const shortIdentity = (provider: LocatedProvider): string => `${provider.announcement.identityXOnlyKey.slice(0, 12)}…`;
 
+type AmountBands = AnnouncementCandidate["amountBands"];
+const withinBands = (bands: AmountBands, amount: bigint): boolean =>
+  bands.some((band) => amount >= BigInt(band.minimum_sat) && amount <= BigInt(band.maximum_sat));
+
 /** Why no announced provider serves `amount`, phrased for the user. */
-export function ineligibilityReason(providers: readonly LocatedProvider[], amount: bigint): string {
+export function ineligibilityReason(providers: readonly { identity: string; amountBands: AmountBands }[], amount: bigint): string {
   if (providers.length === 0) return "No provider announced this swap direction on your relays. Try another relay or pin a provider in Settings.";
-  const limits = providers.map((provider) => {
-    const bands = provider.announcement.amountBands;
-    const minimum = bands.reduce((low, band) => BigInt(band.minimum_sat) < low ? BigInt(band.minimum_sat) : low, BigInt(bands[0]!.minimum_sat));
-    const maximum = bands.reduce((high, band) => BigInt(band.maximum_sat) > high ? BigInt(band.maximum_sat) : high, 0n);
-    return `${minimum.toLocaleString()} to ${maximum.toLocaleString()} sat (${shortIdentity(provider)})`;
+  const limits = providers.map(({ identity, amountBands }) => {
+    const minimum = amountBands.reduce((low, band) => BigInt(band.minimum_sat) < low ? BigInt(band.minimum_sat) : low, BigInt(amountBands[0]!.minimum_sat));
+    const maximum = amountBands.reduce((high, band) => BigInt(band.maximum_sat) > high ? BigInt(band.maximum_sat) : high, 0n);
+    return `${minimum.toLocaleString()} to ${maximum.toLocaleString()} sat (${identity.slice(0, 12)}…)`;
   });
   return `No provider accepts ${amount.toLocaleString()} sat. Announced limits: ${limits.join("; ")}.`;
+}
+
+export const providerLimits = (providers: readonly LocatedProvider[]): { identity: string; amountBands: AmountBands }[] =>
+  providers.map(({ announcement }) => ({ identity: announcement.identityXOnlyKey, amountBands: announcement.amountBands }));
+
+/** The lowest announced fee for `amount` among directory entries serving `profile` (and `pinned`, if set). */
+export type DirectoryEstimate = { readonly identity: string; readonly feeSat: bigint } | { readonly reason: string };
+
+export function estimateFromDirectory(entries: readonly DirectoryEntry[], profile: AnnouncementProfile, amount: bigint, pinned = ""): DirectoryEstimate {
+  const serving = entries.filter((entry) => entry.profiles.includes(profile) && (!pinned || entry.identity === pinned));
+  const eligible = serving.filter((entry) => withinBands(entry.amountBands, amount))
+    .map((entry) => ({ identity: entry.identity, feeSat: indicativeFee(entry.indicativeFeePolicy, amount) }))
+    .sort((a, b) => a.feeSat < b.feeSat ? -1 : a.feeSat > b.feeSat ? 1 : a.identity.localeCompare(b.identity));
+  if (eligible.length > 0) return eligible[0]!;
+  return { reason: pinned && serving.length === 0 ? "The chosen provider does not announce this swap direction." : ineligibilityReason(serving, amount) };
 }
 
 export function rankQuotes(quotes: readonly LocatedQuote[]): readonly LocatedQuote[] {

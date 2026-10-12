@@ -11,9 +11,20 @@ export const MAX_QUOTE_PROVIDERS = 8;
 export const discoverMarketplace = async () => ({ providers: [{}], warnings: [] });
 export const eligibleProviders = (providers: unknown[]) => providers;
 export const ineligibilityReason = () => "fixture ineligible";
-export const discoverDirectory = async () => ({ entries: [], warnings: [] });
+export const discoverDirectory = async () => ({ warnings: [], entries: [{ identity: "4".repeat(64), slot: "fixture", profiles: ["btc-to-ln/v1", "ln-to-btc/v1"],
+  amountBands: [{ minimum_sat: "1000", maximum_sat: "100000000" }], indicativeFeePolicy: { base_sat: "2000", proportional_millionths: 0 },
+  relayUrls: ["ws://127.0.0.1:7777/"], expiresAt: Math.floor(Date.now() / 1000) + 3600 }] });
 export const indicativeFee = (policy: { base_sat: string; proportional_millionths: number }, amount: bigint) =>
   BigInt(policy.base_sat) + (amount * BigInt(policy.proportional_millionths) + 999_999n) / 1_000_000n;
+export const providerLimits = (providers: unknown[]) => providers;
+type FixtureEntry = { identity: string; profiles: string[]; amountBands: { minimum_sat: string; maximum_sat: string }[];
+  indicativeFeePolicy: { base_sat: string; proportional_millionths: number } };
+export const estimateFromDirectory = (entries: FixtureEntry[], profile: string, amount: bigint, pinned = "") => {
+  const serving = entries.filter((entry) => entry.profiles.includes(profile) && (!pinned || entry.identity === pinned));
+  const eligible = serving.filter((entry) => entry.amountBands.some((band) => amount >= BigInt(band.minimum_sat) && amount <= BigInt(band.maximum_sat)));
+  if (eligible.length === 0) return { reason: serving.length === 0 ? "No provider announced this swap direction." : "fixture ineligible" };
+  return { identity: eligible[0]!.identity, feeSat: indicativeFee(eligible[0]!.indicativeFeePolicy, amount) };
+};
 export const quoteProviders = async (_providers: unknown[], request: unknown) => {
   window.uiFixture.requests.push(structuredClone(request));
   return { failures: 0, reasons: [], quotes: ["4", "5"].map((id) => ({ relayUrl: "ws://127.0.0.1:7777/",

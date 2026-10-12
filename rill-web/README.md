@@ -180,7 +180,7 @@ signed quote binds a provider.
 ### Automatic quote selection
 
 Leave the provider identity empty for automatic discovery, choose one under
-Providers, or pin it in Settings. **Get quote** queries the configured relays, filters authenticated
+Providers, or pin it in Settings. **Swap** queries the configured relays, filters authenticated
 announcements by amount, and requests up to eight firm offers on separate
 single-relay sessions. Indicative fees order the bounded shortlist; only
 locally verified signed terms determine the displayed winner. The winner has
@@ -190,7 +190,17 @@ Unpinned identities are self-authenticated, not approved or reputation-rated;
 identities and slots can be created by one operator. There is no global
 best-price or independent-provider guarantee.
 
-The quote screen offers manual selection under provider details. **Use this
+**Show fees** loads the provider directory once (relays only, no chain API)
+and keeps the estimate line (`#swap-estimate`) current as the invoice or
+amount changes: the lowest announced fee for the amount (`estimateFromDirectory`),
+or the reason no announced provider serves it. With that estimate shown, **Swap**
+is one step: the winning signed offer executes directly when its total is at
+or below the estimate (and, for Lightning to Bitcoin, the address was entered
+up front). A higher signed total, a missing estimate, or a missing address
+falls back to the review screen below, so a provider cannot quietly charge more
+than it announced.
+
+The review screen offers manual selection under provider details. **Use this
 quote** executes that exact displayed offer on its original session. Preparing
 a quote does not accept terms, export recovery, request funding, or share a
 signed transaction. Editing discards the quotes and closes their transports;

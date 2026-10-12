@@ -3,7 +3,7 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import canonicalize from "canonicalize";
 import { finalizeEvent, getPublicKey } from "nostr-tools";
-import { directoryFromObservations, eligibleProviders, indicativeFee, ineligibilityReason, rankQuotes, scanAnnouncements, type LocatedQuote, type RelayObservation } from "../src/swap/marketplace";
+import { directoryFromObservations, eligibleProviders, estimateFromDirectory, indicativeFee, ineligibilityReason, providerLimits, rankQuotes, scanAnnouncements, type LocatedQuote, type RelayObservation } from "../src/swap/marketplace";
 import application from "./fixtures/manual-advertisement-regtest-v1.json";
 import vector from "./fixtures/nostr-announcement-regtest-v1.json";
 import network from "../src/networks/regtest-rillswap-e2e-v1.json";
@@ -73,7 +73,7 @@ test("highest revision replaces older transport provenance and amount bands filt
   expect(eligibleProviders(directory.providers, 100n)).toHaveLength(1);
   expect(eligibleProviders(directory.providers, 10001n)).toHaveLength(0);
   const identity = directory.providers[0]!.announcement.identityXOnlyKey.slice(0, 12);
-  expect(ineligibilityReason(directory.providers, 10001n)).toBe(`No provider accepts 10,001 sat. Announced limits: 100 to 10,000 sat (${identity}…).`);
+  expect(ineligibilityReason(providerLimits(directory.providers), 10001n)).toBe(`No provider accepts 10,001 sat. Announced limits: 100 to 10,000 sat (${identity}…).`);
   expect(ineligibilityReason([], 10001n)).toContain("No provider announced this swap direction");
 });
 
@@ -89,6 +89,19 @@ test("the directory lists each announced slot once with every profile it serves 
   expect(indicativeFee(entry.indicativeFeePolicy, 10_000n)).toBe(25n + BigInt(Math.ceil(10_000 * application.advertisement.indicative_fee_policy.proportional_millionths / 1_000_000)));
   expect(directory.warnings).toEqual([]);
   expect(directoryFromObservations([observed(["not json"])], network).entries).toEqual([]);
+});
+
+test("the directory estimate picks the lowest announced fee for the direction, honors a pinned identity, and explains misses", () => {
+  const cheap = directoryFromObservations([observed([announcement(1, "10", 2)])], network).entries[0]!;
+  const dear = directoryFromObservations([observed([announcement(1, "40", 3)])], network).entries[0]!;
+  const reverseOnly = { ...cheap, identity: "ab".repeat(32), profiles: ["ln-to-btc/v1" as const] };
+  const entries = [dear, cheap, reverseOnly];
+  expect(estimateFromDirectory(entries, "btc-to-ln/v1", 1000n)).toEqual({ identity: cheap.identity, feeSat: 10n + 1n });
+  expect(estimateFromDirectory(entries, "btc-to-ln/v1", 1000n, dear.identity)).toEqual({ identity: dear.identity, feeSat: 40n + 1n });
+  expect(estimateFromDirectory(entries, "ln-to-btc/v1", 1000n)).toEqual({ identity: reverseOnly.identity, feeSat: 11n }); // equal fees tie on identity
+  expect(estimateFromDirectory(entries, "btc-to-ln/v1", 20_000n)).toEqual({ reason: expect.stringContaining("No provider accepts 20,000 sat") });
+  expect(estimateFromDirectory(entries, "btc-to-ln/v1", 1000n, reverseOnly.identity)).toEqual({ reason: "The chosen provider does not announce this swap direction." });
+  expect(estimateFromDirectory([], "btc-to-ln/v1", 1000n)).toEqual({ reason: expect.stringContaining("No provider announced") });
 });
 
 test("verified contract prices, not indicative prices, choose the winner with deterministic ties", () => {
