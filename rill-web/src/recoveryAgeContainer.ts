@@ -45,11 +45,10 @@ export async function encryptCanonicalRecoveryForRecipient(
       throw new RecoveryAgeContainerRefusedError();
     }
     const wrapper = parsed as Record<string, unknown>;
-    if (wrapper.format !== "rillswap-recovery" ||
-        wrapper.format_version !== "1-pre.1" ||
-        wrapper.specification_version !== "0.1.0-pre.1") {
-      throw new RecoveryAgeContainerRefusedError();
-    }
+    const rs007 = wrapper.format === "rillswap-recovery" &&
+      wrapper.format_version === "1-pre.1" && wrapper.specification_version === "0.1.0-pre.1";
+    const rs010 = wrapper.format === "rillswap-evm-recovery" && wrapper.format_version === "1";
+    if (!rs007 && !rs010) throw new RecoveryAgeContainerRefusedError();
     const encrypter = new Encrypter();
     encrypter.addRecipient(selectedAgeRecipient);
     const ciphertext = await encrypter.encrypt(plaintext);

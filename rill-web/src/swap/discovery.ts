@@ -1,6 +1,7 @@
 /** Provider discovery over one relay (port of rill-cli live_swap.discover). */
 import { type AnnouncementCandidate, verifyNostrProviderAnnouncement } from "../nostrProviderAnnouncement";
 import { SwapError } from "./session";
+import type { ProfileId } from "../swapPairs";
 
 export const ANNOUNCEMENT_KIND = 39417;
 export const MAX_DISCOVERY_EVENTS = 256;
@@ -20,7 +21,7 @@ export async function discoverProvider(
   source: AnnouncementSource,
   identity: string,
   network: unknown,
-  profile: "btc-to-ln/v1",
+  profile: ProfileId,
   timeoutMs = 10_000,
 ): Promise<AnnouncementCandidate> {
   const { events, truncated } = await source.query(

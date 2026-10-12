@@ -11,6 +11,7 @@ export default defineConfig(({ mode }) => {
       const origins = new Set(["https://mempool.space", "https://blockstream.info",
         "http://127.0.0.1:8091", "http://localhost:8091", new URL(defaults.mempoolApi).origin, new URL(defaults.broadcastApi).origin]);
       if (defaults.nodeApi) origins.add(new URL(defaults.nodeApi).origin);
+      if (defaults.evmRpc) origins.add(new URL(defaults.evmRpc).origin);
       return html.replace("__CHAIN_API_ORIGINS__", [...origins].join(" "));
     } }],
     build: {

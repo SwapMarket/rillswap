@@ -33,7 +33,7 @@ export function requireShape<T>(name: keyof typeof generated, document: unknown)
   return document as T;
 }
 
-const same = (a: unknown, b: unknown): boolean => bytesToHex(jcs(a)) === bytesToHex(jcs(b));
+export const same = (a: unknown, b: unknown): boolean => bytesToHex(jcs(a)) === bytesToHex(jcs(b));
 
 export function sats(value: string, what: string, positive = false): bigint {
   if (!/^(0|[1-9][0-9]{0,15})$/.test(value)) throw new ProtocolError(`${what} malformed`);
@@ -307,7 +307,7 @@ interface SignedTerms {
 }
 
 /** Both directions: the identity signs these exact terms, for this network, before they expire. */
-function checkSignedOfferBinding(
+export function checkSignedOfferBinding(
   offer: SignedTerms,
   context: Pick<OfferContext, "identity" | "envelopeContractHash" | "network" | "now">,
 ): void {

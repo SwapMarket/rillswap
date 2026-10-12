@@ -9,6 +9,8 @@ export interface SwapDefaults {
   readonly broadcastApi: string;
   /** Public endpoint only. Credentials are never deployment defaults. */
   readonly nodeApi?: string;
+  /** RS-010: JSON-RPC endpoint for reading the EVM chain; the user's wallet signs. */
+  readonly evmRpc?: string;
 }
 
 export const MAX_RELAYS = 4;
@@ -63,6 +65,9 @@ export function resolveSwapDefaults(env: Record<string, string | undefined>): Sw
     broadcastApi: validateMempoolApi(env.VITE_RILLSWAP_BROADCAST_API ?? (name === "regtest" ? "http://127.0.0.1:8092/api" : env.VITE_RILLSWAP_MEMPOOL_API ?? MEMPOOL_APIS[name]), name),
     ...(env.VITE_RILLSWAP_NODE_API !== undefined || name === "regtest" ? {
       nodeApi: validateMempoolApi(env.VITE_RILLSWAP_NODE_API ?? "http://127.0.0.1:8093", name),
+    } : {}),
+    ...(env.VITE_RILLSWAP_EVM_RPC !== undefined || name === "regtest" ? {
+      evmRpc: validateMempoolApi(env.VITE_RILLSWAP_EVM_RPC ?? "http://127.0.0.1:8545", name),
     } : {}),
   };
 }

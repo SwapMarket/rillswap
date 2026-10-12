@@ -54,6 +54,7 @@ const wireExports = {
   validateEnvelope: envelopeSchema.$id,
   validateHandshakeAcceptPayload: def(handshakeSchema, "acceptPayload"),
   validateFirmQuoteRequest: def(quoteSchema, "firmRequest"),
+  validateErc20FirmQuoteRequest: def(quoteSchema, "erc20FirmRequest"),
   validateTermsOffer: def(quoteSchema, "termsOffer"),
   validateReverseIndicativeQuoteRequest: def(quoteSchema, "reverseIndicativeRequest"),
   validateReverseQuoteOffer: def(quoteSchema, "reverseQuoteOffer"),

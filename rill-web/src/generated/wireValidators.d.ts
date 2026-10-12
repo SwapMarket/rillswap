@@ -3,6 +3,7 @@ type Validator = ((document: unknown) => boolean) & { errors?: unknown[] | null 
 export declare const validateEnvelope: Validator;
 export declare const validateHandshakeAcceptPayload: Validator;
 export declare const validateFirmQuoteRequest: Validator;
+export declare const validateErc20FirmQuoteRequest: Validator;
 export declare const validateTermsOffer: Validator;
 export declare const validateReverseIndicativeQuoteRequest: Validator;
 export declare const validateReverseQuoteOffer: Validator;

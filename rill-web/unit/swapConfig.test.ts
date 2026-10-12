@@ -21,6 +21,12 @@ describe("explicit deployment defaults", () => {
       for (const network of ["signet", "mainnet"]) expect(() => resolveSwapDefaults({ VITE_RILLSWAP_NETWORK: network, VITE_RILLSWAP_NODE_API: value })).toThrow();
     }
   });
+  test("the EVM RPC is read-only public configuration with a local Anvil default on regtest", () => {
+    expect(resolveSwapDefaults({}).evmRpc).toBeUndefined();
+    expect(resolveSwapDefaults({ VITE_RILLSWAP_NETWORK: "regtest" }).evmRpc).toBe("http://127.0.0.1:8545");
+    expect(resolveSwapDefaults({ VITE_RILLSWAP_NETWORK: "mainnet", VITE_RILLSWAP_EVM_RPC: "https://rpc.example/v1/" }).evmRpc).toBe("https://rpc.example/v1");
+    expect(() => resolveSwapDefaults({ VITE_RILLSWAP_NETWORK: "mainnet", VITE_RILLSWAP_EVM_RPC: "http://rpc.example" })).toThrow();
+  });
   test("public builds admit only an explicitly configured concrete node origin", async () => {
     for (const configured of [false, true]) {
       const destination = `tmp/node-csp-${configured ? "configured" : "unset"}`;
