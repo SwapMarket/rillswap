@@ -21,6 +21,7 @@ import { invoiceBinding } from "./swap/bolt11";
 import { quoteSelectionLabel, stoppedSwapAdvice } from "./swapUiStatus";
 import { ASSETS, type AssetId, routeFor } from "./swapPairs";
 import { recoveryPanel } from "./recoveryUi";
+import { parseSwapLink, swapLinkFragment } from "./swapLink";
 import { mountReverseExecution } from "./reverseExecutionUi";
 
 const NETWORKS = { mainnet, signet, testnet4, regtest } as const;
@@ -207,6 +208,20 @@ function mount(root: HTMLElement): void {
       "keep it open until the swap finishes."),
     node("p", "Save your recovery key and each encrypted swap backup before funding or paying. Browser recovery below can check funding, " +
       "prepare a Bitcoin refund after its lock height, or recover a Lightning-to-Bitcoin claim. Missing evidence stays blocked; never pay again to recover an uncertain attempt.", "swap-refund-intro"));
+  // Once a swap starts, the form gives way to this tracking view; its link addresses the swap record.
+  const tracking = node("div", "", "swap-tracking");
+  tracking.hidden = true;
+  const trackingTitle = node("h2", "Your swap");
+  const another = node("a", "Start another swap", "swap-another");
+  another.href = "./swap.html";
+  const linkBox = node("div", "", "swap-link");
+  linkBox.hidden = true;
+  const linkAnchor = node("a", "Swap link", "swap-link-anchor");
+  const copyLink = node("button", "Copy swap link", "swap-link-copy");
+  copyLink.type = "button";
+  linkBox.append(node("p", "This page's address now holds your encrypted swap record. Bookmark it or copy it: opening it later " +
+    "shows the swap and its recovery actions. Only your recovery key can read it; the link is never sent anywhere."), linkAnchor, copyLink);
+  tracking.append(trackingTitle, another, linkBox);
   const panel = node("div", "", "swap-panel");
   panel.setAttribute("aria-live", "polite");
   const progress = node("section", "", "swap-progress");
@@ -219,7 +234,7 @@ function mount(root: HTMLElement): void {
   diagnostics.append(node("summary", "Technical activity"));
   const log = node("pre", "", "swap-log");
   diagnostics.append(log);
-  card.append(cardHead, form, progress, panel, privacy, safety, diagnostics);
+  card.append(cardHead, form, tracking, progress, panel, privacy, safety, diagnostics);
   const footer = node("footer", "Provider-neutral · No account · Locally verified");
   root.replaceChildren(header, intro, card, footer, settings);
   const setStatus = (text: string, step: number, state = "working"): void => {
@@ -238,6 +253,23 @@ function mount(root: HTMLElement): void {
     else if (line.startsWith("funded recovery")) setStatus("Save your funded recovery backup", 2);
     else if (line.includes("broadcast; waiting")) setStatus("Waiting for the Lightning payment", 3);
     else if (line.startsWith("refused:") || line.startsWith("stopped:")) setStatus(line.replace(/^[^:]+: /, ""), -1, "error");
+  };
+  let busy = false;
+  const showTracking = (title: string): void => {
+    intro.hidden = form.hidden = true;
+    tracking.hidden = false;
+    trackingTitle.textContent = title;
+  };
+  let linkPublished = false;
+  const publishLink = (file: Uint8Array, name: NetworkName): void => {
+    const target = location.pathname + location.search + swapLinkFragment({ file, network: name });
+    if (linkPublished) history.replaceState(null, "", target);
+    else { history.pushState(null, "", target); linkPublished = true; }
+    linkAnchor.href = location.href;
+    linkBox.hidden = false;
+  };
+  copyLink.onclick = () => {
+    void navigator.clipboard.writeText(location.href).then(() => { copyLink.textContent = "Copied"; }, () => { copyLink.textContent = "Copy failed; use the link"; });
   };
   const walletPromise = BrowserRecoveryWallet.open();
   const recovery = recoveryPanel({
@@ -306,7 +338,7 @@ function mount(root: HTMLElement): void {
     lastFrom = fromAsset.value; lastTo = toAsset.value;
     updateNetwork();
   };
-  network.onchange = () => {
+  const applyNetwork = (): void => {
     relay.value = relaysForNetwork(network.value as NetworkName, __SWAP_DEFAULTS__).join("\n");
     chainApi.value = mempoolApiForNetwork(network.value as NetworkName, __SWAP_DEFAULTS__);
     broadcastApi.value = network.value === __SWAP_DEFAULTS__.network ? __SWAP_DEFAULTS__.broadcastApi :
@@ -316,11 +348,26 @@ function mount(root: HTMLElement): void {
     updateNetwork();
     recovery.clearFundingObservation();
   };
+  network.onchange = applyNetwork;
   updateNetwork();
+  // A swap link reopens its encrypted record locally: inspection decrypts and parses, nothing connects.
+  const link = parseSwapLink(location.hash);
+  if (link) {
+    if (link.network in NETWORKS && network.value !== link.network) { network.value = link.network; applyNetwork(); }
+    linkPublished = true;
+    linkAnchor.href = location.href;
+    linkBox.hidden = false;
+    showTracking("Swap record");
+    setStatus("Swap record opened from its link", -1, "ready");
+    recovery.load(link.file, "swap-link.age");
+  }
+  // Following another swap link while this page is open is a fragment-only navigation; reload so
+  // the new record is opened, unless a swap is in progress in this tab.
+  window.addEventListener("hashchange", () => { if (!busy && parseSwapLink(location.hash)) location.reload(); });
   // Handoffs and shared links use a fragment, never a server-visible query. Prefilling is
   // inert: no quote, connection, or payment starts automatically, and the fragment is dropped.
   const handoff = new URLSearchParams(location.hash.slice(1));
-  if ([...handoff.keys()].length > 0) {
+  if (!link && [...handoff.keys()].length > 0) {
     const text = (key: string, limit: number): string => { const value = handoff.get(key) ?? ""; return value.length <= limit ? value : ""; };
     const prefill = { invoice: text("invoice", 4096), address: text("address", 128), amount: text("amount", 16) };
     if (prefill.invoice) { fromAsset.value = "btc"; toAsset.value = "ln"; invoice.value = prefill.invoice; }
@@ -332,7 +379,6 @@ function mount(root: HTMLElement): void {
     updateNetwork();
   }
 
-  let busy = false;
   /** Indicative comparison first; only the selected provider can enter durable execution. */
   const reverseQuote = (name: NetworkName): void => {
     let request: Omit<ReverseSwapRequest, "identity">;
@@ -450,10 +496,12 @@ function mount(root: HTMLElement): void {
             executing = true; done.disabled = true;
             for (const quote of arrivals) if (quote !== selected) quote.dispose();
             arrivals = [selected];
+            showTracking("Lightning to Bitcoin swap");
             await mountReverseExecution(panel, { prepared: selected.prepared, network: { ...NETWORKS[name], name }, destinationScript,
               ageRecipient: info.recipient, chainApi: chainApi.value.trim(), broadcastApi: broadcastApi.value.trim(), assertCurrent,
               nodeApi: __SWAP_DEFAULTS__.network === name ? __SWAP_DEFAULTS__.nodeApi ?? "" : name === "regtest" ? "http://127.0.0.1:8093" : "",
-              status: (message, step) => setStatus(message, step), download: offerDownload });
+              status: (message, step) => setStatus(message, step),
+              download: (root, file, fileName) => { offerDownload(root, file, fileName); if (fileName.endsWith(".age")) publishLink(file, name); } });
           })().catch(() => { report("stopped: Reverse execution could not continue. Keep backups; no uncertain payment will be retried."); });
         };
         review.append(providers, chosen, node("p", "By continuing you accept the selected provider's signed terms and this preview's test-funds-only conditions. " +
@@ -650,7 +698,8 @@ function mount(root: HTMLElement): void {
         executing = true;
         for (const quote of arrivals) if (quote !== accepted) quote.dispose();
         arrivals = [accepted];
-        const paid = await run(accepted, name, panel, report);
+        showTracking("Bitcoin to Lightning swap");
+        const paid = await run(accepted, name, panel, report, (file) => publishLink(file, name));
         if (paid) setStatus("Lightning invoice paid", 4, "success");
       } catch (error) {
         if (!cancelled) {
@@ -728,6 +777,7 @@ async function run(
   networkName: NetworkName,
   panel: HTMLElement,
   report: (line: string) => void,
+  publish: (file: Uint8Array) => void,
 ): Promise<boolean> {
   let fundsMayBeCommitted = false;
   // Backups stay visible while the stage prompts below them change.
@@ -742,6 +792,7 @@ async function run(
       report,
       saveRecovery: async (file, kind) => {
         offerDownload(backups, file, `rillswap-${kind}-recovery-${Math.floor(Date.now() / 1000)}.age`);
+        publish(file);
         report(kind === "terms" ? "recovery file saved to the backups list" : "funded recovery file added to the backups list");
       },
       fundingPsbt: (funding) => fundingPrompt(panel, networkName, funding),
@@ -771,6 +822,7 @@ async function run(
       node("p", "Optional: keep the paid recovery file from the backups list as a record of the completed swap."),
     );
     offerDownload(backups, outcome.paidRecovery, `rillswap-paid-recovery-${Math.floor(Date.now() / 1000)}.age`);
+    publish(outcome.paidRecovery);
     return true;
   } catch (error) {
     const message = (error as Error).message;

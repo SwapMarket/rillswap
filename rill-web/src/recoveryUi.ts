@@ -27,9 +27,11 @@ function element<K extends keyof HTMLElementTagNameMap>(tag: K, text = "", id?: 
 }
 
 /** Public controls needed by the owning Settings UI, without exposing imported state. */
-interface RecoveryPanel {
+export interface RecoveryPanel {
   readonly element: HTMLElement;
   clearFundingObservation(): void;
+  /** Open the panel on an in-memory recovery container (for example from a swap link) and inspect it locally. */
+  load(file: Uint8Array, name: string): void;
 }
 
 /** A collapsed panel with local imports and explicitly requested, report-only chain reads. */
@@ -270,5 +272,17 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
     })();
   };
   prepare.onclick = () => refundAction("prepare"); download.onclick = () => refundAction("export"); broadcast.onclick = () => refundAction("broadcast");
-  return { element: details, clearFundingObservation() { pendingInvalidated = true; fundingResult.replaceChildren(); invalidateRefund(); } };
+  return {
+    element: details,
+    clearFundingObservation() { pendingInvalidated = true; fundingResult.replaceChildren(); invalidateRefund(); },
+    load(bytes, name) {
+      // The same path as a chosen file: the input holds it, so every later action rechecks the same selection.
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([Uint8Array.from(bytes)], name, { type: "application/octet-stream" }));
+      file.files = transfer.files;
+      clear();
+      details.open = true;
+      inspect.click();
+    },
+  };
 }

@@ -75,6 +75,14 @@ test("defaults fetch a tip on quote action and the stored browser key approves a
   await page.locator("#swap-quote-accept").click();
   await expect(page.locator("#swap-error")).toContainText("Fixture stopped before funding");
   expect(await page.evaluate(() => window.uiFixture.executed)).toBe(1);
+  // The started swap replaces the form with a tracking view whose link carries the encrypted record.
+  await expect(page.locator("#swap-form")).toBeHidden();
+  await expect(page.locator("#swap-tracking h2")).toHaveText("Bitcoin to Lightning swap");
+  expect(new URL(page.url()).hash).toBe("#swap=BwcH&network=regtest");
+  await expect(page.locator("#swap-link-anchor")).toHaveAttribute("href", page.url());
+  await expect(page.locator('#swap-backups a[download$=".age"]')).toHaveCount(1);
+  await expect(page.locator("#swap-another")).toHaveAttribute("href", "./swap.html");
+  expect(requests).toHaveLength(5); // publishing the link connects nowhere
 });
 
 test("wrong chain identity prevents quote preparation", async ({ page }) => {

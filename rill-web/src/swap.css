@@ -67,6 +67,11 @@ details { border-top: 1px solid #344347; margin-top: 1.35rem; padding-top: 1rem;
 summary { color: #b5c6ca; font-size: .82rem; }
 details p, #swap-release-notice { font-size: .78rem; color: #99abb1; }
 #swap-release-notice { margin: 1rem 0 0; }
+#swap-tracking { display: flex; flex-wrap: wrap; align-items: baseline; gap: .5rem 1rem; margin-bottom: 1rem; }
+#swap-tracking h2 { margin: 0; flex: 1; }
+#swap-link { flex-basis: 100%; }
+#swap-link p { font-size: .78rem; color: #99abb1; margin: .25rem 0 .5rem; }
+#swap-link a { word-break: break-all; margin-right: 1rem; }
 .swap-consent, #swap-quote-consent, #swap-reverse-consent, #swap-reverse-refusal, #swap-backups-intro { font-size: .78rem; color: #99abb1; }
 #swap-reverse-refusal:not(:empty) { color: #f0d8a8; }
 #swap-progress { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #344347; }

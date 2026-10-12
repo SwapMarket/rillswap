@@ -18,7 +18,11 @@ export const quoteProviders = async (_providers: unknown[], request: unknown) =>
     prepared: {
       quote: { providerIdentity: id.repeat(64), contractAmountSat: BigInt(1100 + Number(id)), successFeeSat: 100n,
         refundLockHeight: 300, expiresAt: Math.floor(Date.now() / 1000) + 3600 },
-      execute: async () => { window.uiFixture.executed++; window.uiFixture.executedProviders.push(id.repeat(64)); throw new Error("Fixture stopped before funding"); },
+      execute: async (hooks: { saveRecovery: (file: Uint8Array, stage: string) => Promise<void> }) => {
+        window.uiFixture.executed++; window.uiFixture.executedProviders.push(id.repeat(64));
+        await hooks.saveRecovery(new Uint8Array([7, 7, 7]), "terms");
+        throw new Error("Fixture stopped before funding");
+      },
       dispose: () => { window.uiFixture.disposed++; },
     },
   })) };

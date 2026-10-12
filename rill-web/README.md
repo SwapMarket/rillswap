@@ -202,6 +202,22 @@ Provider-advertised endpoints are never automatically contacted. Existing
 manual `runSwap` callers retain their prepare-and-execute behavior, and no
 persisted state or journal schema changes.
 
+### Swap links and the tracking view
+
+Starting a swap replaces the form with a tracking view. Each time the swap
+produces an encrypted recovery container (terms, funded, paid, or claim
+stage), `src/swapLink.ts` publishes it into the page address as
+`#swap=<base64url age container>&network=<name>` (`pushState` once, then
+`replaceState`). Fragments never reach a server, so the address can be
+bookmarked, copied, or found in history. Opening such a link renders the
+tracking view and loads the record into the **Recover a swap** panel, which
+decrypts it locally with the browser recovery key (or an uploaded older key)
+and offers the same funding checks, refunds, and reverse claims as a chosen
+file; nothing connects until an explicit check. Malformed or oversized
+fragments are ignored entirely. The link is as sensitive as the `.age` file:
+anyone holding it and the recovery key can act on the swap, and in-tab
+protocol sessions are not resumed from it, only recovery.
+
 ### Browser recovery wallet
 
 `src/browserRecoveryWallet.ts` provides a browser-stored recovery identity,

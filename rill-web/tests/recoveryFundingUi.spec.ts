@@ -3,6 +3,7 @@ import canonicalize from "canonicalize";
 import { readFileSync } from "node:fs";
 import { encryptCanonicalRecoveryForRecipient } from "../src/recoveryAgeContainer";
 import { createRecoveryKey } from "../src/recoveryKeys";
+import { swapLinkFragment } from "../src/swapLink";
 import type { RecoveryRefundCase } from "../unit/fixtures/recoveryRefundCases";
 import type { BrowserRefundJournal } from "../src/browserRefundJournal";
 
@@ -46,6 +47,34 @@ async function chainApi(page: Page, item: RecoveryRefundCase, tip = 1101, pause?
   });
   return calls;
 }
+
+test("a swap link reopens its encrypted record locally in the tracking view without connecting", async ({ page }) => {
+  const item = corpus()[0]!, calls = await chainApi(page, item);
+  const sockets: string[] = []; page.on("websocket", (socket) => sockets.push(socket.url()));
+  await page.goto("http://127.0.0.1:18765/test-only/swap.html");
+  const recipient = await page.evaluate(async () => {
+    const wallet = await window.uiFixture.wallet.open();
+    try { return (await wallet.recoveryKey()).recipient; } finally { wallet.close(); }
+  });
+  const encrypted = await encryptCanonicalRecoveryForRecipient(new TextEncoder().encode(canonicalize(item.record)!), recipient);
+  const fragment = swapLinkFragment({ file: encrypted, network: "regtest" });
+  await page.evaluate((fragment) => { location.hash = fragment; }, fragment); // a bookmark followed from the open page reloads it
+  await page.waitForLoadState();
+  await expect(page.locator("#swap-recovery-result h3")).toHaveText("Recovery record verified");
+  await expect(page.locator("#swap-form")).toBeHidden();
+  await expect(page.locator("#swap-tracking h2")).toHaveText("Swap record");
+  await expect(page.locator("#swap-status")).toHaveText("Swap record opened from its link");
+  await expect(page.locator("#swap-network")).toHaveValue("regtest");
+  expect(new URL(page.url()).hash).toBe(fragment); // the address stays bookmarkable
+  await expect(page.locator("#swap-link-anchor")).toHaveAttribute("href", page.url());
+  expect(calls).toEqual([]); expect(sockets).toEqual([]);
+  await page.locator("#swap-recovery-check-funding").click();
+  await expect(page.locator("#swap-recovery-funding-result h3")).toHaveText("Funding observed by your API");
+  await page.goto("about:blank");
+  await page.goto("http://127.0.0.1:18765/test-only/swap.html#swap=not*base64&network=regtest");
+  await expect(page.locator("#swap-form")).toBeVisible(); // malformed links are ignored, not partially used
+  await expect(page.locator("#swap-tracking")).toBeHidden();
+});
 
 test("local inspection connects to nothing; an explicit funding check reports trusted mature observations", async ({ page }) => {
   const item = corpus()[0]!, calls = await chainApi(page, item);
