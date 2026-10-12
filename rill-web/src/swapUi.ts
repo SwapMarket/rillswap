@@ -11,7 +11,9 @@ import signet from "./networks/signet.json";
 import testnet4 from "./networks/testnet4.json";
 import { addressScript, scriptAddress } from "./swap/address";
 import { browserCosigner } from "./swap/browserCosigner";
-import { type FundingRequest, type SwapRequest } from "./swap/swap";
+import { type FundingRequest, type FundingSource, type SwapRequest } from "./swap/swap";
+import { observeDeposit } from "./swap/depositWatch";
+import { TransactionRefusedError } from "./swap/transaction";
 import { mempoolApiForNetwork, relaysForNetwork, validateMempoolApi, validateRelays, type NetworkName } from "./swap/config";
 import { readChainTip } from "./swap/chainTip";
 import { BrowserRecoveryWallet } from "./browserRecoveryWallet";
@@ -821,7 +823,8 @@ function mount(root: HTMLElement): void {
         for (const quote of arrivals) if (quote !== accepted) quote.dispose();
         arrivals = [accepted];
         showTracking("Bitcoin to Lightning swap");
-        const paid = await run(accepted, name, panel, report, (file) => publishLink(file, name));
+        const paid = await run(accepted, name, panel, report, (file) => publishLink(file, name),
+          () => validateMempoolApi(chainApi.value.trim(), name));
         if (paid) setStatus("Lightning invoice paid", 4, "success");
       } catch (error) {
         if (!cancelled) {
@@ -869,29 +872,71 @@ function offerDownload(panel: HTMLElement, file: Uint8Array, name: string): void
   panel.append(link);
 }
 
-function fundingPrompt(panel: HTMLElement, networkName: NetworkName, request: FundingRequest): Promise<string> {
+/** The deposit watcher stops on a visible outcome; the swap then continues or reports the refusal. */
+const DEPOSIT_POLL_MS = 10_000;
+
+function fundingPrompt(panel: HTMLElement, networkName: NetworkName, request: FundingRequest, chainApi: () => string,
+  addressShown: () => void): Promise<FundingSource> {
+  const address = scriptAddress(request.contractScript, networkName);
+  const uri = `bitcoin:${address}?amount=${btc(request.amountSat)}`;
+  const open = node("a", "Open in your wallet", "swap-funding-uri"); open.href = uri;
+  const copy = node("button", "Copy address", "swap-funding-copy"); copy.type = "button";
+  copy.onclick = () => { void navigator.clipboard?.writeText(address).then(() => { copy.textContent = "Copied"; }, () => {}); };
+  const status = node("p", "Waiting for your payment. This page checks your mempool API every 10 seconds.", "swap-deposit-status");
+  status.setAttribute("role", "status");
   panel.replaceChildren(
-    node("h2", "Fund the swap from your wallet"),
-    node("p", "Do not use your wallet's normal Send button: it broadcasts immediately. Instead create a " +
-      "transaction, sign and finalize it as a PSBT, and paste it below. The page checks it first."),
-    node("p", `The transaction must pay exactly ${btc(request.amountSat)} BTC (${request.amountSat} sat, ` +
-      `including a ${request.successFeeSat} sat provider fee) to:`),
-    node("pre", scriptAddress(request.contractScript, networkName), "swap-contract-address"),
-    node("p", `Keep the network fee at or below ${request.maxFundingFeeSat} sat. Use only native segwit inputs. ` +
-      "Sign and finalize in your wallet, then paste the finalized PSBT (base64 or hex) here. Do not broadcast yet. " +
-      "In Sparrow: on the Send tab choose Create Transaction, then Finalize Transaction for Signing, then Sign; " +
-      "copy or save the signed PSBT as Base64 and do not click Broadcast Transaction."),
+    node("h2", "Send Bitcoin to fund the swap"),
+    node("p", `Send exactly ${btc(request.amountSat)} BTC (${request.amountSat.toLocaleString()} sat, ` +
+      `including the ${request.successFeeSat.toLocaleString()} sat provider fee) from any wallet to:`),
+    node("pre", address, "swap-contract-address"),
+    open, copy,
+    node("p", `Send it once, in one transaction, from a native segwit wallet (addresses starting with bc1), with a network fee of at most ` +
+      `${request.maxFundingFeeSat.toLocaleString()} sat. The swap continues by itself once the payment has one confirmation. ` +
+      "Keep this page open until then: closing it before the confirmation leaves the deposit unbound to the swap.", "swap-funding-rules"),
     node("p", `If the provider does not pay, you can refund after block ${request.refundLockHeight}.`),
     node("p", "Pay this address once, in this one transaction. A second payment to it is not a new swap: " +
       "it is never paid over Lightning, the refund tools cover only the bound funding output, and once " +
       "the provider knows the preimage it can claim any output at this address. It may be lost.",
     "swap-second-deposit-warning"),
+    status,
   );
+  const advanced = node("details", "", "swap-funding-advanced");
+  advanced.append(node("summary", "Advanced: fund with a finalized PSBT instead"),
+    node("p", "Create the transaction in your wallet, sign and finalize it as a PSBT, and paste it here without broadcasting. " +
+      "The page checks it, shares it with the provider, then asks you to broadcast it."));
   const psbtLabel = node("label", "Finalized PSBT (base64 or hex)");
   const psbt = node("textarea", "", "swap-psbt");
   psbtLabel.htmlFor = psbt.id;
-  panel.append(psbtLabel, psbt);
-  return waitForClick(panel, "Check funding").then(() => psbt.value);
+  advanced.append(psbtLabel, psbt);
+  panel.append(advanced);
+  addressShown();
+  return new Promise<FundingSource>((resolve, reject) => {
+    let settled = false;
+    const finish = (outcome: () => void): void => { if (!settled) { settled = true; clearTimeout(timer); outcome(); } };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async (): Promise<void> => {
+      try {
+        const seen = await observeDeposit(chainApi(), { address, script: request.contractScript, amountSat: request.amountSat });
+        if (settled) return;
+        if (seen.status === "confirmed") { finish(() => resolve({ deposit: seen.funding })); return; }
+        if (seen.status === "ambiguous") {
+          finish(() => reject(new Error(`Several confirmed payments reached this address (${seen.txids.join(", ")}); ` +
+            "none was bound to the swap. Each is refundable after the refund block; keep the terms backup.")));
+          return;
+        }
+        status.textContent = seen.status === "unconfirmed"
+          ? `Payment ${seen.txid} seen, waiting for its first confirmation.`
+          : "Waiting for your payment. This page checks your mempool API every 10 seconds.";
+      } catch (error) {
+        if (settled) return;
+        if (error instanceof TransactionRefusedError) { finish(() => reject(new Error(`Your deposit could not be verified: ${error.message}`))); return; }
+        status.textContent = "Your mempool API did not answer; trying again.";
+      }
+      timer = setTimeout(() => { void poll(); }, DEPOSIT_POLL_MS);
+    };
+    void poll();
+    waitForClick(advanced, "Check funding").then(() => finish(() => resolve({ psbt: psbt.value })));
+  });
 }
 
 async function run(
@@ -900,6 +945,7 @@ async function run(
   panel: HTMLElement,
   report: (line: string) => void,
   publish: (file: Uint8Array) => void,
+  chainApi: () => string,
 ): Promise<boolean> {
   let fundsMayBeCommitted = false;
   // Backups stay visible while the stage prompts below them change.
@@ -917,7 +963,8 @@ async function run(
         publish(file);
         report(kind === "terms" ? "recovery file saved to the backups list" : "funded recovery file added to the backups list");
       },
-      fundingPsbt: (funding) => fundingPrompt(panel, networkName, funding),
+      // Showing the address can commit funds: anything sent there is the user's deposit from that moment.
+      fundingSource: (funding) => fundingPrompt(panel, networkName, funding, chainApi, () => { fundsMayBeCommitted = true; }),
       beforeFundingCommit: async () => { fundsMayBeCommitted = true; },
       broadcast: async (raw, txid) => {
         panel.replaceChildren(

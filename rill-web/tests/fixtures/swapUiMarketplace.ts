@@ -3,6 +3,7 @@ import { BrowserRecoveryWallet } from "../../src/browserRecoveryWallet";
 declare global {
   interface Window {
     uiFixture: { requests: unknown[]; executed: number; executedProviders: string[]; disposed: number;
+      fundingScript?: string; fundingSource?: { psbt: string } | { depositTxid: string };
       wallet: typeof BrowserRecoveryWallet; releaseInfo?: () => void; infoPending: boolean };
   }
 }
@@ -32,9 +33,16 @@ export const quoteProviders = async (_providers: unknown[], request: unknown) =>
     prepared: {
       quote: { providerIdentity: id.repeat(64), contractAmountSat: BigInt(1100 + Number(id)), successFeeSat: 100n,
         refundLockHeight: 300, expiresAt: Math.floor(Date.now() / 1000) + 3600 },
-      execute: async (hooks: { saveRecovery: (file: Uint8Array, stage: string) => Promise<void> }) => {
+      execute: async (hooks: { saveRecovery: (file: Uint8Array, stage: string) => Promise<void>; fundingSource: (request: unknown) => Promise<unknown> }) => {
         window.uiFixture.executed++; window.uiFixture.executedProviders.push(id.repeat(64));
         await hooks.saveRecovery(new Uint8Array([7, 7, 7]), "terms");
+        if (window.uiFixture.fundingScript) {
+          // Exercise the funding prompt with the test's contract script; record what it resolved with.
+          const source = await hooks.fundingSource({ contractScript: window.uiFixture.fundingScript, amountSat: 101_000n, maxFundingFeeSat: 500n,
+            refundLockHeight: 300, successFeeSat: 100n, termsExpiry: Math.floor(Date.now() / 1000) + 3600 }) as { psbt?: string; deposit?: { transaction: { txid: string } } };
+          window.uiFixture.fundingSource = source.psbt !== undefined ? { psbt: source.psbt } : { depositTxid: source.deposit!.transaction.txid };
+          throw new Error("Fixture stopped after funding");
+        }
         throw new Error("Fixture stopped before funding");
       },
       dispose: () => { window.uiFixture.disposed++; },

@@ -78,7 +78,7 @@ try {
   const hooks: Parameters<typeof runSwap>[2] = {
       report: (line) => { if (!values["merchant-checkout"]) console.error(`web: ${line}`); },
       saveRecovery: async (file, stage) => writeFileSync(join(out, `web-recovery-${stage}.age`), file, { mode: 0o600 }),
-      fundingPsbt: async (request) => {
+      fundingSource: async (request) => {
         const address = scriptAddress(request.contractScript, "regtest");
         const funded = await rpc<{ psbt: string }>("walletcreatefundedpsbt", [
           [],
@@ -88,7 +88,7 @@ try {
         ]);
         const signed = await rpc<{ psbt: string; complete: boolean }>("walletprocesspsbt", [funded.psbt, true]);
         if (!signed.complete) throw new Error("wallet did not finalize the PSBT");
-        return signed.psbt;
+        return { psbt: signed.psbt };
       },
       broadcast: async (raw, txid) => {
         const sent = await rpc<string>("sendrawtransaction", [raw]);

@@ -32,7 +32,7 @@ mock.module("../../src/swap/wire", () => ({ checkHandshakeAccept: () => ({}), ch
   COOPERATIVE_CLAIM_FEATURE: "fixture", EPOCH_SESSION_EXTENSION: "fixture", EPOCH_SESSION_FEATURE: "fixture" }));
 mock.module("../../src/swap/hashes", () => ({ clientAcceptanceHash: () => new Uint8Array(32), fundingBindingHash: () => new Uint8Array(32),
   epochBoundSessionId: () => new Uint8Array(32), handshakeHash: () => new Uint8Array(32) }));
-mock.module("../../src/swap/funding", () => ({ authorizeFundingPsbt: () => ({ txid: "7".repeat(64), raw: "fixture transaction" }),
+mock.module("../../src/swap/funding", () => ({ authorizeFundingPsbt: () => ({ txid: "7".repeat(64), raw: "fixture transaction" }), authorizeFunding: () => { if (scenario === "prepare_deposit_refused") throw new Error("funding fee exceeds the signed maximum"); return { txid: "7".repeat(64), raw: "fixture transaction" }; },
   fundingBinding: () => ({ funding_attempt_id: "9".repeat(64) }) }));
 mock.module("../../src/swap/taproot", () => ({ reconstructTaprootContract: () => ({ script_pubkey: "5120" + "1".repeat(64) }) }));
 mock.module("../../src/swap/recovery", () => ({ encryptRecovery: async (record: { birthday: number; extensions?: unknown }) => {
@@ -53,7 +53,8 @@ const options: MerchantSwapOptions = {
   relay: { publish: async () => false, subscribe: async () => {}, next: async () => null, query: async () => ({ events: [], truncated: false }) },
   request: { identity: "4".repeat(64), network: { name: "regtest" }, refundScript: "fixture", tipHeight: 100, ageRecipient: "fixture",
     limits: { maxSuccessFeeSat: 10n, maxFundingFeeSat: 10n, maxClaimFeeSat: 10n, maxRefundFeeSat: 10n, maxRefundDelayBlocks: 100 } },
-  hooks: { report: () => {}, fundingPsbt: async () => { if (scenario === "wallet_delay") now = 3000; return "fixture"; },
+  hooks: { report: () => {}, fundingSource: async () => { if (scenario === "wallet_delay") now = 3000;
+    return scenario?.startsWith("prepare_deposit") ? { deposit: { transaction: { txid: "7".repeat(64) }, inputValues: [] } as never } : { psbt: "fixture" }; },
     broadcast: async () => { broadcasts++; }, cosigner: { loadMusig: async () => { throw new Error(); }, reserve: async () => { throw new Error(); } } },
   recoveryStore: { load: async () => checkpoint, begin: async (record) => { if (checkpoint) return false; checkpoint = record; return true; },
     update: async (record) => { checkpoint = record; if (scenario === "checkpoint_delay" && record.route?.fundingTxid) now = 3000; } },
@@ -71,7 +72,7 @@ if (scenario?.startsWith("prepare_")) {
     recoveryStages.push(stage);
     if (scenario === "prepare_callback_error") throw new Error("backup failed");
   } };
-  let refused = false, activeSignerPreserved = true;
+  let refused = false, refusal = "", activeSignerPreserved = true;
   if (scenario === "prepare_only") prepared.dispose();
   else if (scenario === "prepare_disposed") {
     prepared.dispose(); prepared.dispose();
@@ -92,9 +93,9 @@ if (scenario?.startsWith("prepare_")) {
     (request.refundAllocation as { index: number }).index = 999;
     await prepared.execute(hooks);
   } else {
-    try { await prepared.execute(hooks); } catch { refused = true; }
+    try { await prepared.execute(hooks); } catch (error) { refused = true; refusal = (error as Error).message; }
   }
-  console.log(JSON.stringify({ before, refused, activeSignerPreserved, recoveryBirthday, recoveryExtensions,
+  console.log(JSON.stringify({ before, refused, refusal, activeSignerPreserved, recoveryBirthday, recoveryExtensions,
     quoteFrozen: Object.isFrozen(prepared.quote), secretsWiped: sessionSecrets.every((secret) => secret.every((byte) => byte === 0)),
     accepted: messages.includes("terms_accept"), shared, recoveryStages, broadcasts }));
 } else {

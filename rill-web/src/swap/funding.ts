@@ -40,13 +40,17 @@ export interface FundingBinding {
   readonly created_at: number;
 }
 
-/** Check the exact funding transaction the user's wallet signed. */
+/** Check the exact funding transaction the user's wallet signed (PSBT) or already broadcast (deposit). */
 export function authorizeFunding(funding: FinalizedFunding, terms: FundingTermsInput): AuthorizedFunding {
   const { transaction, inputValues } = funding;
   const script = reconstructTaprootContract(terms).script_pubkey;
   const value = BigInt(terms.economics.contract_amount_sat);
   const outpoints = new Set(transaction.inputs.map((input) => `${input.txid}:${input.vout}`));
   if (outpoints.size !== transaction.inputs.length) throw new TransactionRefusedError("duplicate input");
+  // PSBT extraction already guarantees this; a deposit discovered on chain must pass the same rule.
+  if (inputValues.length !== transaction.inputs.length || transaction.inputs.some((input) => input.scriptSig.length > 0 || input.witness.length === 0)) {
+    throw new TransactionRefusedError("every input must be native segwit");
+  }
   const contract = transaction.outputs.flatMap((output, index) =>
     bytesToHex(output.script) === script ? [index] : [],
   );

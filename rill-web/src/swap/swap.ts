@@ -14,7 +14,8 @@ import { bytesToHex, randomBytes } from "@noble/hashes/utils.js";
 import { invoiceBinding } from "./bolt11";
 import { COOPERATIVE_RESERVATION_EXTENSION, type Cosigner, settle } from "./cooperative";
 import { type AnnouncementSource, discoverProvider } from "./discovery";
-import { type AuthorizedFunding, authorizeFundingPsbt, type FundingBinding, fundingBinding } from "./funding";
+import { type AuthorizedFunding, authorizeFunding, authorizeFundingPsbt, type FundingBinding, fundingBinding } from "./funding";
+import type { FinalizedFunding } from "./transaction";
 import { clientAcceptanceHash, fundingBindingHash } from "./hashes";
 import { encryptRecovery, type RecoveryParts } from "./recovery";
 import { handshake, newKeyPair } from "./handshake";
@@ -70,15 +71,20 @@ export interface SwapHooks {
   report(line: string): void;
   /** Offer the age file for download; resolve after the user saved it. */
   saveRecovery(file: Uint8Array, stage: "terms" | "funded"): Promise<void>;
-  /** Show the contract output; resolve with the wallet's finalized PSBT. */
-  fundingPsbt(request: FundingRequest): Promise<string>;
-  /** Show the signed transaction; resolve once the user broadcast it. */
+  /**
+   * Show the contract output; resolve with the user's funding: a finalized PSBT
+   * from the wallet, or a confirmed deposit the page found on chain (already broadcast).
+   */
+  fundingSource(request: FundingRequest): Promise<FundingSource>;
+  /** PSBT funding only: show the signed transaction; resolve once the user broadcast it. */
   broadcast(rawTransaction: string, txid: string): Promise<void>;
   /** Persist public references before releasing a signed transaction to the provider. */
   beforeFundingCommit?(txid: string, termsExpiry: number): Promise<void>;
   /** The MuSig2 signer and cross-tab reservation journal for the key-path claim. */
   readonly cosigner: Cosigner;
 }
+
+export type FundingSource = { readonly psbt: string } | { readonly deposit: FinalizedFunding };
 
 export interface SwapOutcome {
   readonly sessionId: string;
@@ -259,8 +265,11 @@ export async function prepareSwap(
             () => assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry));
           await session.replyTo(accepted, "ack");
 
-          const funding = await authorizeUserFunding(terms, hooks);
-          assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry);
+          // RS-003: terms_expiry gates acceptance only. Funding is bounded by the payment the
+          // provider still has to make (invoice and checkout expiry); a deposit needs a confirmation.
+          const paymentWindow = (): void => assertFundingWindow(invoice.expires_at, invoice.expires_at, seconds(), checkoutExpiry);
+          const { funding, broadcastByUser } = await authorizeUserFunding(terms, hooks);
+          paymentWindow();
           const binding = fundingBinding(contractHash, funding, bytesToHex(randomBytes(32)), seconds());
           const bindingSignature = sign(fundingBindingHash(binding), session.secret);
           const funded = { ...record, updatedAt: seconds(), funding: [{ binding, signature: bindingSignature }] };
@@ -273,13 +282,16 @@ export async function prepareSwap(
           );
           // Sharing a signed transaction can commit funds before a broadcast acknowledgment.
           await hooks.beforeFundingCommit?.(funding.txid, terms.terms_expiry);
-          assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry);
-          await session.send(bound, providerKey,
-            () => assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry));
+          paymentWindow();
+          await session.send(bound, providerKey, paymentWindow);
           await session.replyTo(bound, "ack");
-          assertFundingWindow(terms.terms_expiry, invoice.expires_at, seconds(), checkoutExpiry);
-          await hooks.broadcast(funding.raw, funding.txid);
-          hooks.report(`funding ${funding.txid} broadcast; waiting for the provider to pay`);
+          paymentWindow();
+          if (broadcastByUser) {
+            await hooks.broadcast(funding.raw, funding.txid);
+            hooks.report(`funding ${funding.txid} broadcast; waiting for the provider to pay`);
+          } else {
+            hooks.report(`the provider acknowledged your confirmed deposit ${funding.txid}; waiting for it to pay`);
+          }
           const hint =
             `funds are committed; after block ${terms.refund_lock_height} open Recover a swap with the funded ` +
             `recovery file (funding attempt ${binding.funding_attempt_id}) to check funding and prepare your refund`;
@@ -343,8 +355,8 @@ export function assertFundingWindow(termsExpiry: number, invoiceExpiry: number, 
   }
 }
 
-/** Ask for the wallet's finalized PSBT until one passes authorization. */
-async function authorizeUserFunding(terms: BtcToLnTerms, hooks: SwapHooks): Promise<AuthorizedFunding> {
+/** Ask for the user's funding until one passes authorization. A PSBT still needs the user's broadcast. */
+async function authorizeUserFunding(terms: BtcToLnTerms, hooks: SwapHooks): Promise<{ funding: AuthorizedFunding; broadcastByUser: boolean }> {
   const request: FundingRequest = {
     contractScript: reconstructTaprootContract(terms).script_pubkey,
     amountSat: BigInt(terms.economics.contract_amount_sat),
@@ -354,10 +366,18 @@ async function authorizeUserFunding(terms: BtcToLnTerms, hooks: SwapHooks): Prom
     termsExpiry: terms.terms_expiry,
   };
   for (let attempt = 1; ; attempt += 1) {
-    const psbt = await hooks.fundingPsbt(request);
+    const source = await hooks.fundingSource(request);
     try {
-      return authorizeFundingPsbt(psbt, terms);
+      return "psbt" in source
+        ? { funding: authorizeFundingPsbt(source.psbt, terms), broadcastByUser: true }
+        : { funding: authorizeFunding(source.deposit, terms), broadcastByUser: false };
     } catch (error) {
+      if ("deposit" in source) {
+        // The deposit is already on chain: a retry cannot change it, and it was not bound to the swap.
+        throw new SwapError(`your confirmed deposit ${source.deposit.transaction.txid} cannot fund this swap (${(error as Error).message}). ` +
+          `It was not bound to the swap and is refundable after block ${terms.refund_lock_height}; keep the terms recovery file and this transaction id. ` +
+          "This page cannot prepare that refund yet.");
+      }
       if (attempt >= MAX_FUNDING_ATTEMPTS) throw new SwapError("no acceptable funding transaction; nothing was funded");
       hooks.report(`${(error as Error).message}; nothing was sent, try again`);
     }

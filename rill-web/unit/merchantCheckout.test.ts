@@ -16,7 +16,7 @@ function fixture() {
     relay: { publish: async () => { throw new Error("No relay in disconnected fixture"); }, subscribe: async () => {}, next: async () => null, query: async () => ({ events: [], truncated: false }) },
     request: { identity: "4".repeat(64), network: { name: "regtest" }, refundScript: "fixture", tipHeight: 100, ageRecipient: "fixture",
       limits: { maxSuccessFeeSat: 10n, maxFundingFeeSat: 10n, maxClaimFeeSat: 10n, maxRefundFeeSat: 10n, maxRefundDelayBlocks: 100 } },
-    hooks: { report: () => {}, fundingPsbt: async () => "fixture-psbt", broadcast: async () => { broadcasts++; },
+    hooks: { report: () => {}, fundingSource: async () => ({ psbt: "fixture-psbt" }), broadcast: async () => { broadcasts++; },
       cosigner: { loadMusig: async () => { throw new Error("No signer in disconnected fixture"); }, reserve: async () => { throw new Error("No signer in disconnected fixture"); } } },
     recoveryStore: { load: async () => row, begin: async (record) => { if (row) return false; row = record; return true; }, update: async (record) => { row = record; } },
     savePayerRecovery: async (_file, stage) => "wallet-recovery:" + stage, now: () => now,
@@ -27,7 +27,7 @@ const funding: FundingRequest = { contractScript: "fixture", amountSat: 1000n, m
 const outcome: SwapOutcome = { sessionId: "5".repeat(64), contractHash: "6".repeat(64), fundingTxid: "7".repeat(64), preimage: "private payer preimage",
   refundLockHeight: 200, cooperation: "abandoned", claimTxid: null, paidRecovery: new Uint8Array([9]) };
 const runner = async (_request: unknown, hooks: SwapHooks): Promise<SwapOutcome> => {
-  await hooks.saveRecovery(new Uint8Array([1]), "terms"); await hooks.fundingPsbt(funding);
+  await hooks.saveRecovery(new Uint8Array([1]), "terms"); await hooks.fundingSource(funding);
   await hooks.saveRecovery(new Uint8Array([2]), "funded"); await hooks.beforeFundingCommit?.(outcome.fundingTxid, 4000);
   await hooks.broadcast("fixture-raw", outcome.fundingTxid); return outcome;
 };
@@ -46,11 +46,11 @@ test("unapproved provider, short invoice and aggregate buyer fee caps fail befor
   ]) { const f = fixture(); await expect(executeMerchantSwap(change(f), runner)).rejects.toThrow(); expect(f.row()).toBeNull(); }
 });
 test("wallet delay cannot broadcast expired merchant terms", async () => {
-  const f = fixture(); const options = { ...f.options, hooks: { ...f.options.hooks, fundingPsbt: async () => { f.expire(); return "fixture-psbt"; } } };
+  const f = fixture(); const options = { ...f.options, hooks: { ...f.options.hooks, fundingSource: async () => { f.expire(); return { psbt: "fixture-psbt" }; } } };
   await expect(executeMerchantSwap(options, runner)).rejects.toThrow("expired"); expect(f.broadcasts()).toBe(0); expect(f.row()?.stage).toBe("ambiguous");
 });
 test("source funding requires durable payer recovery", async () => {
-  const f = fixture(); await expect(executeMerchantSwap(f.options, async (_request, hooks) => { await hooks.fundingPsbt(funding); return outcome; })).rejects.toThrow("recovery"); expect(f.broadcasts()).toBe(0);
+  const f = fixture(); await expect(executeMerchantSwap(f.options, async (_request, hooks) => { await hooks.fundingSource(funding); return outcome; })).rejects.toThrow("recovery"); expect(f.broadcasts()).toBe(0);
 });
 test("quote and invoice deadlines are checked at their exact boundary", () => {
   expect(() => assertFundingWindow(2000, 3000, 1999)).not.toThrow();

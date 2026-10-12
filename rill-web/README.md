@@ -52,10 +52,23 @@ rill-cli's `run_swap`:
 - Taproot contract reconstruction (ordered BIP327 KeyAgg) and RS-007 recovery
   documents byte-identical to rill-cli's, encrypted to the user's age X25519
   recipient;
-- funding from the user's own wallet: the user pastes a **finalized PSBT**
-  (native segwit inputs with `witness_utxo`, so the signed maximum funding fee
-  is checkable), the client requires exactly one contract output with the
-  exact amount and P2WPKH/P2TR other outputs, and the user broadcasts;
+- funding from the user's own wallet. By default the page shows the contract
+  address, the exact amount, and a `bitcoin:` link, and the user sends from any
+  native segwit wallet; the page polls the configured mempool API for the
+  address (`src/swap/depositWatch.ts`), waits for the first confirmation (a
+  wallet may replace an unconfirmed transaction, and the provider accepts one
+  binding per swap), fetches the deposit and each parent transaction by hash
+  so the fee rests on verified bytes, then signs and shares the binding. The
+  same rules apply as to a PSBT: exactly one contract output with the exact
+  amount, native segwit inputs, P2WPKH/P2TR other outputs, fee within the
+  signed cap. A confirmed deposit that breaks them stops the swap with its
+  txid and refund height (it is not bound; refunding it is not yet supported
+  by the recovery panel). Several confirmed deposits are never chosen between.
+  Under **Advanced**, the user can instead paste a **finalized PSBT** (native
+  segwit inputs with `witness_utxo`), which the page checks and shares before
+  asking the user to broadcast it. After acceptance the funding deadline is the
+  invoice (and checkout) expiry, as RS-003 bounds `terms_expiry` to acceptance
+  only;
 - the mandatory cooperative MuSig2 claim (`cooperative-claim/v1`): every
   handshake requests it and accepts or terms without it are refused. After the
   provider pays, the client verifies the preimage, echoes one readiness

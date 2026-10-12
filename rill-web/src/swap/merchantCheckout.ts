@@ -58,10 +58,10 @@ export async function executeMerchantSwap(options: MerchantSwapOptions,
   try {
     const result = await execute({ ...options.request, invoice: options.invoice, checkoutExpiresAt: terms.expiresAt }, {
       ...options.hooks, saveRecovery: save,
-      async fundingPsbt(request) {
+      async fundingSource(request) {
         eligible();
         if (!recoveryRef) throw new Error("Payer recovery must be durably saved before funding");
-        return options.hooks.fundingPsbt(request);
+        return options.hooks.fundingSource(request);
       },
       async broadcast(raw, txid) {
         eligible();
