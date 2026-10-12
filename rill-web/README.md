@@ -163,9 +163,24 @@ the pair. `src/swapPairs.ts` is the single table mapping display assets to
 protocol profiles: BTC to LN (`btc-to-ln/v1`) is quotable and payable; LN to
 BTC (`ln-to-btc/v1`) supports indicative comparison followed by explicitly
 approved execution paid from any Lightning wallet (or, under Advanced, a
-configured LND node); USDT and USDC are
-listed in both directions as unavailable placeholders with no protocol
-profile. Unavailable pairs explain why and never connect anywhere.
+configured LND node); USDC or USDT to LN (`erc20-to-ln/v1`, RS-010) is
+quotable and payable from an injected EVM wallet; LN to USDC/USDT
+(`ln-to-erc20/v1`) is listed but not quotable yet. Unavailable pairs explain
+why and never connect anywhere.
+
+Stablecoin to LN (`src/swap/erc20Swap.ts`, `src/erc20Ui.ts`) discovers
+providers announcing the `rillswap/evm-assets-v1` extension, picks the
+cheapest eligible provider's asset matching the chosen symbol (a dev chain's
+`fUSDC` serves USDC) and quotes only providers serving exactly that asset.
+The wallet extension (`window.ethereum`, EIP-1193) connects on the asset's
+chain before the firm quote names its address; the configured **EVM RPC**
+(`VITE_RILLSWAP_EVM_RPC`, loopback Anvil on regtest) is read-only. After
+acceptance the wallet signs an ERC20 approval when needed and the lock in the
+Boltz ERC20Swap v6 HTLC; the page then learns the preimage from the provider's
+settlement observation or its on-chain Claim. The encrypted swap record
+(`rillswap-evm-recovery`) carries the signed terms and lock transaction; the
+wallet keeps the refund key. Reopening the swap link shows the lock, checks it
+on request, and offers a wallet refund once the timelock block has passed.
 
 LN to BTC estimates (`src/swap/reverseSwap.ts`) send RS-004 *indicative*
 requests naming only the payout, over the same authenticated handshake as
@@ -485,6 +500,14 @@ docker compose -f dev/compose.yaml up -d --no-build \
   tools maker-ln-to-btc chain broadcast user-node web
 (cd rill-web && RILLSWAP_RUN_BROWSER_REVERSE_REGTEST=1 bun run test:regtest:reverse)
 docker compose -f dev/compose.yaml down -v
+```
+
+The stablecoin to LN check runs against the ordinary development stack
+(`dev/devctl up`): it only spends the user's dev fUSDC on Anvil and needs no
+mining. A fake EIP-1193 wallet forwards signing to Anvil's unlocked account 1.
+
+```sh
+(cd rill-web && RILLSWAP_RUN_BROWSER_ERC20_REGTEST=1 bunx playwright test --config playwright.regtest.config.ts regtest/erc20.spec.ts)
 ```
 
 Do not reuse the default project or reset its wallets. No automatic miner is

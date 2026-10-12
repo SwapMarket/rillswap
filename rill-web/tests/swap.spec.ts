@@ -33,7 +33,7 @@ import { scriptAddress } from "../src/swap/address";
 
 const SWAP = "http://127.0.0.1:18765/swap.html";
 
-test("direction flips between Bitcoin and Lightning, and stablecoins are visible but unavailable", async ({ page }) => {
+test("direction flips between Bitcoin and Lightning, and stablecoins pair with Lightning only", async ({ page }) => {
   const requests: string[] = [], sockets: string[] = [];
   page.on("request", (request) => requests.push(request.url()));
   page.on("websocket", (socket) => sockets.push(socket.url()));
@@ -68,13 +68,24 @@ test("direction flips between Bitcoin and Lightning, and stablecoins are visible
   await expect(page.locator("#swap-from")).toHaveValue("btc");
   await expect(page.getByRole("heading", { name: "Bitcoin in. Lightning out." })).toBeVisible();
 
+  // Stablecoins pair with Lightning only: sending them is quotable, receiving them is not yet.
   await page.locator("#swap-to").selectOption("usdt");
-  await expect(page.locator("#swap-to option[value=usdt]")).toHaveText("USDT · soon");
-  await expect(page.locator("#swap-pair-note")).toHaveText("Stablecoin swaps are not supported yet.");
+  await expect(page.locator("#swap-to option[value=usdt]")).toHaveText("USDT");
+  await expect(page.locator("#swap-pair-note")).toHaveText("Bitcoin to Tether swaps are not offered.");
   await expect(page.locator("#swap-start")).toHaveText("Pair unavailable");
   await expect(page.locator("#swap-start")).toBeDisabled();
   await page.locator("#swap-from").selectOption("usdc");
-  await expect(page.locator("#swap-pair-note")).toHaveText("Stablecoin swaps are not supported yet.");
+  await page.locator("#swap-to").selectOption("ln");
+  await expect(page.getByRole("heading", { name: "USD Coin in. Lightning out." })).toBeVisible();
+  await expect(page.locator("#swap-pair-note")).not.toBeVisible();
+  await expect(page.locator("#swap-invoice")).toBeVisible();
+  await expect(page.locator("#swap-forward-overrides")).not.toBeVisible();
+  await expect(page.locator("#swap-start")).toBeEnabled();
+  await page.locator("#swap-start").click(); // an empty invoice is refused locally, before any connection
+  await expect(page.locator("#swap-status")).toContainText("Invoice refused");
+  await page.getByRole("button", { name: "Switch direction" }).click();
+  await expect(page.locator("#swap-pair-note")).toHaveText("Lightning to USD Coin quotes are coming soon.");
+  await expect(page.locator("#swap-start")).toBeDisabled();
 
   await page.locator("#swap-from").selectOption("btc");
   await page.locator("#swap-to").selectOption("ln");

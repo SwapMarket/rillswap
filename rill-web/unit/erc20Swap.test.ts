@@ -99,7 +99,7 @@ describe("EVM recovery record", () => {
   test("round-trips through the age container and authenticates the signed terms", async () => {
     const identity = await generateIdentity();
     const parts = {
-      network: base.network_identity, init: fixture.handshake_init as never, accept: fixture.handshake_accept as never, acceptSignature: "11".repeat(64),
+      network: base.network_identity, init: fixture.verification_context.handshake_init as never, accept: fixture.verification_context.handshake_accept as never, acceptSignature: "11".repeat(64),
       offer: signed(TERMS), acceptanceSignature: "22".repeat(64), clientSessionKey: "33".repeat(32), lockTxHash: "44".repeat(32), preimage: null, createdAt: 1, updatedAt: 2,
     };
     const ciphertext = await encryptEvmRecovery(parts, await identityToRecipient(identity));

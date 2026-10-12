@@ -19,11 +19,14 @@ import { mempoolApiForNetwork, relaysForNetwork, validateMempoolApi, validateRel
 import { readChainTip } from "./swap/chainTip";
 import { BrowserRecoveryWallet } from "./browserRecoveryWallet";
 import { type DirectoryEntry, discoverDirectory, discoverMarketplace, eligibleProviders, indicativeFee, ineligibilityReason, quoteProviders, quoteReverseProviders,
-  estimateFromDirectory, providerLimits, type LocatedQuote, MAX_QUOTE_PROVIDERS } from "./swap/marketplace";
+  estimateFromDirectory, providerLimits, type LocatedQuote, MAX_QUOTE_PROVIDERS, quoteErc20Providers, selectEvmAsset } from "./swap/marketplace";
+import type { Erc20SwapRequest, PreparedErc20Swap } from "./swap/erc20Swap";
+import { EvmRpc } from "./swap/evmHtlc";
+import { connectEvmWallet, mountErc20Execution, parseTokenAmount, tokenLabel } from "./erc20Ui";
 import type { PreparedReverseQuote, ReverseSwapRequest } from "./swap/reverseSwap";
 import { invoiceBinding } from "./swap/bolt11";
 import { quoteSelectionLabel, stoppedSwapAdvice } from "./swapUiStatus";
-import { ASSETS, type AssetId, routeFor } from "./swapPairs";
+import { ASSETS, type AssetId, routeFor, STABLECOIN_SYMBOL } from "./swapPairs";
 import { recoveryPanel } from "./recoveryUi";
 import { parseSwapLink, swapLinkFragment } from "./swapLink";
 import { mountReverseExecution } from "./reverseExecutionUi";
@@ -118,6 +121,8 @@ function mount(root: HTMLElement): void {
     "Trusted height observations, not independent chain verification. Custom origins need a deployment CSP allowance.");
   const broadcastApi = field(settings, "swap-broadcast-api", "Transaction broadcast API", __SWAP_DEFAULTS__.broadcastApi,
     "Used only after explicit refund or claim approval and a broadcast click. Custom origins need a deployment CSP allowance.");
+  const evmRpc = field(settings, "swap-evm-rpc", "EVM RPC (stablecoin swaps)", __SWAP_DEFAULTS__.evmRpc ?? "",
+    "Read-only chain access for stablecoin swaps; your wallet extension signs. This operator sees your IP and the swap's addresses. Custom origins need a deployment CSP allowance.");
   const identity = field(settings, "swap-provider", "Provider identity", "",
     "Automatic by default. Optionally pin a provider's 64-character public identity key, or choose one under Providers.");
   identity.placeholder = "Automatic (lowest verified provider price)";
@@ -246,10 +251,16 @@ function mount(root: HTMLElement): void {
     if (route.profile === null || route.unavailable) { estimate.textContent = ""; return; }
     let amount: bigint;
     try {
-      amount = route.profile === "btc-to-ln/v1"
-        ? BigInt(invoiceBinding(invoice.value.trim(), network.value as NetworkName).amount_msat) / 1000n
-        : positive(receiveAmount, "Amount to receive");
+      amount = route.profile === "ln-to-btc/v1"
+        ? positive(receiveAmount, "Amount to receive")
+        : BigInt(invoiceBinding(invoice.value.trim(), network.value as NetworkName).amount_msat) / 1000n;
     } catch { estimate.textContent = directoryLoaded ? "Enter an amount to see the fee." : "Load announced fees to see the estimate before you swap."; return; }
+    if (route.profile === "erc20-to-ln/v1") {
+      // Token prices are only known from a signed quote; the announced fee policy is denominated in sat.
+      estimate.textContent = `You pay the ${amount.toLocaleString()} sat invoice in ${route.from.symbol} at the provider's signed rate, plus its fee. ` +
+        "The exact amount is shown before your wallet signs.";
+      return;
+    }
     if (!directoryLoaded) { estimate.textContent = "Load announced fees to see the estimate before you swap."; return; }
     const found = estimateFromDirectory(directoryEntries, route.profile, amount, identity.value.trim());
     if ("reason" in found) { estimate.textContent = found.reason; return; }
@@ -285,6 +296,8 @@ function mount(root: HTMLElement): void {
     node("p", "For Bitcoin to Lightning, responding providers receive your Lightning invoice. For Lightning to Bitcoin, " +
       "only the selected firm provider receives your payout script and payment hash. Encrypted messages do not hide transport metadata. " +
       "Signatures authenticate offers, not provider reputation."),
+    node("p", "For stablecoin to Lightning, responding providers receive your invoice and wallet address; the configured EVM RPC operator " +
+      "sees your IP, wallet address, and the swap's lock. Your wallet extension signs the approval, lock, and any refund; this page never holds its key."),
     node("p", "Connecting a Lightning node discloses its scoped credential to this tab and sends the signed hold invoice to that node. " +
       "Credentials are not saved. Approving the exact route authorizes one payment attempt; signing and broadcasting a reverse claim reveals its preimage."),
     node("p", "Recovery keys and files are not uploaded. The recovery root is stored unencrypted in this browser, " +
@@ -308,6 +321,11 @@ function mount(root: HTMLElement): void {
   const minRefundDelay = field(limits, "swap-min-refund-delay", "Minimum time before provider refund (blocks)", "72");
   const maxHold = field(limits, "swap-max-hold", "Maximum Lightning hold (blocks)", "432",
     "How long your Lightning payment may stay pending (432 is about three days).");
+  limits.append(node("p", "Stablecoin → Lightning", "swap-erc20-limits"));
+  const tokenFee = field(limits, "swap-token-fee", "Maximum provider fee (stablecoin units)", "5",
+    "The provider's fee is quoted in the stablecoin on top of the invoice amount at its signed rate.");
+  const evmTimelock = field(limits, "swap-evm-timelock", "Maximum lock time (EVM blocks)", "50000",
+    "If the provider never pays, your refund unlocks within this many EVM blocks of the quote.");
   settings.append(limits);
   const notice = node("p", "", "swap-release-notice");
   notice.setAttribute("role", "note");
@@ -395,6 +413,7 @@ function mount(root: HTMLElement): void {
     selectedChainApi: () => validateMempoolApi(chainApi.value.trim(), network.value as NetworkName),
     selectedBroadcastApi: () => validateMempoolApi(broadcastApi.value.trim(), network.value as NetworkName),
     selectedRelays: () => validateRelays(relay.value.trim(), network.value as NetworkName),
+    selectedEvmRpc: () => validateMempoolApi(evmRpc.value.trim(), network.value as NetworkName),
   });
   card.insertBefore(recovery.element, safety);
   // Register failure handling immediately so blocked storage never becomes an unhandled rejection.
@@ -429,11 +448,14 @@ function mount(root: HTMLElement): void {
     heroTagline.textContent = route.tagline;
     pairNote.textContent = route.unavailable ?? "";
     pairNote.hidden = !route.unavailable;
-    invoiceBox.hidden = route.profile !== "btc-to-ln/v1";
+    invoiceBox.hidden = route.profile !== "btc-to-ln/v1" && route.profile !== "erc20-to-ln/v1";
     overrides.hidden = route.profile !== "btc-to-ln/v1";
     prerequisites.textContent = route.profile === "btc-to-ln/v1"
       ? "This experimental flow needs a wallet that can sign a PSBT without broadcasting it, but creates your recovery key and refund address automatically."
-      : "Your browser recovery key is created automatically and covers every swap started here.";
+      : route.profile === "erc20-to-ln/v1"
+        ? `This flow needs an EVM wallet extension (MetaMask or similar) holding ${route.from.symbol} plus gas on the provider's chain. ` +
+          "The wallet keeps the refund key; your browser recovery key encrypts the swap record."
+        : "Your browser recovery key is created automatically and covers every swap started here.";
     receiveBox.hidden = route.profile !== "ln-to-btc/v1";
     start.disabled = main || route.unavailable !== null;
     start.textContent = main ? "Mainnet swaps unavailable" : route.unavailable ? "Pair unavailable" : "Swap";
@@ -457,6 +479,7 @@ function mount(root: HTMLElement): void {
     chainApi.value = mempoolApiForNetwork(network.value as NetworkName, __SWAP_DEFAULTS__);
     broadcastApi.value = network.value === __SWAP_DEFAULTS__.network ? __SWAP_DEFAULTS__.broadcastApi :
       (network.value === "regtest" ? "http://127.0.0.1:8092/api" : chainApi.value);
+    evmRpc.value = network.value === __SWAP_DEFAULTS__.network ? __SWAP_DEFAULTS__.evmRpc ?? "" : network.value === "regtest" ? "http://127.0.0.1:8545" : "";
     refund.value = tip.value = age.value = "";
     updateDisclosure();
     updateNetwork();
@@ -484,8 +507,10 @@ function mount(root: HTMLElement): void {
   const handoff = new URLSearchParams(location.hash.slice(1));
   if (!link && [...handoff.keys()].length > 0) {
     const text = (key: string, limit: number): string => { const value = handoff.get(key) ?? ""; return value.length <= limit ? value : ""; };
-    const prefill = { invoice: text("invoice", 4096), address: text("address", 128), amount: text("amount", 16) };
-    if (prefill.invoice) { fromAsset.value = "btc"; toAsset.value = "ln"; invoice.value = prefill.invoice; }
+    const prefill = { invoice: text("invoice", 4096), address: text("address", 128), amount: text("amount", 16), from: text("from", 8) };
+    if (prefill.invoice) {
+      fromAsset.value = prefill.from in STABLECOIN_SYMBOL ? prefill.from : "btc"; toAsset.value = "ln"; invoice.value = prefill.invoice;
+    }
     else if (prefill.address || prefill.amount) { fromAsset.value = "ln"; toAsset.value = "btc"; }
     if (prefill.address) receiveAddress.value = prefill.address;
     if (/^[0-9]{1,16}$/.test(prefill.amount)) receiveAmount.value = prefill.amount;
@@ -493,6 +518,149 @@ function mount(root: HTMLElement): void {
     history.replaceState(null, "", location.pathname + location.search);
     updateNetwork();
   }
+
+  /** Stablecoin to Lightning: one asset per round, the wallet connected before any firm quote names its address. */
+  const erc20Quote = (name: NetworkName, symbol: "USDC" | "USDT"): void => {
+    let urls: readonly string[];
+    let rpcUrl: string;
+    let limits: Erc20SwapRequest["limits"];
+    const pinned = identity.value.trim();
+    try {
+      urls = validateRelays(relay.value.trim(), name);
+      if (!evmRpc.value.trim()) throw new Error("Set the EVM RPC endpoint in Settings for stablecoin swaps");
+      rpcUrl = validateMempoolApi(evmRpc.value.trim(), name);
+      if (pinned && !/^[0-9a-f]{64}$/.test(pinned)) {
+        throw new Error("Provider identity must be 64 lowercase hex characters, or leave it empty for automatic selection");
+      }
+      invoiceBinding(invoice.value.trim(), name);
+      limits = { maxSuccessFeeTokenBase: 0n, maxTimelockDelayBlocks: Number(positive(evmTimelock, "maximum lock time")) };
+      parseTokenAmount(tokenFee.value, 18, "Maximum provider fee"); // decimals are only known with the asset
+    } catch (error) {
+      report(`refused: ${(error as Error).message}`);
+      return;
+    }
+    const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button")];
+    busy = true;
+    for (const control of controls) (control as HTMLInputElement).disabled = true;
+    settingsButton.disabled = providersButton.disabled = true;
+    const guard = (unload: BeforeUnloadEvent): void => unload.preventDefault();
+    window.addEventListener("beforeunload", guard);
+    const cancellation = new AbortController();
+    let executing = false;
+    let arrivals: readonly LocatedQuote<PreparedErc20Swap>[] = [];
+    const done = node("button", "Edit swap", "swap-edit");
+    done.type = "button";
+    const restore = (): void => {
+      busy = false;
+      for (const control of controls) (control as HTMLInputElement).disabled = false;
+      settingsButton.disabled = providersButton.disabled = false;
+      window.removeEventListener("beforeunload", guard);
+      updateNetwork();
+    };
+    done.onclick = () => {
+      if (executing) return;
+      cancellation.abort();
+      for (const quote of arrivals) quote.dispose();
+      panel.replaceChildren();
+      setStatus("Ready for a new quote", -1, "ready");
+      restore();
+    };
+    const assertCurrent = (): void => { cancellation.signal.throwIfAborted(); };
+    panel.replaceChildren(node("p", "Checking signed provider announcements across your relays..."), done);
+    setStatus("Finding available providers", 0);
+    void (async () => {
+      try {
+        const binding = invoiceBinding(invoice.value.trim(), name);
+        const principal = BigInt(binding.amount_msat) / 1000n;
+        const directory = await discoverMarketplace(urls, NETWORKS[name], pinned || undefined, cancellation.signal, "erc20-to-ln/v1");
+        assertCurrent();
+        for (const warning of directory.warnings) report(warning);
+        const eligible = eligibleProviders(directory.providers, principal);
+        if (eligible.length === 0) throw new Error(ineligibilityReason(providerLimits(directory.providers), principal));
+        const selection = selectEvmAsset(eligible, symbol);
+        if (selection === null) throw new Error(`No announced provider serves ${symbol} for this network.`);
+        const { asset } = selection;
+        report(`${asset.token_symbol} on ${asset.name} (chain ${asset.chain_id}) served by ${selection.providers.length} provider(s)`);
+        const rpc = new EvmRpc(rpcUrl);
+        setStatus("Connect your EVM wallet", 0);
+        const { wallet, account } = await connectEvmWallet(rpc, asset);
+        assertCurrent();
+        report(`wallet ${account} connected on chain ${asset.chain_id}`);
+        const evmTip = await rpc.blockNumber();
+        assertCurrent();
+        const request: Omit<Erc20SwapRequest, "identity"> = {
+          network: NETWORKS[name], invoice: invoice.value.trim(), asset, clientEvmAddress: account, evmTip, ageRecipient: "",
+          limits: { ...limits, maxSuccessFeeTokenBase: parseTokenAmount(tokenFee.value, asset.token_decimals, "Maximum provider fee") },
+        };
+        const recoveryWallet = await walletPromise; assertCurrent();
+        const info = await recoveryWallet.info(); assertCurrent();
+        setStatus("Comparing verified provider quotes", 1);
+        report(`Requesting up to ${MAX_QUOTE_PROVIDERS} eligible offers from ${selection.providers.length} announced providers`);
+        const result = await quoteErc20Providers(selection.providers, { ...request, ageRecipient: info.recipient }, cancellation.signal);
+        arrivals = result.quotes;
+        if (cancellation.signal.aborted) return;
+        if (arrivals.length === 0) throw new Error(`No provider returned acceptable terms (${result.reasons.join("; ")}). Nothing was accepted or locked.`);
+        let selected = arrivals[0]!;
+        const review = node("div", "", "swap-quote-review");
+        const quoteSummary = node("div", "", "swap-quote-summary");
+        const priceClaim = node("p", "", "swap-quote-selection");
+        const showQuote = (): void => {
+          const quote = selected.prepared.quote;
+          priceClaim.textContent = quoteSelectionLabel(selected === arrivals[0], arrivals.length);
+          quoteSummary.replaceChildren(node("h2", tokenLabel(quote.lockAmountTokenBase, asset)),
+            node("p", `Pays your ${principal.toLocaleString()} sat invoice at ${tokenLabel(quote.rateTokenBasePerBtc, asset)} per BTC. ` +
+              `Provider fee: ${tokenLabel(quote.successFeeTokenBase, asset)}. Your wallet's gas is extra.`),
+            node("small", `Refundable from EVM block ${quote.timelockBlock} if the provider never pays. Offer expires ${new Date(quote.expiresAt * 1000).toLocaleTimeString()}.`));
+        };
+        showQuote();
+        review.append(quoteSummary, priceClaim, node("small", "Signatures authenticate offers, not provider reputation."));
+        if (directory.warnings.length || result.failures || selection.providers.length > MAX_QUOTE_PROVIDERS) {
+          review.append(node("small", "Some relays or providers did not return complete results. This is not a market-wide best-price guarantee."));
+        }
+        const offers = node("details");
+        offers.append(node("summary", "Provider details & manual selection"));
+        for (const [index, quote] of arrivals.entries()) {
+          const label = node("label"), option = node("input");
+          option.type = "radio"; option.name = "verified-provider"; option.checked = index === 0;
+          option.onchange = () => { selected = quote; showQuote(); };
+          label.append(option, node("span", `${tokenLabel(quote.prepared.quote.lockAmountTokenBase, asset)} · ${quote.prepared.quote.providerIdentity.slice(0, 12)}…`),
+            node("small", `Transport: ${quote.relayUrl}; identity: ${quote.prepared.quote.providerIdentity}`));
+          offers.append(label);
+        }
+        const accept = node("button", "Swap with this quote", "swap-quote-accept");
+        accept.type = "button";
+        review.append(offers, node("p", "By continuing you accept the selected provider's signed terms and this preview's test-funds-only conditions. " +
+          "Your wallet will ask you to approve and lock the tokens; it keeps the refund key.", "swap-quote-consent"), accept, done);
+        panel.replaceChildren(review);
+        setStatus("Quote ready. Review before continuing", 1);
+        const accepted = await new Promise<LocatedQuote<PreparedErc20Swap> | null>((resolve) => {
+          accept.onclick = () => { for (const option of offers.querySelectorAll("input")) option.disabled = true; accept.disabled = true; resolve(selected); };
+          cancellation.signal.addEventListener("abort", () => resolve(null), { once: true });
+        });
+        if (!accepted || cancellation.signal.aborted) return;
+        // The browser-stored recovery key is the approval; only an identity change blocks acceptance.
+        if ((await recoveryWallet.info()).fingerprint !== info.fingerprint) throw new Error("Recovery identity changed. Request a fresh quote.");
+        if (Date.now() / 1000 >= accepted.prepared.quote.expiresAt) throw new Error("Quote expired. Request a fresh quote.");
+        executing = true;
+        for (const quote of arrivals) if (quote !== accepted) quote.dispose();
+        arrivals = [accepted];
+        showTracking(`${asset.token_symbol} to Lightning swap`);
+        await mountErc20Execution(panel, {
+          prepared: accepted.prepared, asset, rpc, wallet, account, ageRecipient: info.recipient, signal: cancellation.signal,
+          status: (message, step, state) => setStatus(message, step, state), report,
+          download: (root, file, fileName) => { offerDownload(root, file, fileName); publishLink(file, name); },
+        });
+      } catch (error) {
+        if (!cancellation.signal.aborted) {
+          panel.replaceChildren(node("p", (error as Error).message, "swap-error"), done);
+          report(`stopped: ${(error as Error).message}`);
+        }
+      } finally {
+        if (!executing) { if (!cancellation.signal.aborted) restore(); }
+        else { window.removeEventListener("beforeunload", guard); }
+      }
+    })();
+  };
 
   /** Indicative comparison first; only the selected provider can enter durable execution. */
   const reverseQuote = (name: NetworkName): void => {
@@ -658,6 +826,10 @@ function mount(root: HTMLElement): void {
     }
     if (route.profile === "ln-to-btc/v1") {
       reverseQuote(name);
+      return;
+    }
+    if (route.profile === "erc20-to-ln/v1") {
+      erc20Quote(name, STABLECOIN_SYMBOL[route.from.id]!);
       return;
     }
     let request: SwapRequest;

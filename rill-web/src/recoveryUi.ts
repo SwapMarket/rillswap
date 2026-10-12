@@ -4,6 +4,7 @@ import { decryptRecoveryContainer } from "./recoveryKeys";
 import { inspectRecoveryPlaintext, type RecoveryInspection } from "./recoveryInspection";
 import { observeRecoveryFunding } from "./recoveryFunding";
 import { reverseRecoveryControls } from "./reverseRecoveryUi";
+import { evmRecoveryControls } from "./erc20Ui";
 import { parseRecoveryPlaintext } from "./recoveryDocument";
 import type { NetworkName } from "./swap/config";
 import { scriptAddress } from "./swap/address";
@@ -17,6 +18,8 @@ interface RecoveryUiOptions {
   readonly selectedChainApi: () => string;
   readonly selectedBroadcastApi: () => string;
   readonly selectedRelays?: () => readonly string[];
+  /** RS-010 records check and refund through this endpoint and the injected wallet. */
+  readonly selectedEvmRpc?: () => string;
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, text = "", id?: string): HTMLElementTagNameMap[K] {
@@ -24,6 +27,14 @@ function element<K extends keyof HTMLElementTagNameMap>(tag: K, text = "", id?: 
   node.textContent = text;
   if (id) node.id = id;
   return node;
+}
+
+/** Format sniff only; `evmRecoveryControls` authenticates the record. */
+function isEvmRecovery(plaintext: Uint8Array): boolean {
+  try {
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(plaintext));
+    return typeof parsed === "object" && parsed !== null && (parsed as { format?: unknown }).format === "rillswap-evm-recovery";
+  } catch { return false; }
 }
 
 /** Public controls needed by the owning Settings UI, without exposing imported state. */
@@ -143,6 +154,13 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
       try {
         const identity = selectedKey ? await selectedKey.text() : await options.browserIdentity();
         plaintext = await decryptRecoveryContainer(new Uint8Array(await selectedFile.arrayBuffer()), identity);
+        if (isEvmRecovery(plaintext)) {
+          pendingInvalidated = false;
+          const assertCurrent = (): void => { if (pendingInvalidated || options.selectedNetwork().name !== selected.name || file.files?.[0] !== selectedFile || keyFile.files?.[0] !== selectedKey) throw new Error("Recovery selection changed"); };
+          assertCurrent();
+          disposeReverse = evmRecoveryControls(result, { plaintext, network: expectedNetwork, evmRpc: options.selectedEvmRpc ?? (() => ""), assertCurrent });
+          return;
+        }
         if (parseRecoveryPlaintext(plaintext).document.profile_id === "ln-to-btc/v1") {
           pendingInvalidated = false;
           const assertCurrent = (): void => { if (pendingInvalidated || options.selectedNetwork().name !== selected.name || file.files?.[0] !== selectedFile || keyFile.files?.[0] !== selectedKey) throw new Error("Recovery selection changed"); };

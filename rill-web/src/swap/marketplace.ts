@@ -8,6 +8,8 @@ import { SwapError } from "./session";
 import { ProtocolError } from "./wire";
 import { type PreparedReverseQuote, prepareReverseQuote, type ReverseSwapRequest } from "./reverseSwap";
 import { prepareSwap, type PreparedSwap, type SwapRequest } from "./swap";
+import { type Erc20SwapRequest, type PreparedErc20Swap, prepareErc20Swap } from "./erc20Swap";
+import type { EvmAssetIdentity } from "../manualProviderAdvertisement";
 
 type AnnouncementProfile = Parameters<typeof verifyNostrProviderAnnouncement>[3];
 
@@ -223,6 +225,46 @@ export async function quoteReverseProviders(
     prepareReverseQuote(relay, { ...request, identity: provider.announcement.identityXOnlyKey },
       { announcement: provider.rawAnnouncement }), signal);
   return { ...result, quotes: rankReverseQuotes(result.quotes) };
+}
+
+/** The announced asset for a stablecoin symbol (`USDC` also matches a dev chain's `fUSDC`), or null. */
+export function matchEvmAsset(assets: readonly EvmAssetIdentity[], symbol: "USDC" | "USDT"): EvmAssetIdentity | null {
+  return assets.find((asset) => asset.htlc_version === 6 && asset.token_symbol.toUpperCase().endsWith(symbol)) ?? null;
+}
+
+const sameAsset = (a: EvmAssetIdentity, b: EvmAssetIdentity): boolean =>
+  a.chain_id === b.chain_id && a.token_contract === b.token_contract && a.htlc_contract === b.htlc_contract;
+
+/**
+ * One asset per quote round: the cheapest eligible provider's match for `symbol` decides the chain
+ * and token, and only providers serving exactly that asset are quoted. The wallet connects to one chain.
+ */
+export function selectEvmAsset(
+  providers: readonly LocatedProvider[], symbol: "USDC" | "USDT",
+): { readonly asset: EvmAssetIdentity; readonly providers: readonly LocatedProvider[] } | null {
+  for (const provider of providers) {
+    const asset = matchEvmAsset(provider.announcement.evmAssets, symbol);
+    if (asset === null) continue;
+    return { asset, providers: providers.filter((item) => item.announcement.evmAssets.some((served) => sameAsset(served, asset))) };
+  }
+  return null;
+}
+
+/** ERC20 to LN: the smallest lock for the same invoice wins. */
+export async function quoteErc20Providers(
+  providers: readonly LocatedProvider[], request: Omit<Erc20SwapRequest, "identity">, signal?: AbortSignal,
+): Promise<QuoteFanOut<PreparedErc20Swap>> {
+  const result = await fanOutQuotes(providers, (relay, provider) =>
+    prepareErc20Swap(relay, { ...request, identity: provider.announcement.identityXOnlyKey }, () => {}, {
+      announcement: provider.rawAnnouncement, timeouts: { replyMs: 15_000, settleMs: 900_000 },
+    }), signal);
+  const quotes = [...result.quotes].sort((a, b) => {
+    const left = a.prepared.quote, right = b.prepared.quote;
+    const difference = left.lockAmountTokenBase - right.lockAmountTokenBase;
+    return difference < 0n ? -1 : difference > 0n ? 1 :
+      `${left.providerIdentity}:${left.providerSlot}`.localeCompare(`${right.providerIdentity}:${right.providerSlot}`);
+  });
+  return { ...result, quotes };
 }
 
 export function rankReverseQuotes(quotes: readonly LocatedQuote<PreparedReverseQuote>[]): readonly LocatedQuote<PreparedReverseQuote>[] {

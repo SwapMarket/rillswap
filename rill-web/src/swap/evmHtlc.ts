@@ -116,7 +116,11 @@ const hexInt = (value: unknown, what: string): number => {
 
 /** Stateless JSON-RPC reads against one configured endpoint; never signs. */
 export class EvmRpc {
-  constructor(private readonly url: string, private readonly fetchFn: typeof fetch = fetch) {}
+  private readonly fetchFn: (input: string, init: RequestInit) => Promise<Response>;
+  constructor(private readonly url: string, fetchFn?: (input: string, init: RequestInit) => Promise<Response>) {
+    // A bare `fetch` reference loses its window binding ("Illegal invocation" in browsers).
+    this.fetchFn = fetchFn ?? ((input, init) => fetch(input, init));
+  }
 
   async call(method: string, params: unknown[]): Promise<unknown> {
     const response = await this.fetchFn(this.url, {

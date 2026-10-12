@@ -17,8 +17,8 @@ export interface Asset {
 export const ASSETS: readonly Asset[] = [
   { id: "btc", symbol: "BTC", name: "Bitcoin" },
   { id: "ln", symbol: "LN", name: "Lightning" },
-  { id: "usdt", symbol: "USDT", name: "Tether", unavailable: "Stablecoin swaps are not supported yet." },
-  { id: "usdc", symbol: "USDC", name: "USD Coin", unavailable: "Stablecoin swaps are not supported yet." },
+  { id: "usdt", symbol: "USDT", name: "Tether" },
+  { id: "usdc", symbol: "USDC", name: "USD Coin" },
 ];
 
 export interface Route {
@@ -42,7 +42,10 @@ const PROFILES: Partial<Record<`${AssetId}>${AssetId}`, ProfileId>> = {
 };
 
 /** Profiles whose browser quote flow exists in this build. */
-const QUOTABLE: ReadonlySet<ProfileId> = new Set(["btc-to-ln/v1", "ln-to-btc/v1"]);
+const QUOTABLE: ReadonlySet<ProfileId> = new Set(["btc-to-ln/v1", "ln-to-btc/v1", "erc20-to-ln/v1"]);
+
+/** Stablecoin display assets match an announced ERC20 by symbol suffix (dev chains serve fUSDC for USDC). */
+export const STABLECOIN_SYMBOL: Partial<Record<AssetId, "USDC" | "USDT">> = { usdc: "USDC", usdt: "USDT" };
 
 export function asset(id: string): Asset {
   const found = ASSETS.find((item) => item.id === id);
@@ -63,5 +66,7 @@ export function routeFor(fromId: string, toId: string): Route {
       ? "Pay a Lightning invoice, receive Bitcoin on-chain. No account. Your keys stay with you."
       : profile === "btc-to-ln/v1"
         ? "Pay a Lightning invoice from your Bitcoin wallet. No account. Your keys stay with you."
-        : "This pair is shown for planning. It cannot be quoted yet." };
+        : profile === "erc20-to-ln/v1"
+          ? `Pay a Lightning invoice with ${from.symbol} from your EVM wallet. No account. Your keys stay with you.`
+          : "This pair is shown for planning. It cannot be quoted yet." };
 }

@@ -67,6 +67,19 @@ describe("handshake accept", () => {
     }
   });
 
+  test("RS-010 profiles settle in the HTLC contract: cooperation is refused, its absence accepted", () => {
+    const evm = (initFeatures: string[], acceptFeatures: string[]) => {
+      const half = featured(initFeatures, acceptFeatures);
+      const init = { ...half.init, profile_id: "erc20-to-ln/v1" } as HandshakeInit;
+      const accept = { ...half.accept, profile_id: "erc20-to-ln/v1", handshake_init_hash: bytesToHex(handshakeInitHash(init)) };
+      return { init, payload: { accept, provider_identity_signature: bytesToHex(schnorr.sign(handshakeAcceptHash(accept), secret)) } };
+    };
+    const plain = evm([], []);
+    expect(checkHandshakeAccept(plain.payload, plain.init, sender).session_id).toBe(init.session_id);
+    const negotiated = evm([COOPERATIVE_CLAIM_FEATURE], [COOPERATIVE_CLAIM_FEATURE]);
+    expect(() => checkHandshakeAccept(negotiated.payload, negotiated.init, sender)).toThrow("cooperative claim must be jointly");
+  });
+
   test("another sender, identity, echo, or signature is refused", () => {
     expect(() => checkHandshakeAccept(clone(payload), init, init.client_session_xonly_key)).toThrow(ProtocolError);
     const otherIdentity = { ...init, expected_provider_identity_xonly_key: init.client_session_xonly_key };

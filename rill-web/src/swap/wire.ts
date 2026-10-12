@@ -126,8 +126,11 @@ export function checkHandshakeAccept(payload: unknown, init: HandshakeInit, send
   if ([...required].some((feature) => feature !== EPOCH_SESSION_FEATURE && feature !== COOPERATIVE_CLAIM_FEATURE)) {
     throw new ProtocolError("handshake requires an unknown feature");
   }
-  if (init.required_features.includes(COOPERATIVE_CLAIM_FEATURE) !== accept.required_features.includes(COOPERATIVE_CLAIM_FEATURE) ||
-    (init.profile_id !== "ln-to-btc/v1" && !init.required_features.includes(COOPERATIVE_CLAIM_FEATURE))) {
+  // Cooperative claims exist for the Bitcoin forward profile only: the reverse profile and the
+  // RS-010 EVM profiles settle through the HTLC contract itself.
+  const cooperative = init.required_features.includes(COOPERATIVE_CLAIM_FEATURE);
+  if (cooperative !== accept.required_features.includes(COOPERATIVE_CLAIM_FEATURE) ||
+    (init.profile_id === "btc-to-ln/v1" && !cooperative) || (init.profile_id.includes("erc20") && cooperative)) {
     throw new ProtocolError("cooperative claim must be jointly negotiated");
   }
   if (required.has(EPOCH_SESSION_FEATURE)) {
