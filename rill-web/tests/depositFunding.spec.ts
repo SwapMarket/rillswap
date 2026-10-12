@@ -59,6 +59,8 @@ test("the default funding step shows the address and binds the deposit once it c
   await startSwap(page);
   await expect(page.locator("#swap-funding-uri")).toHaveAttribute("href", `bitcoin:${ADDRESS}?amount=0.00101000`);
   await expect(page.locator("#swap-funding-rules")).toContainText("at most 500 sat");
+  await expect(page.locator("#swap-funding-qr")).toHaveAttribute("aria-label", `QR code: bitcoin:${ADDRESS}?amount=0.00101000`);
+  expect(await page.locator("#swap-funding-qr path").getAttribute("d")).toMatch(/^(M\d+ \d+h1v1h-1z)+$/);
   await expect(page.locator("#swap-funding-advanced")).not.toHaveAttribute("open");
   await expect(page.locator("#swap-psbt")).toBeHidden(); // the PSBT path stays behind the disclosure
   await expect(page.locator("#swap-deposit-status")).toHaveText(`Payment ${tx.txid} seen, waiting for its first confirmation.`);

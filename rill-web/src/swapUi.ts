@@ -13,6 +13,7 @@ import { addressScript, scriptAddress } from "./swap/address";
 import { browserCosigner } from "./swap/browserCosigner";
 import { type FundingRequest, type FundingSource, type SwapRequest } from "./swap/swap";
 import { observeDeposit } from "./swap/depositWatch";
+import { qrSvg } from "./qr";
 import { TransactionRefusedError } from "./swap/transaction";
 import { mempoolApiForNetwork, relaysForNetwork, validateMempoolApi, validateRelays, type NetworkName } from "./swap/config";
 import { readChainTip } from "./swap/chainTip";
@@ -888,6 +889,7 @@ function fundingPrompt(panel: HTMLElement, networkName: NetworkName, request: Fu
     node("h2", "Send Bitcoin to fund the swap"),
     node("p", `Send exactly ${btc(request.amountSat)} BTC (${request.amountSat.toLocaleString()} sat, ` +
       `including the ${request.successFeeSat.toLocaleString()} sat provider fee) from any wallet to:`),
+    qrSvg(uri, `QR code: ${uri}`, "swap-funding-qr"),
     node("pre", address, "swap-contract-address"),
     open, copy,
     node("p", `Send it once, in one transaction, from a native segwit wallet (addresses starting with bc1), with a network fee of at most ` +

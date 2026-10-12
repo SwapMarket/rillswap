@@ -30,6 +30,7 @@ test("accepting shows the hold invoice for any wallet, hides the node path, and 
   await expect(page.locator("#swap-reverse-invoice")).toHaveText("lnbcrt510010n1fixture");
   await expect(page.locator("#swap-reverse-invoice-uri")).toHaveAttribute("href", "lightning:lnbcrt510010n1fixture");
   await expect(page.locator("#swap-reverse-invoice-notes")).toContainText("Pay it once");
+  await expect(page.locator("#swap-reverse-invoice-qr")).toBeVisible();
   await expect(page.locator("#swap-reverse-advanced")).toHaveCount(0);
   await expect(page.locator("#swap-status")).toContainText("Pay the invoice from your Lightning wallet");
   await expect(page.locator("#swap-reverse-funding-status")).toContainText("Waiting for the provider to lock the Bitcoin");

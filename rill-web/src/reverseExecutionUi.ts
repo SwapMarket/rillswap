@@ -5,6 +5,7 @@ import { BrowserHoldPayer } from "./swap/browserHoldPayer";
 import { validateMempoolApi, type NetworkName } from "./swap/config";
 import { readBoundedChainText, readChainTip } from "./swap/chainTip";
 import { parseStrictEventJson } from "./strictEventJson";
+import { qrSvg } from "./qr";
 import type { PreparedReverseQuote } from "./swap/reverseSwap";
 import type { PreparedReverseExecution } from "./swap/reverseExecution";
 
@@ -153,6 +154,7 @@ export async function mountReverseExecution(root: HTMLElement, options: ReverseE
       const copy = node("button", "Copy invoice", "swap-reverse-invoice-copy"); copy.type = "button";
       copy.onclick = () => { void navigator.clipboard?.writeText(exposure.bolt11).then(() => { copy.textContent = "Copied"; }, () => {}); };
       steps.append(node("h3", `Pay ${terms.economics.hold_invoice_sat} sat from any Lightning wallet`),
+        qrSvg(`lightning:${exposure.bolt11}`, "QR code of the Lightning invoice", "swap-reverse-invoice-qr"),
         node("pre", exposure.bolt11, "swap-reverse-invoice"), open, copy,
         node("p", `Pay it once, before ${new Date(exposure.expiresAt * 1000).toLocaleString()}. Your wallet may show the payment as pending until the provider locks the Bitcoin and this page claims it; that is expected.`, "swap-reverse-invoice-notes"));
       afterPayment(async () => null);

@@ -53,7 +53,8 @@ rill-cli's `run_swap`:
   documents byte-identical to rill-cli's, encrypted to the user's age X25519
   recipient;
 - funding from the user's own wallet. By default the page shows the contract
-  address, the exact amount, and a `bitcoin:` link, and the user sends from any
+  address, the exact amount, a `bitcoin:` link and its QR code (`src/qr.ts`,
+  an inline SVG built from `qrcode-generator`'s module matrix), and the user sends from any
   native segwit wallet; the page polls the configured mempool API for the
   address (`src/swap/depositWatch.ts`), waits for the first confirmation (a
   wallet may replace an unconfirmed transaction, and the provider accepts one
@@ -417,7 +418,7 @@ explicit-action controller described below.
 By default the reverse execution exposes the provider's hold invoice
 (`exposeInvoice` in `swap/reverseExecution.ts`) for any Lightning wallet:
 the page journals an `external-wallet` payment intent (one per payment hash
-across tabs) and encrypts the terms snapshot before the invoice, its
+across tabs) and encrypts the terms snapshot before the invoice, its QR code,
 `lightning:` link, and a copy button appear. The invoice is the one bound by
 the signed terms, so the wallet pays the hash whose preimage the browser
 holds. From then on the wallet owns the routing fee and how long its payment
