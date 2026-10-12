@@ -424,7 +424,7 @@ jobs:
       - name: Check the dev stack's static invariants
         run: |
           docker compose -f dev/compose.yaml config -q
-          python -m pip install httpx==0.28.1 pytest==9.1.1
+          python -m pip install httpx==0.28.1 pytest==9.1.1 web3==7.16.0
           python -m pytest -q dev/tests
 
   dev-stack-smoke:
