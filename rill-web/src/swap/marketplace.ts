@@ -10,6 +10,7 @@ import { type PreparedReverseQuote, prepareReverseQuote, type ReverseSwapRequest
 import { prepareSwap, type PreparedSwap, type SwapRequest } from "./swap";
 import { type Erc20SwapRequest, type PreparedErc20Swap, prepareErc20Swap } from "./erc20Swap";
 import type { EvmAssetIdentity } from "../manualProviderAdvertisement";
+import { prepareLnErc20Quote, type LnErc20Request, type PreparedLnErc20Quote } from "./lnErc20Swap";
 
 type AnnouncementProfile = Parameters<typeof verifyNostrProviderAnnouncement>[3];
 
@@ -265,6 +266,18 @@ export async function quoteErc20Providers(
       `${left.providerIdentity}:${left.providerSlot}`.localeCompare(`${right.providerIdentity}:${right.providerSlot}`);
   });
   return { ...result, quotes };
+}
+
+/** Compare Lightning costs for the same exact ERC20 payout without creating hold invoices. */
+export async function quoteLnErc20Providers(
+  providers: readonly LocatedProvider[], request: Omit<LnErc20Request, "identity">, signal?: AbortSignal,
+): Promise<QuoteFanOut<PreparedLnErc20Quote>> {
+  const result = await fanOutQuotes(providers, (relay, provider) => prepareLnErc20Quote(relay,
+    { ...request, identity: provider.announcement.identityXOnlyKey }, { announcement: provider.rawAnnouncement, replyMs: 15_000 }), signal);
+  return { ...result, quotes: [...result.quotes].sort((a, b) => {
+    const left = BigInt(a.prepared.quote.offer.economics.hold_invoice_sat), right = BigInt(b.prepared.quote.offer.economics.hold_invoice_sat);
+    return left < right ? -1 : left > right ? 1 : a.prepared.quote.providerIdentity.localeCompare(b.prepared.quote.providerIdentity);
+  }) };
 }
 
 export function rankReverseQuotes(quotes: readonly LocatedQuote<PreparedReverseQuote>[]): readonly LocatedQuote<PreparedReverseQuote>[] {

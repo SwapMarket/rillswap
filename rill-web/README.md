@@ -165,7 +165,8 @@ BTC (`ln-to-btc/v1`) supports indicative comparison followed by explicitly
 approved execution paid from any Lightning wallet (or, under Advanced, a
 configured LND node); USDC or USDT to LN (`erc20-to-ln/v1`, RS-010) is
 quotable and payable from an injected EVM wallet; LN to USDC/USDT
-(`ln-to-erc20/v1`) is listed but not quotable yet. Unavailable pairs explain
+(`ln-to-erc20/v1`) supports indicative comparison, external Lightning
+payment, and a direct claim from an injected EVM wallet. Unavailable pairs explain
 why and never connect anywhere.
 
 Stablecoin to LN (`src/swap/erc20Swap.ts`, `src/erc20Ui.ts`) discovers
@@ -181,6 +182,31 @@ settlement observation or its on-chain Claim. The encrypted swap record
 (`rillswap-evm-recovery`) carries the signed terms and lock transaction; the
 wallet keeps the refund key. Reopening the swap link shows the lock, checks it
 on request, and offers a wallet refund once the timelock block has passed.
+
+LN to stablecoin (`src/swap/lnErc20Swap.ts`) quotes the token payout before
+connecting a wallet or creating a hold invoice. The selected firm price may
+not exceed the estimate. Direct receive currently uses the connected EVM
+wallet's address as the destination and needs native gas. Pay the QR invoice
+from any Lightning wallet, without configuring a Lightning node. The browser
+stores the encrypted preimage before the firm request, then commits the signed
+terms and invoice in IndexedDB before accepting or displaying the invoice.
+It verifies the exact confirmed lock, vendored contract bytecode, live refund
+margin, wallet chain/account, and gas balance before claiming. It does not
+simulate or estimate claim calldata before recording exposure (those calls
+would disclose the preimage). A five-second freshness budget covers final
+live checks through the exposure commit. Wallet prompt delays are still a
+risk: claim promptly, and never assume a failed request kept the preimage private.
+
+`src/evmClaimJournal.ts` commits an atomic exposure-unknown marker before
+sending the preimage to the wallet. Reload never creates another hold invoice
+or automatically retries a claim. The recovery view can explicitly check and
+claim an unexposed swap in the same browser, even without its relay. Missing
+or unknown exposure state cannot authorize a claim: importing a reverse file
+in another browser is currently inspection-only. This is a release limitation,
+not evidence that the swap was never attempted. Older forward recovery files
+remain readable; upgrading does not start chain scans or alter existing records.
+Regenerate the standalone bytecode fingerprint after a contract artifact update
+with `bun scripts/generate-evm-identity.ts`; unit tests compare it to the source artifact.
 
 LN to BTC estimates (`src/swap/reverseSwap.ts`) send RS-004 *indicative*
 requests naming only the payout, over the same authenticated handshake as
@@ -502,9 +528,10 @@ docker compose -f dev/compose.yaml up -d --no-build \
 docker compose -f dev/compose.yaml down -v
 ```
 
-The stablecoin to LN check runs against the ordinary development stack
-(`dev/devctl up`): it only spends the user's dev fUSDC on Anvil and needs no
-mining. A fake EIP-1193 wallet forwards signing to Anvil's unlocked account 1.
+The bidirectional stablecoin check runs against the ordinary development stack
+(`dev/devctl up`): it spends dev fUSDC and regtest Lightning funds and needs no
+manual mining. A fake EIP-1193 wallet forwards signing to Anvil's unlocked account 1.
+It checks both live flows and explicit reverse recovery after reload.
 
 ```sh
 (cd rill-web && RILLSWAP_RUN_BROWSER_ERC20_REGTEST=1 bunx playwright test --config playwright.regtest.config.ts regtest/erc20.spec.ts)

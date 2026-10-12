@@ -90,6 +90,29 @@ export interface Erc20TermsOffer {
   readonly provider_terms_signature: string;
 }
 
+export interface LnToErc20Terms extends Omit<Erc20ToLnTerms, "profile_id" | "claimant" | "refund_party" | "economics" | "timing_policy"> {
+  readonly profile_id: "ln-to-erc20/v1";
+  readonly claimant: "client";
+  readonly refund_party: "provider";
+  readonly economics: {
+    readonly kind: "ln-to-erc20";
+    readonly payout_token_base: string;
+    readonly rate_token_base_per_btc: string;
+    readonly payout_sat_equivalent: string;
+    readonly success_fee_sat: string;
+    readonly hold_invoice_sat: string;
+  };
+  readonly timing_policy: { readonly kind: "ln-to-erc20"; readonly min_incoming_htlc_expiry_height: number; readonly refund_and_ln_resolution_seconds: number };
+}
+
+export interface LnToErc20TermsOffer {
+  readonly terms: { readonly contract_hash: string; readonly contract_terms: LnToErc20Terms; readonly handshake_hash: string };
+  readonly provider_terms_signature: string;
+  readonly hold_invoice: string;
+}
+
+export type EvmTerms = Erc20ToLnTerms | LnToErc20Terms;
+
 export interface Erc20OfferContext {
   readonly request: Erc20FirmQuoteRequest;
   readonly invoiceBinding: InvoiceBinding;
@@ -112,13 +135,14 @@ const tokenUnits = (value: string, what: string): bigint => {
 };
 
 /** The exact HTLC lock the signed terms describe. */
-export function lockOf(terms: Erc20ToLnTerms): HtlcLock {
+export function lockOf(terms: EvmTerms): HtlcLock {
+  const forward = terms.profile_id === ERC20_TO_LN;
   return Object.freeze({
     preimageHash: terms.invoice_binding.payment_hash,
-    amount: BigInt(terms.economics.lock_amount_token_base),
+    amount: BigInt(terms.economics.kind === "erc20-to-ln" ? terms.economics.lock_amount_token_base : terms.economics.payout_token_base),
     token: terms.evm_asset.token_contract,
-    claimAddress: terms.provider_evm_address,
-    refundAddress: terms.client_evm_address,
+    claimAddress: forward ? terms.provider_evm_address : terms.client_evm_address,
+    refundAddress: forward ? terms.client_evm_address : terms.provider_evm_address,
     timelock: terms.htlc_timelock_block,
   });
 }
@@ -168,11 +192,12 @@ export interface EvmRecoveryParts {
   readonly init: HandshakeInit;
   readonly accept: HandshakeAccept;
   readonly acceptSignature: string;
-  readonly offer: Erc20TermsOffer;
+  readonly offer: Erc20TermsOffer | LnToErc20TermsOffer;
   readonly acceptanceSignature: string;
   readonly clientSessionKey: string;
   readonly lockTxHash: string | null;
   readonly preimage: string | null;
+  readonly claimTxHash?: string | null;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -181,7 +206,7 @@ export function evmRecoveryDocument(parts: EvmRecoveryParts): Uint8Array {
   const document = canonicalize({
     format: "rillswap-evm-recovery",
     format_version: "1",
-    profile_id: ERC20_TO_LN,
+    profile_id: parts.offer.terms.contract_terms.profile_id,
     network_identity: parts.network,
     handshake: { init: parts.init, accept: parts.accept, accept_signature: parts.acceptSignature },
     offer: parts.offer,
@@ -189,6 +214,7 @@ export function evmRecoveryDocument(parts: EvmRecoveryParts): Uint8Array {
     client_session_xonly_key: parts.clientSessionKey,
     lock_tx_hash: parts.lockTxHash,
     preimage: parts.preimage,
+    ...(parts.offer.terms.contract_terms.profile_id === "ln-to-erc20/v1" ? { claim_tx_hash: parts.claimTxHash ?? null } : {}),
     created_at: parts.createdAt,
     updated_at: parts.updatedAt,
   });
@@ -200,12 +226,14 @@ export const encryptEvmRecovery = (parts: EvmRecoveryParts, ageRecipient: string
   encryptCanonicalRecoveryForRecipient(evmRecoveryDocument(parts), ageRecipient);
 
 export interface EvmRecoveryRecord {
-  readonly terms: Erc20ToLnTerms;
+  readonly terms: EvmTerms;
   readonly contractHash: string;
   readonly lock: HtlcLock;
   readonly lockTxHash: string | null;
   readonly preimage: string | null;
   readonly updatedAt: number;
+  readonly holdInvoice: string | null;
+  readonly claimTxHash: string | null;
 }
 
 /** Authenticate a decrypted EVM recovery record for `network`: the provider's signature binds the terms. */
@@ -213,21 +241,35 @@ export function parseEvmRecovery(plaintext: Uint8Array, network: unknown, now: n
   const text = new TextDecoder().decode(plaintext);
   const parsed = JSON.parse(text) as Record<string, unknown>;
   if (canonicalize(parsed) !== text || parsed.format !== "rillswap-evm-recovery" || parsed.format_version !== "1" ||
-      parsed.profile_id !== ERC20_TO_LN || !same(parsed.network_identity, network)) {
+      ![ERC20_TO_LN, "ln-to-erc20/v1"].includes(parsed.profile_id as string) || !same(parsed.network_identity, network)) {
     throw new SwapError("not an RS-010 recovery record for this network");
   }
-  const offer = requireShape<Erc20TermsOffer>("validateTermsOffer", parsed.offer);
+  const reverse = parsed.profile_id === "ln-to-erc20/v1";
+  const offer = requireShape<Erc20TermsOffer | LnToErc20TermsOffer>(reverse ? "validateReverseTermsOffer" : "validateTermsOffer", parsed.offer);
   const terms = offer.terms.contract_terms;
-  if (terms.profile_id !== ERC20_TO_LN) throw new SwapError("recovery record is not an erc20-to-ln swap");
+  if (terms.profile_id !== parsed.profile_id || terms.economics.kind !== (reverse ? "ln-to-erc20" : "erc20-to-ln") ||
+      terms.claimant !== (reverse ? "client" : "provider") || terms.refund_party !== (reverse ? "provider" : "client")) {
+    throw new SwapError("recovery record profile and lock roles disagree");
+  }
   // Expiry is irrelevant for a refund: bind identity, network, and hash only.
   checkSignedOfferBinding(offer, { identity: terms.provider_identity_key, envelopeContractHash: offer.terms.contract_hash, network, now: Math.min(now, terms.terms_expiry - 1) });
   const lockTxHash = parsed.lock_tx_hash, preimage = parsed.preimage, updatedAt = parsed.updated_at;
+  const claimTxHash = parsed.claim_tx_hash ?? null;
   if ((lockTxHash !== null && (typeof lockTxHash !== "string" || !/^[0-9a-f]{64}$/.test(lockTxHash))) ||
       (preimage !== null && (typeof preimage !== "string" || !/^[0-9a-f]{64}$/.test(preimage))) ||
-      !Number.isSafeInteger(updatedAt)) {
+       (claimTxHash !== null && (typeof claimTxHash !== "string" || !/^[0-9a-f]{64}$/.test(claimTxHash))) ||
+       !Number.isSafeInteger(updatedAt)) {
     throw new SwapError("recovery record fields are malformed");
   }
-  return Object.freeze({ terms, contractHash: offer.terms.contract_hash, lock: lockOf(terms), lockTxHash: lockTxHash as string | null, preimage: preimage as string | null, updatedAt: updatedAt as number });
+  if (preimage !== null && bytesToHex(sha256(hexToBytes(preimage as string))) !== terms.invoice_binding.payment_hash) throw new SwapError("recovery preimage does not match the invoice");
+  let holdInvoice: string | null = null;
+  if (reverse) {
+    if (preimage === null) throw new SwapError("reverse recovery has no claim preimage");
+    holdInvoice = (offer as LnToErc20TermsOffer).hold_invoice;
+    if (!same(invoiceBinding(holdInvoice, (network as { name: string }).name), terms.invoice_binding)) throw new SwapError("recovery invoice binding mismatch");
+  }
+  return Object.freeze({ terms, contractHash: offer.terms.contract_hash, lock: lockOf(terms), lockTxHash: lockTxHash as string | null, preimage: preimage as string | null,
+    updatedAt: updatedAt as number, holdInvoice, claimTxHash: claimTxHash as string | null });
 }
 
 // Preparation and execution.

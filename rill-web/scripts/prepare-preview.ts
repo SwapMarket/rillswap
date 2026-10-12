@@ -19,6 +19,10 @@ const journal = await Bun.build({
   format: "esm",
 });
 if (!journal.success) throw new AggregateError(journal.logs, "journal test bundle failed");
+const evmJournal = await Bun.build({ entrypoints: ["src/evmClaimJournal.ts"], outdir: "tmp/preview/test-only", target: "browser", format: "esm" });
+if (!evmJournal.success) throw new AggregateError(evmJournal.logs, "EVM journal preview build failed");
+writeFileSync("tmp/preview/test-only/evm-journal.html", '<!doctype html><script type="module">' +
+  'import { EvmClaimJournal } from "./evmClaimJournal.js"; window.EvmClaimJournal = EvmClaimJournal; window.evmJournalReady = true;</script>');
 writeFileSync(
   "tmp/preview/test-only/journal.html",
   '<!doctype html><script type="module">import { reserveCooperation } from "./cooperationJournal.js";' +

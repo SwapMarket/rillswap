@@ -1,0 +1,22 @@
+{
+  "runtimeHexLength": 13384,
+  "immutableRanges": [
+    {
+      "start": 450,
+      "length": 32
+    },
+    {
+      "start": 1979,
+      "length": 32
+    },
+    {
+      "start": 2586,
+      "length": 32
+    },
+    {
+      "start": 3089,
+      "length": 32
+    }
+  ],
+  "maskedRuntimeSha256": "e89b94ca6c7d56d9389ea9ad42ef15f446254b11920be70f6a806a63f0c76c50"
+}

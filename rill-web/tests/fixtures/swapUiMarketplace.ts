@@ -85,3 +85,4 @@ export const quoteReverseProviders = async (_providers: unknown[], request: unkn
 /** RS-010 is exercised against the real stack (regtest/erc20.spec.ts); page tests never reach a wallet. */
 export const selectEvmAsset = () => null;
 export const quoteErc20Providers = async () => ({ quotes: [], failures: 0, reasons: ["fixture: no EVM providers"] });
+export const quoteLnErc20Providers = async () => ({ quotes: [], failures: 0, reasons: ["fixture: no EVM providers"] });

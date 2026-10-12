@@ -5,9 +5,14 @@
  */
 import { type Erc20SwapOutcome, type EvmRecoveryRecord, parseEvmRecovery, type PreparedErc20Swap } from "./swap/erc20Swap";
 import {
-  awaitReceipt, encodeApprove, encodeLock, encodeRefund, EvmError, EvmRpc, EvmWallet, type HtlcLock, injectedProvider,
+  awaitReceipt, encodeApprove, encodeClaim, encodeLock, encodeRefund, EvmError, EvmRpc, EvmWallet, type HtlcLock, injectedProvider,
 } from "./swap/evmHtlc";
 import type { EvmAssetIdentity } from "./manualProviderAdvertisement";
+import { assertFreshEvmClaim, assertSafeEvmClaim, type PreparedLnErc20Execution } from "./swap/lnErc20Swap";
+import { EvmClaimJournal } from "./evmClaimJournal";
+import { qrSvg } from "./qr";
+import canonicalize from "canonicalize";
+import { encryptCanonicalRecoveryForRecipient } from "./recoveryAgeContainer";
 
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, text = "", id = ""): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag); e.textContent = text; if (id) e.id = id; return e;
@@ -111,6 +116,7 @@ export interface EvmRecoveryOptions {
   readonly evmRpc: () => string;
   readonly assertCurrent: () => void;
   readonly rpcFactory?: (url: string) => EvmRpc;
+  readonly ageRecipient?: () => Promise<string>;
 }
 
 /** Reopen an RS-010 record: show the signed lock, check it on request, and refund through the wallet after the timelock. */
@@ -124,6 +130,7 @@ export function evmRecoveryControls(root: HTMLElement, options: EvmRecoveryOptio
     root.replaceChildren(node("p", "Could not verify this recovery file for the selected network. Keep your backups; nothing was changed or uploaded."));
     return () => { disposed = true; };
   }
+  if (record.terms.profile_id === "ln-to-erc20/v1") return reverseEvmRecoveryControls(root, record, options);
   const { terms, lock } = record;
   const asset = terms.evm_asset;
   const message = node("p", "", "swap-evm-recovery-message");
@@ -132,7 +139,7 @@ export function evmRecoveryControls(root: HTMLElement, options: EvmRecoveryOptio
   refund.disabled = true;
   root.replaceChildren(
     node("h3", `${asset.token_symbol} to Lightning recovery verified`),
-    node("p", `${asset.name} (chain ${asset.chain_id}) · ${tokenLabel(lock.amount, asset)} locked for ${terms.economics.lightning_principal_sat} sat. ` +
+    node("p", `${asset.name} (chain ${asset.chain_id}) · ${tokenLabel(lock.amount, asset)} locked for ${terms.economics.kind === "erc20-to-ln" ? terms.economics.lightning_principal_sat : ""} sat. ` +
       `Refund address ${lock.refundAddress}. Refundable from block ${lock.timelock}.` +
       (record.lockTxHash ? ` Lock transaction ${record.lockTxHash}.` : " No lock transaction recorded.") +
       (record.preimage ? " The provider paid; the preimage is known." : "")),
@@ -183,4 +190,96 @@ export function evmRecoveryControls(root: HTMLElement, options: EvmRecoveryOptio
       .finally(() => { busy = false; check.disabled = false; });
   };
   return () => { disposed = true; };
+}
+
+/** Persisted terms and exposure state are independent: stale URL files cannot reset the journal. */
+function reverseEvmRecoveryControls(root: HTMLElement, record: EvmRecoveryRecord, options: EvmRecoveryOptions): () => void {
+  const terms = record.terms;
+  if (terms.profile_id !== "ln-to-erc20/v1") throw new Error("not reverse EVM recovery");
+  const plaintext = Uint8Array.from(options.plaintext), journal = new EvmClaimJournal();
+  let disposed = false, busy = false;
+  const current = (): void => { if (disposed) throw new Error("Recovery view closed"); options.assertCurrent(); };
+  const message = node("p", "Payment and claim status are unknown until you explicitly check the chain.", "swap-evm-recovery-message");
+  const check = node("button", "Check lock status", "swap-evm-recovery-check"); check.type = "button";
+  const claim = node("button", "Claim with your EVM wallet", "swap-evm-recovery-claim"); claim.type = "button"; claim.disabled = true;
+  root.replaceChildren(node("h3", `Lightning to ${terms.evm_asset.token_symbol} recovery verified`),
+    node("p", `${tokenLabel(record.lock.amount, terms.evm_asset)} to ${record.lock.claimAddress}. Provider refund block ${record.lock.timelock}. ` +
+      "Keep the preimage private until a confirmed token lock has enough time left. A failed wallet request may still disclose it."), message, check, claim);
+  // Do not redisplay an old hold invoice on reload: it may have been paid already.
+  const rpc = (): EvmRpc => (options.rpcFactory ?? ((url) => new EvmRpc(url)))(options.evmRpc());
+  check.onclick = () => {
+    if (busy) return; busy = true; check.disabled = claim.disabled = true;
+    void (async () => {
+      current(); const chain = rpc();
+      if (await chain.chainId() !== terms.evm_asset.chain_id) throw new Error("Wrong EVM chain");
+      await chain.verifyHtlc(terms.evm_asset.htlc_contract);
+      const tip = await chain.blockNumber();
+      const found = await chain.findClaim(terms.evm_asset.htlc_contract, record.lock.preimageHash, Math.max(0, terms.evm_reference_block - 12), tip);
+      current();
+      if (found) { message.textContent = `Tokens claimed in ${found.txHash}. The provider can settle the Lightning hold.`; return; }
+      const entry = await journal.read(record.contractHash); current();
+      if (!entry || entry.exposure !== "unexposed") {
+        message.textContent = "Claim exposure is unknown (or this browser has no exposure journal). No automatic retry is allowed. Keep the recovery file and inspect any pending wallet transaction.";
+        return;
+      }
+      await assertSafeEvmClaim(chain, terms, record.preimage!); current();
+      message.textContent = "Exact confirmed token lock is active with a safe claim window. Connect the wallet that receives the tokens to claim.";
+      claim.disabled = false;
+    })().catch((error: unknown) => { if (!disposed) message.textContent = `Check stopped: ${error instanceof Error ? error.message : "unknown error"}`; })
+      .finally(() => { busy = false; if (!disposed) check.disabled = false; });
+  };
+  claim.onclick = () => {
+    if (busy) return; busy = true; check.disabled = claim.disabled = true;
+    void (async () => {
+      current(); const chain = rpc();
+      const { wallet, account } = await connectEvmWallet(chain, terms.evm_asset);
+      if (account !== terms.client_evm_address) throw new Error("Connect the signed token destination's wallet account");
+      if (!options.ageRecipient) throw new Error("Recovery encryption key unavailable");
+      const recipient = await options.ageRecipient(); current();
+      const safety = await assertSafeEvmClaim(chain, terms, record.preimage!);
+      await wallet.assertAccount(terms.evm_asset.chain_id, account); current();
+      await journal.expose(record.contractHash); current();
+      assertFreshEvmClaim(safety);
+      message.textContent = "Confirm the claim in your wallet. The preimage may be disclosed even if the request fails.";
+      const hash = await wallet.send(account, terms.evm_asset.htlc_contract, encodeClaim(record.lock, record.preimage!));
+      const document = JSON.parse(new TextDecoder().decode(plaintext)) as Record<string, unknown>;
+      document.claim_tx_hash = hash; document.updated_at = Math.floor(Date.now() / 1000);
+      await journal.save(record.contractHash, await encryptCanonicalRecoveryForRecipient(new TextEncoder().encode(canonicalize(document)!), recipient));
+      const receipt = await awaitReceipt(chain, hash, terms.settlement_confirmations);
+      current(); message.textContent = receipt.status ? `Tokens claimed in ${hash}. The provider can settle the Lightning hold.`
+        : "Claim reverted after preimage exposure. Inspect the chain and Lightning payment; do not assume a refund.";
+    })().catch((error: unknown) => { if (!disposed) message.textContent = `Claim stopped: ${error instanceof Error ? error.message : "unknown error"}`; })
+      .finally(() => { busy = false; if (!disposed) check.disabled = false; });
+  };
+  return () => { disposed = true; plaintext.fill(0); };
+}
+
+export async function mountLnErc20Execution(panel: HTMLElement, options: {
+  readonly prepared: PreparedLnErc20Execution; readonly rpc: EvmRpc; readonly wallet: EvmWallet; readonly account: string;
+  readonly journal: EvmClaimJournal; readonly status: (message: string, step: number, state?: string) => void;
+  readonly report: (line: string) => void; readonly download: (root: HTMLElement, file: Uint8Array, name: string) => void;
+}): Promise<void> {
+  const { prepared, rpc, wallet, account, journal } = options, asset = prepared.terms.evm_asset;
+  const files = node("section", "", "swap-erc20-files"), invoice = node("section"), message = node("p", "Preparing durable recovery before exposing the invoice");
+  panel.replaceChildren(message, invoice, files);
+  const outcome = await prepared.execute({
+    rpc, report: (line) => { options.report(line); message.textContent = line; options.status(line, 3); },
+    saveRecovery: async (file, stage, contract) => {
+      if (stage === "terms") await journal.create(contract, file); else await journal.save(contract, file);
+      options.download(files, file, `rillswap-ln-to-${asset.token_symbol.toLowerCase()}-${stage}.age`);
+    },
+    showInvoice: (bolt11) => {
+      invoice.replaceChildren(node("h3", `Pay ${prepared.terms.economics.hold_invoice_sat} sat from any Lightning wallet`),
+        node("p", "No Lightning node connection is needed. Your payment stays held until the token claim reveals the preimage."),
+        qrSvg(`lightning:${bolt11}`, "QR code of the Lightning invoice", "swap-reverse-invoice-qr"),
+        node("code", bolt11, "swap-reverse-invoice"));
+      const open = node("a", "Open in Lightning wallet"); open.href = `lightning:${bolt11}`; invoice.append(open);
+    },
+    checkWallet: () => wallet.assertAccount(asset.chain_id, account),
+    markExposure: (contract) => journal.expose(contract),
+    claim: (lock, preimage, htlc) => wallet.send(account, htlc, encodeClaim(lock, preimage)),
+  });
+  invoice.replaceChildren();
+  message.textContent = `${tokenLabel(BigInt(prepared.terms.economics.payout_token_base), asset)} received in ${outcome.claimTxHash}.`;
+  options.status("Stablecoins received", 4, "success");
 }

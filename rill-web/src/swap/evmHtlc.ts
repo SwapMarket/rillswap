@@ -5,7 +5,9 @@
  * word, so no ABI library is needed. Nothing here holds keys.
  */
 import { keccak_256 } from "@noble/hashes/sha3.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import artifact from "../generated/erc20SwapIdentity.json";
 
 const encoder = new TextEncoder();
 const ADDRESS = /^0x[0-9a-f]{40}$/;
@@ -84,6 +86,14 @@ export function lockHash(lock: HtlcLock): string {
   return bytesToHex(keccak_256(hexToBytes(lockWords(lock))));
 }
 
+/** Compare executable code to the vendored artifact, masking only compiler-declared immutables. */
+export function isErc20SwapCode(code: unknown): boolean {
+  if (typeof code !== "string" || !/^0x(?:[0-9a-fA-F]{2})+$/.test(code) || code.length !== artifact.runtimeHexLength) return false;
+  const bytes = hexToBytes(code.slice(2));
+  for (const { start, length } of artifact.immutableRanges) bytes.fill(0, start, start + length);
+  return bytesToHex(sha256(bytes)) === artifact.maskedRuntimeSha256;
+}
+
 export interface LockupLog {
   readonly txHash: string; // 32 bytes hex, no 0x
   readonly logIndex: number;
@@ -137,6 +147,23 @@ export class EvmRpc {
   async chainId(): Promise<number> { return hexInt(await this.call("eth_chainId", []), "chain id"); }
   async blockNumber(): Promise<number> { return hexInt(await this.call("eth_blockNumber", []), "block number"); }
 
+  async verifyHtlc(htlc: string): Promise<void> {
+    checkEvmAddress(htlc, "HTLC");
+    if (!isErc20SwapCode(await this.call("eth_getCode", [htlc, "latest"]))) throw new EvmError("HTLC bytecode does not match the vendored ERC20Swap v6");
+  }
+
+  async nativeBalance(account: string): Promise<bigint> {
+    const value = await this.call("eth_getBalance", [checkEvmAddress(account, "account"), "latest"]);
+    if (typeof value !== "string" || !/^0x[0-9a-fA-F]+$/.test(value)) throw new EvmError("invalid gas balance");
+    return BigInt(value);
+  }
+
+  async gasPrice(): Promise<bigint> {
+    const value = await this.call("eth_gasPrice", []);
+    if (typeof value !== "string" || !/^0x[0-9a-fA-F]+$/.test(value)) throw new EvmError("invalid gas price");
+    return BigInt(value);
+  }
+
   private async read(to: string, data: string): Promise<string> {
     const result = await this.call("eth_call", [{ to, data }, "latest"]);
     if (typeof result !== "string" || !result.startsWith("0x")) throw new EvmError("eth_call returned no data");
@@ -159,12 +186,15 @@ export class EvmRpc {
   }
 
   private async logs(htlc: string, topics: (string | null)[], fromBlock: number, toBlock: number): Promise<RawLog[]> {
-    if (toBlock - fromBlock > MAX_LOG_RANGE) fromBlock = toBlock - MAX_LOG_RANGE;
-    const result = await this.call("eth_getLogs", [{
-      address: htlc, topics, fromBlock: `0x${Math.max(0, fromBlock).toString(16)}`, toBlock: `0x${toBlock.toString(16)}`,
-    }]);
-    if (!Array.isArray(result)) throw new EvmError("eth_getLogs returned no list");
-    return (result as RawLog[]).filter((log) => !log.removed && log.address.toLowerCase() === htlc);
+    const found: RawLog[] = [];
+    for (let start = Math.max(0, fromBlock); start <= toBlock; start += MAX_LOG_RANGE) {
+      const result = await this.call("eth_getLogs", [{
+        address: htlc, topics, fromBlock: `0x${start.toString(16)}`, toBlock: `0x${Math.min(toBlock, start + MAX_LOG_RANGE - 1).toString(16)}`,
+      }]);
+      if (!Array.isArray(result)) throw new EvmError("eth_getLogs returned no list");
+      found.push(...(result as RawLog[]).filter((log) => !log.removed && log.address.toLowerCase() === htlc));
+    }
+    return found;
   }
 
   /** Lockup logs for a payment hash; the caller matches the exact lock values. */
@@ -214,6 +244,15 @@ export function injectedProvider(): Eip1193Provider | null {
 export class EvmWallet {
   constructor(private readonly provider: Eip1193Provider) {}
 
+  /** Recheck without prompting or switching chains before disclosing a claim preimage. */
+  async assertAccount(chainId: number, account: string): Promise<void> {
+    const accounts = await this.provider.request({ method: "eth_accounts" });
+    if (hexInt(await this.provider.request({ method: "eth_chainId" }), "wallet chain id") !== chainId ||
+        !Array.isArray(accounts) || typeof accounts[0] !== "string" || accounts[0].toLowerCase() !== account) {
+      throw new EvmError("Wallet account or chain changed; reconnect before claiming");
+    }
+  }
+
   /** Prompt for the account and make sure the wallet is on `chainId`. */
   async connect(chainId: number): Promise<string> {
     const accounts = await this.provider.request({ method: "eth_requestAccounts" }) as unknown;
@@ -236,7 +275,7 @@ export class EvmWallet {
   }
 }
 
-/** Poll until `txHash` is mined with `confirmations` blocks on top, or `signal` aborts. */
+/** Poll until `txHash` reaches the requested depth (including its block), or `signal` aborts. */
 export async function awaitReceipt(
   rpc: EvmRpc, txHash: string, confirmations: number,
   options: { readonly intervalMs?: number; readonly signal?: AbortSignal; readonly timeoutMs?: number } = {},

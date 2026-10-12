@@ -19,10 +19,12 @@ import { mempoolApiForNetwork, relaysForNetwork, validateMempoolApi, validateRel
 import { readChainTip } from "./swap/chainTip";
 import { BrowserRecoveryWallet } from "./browserRecoveryWallet";
 import { type DirectoryEntry, discoverDirectory, discoverMarketplace, eligibleProviders, indicativeFee, ineligibilityReason, quoteProviders, quoteReverseProviders,
-  estimateFromDirectory, providerLimits, type LocatedQuote, MAX_QUOTE_PROVIDERS, quoteErc20Providers, selectEvmAsset } from "./swap/marketplace";
+  estimateFromDirectory, providerLimits, type LocatedQuote, MAX_QUOTE_PROVIDERS, quoteErc20Providers, quoteLnErc20Providers, selectEvmAsset } from "./swap/marketplace";
 import type { Erc20SwapRequest, PreparedErc20Swap } from "./swap/erc20Swap";
 import { EvmRpc } from "./swap/evmHtlc";
-import { connectEvmWallet, mountErc20Execution, parseTokenAmount, tokenLabel } from "./erc20Ui";
+import { connectEvmWallet, mountErc20Execution, mountLnErc20Execution, parseTokenAmount, tokenLabel } from "./erc20Ui";
+import { EvmClaimJournal } from "./evmClaimJournal";
+import type { PreparedLnErc20Quote } from "./swap/lnErc20Swap";
 import type { PreparedReverseQuote, ReverseSwapRequest } from "./swap/reverseSwap";
 import { invoiceBinding } from "./swap/bolt11";
 import { quoteSelectionLabel, stoppedSwapAdvice } from "./swapUiStatus";
@@ -249,6 +251,10 @@ function mount(root: HTMLElement): void {
     estimateLoad.disabled = false;
     const route = routeFor(fromAsset.value, toAsset.value);
     if (route.profile === null || route.unavailable) { estimate.textContent = ""; return; }
+    if (route.profile === "ln-to-erc20/v1") {
+      estimate.textContent = `Enter the ${route.to.symbol} amount to receive. The Lightning price is quoted before connecting an EVM wallet; gas is extra.`;
+      return;
+    }
     let amount: bigint;
     try {
       amount = route.profile === "ln-to-btc/v1"
@@ -326,6 +332,8 @@ function mount(root: HTMLElement): void {
     "The provider's fee is quoted in the stablecoin on top of the invoice amount at its signed rate.");
   const evmTimelock = field(limits, "swap-evm-timelock", "Maximum lock time (EVM blocks)", "50000",
     "If the provider never pays, your refund unlocks within this many EVM blocks of the quote.");
+  const evmClaimWindow = field(limits, "swap-evm-claim-window", "Minimum receive claim window (EVM blocks)", "600",
+    "Lightning to stablecoin only. Claims also require at least ten minutes before the provider's refund block.");
   settings.append(limits);
   const notice = node("p", "", "swap-release-notice");
   notice.setAttribute("role", "note");
@@ -455,8 +463,14 @@ function mount(root: HTMLElement): void {
       : route.profile === "erc20-to-ln/v1"
         ? `This flow needs an EVM wallet extension (MetaMask or similar) holding ${route.from.symbol} plus gas on the provider's chain. ` +
           "The wallet keeps the refund key; your browser recovery key encrypts the swap record."
-        : "Your browser recovery key is created automatically and covers every swap started here.";
-    receiveBox.hidden = route.profile !== "ln-to-btc/v1";
+        : route.profile === "ln-to-erc20/v1"
+          ? "Pay from any Lightning wallet. For direct receive, connect an EVM wallet with gas to claim the tokens. Recovery is saved before the invoice is shown."
+          : "Your browser recovery key is created automatically and covers every swap started here.";
+    receiveBox.hidden = route.profile !== "ln-to-btc/v1" && route.profile !== "ln-to-erc20/v1";
+    receiveAddress.hidden = route.profile === "ln-to-erc20/v1";
+    receiveBox.querySelector<HTMLLabelElement>('label[for="swap-receive-address"]')!.hidden = receiveAddress.hidden;
+    receiveBox.querySelector<HTMLLabelElement>('label[for="swap-receive-amount"]')!.textContent = `Amount to receive (${route.profile === "ln-to-erc20/v1" ? route.to.symbol : "sat"})`;
+    receiveAmount.inputMode = route.profile === "ln-to-erc20/v1" ? "decimal" : "numeric";
     start.disabled = main || route.unavailable !== null;
     start.textContent = main ? "Mainnet swaps unavailable" : route.unavailable ? "Pair unavailable" : "Swap";
     updateEstimate();
@@ -662,6 +676,96 @@ function mount(root: HTMLElement): void {
     })();
   };
 
+  /** Token amounts can be priced without a destination or a connected Lightning node. */
+  const lnErc20Quote = (name: NetworkName, symbol: "USDC" | "USDT"): void => {
+    let urls: readonly string[], rpcUrl: string, api: string;
+    const pinned = identity.value.trim(), amount = receiveAmount.value.trim();
+    try {
+      urls = validateRelays(relay.value.trim(), name);
+      rpcUrl = validateMempoolApi(evmRpc.value.trim(), name);
+      api = validateMempoolApi(chainApi.value.trim(), name);
+      if (pinned && !/^[0-9a-f]{64}$/.test(pinned)) throw new Error("Provider identity must be 64 lowercase hex characters");
+      if (parseTokenAmount(amount, 18, "Amount to receive") <= 0n) throw new Error("Amount to receive must be positive");
+    } catch (error) { report(`refused: ${(error as Error).message}`); return; }
+    const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button")];
+    busy = true; for (const control of controls) (control as HTMLInputElement).disabled = true;
+    settingsButton.disabled = providersButton.disabled = true;
+    const cancellation = new AbortController(), guard = (event: BeforeUnloadEvent): void => event.preventDefault();
+    window.addEventListener("beforeunload", guard);
+    let executing = false, arrivals: readonly LocatedQuote<PreparedLnErc20Quote>[] = [];
+    const current = (): void => cancellation.signal.throwIfAborted();
+    const restore = (): void => {
+      busy = false; for (const control of controls) (control as HTMLInputElement).disabled = false;
+      settingsButton.disabled = providersButton.disabled = false; window.removeEventListener("beforeunload", guard); updateNetwork();
+    };
+    const edit = node("button", "Edit swap", "swap-edit"); edit.type = "button";
+    edit.onclick = () => {
+      if (executing) return; cancellation.abort(); for (const quote of arrivals) quote.dispose();
+      panel.replaceChildren(); setStatus("Ready for a new quote", -1, "ready"); restore();
+    };
+    panel.replaceChildren(node("p", "Finding stablecoin providers..."), edit); setStatus("Finding available providers", 0);
+    void (async () => {
+      try {
+        const directory = await discoverMarketplace(urls, NETWORKS[name], pinned || undefined, cancellation.signal, "ln-to-erc20/v1"); current();
+        const selection = selectEvmAsset(directory.providers, symbol);
+        if (!selection) throw new Error(`No announced provider serves ${symbol} for this network`);
+        for (const warning of directory.warnings) report(warning);
+        const asset = selection.asset, payoutTokenBase = parseTokenAmount(amount, asset.token_decimals, "Amount to receive");
+        const result = await quoteLnErc20Providers(selection.providers, { network: NETWORKS[name], asset, payoutTokenBase, limits: {
+          maxSuccessFeeSat: positive(successFee, "provider fee"), minTimelockDelayBlocks: Number(positive(evmClaimWindow, "minimum EVM claim window")),
+          maxIncomingHtlcDelayBlocks: Number(positive(maxHold, "maximum Lightning hold")),
+        } }, cancellation.signal);
+        arrivals = result.quotes; current();
+        if (!arrivals.length) throw new Error(`No acceptable estimate (${result.reasons.join("; ")}). Nothing was accepted or paid.`);
+        let selected = arrivals[0]!;
+        const review = node("div", "", "swap-quote-review"), summary = node("div", "", "swap-quote-summary");
+        const show = (): void => {
+          const offer = selected.prepared.quote.offer;
+          summary.replaceChildren(node("h2", `${BigInt(offer.economics.hold_invoice_sat).toLocaleString()} sat`),
+            node("p", `Pay over Lightning to receive ${tokenLabel(payoutTokenBase, asset)} on ${asset.name}. ` +
+              `Provider fee: ${offer.economics.success_fee_sat} sat. Your EVM wallet pays claim gas.`),
+            node("small", `Claim window: ${offer.timelock_delay_blocks} EVM blocks. Lightning hold budget: ${offer.incoming_htlc_expiry_delta_blocks} Bitcoin blocks.`));
+        };
+        show(); review.append(summary);
+        const choices = node("details"); choices.append(node("summary", "Provider details & manual selection"));
+        for (const [index, quote] of arrivals.entries()) {
+          const label = node("label"), radio = node("input"); radio.type = "radio"; radio.name = "verified-provider"; radio.checked = index === 0;
+          radio.onchange = () => { selected = quote; show(); };
+          label.append(radio, node("span", `${quote.prepared.quote.offer.economics.hold_invoice_sat} sat · ${quote.prepared.quote.providerIdentity.slice(0, 12)}`),
+            node("small", `Identity: ${quote.prepared.quote.providerIdentity}; transport: ${quote.relayUrl}`)); choices.append(label);
+        }
+        const accept = node("button", "Swap with this quote", "swap-quote-accept"); accept.type = "button";
+        review.append(choices, node("p", "By continuing you accept the selected provider's signed terms and test-funds-only conditions. " +
+          "Connect an EVM wallet to receive the tokens; pay the invoice from any Lightning wallet. The firm price cannot exceed this estimate."), accept, edit);
+        if (result.failures || directory.warnings.length || selection.providers.length > MAX_QUOTE_PROVIDERS) review.append(node("small", "Incomplete provider results; this is not a market-wide best-price guarantee."));
+        panel.replaceChildren(review); setStatus("Quote ready. Review before continuing", 1);
+        const chosen = await new Promise<LocatedQuote<PreparedLnErc20Quote> | null>((resolve) => {
+          accept.onclick = () => { accept.disabled = true; for (const input of choices.querySelectorAll("input")) input.disabled = true; resolve(selected); };
+          cancellation.signal.addEventListener("abort", () => resolve(null), { once: true });
+        });
+        if (!chosen) return; current(); executing = true;
+        for (const quote of arrivals) if (quote !== chosen) quote.dispose();
+        const rpc = new EvmRpc(rpcUrl), { wallet, account } = await connectEvmWallet(rpc, asset); current();
+        await rpc.verifyHtlc(asset.htlc_contract); current();
+        const recoveryWallet = await walletPromise, info = await recoveryWallet.info(); current();
+        const journal = new EvmClaimJournal();
+        const btcTip = await readChainTip(api, { name, genesis_hash: NETWORKS[name].genesis_hash as string }, { signal: cancellation.signal }); current();
+        const prepared = await chosen.prepared.prepareExecution({ clientEvmAddress: account, btcTip: btcTip.height,
+          evmTip: await rpc.blockNumber(), ageRecipient: info.recipient, saveSecrets: (file, sessionId) => journal.create(`secrets:${sessionId}`, file) });
+        if ((await recoveryWallet.info()).fingerprint !== info.fingerprint) { prepared.dispose(); throw new Error("Recovery identity changed; request fresh terms"); }
+        showTracking(`Lightning to ${asset.token_symbol} swap`);
+        await mountLnErc20Execution(panel, { prepared, rpc, wallet, account, journal, status: setStatus, report,
+          download: (root, file, fileName) => { offerDownload(root, file, fileName); publishLink(file, name); } });
+      } catch (error) {
+        if (!cancellation.signal.aborted) { panel.append(node("p", (error as Error).message, "swap-error"), edit); report(`stopped: ${(error as Error).message}`); }
+      } finally {
+        for (const quote of arrivals) quote.dispose();
+        if (!executing && !cancellation.signal.aborted) restore();
+        else window.removeEventListener("beforeunload", guard);
+      }
+    })();
+  };
+
   /** Indicative comparison first; only the selected provider can enter durable execution. */
   const reverseQuote = (name: NetworkName): void => {
     let request: Omit<ReverseSwapRequest, "identity">;
@@ -830,6 +934,10 @@ function mount(root: HTMLElement): void {
     }
     if (route.profile === "erc20-to-ln/v1") {
       erc20Quote(name, STABLECOIN_SYMBOL[route.from.id]!);
+      return;
+    }
+    if (route.profile === "ln-to-erc20/v1") {
+      lnErc20Quote(name, STABLECOIN_SYMBOL[route.to.id]!);
       return;
     }
     let request: SwapRequest;

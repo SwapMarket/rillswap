@@ -1,9 +1,9 @@
 /**
- * Opt-in acceptance of the browser ERC20 to Lightning swap against the running dev stack. A fake
+ * Opt-in acceptance of both browser ERC20 swap directions against the running dev stack. A fake
  * EIP-1193 wallet forwards signing to Anvil's unlocked user account (account 1); it spends dev fUSDC only.
  */
-import { test, expect } from "@playwright/test";
-import { execFileSync } from "node:child_process";
+import { test, expect, type Page } from "@playwright/test";
+import { execFile, execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "../..");
@@ -17,11 +17,7 @@ const makerState = (lockTxHash: string): string => execFileSync("docker", ["exec
   + "r=c.execute(\"select s.state from swaps s join evm_swaps e on e.session_id=s.session_id where lower(replace(e.lock_tx_hash,'0x',''))=?\",(sys.argv[1],)).fetchone(); print(r[0] if r else '')",
   lockTxHash], { encoding: "utf8", timeout: 10000 }).trim();
 
-test("browser locks fUSDC through an injected wallet and the provider pays the invoice", async ({ page }) => {
-  test.skip(!enabled, "Explicit dev-stack opt-in required");
-  const invoice = command("invoice", "20000", "--node", "user");
-  const paymentHash = JSON.parse(command("lncli", "user", "decodepayreq", invoice)).payment_hash as string;
-  const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
+async function injectWallet(page: Page): Promise<string[]> {
   const walletCalls: string[] = [];
   await page.exposeFunction("__walletCall", (method: string) => { walletCalls.push(method); });
   await page.addInitScript(({ rpc, account }) => {
@@ -40,6 +36,15 @@ test("browser locks fUSDC through an injected wallet and the provider pays the i
       },
     };
   }, { rpc: `http://127.0.0.1:${anvilPort}`, account: USER });
+  return walletCalls;
+}
+
+test("browser locks fUSDC through an injected wallet and the provider pays the invoice", async ({ page }) => {
+  test.skip(!enabled, "Explicit dev-stack opt-in required");
+  const invoice = command("invoice", "20000", "--node", "user");
+  const paymentHash = JSON.parse(command("lncli", "user", "decodepayreq", invoice)).payment_hash as string;
+  const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
+  const walletCalls = await injectWallet(page);
   await page.goto(`http://127.0.0.1:${webPort}/swap.html`);
   await page.locator("#swap-from").selectOption("usdc");
   await expect(page.locator("#swap-to")).toHaveValue("ln");
@@ -69,5 +74,63 @@ test("browser locks fUSDC through an injected wallet and the provider pays the i
   await page.locator("#swap-evm-recovery-check").click();
   await expect(page.locator("#swap-evm-recovery-message")).toContainText("Claimed by the provider");
   await expect(page.locator("#swap-evm-recovery-refund")).toBeDisabled();
+  expect(errors).toEqual([]);
+});
+
+test("unexposed reverse recovery resumes explicitly after reload without creating another hold invoice", async ({ page }) => {
+  test.skip(!enabled, "Explicit dev-stack opt-in required");
+  const calls = await injectWallet(page);
+  await page.goto(`http://127.0.0.1:${webPort}/swap.html`);
+  await page.locator("#swap-from").selectOption("ln"); await page.locator("#swap-to").selectOption("usdc");
+  await page.locator("#swap-receive-amount").fill("20"); await page.locator("#swap-start").click();
+  await page.locator("#swap-quote-accept").click({ timeout: 60000 });
+  await expect(page.locator("#swap-reverse-invoice")).toBeVisible({ timeout: 60000 });
+  const invoice = (await page.locator("#swap-reverse-invoice").textContent())!;
+  await page.reload();
+  await expect(page.locator("#swap-recovery-result h3")).toHaveText("Lightning to fUSDC recovery verified");
+  await expect(page.locator("#swap-reverse-invoice")).not.toBeVisible();
+  expect(calls.filter((method) => method === "eth_sendTransaction")).toHaveLength(0);
+  const paid = new Promise<{ output: string; error: Error | null }>((resolve) => execFile(`${root}/dev/devctl`, ["pay", invoice, "--node", "user"],
+    { cwd: root, env: process.env, encoding: "utf8", timeout: 150000 }, (error, output) => resolve({ output, error })));
+  // Check is always explicit; an old file never authorizes automatic submission after reload.
+  await expect(async () => {
+    await page.locator("#swap-evm-recovery-check").click();
+    await expect(page.locator("#swap-evm-recovery-check")).toBeEnabled();
+    await expect(page.locator("#swap-evm-recovery-claim")).toBeEnabled({ timeout: 2000 });
+  }).toPass({ timeout: 60000 });
+  await page.locator("#swap-evm-recovery-claim").click();
+  await expect(page.locator("#swap-evm-recovery-message")).toContainText("Tokens claimed", { timeout: 60000 });
+  const result = await paid; if (result.error) throw result.error;
+  expect(result.output).toContain("paid, preimage");
+  expect(calls.filter((method) => method === "eth_sendTransaction")).toHaveLength(1);
+});
+
+test("browser pays Lightning from an external wallet and claims the provider's fUSDC lock", async ({ page }) => {
+  test.skip(!enabled, "Explicit dev-stack opt-in required");
+  const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
+  const calls = await injectWallet(page);
+  await page.goto(`http://127.0.0.1:${webPort}/swap.html`);
+  await page.locator("#swap-from").selectOption("ln"); await page.locator("#swap-to").selectOption("usdc");
+  await page.locator("#swap-receive-amount").fill("20"); await page.locator("#swap-start").click();
+  await expect(page.locator("#swap-quote-accept")).toBeVisible({ timeout: 60000 });
+  expect(calls).not.toContain("eth_requestAccounts"); // shopping needs neither a destination nor wallet access
+  await page.locator("#swap-quote-accept").click();
+  await expect(page.locator("#swap-reverse-invoice")).toBeVisible({ timeout: 60000 });
+  const invoice = (await page.locator("#swap-reverse-invoice").textContent())!;
+  // An external LN wallet pays asynchronously; no LN-node connection is configured in the browser.
+  const payment = new Promise<string>((resolve, reject) => execFile(`${root}/dev/devctl`, ["pay", invoice, "--node", "user"],
+    { cwd: root, env: process.env, encoding: "utf8", timeout: 150000 }, (error, stdout, stderr) => error ? reject(new Error(stderr || error.message)) : resolve(stdout)));
+  // Avoid an unhandled rejection while Playwright waits on the browser.
+  const paid = payment.then((output) => ({ output, error: null }), (error: unknown) => ({ output: "", error }));
+  await expect(page.locator("#swap-status")).toContainText("Stablecoins received", { timeout: 150000 });
+  const result = await paid; if (result.error) throw result.error;
+  expect(result.output).toContain("paid, preimage");
+  expect(calls.filter((method) => method === "eth_sendTransaction")).toHaveLength(1); // claim only
+  await expect(page.locator('#swap-erc20-files a[download="rillswap-ln-to-fusdc-claimed.age"]')).toBeVisible();
+  await page.reload();
+  await expect(page.locator("#swap-recovery-result h3")).toHaveText("Lightning to fUSDC recovery verified");
+  await page.locator("#swap-evm-recovery-check").click();
+  await expect(page.locator("#swap-evm-recovery-message")).toContainText("Tokens claimed");
+  await expect(page.locator("#swap-evm-recovery-claim")).toBeDisabled();
   expect(errors).toEqual([]);
 });

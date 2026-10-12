@@ -15,7 +15,7 @@ test("stablecoins route to the RS-010 profiles against Lightning only", () => {
     expect(routeFor(coin, "ln").profile).toBe("erc20-to-ln/v1");
     expect(routeFor(coin, "ln").unavailable).toBeNull();
     expect(routeFor("ln", coin).profile).toBe("ln-to-erc20/v1");
-    expect(routeFor("ln", coin).unavailable).toMatch(/quotes are coming soon/);
+    expect(routeFor("ln", coin).unavailable).toBeNull();
     for (const route of [routeFor(coin, "btc"), routeFor("btc", coin)]) {
       expect(route.profile).toBeNull();
       expect(route.unavailable).toMatch(/swaps are not offered/);
