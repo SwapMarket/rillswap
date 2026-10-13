@@ -5,14 +5,14 @@
 import { test, expect, type Page } from "@playwright/test";
 import { execFile, execFileSync } from "node:child_process";
 import { resolve } from "node:path";
+import { assertDisposableStack, composeEnabled } from "./stack";
 
 const root = resolve(import.meta.dirname, "../..");
-const enabled = process.env.RILLSWAP_RUN_BROWSER_ERC20_REGTEST === "1";
+const enabled = process.env.RILLSWAP_RUN_BROWSER_ERC20_REGTEST === "1" || composeEnabled;
 const project = process.env.COMPOSE_PROJECT_NAME ?? "rillswap-dev";
 const webPort = process.env.RILL_DEV_WEB_PORT ?? "5273", anvilPort = process.env.RILL_DEV_ANVIL_PORT ?? "8545";
 const USER = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"; // Anvil account 1, funded with fUSDC by bootstrap
-const TOKEN = JSON.parse(execFileSync("docker", ["exec", `${process.env.COMPOSE_PROJECT_NAME ?? "rillswap-dev"}-tools-1`, "cat", "/state/evm/contracts.json"],
-  { encoding: "utf8", timeout: 10000 })).token_contract as string;
+test.beforeEach(() => { if (enabled) assertDisposableStack(); });
 const command = (...args: string[]): string => execFileSync(resolve(root, "dev/devctl"), args, { cwd: root, env: process.env, encoding: "utf8", timeout: 30000 }).trim();
 const makerState = (lockTxHash: string): string => execFileSync("docker", ["exec", `${project}-tools-1`, "python", "-c",
   "import sqlite3,sys; c=sqlite3.connect('file:/state/makers/erc20-to-ln/provider-store/live.sqlite?mode=ro',uri=True); "
@@ -146,6 +146,8 @@ test("browser pays Lightning from an external wallet and claims the provider's f
 
 test("browser receives fUSDC at a typed address with no wallet extension, through the gas sponsor", async ({ page }) => {
   test.skip(!enabled, "Explicit dev-stack opt-in required");
+  const TOKEN = JSON.parse(execFileSync("docker", ["exec", `${project}-tools-1`, "cat", "/state/evm/contracts.json"],
+    { encoding: "utf8", timeout: 10000 })).token_contract as string;
   const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
   const destination = `0x${"d0".repeat(19)}${Math.floor(Math.random() * 256).toString(16).padStart(2, "0")}`;
   const balanceOf = async (): Promise<bigint> => {

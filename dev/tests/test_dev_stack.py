@@ -14,6 +14,18 @@ ROOT = Path(__file__).resolve().parents[2]
 COMPOSE = (ROOT / "dev/compose.yaml").read_text()
 
 
+def test_ci_overlay_only_disables_application_watchers():
+    overlay = (ROOT / "dev/compose.ci.yaml").read_text()
+    assert set(re.findall(r"^  ([a-z-]+):", overlay, re.M)) == {"shop", "web"}
+    assert re.findall(r"^    ([a-z_]+):", overlay, re.M) == ["command", "command"]
+    assert "command: [bun, server.ts]" in overlay
+    assert "vite build &&" in overlay
+    assert "vite preview --host 0.0.0.0 --port 5173 --strictPort" in overlay
+    assert "--watch" not in overlay
+    # The normal development stack retains its existing hot-reload behavior.
+    assert "command: [bun, --watch, server.ts]" in COMPOSE
+
+
 def load_devtool():
     pytest.importorskip("httpx")
     spec = importlib.util.spec_from_file_location("devtool", ROOT / "dev/devtool.py")

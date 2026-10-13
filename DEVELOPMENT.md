@@ -30,6 +30,61 @@ dev/devctl smoke     # both swap directions and a shop purchase per payment meth
 The first `up` takes a few minutes (image build). Later runs reuse the image and
 all chain/wallet/maker state. `dev/devctl help` lists every command.
 
+## Full-stack CI acceptance
+
+`.github/workflows/compose-e2e.yml` runs on pushes, pull requests and manual
+dispatches. It builds and starts **every** service in `dev/compose.yaml` with
+the `dev/compose.ci.yaml` overlay (same applications, no development file
+watchers) and fresh, run-specific volumes, checks service health, real chain
+identities, funded Lightning channels, all shop rails and all four maker announcements,
+then runs the CLI smoke suite and Chromium against the production web bundle.
+
+The browser suite covers all four swap profiles, both external-wallet and
+configured-node Lightning payment, actual Bitcoin claim broadcast and
+settlement, wallet and gas-sponsored ERC20 claims, encrypted recovery/reload,
+and storefront purchases over Lightning, Bitcoin swaps, fUSDC, fUSDT and
+single/split Monero payments. It checks confirmed payouts, settled invoices,
+provider terminal states, verified receipts and receipt persistence across
+application restarts. Component/schema/vector/artifact checks still run
+separately; these tests do not replace them.
+
+Forward Bitcoin browser tests use finalized-PSBT funding. The scoped local
+chain reader does not provide the address-history index required by automatic
+wallet-deposit discovery.
+
+No chain, relay, provider or merchant transport is mocked. The injected EVM
+wallet forwards requests to Anvil's unlocked disposable account, rather than
+testing a wallet extension. The gas sponsor is the existing dev-only stand-in,
+executing real EntryPoint/delegate/HTLC contracts, not a production bundler.
+
+To reproduce locally without touching an existing dev stack:
+
+```sh
+export COMPOSE_PROJECT_NAME=rill-reverse-browser-local-$(date +%s)
+export COMPOSE_FILE=dev/compose.yaml:dev/compose.ci.yaml
+export RILLSWAP_RUN_COMPOSE_E2E=1
+export RILL_DEV_WEB_PORT=15273 RILL_DEV_SHOP_PORT=18090 RILL_DEV_RELAY_PORT=17777
+export RILL_DEV_CHAIN_PORT=18091 RILL_DEV_BROADCAST_PORT=18092 RILL_DEV_NODE_PORT=18093
+export RILL_DEV_SPONSOR_PORT=18094 RILL_DEV_ANVIL_PORT=18545
+(cd rill-payments && bun install --frozen-lockfile --ignore-scripts)
+(cd rill-web && bun install --frozen-lockfile --ignore-scripts && bunx playwright install --with-deps chromium)
+docker compose up -d --build
+dev/devctl info
+(cd rill-web && bun run test:e2e -- stack.spec.ts)
+dev/devctl smoke
+(cd rill-web && bun run test:e2e -- --grep-invert 'whole Compose stack')
+# Only delete the fresh project's disposable regtest data:
+docker compose down --volumes --remove-orphans
+```
+
+Keep the exported project/ports for every command. Use unused ports and a new
+project name for each run. Tests refuse the default project and browser port.
+CI always saves service status/logs and failure traces/screenshots before
+removing its own containers and volumes. Diagnostics contain disposable dev
+data only, never use this stack with real funds or credentials.
+
+## Default development endpoints
+
 | What | Where |
 | --- | --- |
 | Browser swap page | http://127.0.0.1:5273/swap.html |
@@ -164,12 +219,14 @@ chain API and gas sponsor, and a recovery wallet derived and stored in the
 browser. Pick the pair with **You send / You receive**.
 
 - **BTC to Lightning:** `dev/devctl web-inputs 50000` prints a fresh user
-  invoice. Paste it, get a quote, save the recovery files the page offers, then
-  send the exact amount to the contract address it shows:
-  `dev/devctl bitcoin-cli -rpcwallet=user sendtoaddress <address> <btc>`.
-  The page waits for the first confirmation, binds the deposit, and shows the
-  preimage once the maker pays the invoice. Under **Advanced** you can paste a
-  finalized PSBT from `dev/devctl fund-psbt <address> <btc>` instead.
+   invoice. Paste it, get a quote, save the recovery files the page offers, then
+   use **Advanced** to paste a finalized PSBT from
+   `dev/devctl fund-psbt <address> <btc>` (the exact address and amount shown).
+   After the page validates it and the provider acknowledges funding, broadcast
+   its displayed raw transaction with `dev/devctl broadcast <rawtx>`, then click
+   **I broadcast it**. The page shows the preimage once the maker pays the invoice.
+   Plain wallet sends require an address-indexed mempool API; the scoped local
+   chain reader has no address history, so it cannot discover those deposits.
 - **Lightning to BTC:** compare offers, approve one, then pay the hold invoice
   with `dev/devctl pay <bolt11>`. The page claims the on-chain output.
 - **USDC/USDT to Lightning:** needs an injected EVM wallet (for example

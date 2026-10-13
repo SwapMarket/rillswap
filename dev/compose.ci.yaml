@@ -1,0 +1,12 @@
+# Run the same applications without development file watchers. CI never edits
+# sources, and watchers can exhaust the host's inotify/file-descriptor quota.
+services:
+  shop:
+    command: [bun, server.ts]
+  web:
+    command:
+      - sh
+      - -c
+      - >-
+        bun x --bun vite build &&
+        exec bun x --bun vite preview --host 0.0.0.0 --port 5173 --strictPort
