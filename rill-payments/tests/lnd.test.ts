@@ -55,3 +55,15 @@ for (const reason of ["receiver_mismatch", "chain_mismatch", "not_synced"] as co
     } finally { log.mockRestore(); }
   });
 }
+
+test.each([undefined, "true"])("missing or nonboolean LND freshness %p never admits identity", async (freshness) => {
+  const log = spyOn(console, "error").mockImplementation(() => {}), calls: string[] = [];
+  const backend = new LndInvoiceBackend({ call: async (_method, path) => {
+    calls.push(path); return { identity_pubkey: receiver, chains: [{ chain: "bitcoin", network: "regtest" }], synced_to_chain: freshness };
+  } }, { origin: "https://merchant.example", receiver, network: "regtest" }, new Uint8Array(32).fill(9));
+  try {
+    await expect(backend.identity()).rejects.toThrow("LND receiver identity, chain or freshness mismatch");
+    expect(calls).toEqual(["/v1/getinfo"]);
+    expect(log.mock.calls).toEqual([[JSON.stringify({ diagnostic: "lnd_identity_refused", reason: "not_synced" })]]);
+  } finally { log.mockRestore(); }
+});

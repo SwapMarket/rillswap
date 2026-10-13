@@ -48,6 +48,11 @@ provider terminal states, verified receipts and receipt persistence across
 application restarts. Component/schema/vector/artifact checks still run
 separately; these tests do not replace them.
 
+Storefront Lightning order creation briefly stops only the isolated auto-miner,
+drains mining RPCs and waits for LND to match Core's tip. Mining resumes before
+payment, including on checkout failure. This controls fixture timing without
+relaxing the merchant's freshness checks or retrying checkout creation.
+
 Forward Bitcoin browser tests use finalized-PSBT funding. The scoped local
 chain reader does not provide the address-history index required by automatic
 wallet-deposit discovery.
