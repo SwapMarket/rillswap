@@ -137,15 +137,31 @@ function show(order) {
   $("copy")?.addEventListener("click", () => navigator.clipboard.writeText(order.invoice));
   render(order);
   clearInterval(polling);
-  polling = setInterval(async () => render(await (await fetch(`/api/orders/${order.id}`)).json()), 2000);
+  polling = setInterval(() => { void pollOrder(order.id); }, 2000);
   $("order").scrollIntoView({ behavior: "smooth" });
+}
+
+async function pollOrder(id) {
+  try {
+    const response = await fetch(`/api/orders/${id}`);
+    if (!response.ok) throw new Error("Order status unavailable");
+    const order = await response.json();
+    if (order.id !== id || !["waiting", "paid", "reconciliation"].includes(order.status)) throw new Error("Invalid order status");
+    if ($("order-id").textContent === id) render(order);
+  } catch {
+    // A failed read is unknown, not an order or payment outcome. Keep the last
+    // known status and instructions, and continue polling for verified acceptance.
+    if ($("order-id").textContent === id) $("order-acceptance").textContent =
+      "Payment status temporarily unavailable. Retrying; do not send a second payment.";
+  }
 }
 
 function render(order) {
   const status = $("order-status");
   status.textContent = order.status;
   status.className = `status ${order.status}`;
-  if (order.status !== "waiting") { $("order-pay").innerHTML = ""; clearInterval(polling); }
+  if (order.status !== "waiting") $("order-pay").innerHTML = "";
+  if (order.acceptance || order.status === "reconciliation") clearInterval(polling);
   $("order-acceptance").innerHTML = order.acceptance
     ? `<p class="paid">Payment accepted. Merchant signature verified (Ed25519, pinned key).</p>
        <pre>event       ${esc(order.acceptance.eventId)}\nevidence    ${esc(order.acceptance.detail)}\naccepted at ${new Date(order.acceptance.acceptedAt * 1000).toISOString()}</pre>`

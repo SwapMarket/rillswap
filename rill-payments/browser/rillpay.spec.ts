@@ -125,3 +125,48 @@ for (const success of [true, false]) {
     expect(posted).toHaveLength(1);
   });
 }
+
+for (const fault of ["http", "network", "json", "status", "identity", "receipt"] as const) {
+  test(`demo polling recovers from a transient ${fault} read without losing the order`, async ({ page }) => {
+    const key = "0".repeat(64);
+    const method = { id: "lightning", label: "Lightning", network: "Regtest", available: true, unavailableReason: null, price: "2,000 sat", merchantFee: "0", providerFee: "0", walletFee: null, confirmationTime: null, usdCents: 200, minutesToConfirmation: 0 };
+    const waiting = { id: "123", productName: "Stickers", usdCents: 200, rail: "lightning", amountLabel: "2,000 sat", invoice: "lnbcrt-test", status: "waiting", acceptance: null };
+    const accepted = { ...waiting, status: "paid", acceptance: { eventId: "accepted-123", acceptedAt: 1700000000, publicKey: key, detail: "payment hash fixture" } };
+    await page.route("**/api/catalog", (route) => route.fulfill({ json: {
+      products: [{ id: "stickers", name: "Stickers", usdCents: 200, sat: 2000, methods: [method] }],
+      rails: { lightning: { label: "Lightning" } }, demoUsdPerBtc: 100000, demoUsdPerXmr: 100, acceptanceKey: key,
+    } }));
+    await page.route("**/api/orders", (route) => route.fulfill({ json: route.request().method() === "POST" ? waiting : [] }));
+    let polls = 0, release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    await page.route("**/api/orders/123", async (route) => {
+      expect(route.request().method()).toBe("GET");
+      if (++polls === 1) {
+        if (fault === "network") return route.abort("failed");
+        if (fault === "http") return route.fulfill({ status: 500, json: { error: "temporary" } });
+        if (fault === "json") return route.fulfill({ contentType: "application/json", body: "{" });
+        if (fault === "identity") return route.fulfill({ json: { ...accepted, id: "other-order" } });
+        if (fault === "receipt") return route.fulfill({ json: { ...waiting, status: "paid" } });
+        return route.fulfill({ json: { error: "temporary" } });
+      }
+      await gate; return route.fulfill({ json: accepted });
+    });
+    await page.goto("/shop"); await page.getByRole("button", { name: "Buy", exact: true }).click();
+    await page.getByRole("button", { name: "Continue to payment" }).click();
+    try {
+      await expect.poll(() => polls, { timeout: 10000 }).toBeGreaterThanOrEqual(2);
+      await expect(page.locator("#order-status")).toHaveText(fault === "receipt" ? "paid" : "waiting");
+      if (fault === "receipt") await expect(page.locator("#order-pay")).toBeEmpty();
+      else {
+        await expect(page.locator("#order-pay textarea")).toHaveValue("lnbcrt-test");
+        await expect(page.getByRole("link", { name: "Open Lightning wallet" })).toBeVisible();
+        await expect(page.locator("#order-acceptance")).toContainText("temporarily unavailable");
+      }
+      await expect(page.locator("#order-acceptance")).not.toContainText("Merchant signature verified");
+    } finally { release(); }
+    await expect(page.locator("#order-status")).toHaveText("paid");
+    await expect(page.locator("#order-pay")).toBeEmpty();
+    await expect(page.locator("#order-acceptance")).toContainText("Merchant signature verified");
+    await expect(page.locator("#order-acceptance")).toContainText("accepted-123");
+  });
+}
