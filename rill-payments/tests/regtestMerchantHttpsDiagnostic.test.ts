@@ -456,14 +456,26 @@ test.skipIf(process.env.RILLSWAP_RUN_MERCHANT_BROWSER !== "1")("default browser 
         const asset = assets.get(route.request().url())!;
         await route.fulfill({ status: 200, contentType: asset.type, headers: { "Content-Security-Policy": "default-src 'none'; script-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'" }, body: asset.body });
       });
-      const page = context.pages()[0] ?? await context.newPage(), failures: string[] = [], requests: number[] = [];
-      page.on("requestfailed", (request) => { if (request.url() === intentUrl && failures.length < 8) failures.push(request.failure()?.errorText ?? "unknown"); });
-      page.on("request", (request) => { if (request.url() === intentUrl) requests.push(1); });
+      const page = context.pages()[0] ?? await context.newPage(), failures: string[] = [], requests: object[] = [];
+      page.on("requestfailed", (request) => {
+        if (request.url() !== intentUrl || failures.length >= 8) return;
+        const error = request.failure()?.errorText ?? "unknown"; failures.push(error);
+        // Public Chromium error codes and request ordinals only, never URLs,
+        // capabilities, headers or merchant response bodies.
+        console.error(JSON.stringify({ diagnostic: "merchant_browser_request_failed", browser: name,
+          ordinal: requests.indexOf(request) + 1, error: /^net::ERR_[A-Z_]+$/.test(error) ? error : "unknown" }));
+      });
+      page.on("request", (request) => { if (request.url() === intentUrl) requests.push(request); });
       await page.goto(expectedOrigin + "/owned-checkout"); await page.waitForFunction(() => typeof window.createCheckout === "function");
       return { context, page, failures, requests };
     }
     const inputs = { intentUrl, token: intent.statusToken as string, origin: expectedOrigin, receiver, invoice };
-    const open = (page: Awaited<ReturnType<typeof browserFor>>["page"]) => page.evaluate(async (input) => {
+    const open = async (page: Awaited<ReturnType<typeof browserFor>>["page"]) => {
+      // A parsed body is not Chromium's terminal network event. Observe the exact
+      // request before evaluating, then wait for its completion before checking
+      // the cumulative requestfailed contract (including the previous read).
+      const observed = page.waitForRequest((request) => request.url() === intentUrl, { timeout: 10000 });
+      const result = page.evaluate(async (input) => {
       const counters = { wallet: 0, begin: 0, update: 0, load: 0 }, progress: string[] = [];
       const options = { intentUrl: input.intentUrl, statusToken: input.token,
         policy: { version: "native-lightning/1" as const, merchantOrigin: input.origin, receiver: input.receiver, network: "regtest" as const, maxBuyerExtraMsat: "0", maxBuyerExtraBps: 0 },
@@ -473,7 +485,11 @@ test.skipIf(process.env.RILLSWAP_RUN_MERCHANT_BROWSER !== "1")("default browser 
       const checkout = window.createCheckout(options); checkout.on("progress", (event) => progress.push(event.state));
       try { const view = await checkout.open(); return { refused: false, withheld: view.attempt === null, originalInvoice: view.attempt?.invoice === input.invoice, status: view.status, counters, progress }; }
       catch { return { refused: true, withheld: true, originalInvoice: false, status: "unknown", counters, progress }; }
-    }, inputs);
+      }, inputs);
+      const request = await observed, response = await request.response();
+      if (response) await response.finished();
+      return await result;
+    };
     const correct = await browserFor("browser-correct", spki(f.listener.cert));
     expect(await open(correct.page)).toEqual({ refused: false, withheld: true, originalInvoice: false, status: "waiting", counters: { wallet: 0, begin: 0, update: 0, load: 0 }, progress: ["action_required"] });
     expect(correct.requests.length).toBe(1); expect(correct.failures).toEqual([]); expect(consumerHistory(consumerPath)).toEqual(unbound);

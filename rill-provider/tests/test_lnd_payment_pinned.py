@@ -70,11 +70,65 @@ def _docker(*args: str, timeout: int = 60, check: bool = True) -> str:
         category = error_types[-1] if error_types else "unidentified"
         grpc_code = grpc_codes[-1] if grpc_codes else "none"
         diagnostic = diagnostics[-1] if diagnostics else "none"
+        # Fixed public import labels are safe diagnostics; arbitrary exception
+        # text (including a caller-controlled module name) remains private.
+        missing = re.findall(r"ModuleNotFoundError: No module named '([^']+)'", completed.stderr)
+        public_modules = {
+            "grpc",
+            "httpx",
+            "rill_core",
+            "rill_provider",
+            "rill_cli",
+            "rill_crypto",
+            "walletunlocker_pb2",
+            "stateservice_pb2",
+            "google",
+            "pydantic",
+            "pydantic_core",
+            "typing_extensions",
+            "Cryptodome",
+            "_cffi_backend",
+        }
+        missing_module = "none"
+        if missing:
+            prefix = missing[-1].partition(".")[0]
+            missing_module = prefix if prefix in public_modules else "unknown"
         raise AssertionError(
             f"disposable LND failed in {phase} "
-            f"({category}, grpc={grpc_code}, diagnostic={diagnostic})"
+            f"({category}, grpc={grpc_code}, diagnostic={diagnostic}, import={missing_module})"
         )
     return completed.stdout.strip() if completed.returncode == 0 else ""
+
+
+@pytest.mark.parametrize(
+    ("module", "label"),
+    [
+        ("grpc._cython.cygrpc", "grpc"),
+        ("rill_core.wire", "rill_core"),
+        ("private_invoice_do_not_log", "unknown"),
+    ],
+)
+def test_docker_import_diagnostics_do_not_expose_private_output(
+    monkeypatch: pytest.MonkeyPatch, module: str, label: str
+) -> None:
+    monkeypatch.setattr(__name__ + ".DOCKER", "docker")
+    result = subprocess.CompletedProcess(
+        ["docker"],
+        1,
+        stdout="private-macaroon",
+        stderr=(
+            "private-wallet-secret\nPHASE: channel_wallets\n"
+            f"ModuleNotFoundError: No module named '{module}'\n"
+        ),
+    )
+    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: result)
+    with pytest.raises(AssertionError) as failure:
+        _docker("run")
+    message = str(failure.value)
+    assert f"import={label}" in message
+    assert "channel_wallets" in message
+    for private in ("private-macaroon", "private-wallet-secret", "private_invoice_do_not_log"):
+        assert private not in message
 
 
 def _core_cli(container: str, *args: str, timeout: int = 5) -> str:
