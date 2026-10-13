@@ -677,6 +677,21 @@ def write_info(
         "network": network_identity(),
     }
     private_write(STATE / "info.json", json.dumps(info, indent=1) + "\n", 0o644)
+    # Public browser pins come from the operator-owned deployment, never relay metadata.
+    # Re-create this configuration on upgrades without deploying or minting again.
+    asset = {
+        "family": "evm",
+        "chain_id": evm["chain_id"],
+        "name": "anvil-dev",
+        "htlc_contract": evm["htlc_contract"],
+        "htlc_version": 6,
+        "token_contract": evm["token_contract"],
+        "token_symbol": evm["token_symbol"],
+        "token_decimals": evm["token_decimals"],
+        "block_seconds": int(os.environ.get("RILL_DEV_ANVIL_BLOCK_SECONDS", "2")),
+        "deployment_namespace": info["network"]["deployment_namespace"],
+    }
+    private_write(STATE / "evm/browser-assets.json", json.dumps({"USDC": asset}) + "\n", 0o644)
     return info
 
 

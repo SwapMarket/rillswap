@@ -414,10 +414,12 @@ services:
       - sh
       - -c
       - >-
+        export VITE_RILLSWAP_EVM_ASSETS="$$(cat /state/evm/browser-assets.json)" &&
         bun x --bun vite build &&
         (bun x --bun vite build --watch >/tmp/watch.log 2>&1 &) &&
         exec bun x --bun vite preview --host 0.0.0.0 --port 5173 --strictPort
     volumes:
+      - state:/state:ro
       - ../rill-web/src:/src/rill-web/src:ro
       - ../rill-web/index.html:/src/rill-web/index.html:ro
       - ../rill-web/swap.html:/src/rill-web/swap.html:ro
@@ -425,6 +427,9 @@ services:
       - ../rill-web/tsconfig.json:/src/rill-web/tsconfig.json:ro
     ports:
       - 127.0.0.1:${RILL_DEV_WEB_PORT:-5273}:5173
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
 
 volumes:
   browser-node:

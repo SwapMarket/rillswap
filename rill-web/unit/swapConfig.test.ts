@@ -1,7 +1,24 @@
 import { describe, expect, test } from "bun:test";
-import { NETWORK_NAMES, relaysForNetwork, resolveSwapDefaults, validateRelay, validateRelays } from "../src/swap/config";
+import { NETWORK_NAMES, relaysForNetwork, resolveSwapDefaults, trustedEvmAsset, validateRelay, validateRelays } from "../src/swap/config";
 
 describe("explicit deployment defaults", () => {
+  const asset = { family: "evm", chain_id: 31337, name: "anvil-dev", htlc_contract: `0x${"11".repeat(20)}`, htlc_version: 6,
+    token_contract: `0x${"22".repeat(20)}`, token_symbol: "fUSDC", token_decimals: 6, block_seconds: 2, deployment_namespace: "rillswap-e2e-v1" } as const;
+  test("trusted asset configuration is complete and isolated by network and namespace", () => {
+    const defaults = resolveSwapDefaults({ VITE_RILLSWAP_NETWORK: "regtest", VITE_RILLSWAP_EVM_ASSETS: JSON.stringify({ USDC: asset }) });
+    expect(trustedEvmAsset("USDC", "regtest", "rillswap-e2e-v1", defaults)).toEqual(asset);
+    expect(() => trustedEvmAsset("USDC", "signet", null, defaults)).toThrow("No trusted");
+    expect(() => trustedEvmAsset("USDC", "regtest", "other-deployment", defaults)).toThrow("No trusted");
+    expect(() => trustedEvmAsset("USDT", "regtest", "rillswap-e2e-v1", defaults)).toThrow("No trusted");
+    expect(() => trustedEvmAsset("USDC", "regtest", "rillswap-e2e-v1", resolveSwapDefaults({ VITE_RILLSWAP_NETWORK: "regtest" }))).toThrow("No trusted");
+  });
+  test("partial, malformed, and ambiguous asset maps fail closed", () => {
+    for (const map of [null, [], { DAI: asset }, { USDC: {} }, { USDC: { ...asset, token_decimals: 37 } },
+      { USDC: { ...asset, htlc_version: 7 } }, { USDC: { ...asset, token_contract: "0x123" } }]) {
+      expect(() => resolveSwapDefaults({ VITE_RILLSWAP_EVM_ASSETS: JSON.stringify(map) })).toThrow();
+    }
+    expect(() => resolveSwapDefaults({ VITE_RILLSWAP_EVM_ASSETS: "{" })).toThrow();
+  });
   test("unconfigured public builds select mainnet with an encrypted relay", () => {
     expect(resolveSwapDefaults({})).toEqual({ network: "mainnet", relays: ["wss://relay.damus.io/", "wss://nos.lol/", "wss://relay.primal.net/"], mempoolApi: "https://mempool.space/api", broadcastApi: "https://mempool.space/api" });
   });

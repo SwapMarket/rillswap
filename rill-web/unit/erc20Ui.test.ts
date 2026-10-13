@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { formatTokenAmount, parseTokenAmount } from "../src/erc20Ui";
-import { matchEvmAsset, selectEvmAsset, type LocatedProvider } from "../src/swap/marketplace";
+import { selectEvmAsset, type LocatedProvider } from "../src/swap/marketplace";
 import type { EvmAssetIdentity } from "../src/manualProviderAdvertisement";
 
 describe("token amounts", () => {
@@ -30,22 +30,30 @@ describe("asset selection", () => {
   const provider = (identity: string, evmAssets: EvmAssetIdentity[]): LocatedProvider =>
     ({ announcement: { identityXOnlyKey: identity, evmAssets }, rawAnnouncement: "", relayUrls: [] }) as unknown as LocatedProvider;
 
-  test("a symbol matches by suffix, so a dev chain's fUSDC serves USDC", () => {
-    expect(matchEvmAsset([asset(31337, "fUSDC")], "USDC")?.token_symbol).toBe("fUSDC");
-    expect(matchEvmAsset([asset(1, "USDT", "2c"), asset(1, "USDC")], "USDC")?.token_contract).toBe(`0x${"2b".repeat(20)}`);
-    expect(matchEvmAsset([asset(1, "USDCX")], "USDC")).toBeNull();
-    expect(matchEvmAsset([{ ...asset(1, "USDC"), htlc_version: 7 as unknown as 6 }], "USDC")).toBeNull();
-    expect(matchEvmAsset([], "USDT")).toBeNull();
-  });
-
-  test("the first eligible provider's match fixes the asset and keeps only providers serving exactly it", () => {
+  test("trusted configuration fixes the asset regardless of provider order", () => {
+    const trusted = asset(10, "USDC");
     const first = provider("aa", [asset(10, "USDC")]);
     const sameAsset = provider("bb", [asset(1, "USDT", "2c"), asset(10, "USDC")]);
     const otherChain = provider("cc", [asset(1, "USDC")]);
     const otherHtlc = provider("dd", [{ ...asset(10, "USDC"), htlc_contract: `0x${"1b".repeat(20)}` }]);
-    const selected = selectEvmAsset([provider("ee", []), first, otherChain, sameAsset, otherHtlc], "USDC");
-    expect(selected?.asset.chain_id).toBe(10);
+    const selected = selectEvmAsset([otherChain, otherHtlc, provider("ee", []), first, sameAsset], trusted);
+    expect(selected?.asset).toBe(trusted);
     expect(selected?.providers.map((item) => item.announcement.identityXOnlyKey)).toEqual(["aa", "bb"]);
-    expect(selectEvmAsset([otherChain], "USDT")).toBeNull();
+    expect(selectEvmAsset([otherChain], trusted)).toBeNull();
+  });
+
+  test("a counterfeit symbol or any altered identity field is excluded", () => {
+    const trusted = asset(10, "USDC");
+    const substitutions: Record<string, unknown> = {
+      family: "btc", chain_id: 11, name: "different", htlc_contract: `0x${"1b".repeat(20)}`,
+      htlc_version: 7, token_contract: `0x${"2c".repeat(20)}`, token_symbol: "fUSDC",
+      token_decimals: 18, block_seconds: 1, deployment_namespace: "other-deployment",
+    };
+    for (const [field, value] of Object.entries(substitutions)) {
+      const substitute = { ...trusted, [field]: value } as EvmAssetIdentity;
+      expect(selectEvmAsset([provider("evil", [substitute])], trusted)).toBeNull();
+      expect(selectEvmAsset([provider("evil", [substitute]), provider("honest", [trusted])], trusted)?.providers)
+        .toHaveLength(1);
+    }
   });
 });

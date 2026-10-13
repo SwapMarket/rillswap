@@ -437,6 +437,9 @@ export async function prepareErc20Swap(
           await session.replyTo(accepted, "ack");
           window();
           const lock = lockOf(terms);
+          if (await hooks.rpc.chainId() !== asset.chain_id) throw new SwapError("wrong EVM RPC chain");
+          await hooks.rpc.verifyHtlc(asset.htlc_contract);
+          window();
           const lockTxHash = await hooks.lock(lock, asset.htlc_contract);
           const locked = { ...record, updatedAt: seconds(), lockTxHash };
           await hooks.saveRecovery(await encryptEvmRecovery(locked, request.ageRecipient), "locked");

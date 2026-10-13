@@ -5,7 +5,7 @@ import { ANNOUNCEMENT_KIND, MAX_DISCOVERY_EVENTS } from "./discovery";
 import { MAX_RELAYS } from "./config";
 import { RelayConnection, type RelayQueryResult } from "./relay";
 import { SwapError } from "./session";
-import { ProtocolError } from "./wire";
+import { ProtocolError, same } from "./wire";
 import { type PreparedReverseQuote, prepareReverseQuote, type ReverseSwapRequest } from "./reverseSwap";
 import { prepareSwap, type PreparedSwap, type SwapRequest } from "./swap";
 import { type Erc20SwapRequest, type PreparedErc20Swap, prepareErc20Swap } from "./erc20Swap";
@@ -228,27 +228,12 @@ export async function quoteReverseProviders(
   return { ...result, quotes: rankReverseQuotes(result.quotes) };
 }
 
-/** The announced asset for a stablecoin symbol (`USDC` also matches a dev chain's `fUSDC`), or null. */
-export function matchEvmAsset(assets: readonly EvmAssetIdentity[], symbol: "USDC" | "USDT"): EvmAssetIdentity | null {
-  return assets.find((asset) => asset.htlc_version === 6 && asset.token_symbol.toUpperCase().endsWith(symbol)) ?? null;
-}
-
-const sameAsset = (a: EvmAssetIdentity, b: EvmAssetIdentity): boolean =>
-  a.chain_id === b.chain_id && a.token_contract === b.token_contract && a.htlc_contract === b.htlc_contract;
-
-/**
- * One asset per quote round: the cheapest eligible provider's match for `symbol` decides the chain
- * and token, and only providers serving exactly that asset are quoted. The wallet connects to one chain.
- */
+/** Discovery selects counterparties, never the trusted asset or its units. */
 export function selectEvmAsset(
-  providers: readonly LocatedProvider[], symbol: "USDC" | "USDT",
+  providers: readonly LocatedProvider[], asset: EvmAssetIdentity,
 ): { readonly asset: EvmAssetIdentity; readonly providers: readonly LocatedProvider[] } | null {
-  for (const provider of providers) {
-    const asset = matchEvmAsset(provider.announcement.evmAssets, symbol);
-    if (asset === null) continue;
-    return { asset, providers: providers.filter((item) => item.announcement.evmAssets.some((served) => sameAsset(served, asset))) };
-  }
-  return null;
+  const eligible = providers.filter((item) => item.announcement.evmAssets.some((served) => same(served, asset)));
+  return eligible.length === 0 ? null : { asset, providers: eligible };
 }
 
 /** ERC20 to LN: the smallest lock for the same invoice wins. */

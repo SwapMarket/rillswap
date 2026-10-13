@@ -84,12 +84,17 @@ export async function mountErc20Execution(panel: HTMLElement, options: Erc20Exec
       throw new WalletRefusedError(`Your wallet holds ${tokenLabel(balance, asset)}; the lock needs ${tokenLabel(terms.amount, asset)}. Nothing was locked.`);
     }
     if (await rpc.allowance(terms.token, account, htlc) < terms.amount) {
+      await wallet.assertAccount(asset.chain_id, account);
+      options.signal?.throwIfAborted();
       say(`Approve ${tokenLabel(terms.amount, asset)} for the swap contract in your wallet`, 2);
       const approval = await wallet.send(account, terms.token, encodeApprove(htlc, terms.amount));
       report(`approval ${approval} submitted`);
       const receipt = await awaitReceipt(rpc, approval, 1, options.signal ? { signal: options.signal } : {});
       if (!receipt.status) throw new EvmError("the approval transaction reverted; nothing was locked");
     }
+    await wallet.assertAccount(asset.chain_id, account);
+    options.signal?.throwIfAborted();
+    if (Math.floor(Date.now() / 1000) >= prepared.quote.expiresAt) throw new EvmError("The funding window expired; tokens were not locked");
     say(`Confirm the lock of ${tokenLabel(terms.amount, asset)} in your wallet`, 2);
     return wallet.send(account, htlc, encodeLock(terms));
   };

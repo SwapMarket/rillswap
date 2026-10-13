@@ -55,6 +55,7 @@ Deployment defaults are set and validated at build time.
 | `VITE_RILLSWAP_BROADCAST_API` | Transaction broadcast API |
 | `VITE_RILLSWAP_NODE_API` | Optional user-node browser transport |
 | `VITE_RILLSWAP_EVM_RPC` | Read-only EVM RPC endpoint |
+| `VITE_RILLSWAP_EVM_ASSETS` | JSON map from `USDC`/`USDT` to trusted, complete RS-010 asset identities |
 | `VITE_RILLSWAP_EVM_SPONSOR` | Gas sponsor endpoint |
 | `VITE_RILLSWAP_EVM_ENTRY_POINT` | Pinned ERC-4337 EntryPoint address |
 | `VITE_RILLSWAP_EVM_7702_DELEGATE` | Pinned EIP-7702 delegate address |
@@ -66,6 +67,15 @@ single-relay `VITE_RILLSWAP_RELAY` still works but cannot be combined with
 `VITE_RILLSWAP_RELAYS`. Plaintext relays are only allowed on loopback for
 regtest. Custom endpoints must be set at build time so the Content Security
 Policy allows their origins; check their CORS support before deploying.
+
+New stablecoin swaps require independently configured asset pins. Each entry
+includes the chain, HTLC and token addresses, decimals, block interval and
+deployment namespace from RS-010. Provider symbols never select a token.
+Pins apply only to the configured Bitcoin network; local Anvil pins must match
+its regtest namespace. The dev bootstrap regenerates this public configuration
+from its existing deployment without redeploying contracts. Builds without pins
+refuse new stablecoin swaps, but can still open existing recovery files. Forward
+execution checks the deployed HTLC runtime before any approval or lock.
 
 ## Scripts
 

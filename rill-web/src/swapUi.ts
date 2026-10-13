@@ -15,7 +15,7 @@ import { type FundingRequest, type FundingSource, type SwapRequest } from "./swa
 import { observeDeposit } from "./swap/depositWatch";
 import { qrSvg } from "./qr";
 import { TransactionRefusedError } from "./swap/transaction";
-import { mempoolApiForNetwork, relaysForNetwork, validateEvmSponsor, validateMempoolApi, validateRelays, type EvmSponsorDefaults, type NetworkName } from "./swap/config";
+import { mempoolApiForNetwork, relaysForNetwork, trustedEvmAsset, validateEvmSponsor, validateMempoolApi, validateRelays, type EvmSponsorDefaults, type NetworkName } from "./swap/config";
 import { GasSponsor, newStagingSecret, stagingAddress } from "./swap/gasSponsor";
 import { readChainTip } from "./swap/chainTip";
 import { BrowserRecoveryWallet } from "./browserRecoveryWallet";
@@ -603,12 +603,13 @@ function mount(root: HTMLElement): void {
       try {
         const binding = invoiceBinding(invoice.value.trim(), name);
         const principal = BigInt(binding.amount_msat) / 1000n;
+        const trusted = trustedEvmAsset(symbol, name, NETWORKS[name].deployment_namespace, __SWAP_DEFAULTS__);
         const directory = await discoverMarketplace(urls, NETWORKS[name], pinned || undefined, cancellation.signal, "erc20-to-ln/v1");
         assertCurrent();
         for (const warning of directory.warnings) report(warning);
         const eligible = eligibleProviders(directory.providers, principal);
         if (eligible.length === 0) throw new Error(ineligibilityReason(providerLimits(directory.providers), principal));
-        const selection = selectEvmAsset(eligible, symbol);
+        const selection = selectEvmAsset(eligible, trusted);
         if (selection === null) throw new Error(`No announced provider serves ${symbol} for this network.`);
         const { asset } = selection;
         report(`${asset.token_symbol} on ${asset.name} (chain ${asset.chain_id}) served by ${selection.providers.length} provider(s)`);
@@ -725,8 +726,9 @@ function mount(root: HTMLElement): void {
     panel.replaceChildren(node("p", "Finding stablecoin providers..."), edit); setStatus("Finding available providers", 0);
     void (async () => {
       try {
+        const trusted = trustedEvmAsset(symbol, name, NETWORKS[name].deployment_namespace, __SWAP_DEFAULTS__);
         const directory = await discoverMarketplace(urls, NETWORKS[name], pinned || undefined, cancellation.signal, "ln-to-erc20/v1"); current();
-        const selection = selectEvmAsset(directory.providers, symbol);
+        const selection = selectEvmAsset(directory.providers, trusted);
         if (!selection) throw new Error(`No announced provider serves ${symbol} for this network`);
         for (const warning of directory.warnings) report(warning);
         const asset = selection.asset, payoutTokenBase = parseTokenAmount(amount, asset.token_decimals, "Amount to receive");

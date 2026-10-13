@@ -208,3 +208,12 @@ def test_gas_sponsor_serves_the_web_client_only_from_the_dev_stack():
     web = compose_service("web")
     assert "VITE_RILLSWAP_EVM_SPONSOR: http://127.0.0.1:${RILL_DEV_SPONSOR_PORT:-8094}" in web
     assert "VITE_RILLSWAP_EVM_ENTRY_POINT" in web and "VITE_RILLSWAP_EVM_7702_DELEGATE" in web
+
+
+def test_browser_asset_pins_come_from_bootstrap_not_provider_discovery():
+    web = compose_service("web")
+    assert "state:/state:ro" in web
+    assert "bootstrap:\n        condition: service_completed_successfully" in web
+    assert 'VITE_RILLSWAP_EVM_ASSETS="$$(cat /state/evm/browser-assets.json)"' in web
+    overlay = (ROOT / "dev/compose.ci.yaml").read_text()
+    assert 'VITE_RILLSWAP_EVM_ASSETS="$$(cat /state/evm/browser-assets.json)"' in overlay

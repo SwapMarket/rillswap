@@ -26,6 +26,9 @@ async function injectWallet(page: Page): Promise<string[]> {
     (window as unknown as { ethereum: unknown }).ethereum = {
       request: async ({ method, params }: { method: string; params?: unknown[] }) => {
         (window as unknown as { __walletCall: (m: string) => void }).__walletCall(method);
+        if (method === "eth_chainId" && (window as unknown as { __changedWalletChain?: string }).__changedWalletChain) {
+          return (window as unknown as { __changedWalletChain: string }).__changedWalletChain;
+        }
         if (method === "eth_requestAccounts" || method === "eth_accounts") return [account];
         if (method === "wallet_switchEthereumChain") return null;
         // Anvil runs with --base-fee 0; its eth_sendTransaction defaults would otherwise pick a priority fee above the max fee.
@@ -47,6 +50,41 @@ async function disableSponsor(page: Page): Promise<void> {
   for (const id of ["swap-evm-sponsor", "swap-evm-entry-point", "swap-evm-delegate"]) await page.locator(`#${id}`).fill("");
   await page.locator("#swap-settings-close").click();
 }
+
+test("forward execution refuses changed real HTLC runtime before any approval", async ({ page }) => {
+  test.skip(!enabled, "Explicit dev-stack opt-in required");
+  const deployment = JSON.parse(execFileSync("docker", ["exec", `${project}-tools-1`, "cat", "/state/evm/contracts.json"],
+    { encoding: "utf8", timeout: 10000 })) as { htlc_contract: string };
+  const calls = await injectWallet(page);
+  await page.goto(`http://127.0.0.1:${webPort}/swap.html`);
+  await page.locator("#swap-from").selectOption("usdc");
+  await page.locator("#swap-invoice").fill(command("invoice", "20000", "--node", "user"));
+  await page.locator("#swap-start").click();
+  await expect(page.locator("#swap-quote-accept")).toBeVisible({ timeout: 60000 });
+  const original = command("cast", "code", deployment.htlc_contract);
+  try {
+    command("cast", "rpc", "anvil_setCode", deployment.htlc_contract, "0x00");
+    await page.locator("#swap-quote-accept").click();
+    await expect(page.locator("#swap-error")).toContainText("HTLC bytecode does not match", { timeout: 30000 });
+    expect(calls.filter((method) => method === "eth_sendTransaction")).toHaveLength(0);
+  } finally {
+    command("cast", "rpc", "anvil_setCode", deployment.htlc_contract, original);
+  }
+});
+
+test("a wallet chain change after quoting cannot authorize approval or locking", async ({ page }) => {
+  test.skip(!enabled, "Explicit dev-stack opt-in required");
+  const calls = await injectWallet(page);
+  await page.goto(`http://127.0.0.1:${webPort}/swap.html`);
+  await page.locator("#swap-from").selectOption("usdc");
+  await page.locator("#swap-invoice").fill(command("invoice", "20000", "--node", "user"));
+  await page.locator("#swap-start").click();
+  await expect(page.locator("#swap-quote-accept")).toBeVisible({ timeout: 60000 });
+  await page.evaluate(() => { (window as unknown as { __changedWalletChain: string }).__changedWalletChain = "0x1"; });
+  await page.locator("#swap-quote-accept").click();
+  await expect(page.locator("#swap-error")).toContainText("Wallet account or chain changed", { timeout: 30000 });
+  expect(calls.filter((method) => method === "eth_sendTransaction")).toHaveLength(0);
+});
 
 test("browser locks fUSDC through an injected wallet and the provider pays the invoice", async ({ page }) => {
   test.skip(!enabled, "Explicit dev-stack opt-in required");

@@ -1,4 +1,7 @@
 /** Deployment defaults are public configuration, never wallet credentials. */
+import { validateEvmAssetIdentity } from "../generated/manualAdvertisementValidators.js";
+import type { EvmAssetIdentity } from "../manualProviderAdvertisement";
+
 export const NETWORK_NAMES = ["mainnet", "signet", "testnet4", "regtest"] as const;
 export type NetworkName = typeof NETWORK_NAMES[number];
 
@@ -11,6 +14,8 @@ export interface SwapDefaults {
   readonly nodeApi?: string;
   /** RS-010: JSON-RPC endpoint for reading the EVM chain; the user's wallet signs. */
   readonly evmRpc?: string;
+  /** Trusted token deployments, independent of provider discovery. Missing pins disable new EVM swaps. */
+  readonly evmAssets?: Readonly<Partial<Record<"USDC" | "USDT", EvmAssetIdentity>>>;
   /** Alchemy-compatible gas sponsor for receiving stablecoins without a wallet extension (all three or none). */
   readonly evmSponsor?: EvmSponsorDefaults;
 }
@@ -89,7 +94,25 @@ export function resolveSwapDefaults(env: Record<string, string | undefined>): Sw
       evmRpc: validateMempoolApi(env.VITE_RILLSWAP_EVM_RPC ?? "http://127.0.0.1:8545", name),
     } : {}),
     ...(sponsorDefaults(env, name)),
+    ...(env.VITE_RILLSWAP_EVM_ASSETS === undefined ? {} : { evmAssets: parseEvmAssets(env.VITE_RILLSWAP_EVM_ASSETS) }),
   };
+}
+
+function parseEvmAssets(document: string): NonNullable<SwapDefaults["evmAssets"]> {
+  const value: unknown = JSON.parse(document);
+  if (value === null || typeof value !== "object" || Array.isArray(value) ||
+      Object.entries(value).some(([symbol, asset]) => !["USDC", "USDT"].includes(symbol) || !validateEvmAssetIdentity(asset))) {
+    throw new Error("VITE_RILLSWAP_EVM_ASSETS must map USDC/USDT to complete EVM asset identities");
+  }
+  return Object.freeze(Object.fromEntries(Object.entries(value).map(([symbol, asset]) => [symbol, Object.freeze({ ...asset })])));
+}
+
+export function trustedEvmAsset(symbol: "USDC" | "USDT", network: NetworkName, namespace: string | null, defaults: SwapDefaults): EvmAssetIdentity {
+  const asset = defaults.network === network ? defaults.evmAssets?.[symbol] : undefined;
+  if (!asset || (asset.chain_id === 31337 && (network !== "regtest" || asset.deployment_namespace !== namespace))) {
+    throw new Error(`No trusted ${symbol} deployment is configured for this network. Provider announcements cannot select the token.`);
+  }
+  return asset;
 }
 
 function sponsorDefaults(env: Record<string, string | undefined>, name: NetworkName): { evmSponsor?: EvmSponsorDefaults } {
