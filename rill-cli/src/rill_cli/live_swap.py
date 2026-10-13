@@ -24,7 +24,7 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from rill_core.domain.chain import MAX_EXACT_JSON_INTEGER
 from rill_core.recovery import (
@@ -1244,7 +1244,8 @@ def _recovery_document(  # noqa: PLR0913 - one record's explicit parts
     funding: tuple[tuple[FundingBinding, str], ...] = (),
     preimage: bytes | None = None,
 ) -> bytes:
-    terms = offer.terms.contract_terms
+    # The Bitcoin offer was validated by _check_offer before recovery is written.
+    terms = cast("ContractTerms", offer.terms.contract_terms)
     artifacts = reconstruct_taproot_contract(terms, keys=session.crypto)
     return canonicalize(
         {
@@ -1384,7 +1385,8 @@ def _check_offer(  # noqa: PLR0913 - every binding checked explicitly
     now: int,
 ) -> ContractTerms:
     check_terms_offer(request, offer, handshake_hash=transcript, invoice_binding=invoice)
-    terms = offer.terms.contract_terms
+    # check_terms_offer rejects ERC20 terms, but its return type cannot narrow this union.
+    terms = cast("ContractTerms", offer.terms.contract_terms)
     crypto.schnorr_verify(
         bytes.fromhex(identity),
         provider_terms_hash(offer.terms),

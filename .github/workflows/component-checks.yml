@@ -114,7 +114,9 @@ jobs:
         with:
           bun-version: '1.3.11'
       - name: Install frozen web dependencies without lifecycle scripts
-        run: bun install --frozen-lockfile --ignore-scripts
+        run: |
+          (cd ../rill-payments && bun install --frozen-lockfile --ignore-scripts)
+          bun install --frozen-lockfile --ignore-scripts
       - name: Build and test disconnected browser source
         run: |
           (cd src/vendor/rill-crypto && sha256sum -c SHA256SUMS)
@@ -193,7 +195,7 @@ jobs:
           version: '0.11.7'
       - name: Install version-pinned provider development dependencies
         run: |
-          mkdir -p tmp
+          mkdir -p tmp ../tmp
           uv venv --python 3.14 tmp/ci-venv
           uv pip install --python tmp/ci-venv/bin/python -r requirements-dev.txt
       - name: Check provider source without opt-in backends

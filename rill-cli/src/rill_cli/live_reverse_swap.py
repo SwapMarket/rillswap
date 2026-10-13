@@ -308,7 +308,8 @@ def _check_offer(  # noqa: PLR0913 - every binding checked explicitly
     now: int,
 ) -> ContractTerms:
     check_reverse_terms_offer(request, offer, handshake_hash=transcript, invoice_binding=hold)
-    terms = offer.terms.contract_terms
+    # The validator rejects ERC20 terms before this Bitcoin-only path.
+    terms = cast("ContractTerms", offer.terms.contract_terms)
     crypto.schnorr_verify(
         bytes.fromhex(identity),
         provider_terms_hash(offer.terms),
