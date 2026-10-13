@@ -1,1 +1,24 @@
 /tmp/
+tmp/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+
+# JavaScript
+node_modules/
+dist/
+test-results/
+playwright-report/
+coverage/
+*.tsbuildinfo
+
+# Local secrets and editor files
+.env
+.env.*
+.DS_Store
