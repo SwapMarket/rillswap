@@ -86,15 +86,35 @@ def test_a_blocking_hold_send_returns_once_lnd_tracks_it_in_flight(
     sender.send.assert_called_once()
 
 
-def test_a_failed_send_that_lnd_never_recorded_sent_nothing(
+def test_a_failed_send_without_a_record_is_still_ambiguous(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(hold_payment, "POLL_SECONDS", 0.01)
     payer, sender = _payer(1035)
     sender.send.side_effect = LndUnavailableError("connection refused")
     sender.track.return_value = PaymentOutcome("UNKNOWN")
-    with pytest.raises(LndUnavailableError):
-        _pay(payer)  # reported by the swap as "nothing is at risk"
+    with pytest.raises(HoldPaymentError, match="outcome unknown"):
+        _pay(payer)
+    sender.send.assert_called_once()
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("private invoice"), ValueError("private key")])
+def test_unexpected_worker_failure_preserves_unknown_guidance(failure: Exception) -> None:
+    payer, sender = _payer(1035)
+    sender.send.side_effect = failure
+    sender.track.return_value = PaymentOutcome("UNKNOWN")
+    with pytest.raises(HoldPaymentError, match="do not retry payment") as error:
+        _pay(payer)
+    assert "private" not in str(error.value)
+    sender.send.assert_called_once()
+
+
+def test_unknown_send_result_cannot_claim_nothing_was_sent() -> None:
+    payer, sender = _payer(1035)
+    sender.send.return_value = PaymentOutcome("UNKNOWN")
+    with pytest.raises(HoldPaymentError, match="outcome unknown"):
+        _pay(payer)
+    sender.send.assert_called_once()
 
 
 def test_an_untrackable_failed_send_is_ambiguous(monkeypatch: pytest.MonkeyPatch) -> None:

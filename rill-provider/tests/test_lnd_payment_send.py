@@ -180,6 +180,34 @@ def test_send_bounds_the_payment_and_returns_the_checked_preimage(
     assert not request.route.hops[0].HasField("mpp_record")
 
 
+def test_post_submit_sync_failure_is_not_a_retryable_pre_submit_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, channel = _sender(tmp_path, monkeypatch, [])
+    payment = client.prepare(
+        INVOICE,
+        invoice_binding=binding_from_payreq(INVOICE, _payreq()),
+        fee_limit_sat=10,
+        max_expiry_height=1070,
+    )
+    channel.unary_responses[sender.SEND_METHOD] = lightning_pb2.HTLCAttempt(status="FAILED")
+    infos = iter(
+        [
+            _info(),
+            lightning_pb2.GetInfoResponse(
+                block_height=1000,
+                synced_to_chain=False,
+                chains=[{"chain": "bitcoin", "network": "regtest"}],
+                identity_pubkey=PAYER,
+            ),
+        ]
+    )
+    channel.unary_responses[sender.INFO_METHOD] = lambda: next(infos)
+    with pytest.raises(LndUnavailableError, match="after submission"):
+        client.send(payment)
+    assert sum(method == sender.SEND_METHOD for method, _ in channel.calls) == 1
+
+
 def test_wrong_preimage_or_hash_is_a_protocol_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

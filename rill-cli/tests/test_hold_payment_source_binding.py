@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+from dataclasses import replace
 from typing import TYPE_CHECKING
+from unittest.mock import Mock
 
 import pytest
 from rill_core.networks import REGTEST_CONSENSUS_PROFILE
+from rill_provider import lnd_payment_send as sender_module
+from rill_provider._lnd_proto import lightning_pb2
+from rill_provider._lnd_proto.routerrpc import router_pb2
 from rill_provider.lnd_payment_observation import LndNotSyncedError, LndProtocolError
 from rill_provider.lnd_payment_send import PaymentOutcome, PreparedPayment
 from rill_provider.payment_dispatch_record import PaymentAuthority
@@ -17,7 +23,6 @@ from rill_cli import hold_payment as module
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from unittest.mock import Mock
 
 NETWORK = FIXTURE_NETWORK.model_copy(update={"consensus_profile": REGTEST_CONSENSUS_PROFILE})
 EXPECTED = PaymentAuthority(NODE, NETWORK)
@@ -48,6 +53,49 @@ def test_pinned_matching_source_uses_existing_sender_bound_request_once() -> Non
         "fee_limit_sat",
         "max_expiry_height",
     }
+
+
+def test_real_sender_post_send_sync_failure_cannot_redispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payer, stub = _payer(1043)
+    payment = planned(stub)
+    request = router_pb2.SendToRouteRequest.FromString(payment.request)
+    request.payment_hash = bytes.fromhex(payment.payment_hash)
+    request.route.total_time_lock = 1100
+    payment = replace(payment, request=request.SerializeToString())
+    real = sender_module.LndPaymentSender(
+        host="127.0.0.1",
+        port=10009,
+        network=NETWORK,
+        tls_certificate_path=tmp_path / "unused.cert",
+        macaroon_path=tmp_path / "unused.macaroon",
+    )
+    calls = Mock()
+    counts = {"info": 0, "send": 0}
+
+    def unary(method: str, *_args: object, **_kwargs: object) -> object:
+        if method == sender_module.INFO_METHOD:
+            counts["info"] += 1
+            return lightning_pb2.GetInfoResponse(
+                block_height=1000,
+                synced_to_chain=counts["info"] != 2,
+                chains=[{"chain": "bitcoin", "network": "regtest"}],
+                identity_pubkey=NODE,
+            )
+        assert method == sender_module.SEND_METHOD
+        counts["send"] += 1
+        return lightning_pb2.HTLCAttempt(status="FAILED" if counts["send"] == 1 else "IN_FLIGHT")
+
+    calls.unary.side_effect = unary
+    calls.track.return_value = PaymentOutcome("UNKNOWN")
+    monkeypatch.setattr(real, "_connect", lambda: nullcontext(calls))
+    monkeypatch.setattr(real, "prepare", Mock(return_value=payment))
+    payer._sender = real  # noqa: SLF001 - integrate the real send/track boundary
+    payer._expected_payer = EXPECTED  # noqa: SLF001
+    with pytest.raises(module.HoldPaymentError, match="do not retry payment"):
+        _pay(payer)
+    assert counts["send"] == 1
 
 
 def test_wrong_prepared_source_never_sends_or_tracks() -> None:

@@ -152,12 +152,15 @@ class LndHoldPayer:
             _require_submission(submission_deadline, submission_allowed)
             box: list[HoldStatus | LndObservationError] = []
             done = threading.Event()
+            entered_sender = False
 
             def send(
                 box: list[HoldStatus | LndObservationError] = box, done: threading.Event = done
             ) -> None:
+                nonlocal entered_sender
                 try:
                     _require_submission(submission_deadline, submission_allowed)
+                    entered_sender = True
                     if deadline is None and submission_allowed is None:
                         outcome = self._sender.send(payment)
                     else:
@@ -169,6 +172,8 @@ class LndHoldPayer:
                     box.append(outcome.status)
                 except LndObservationError as error:
                     box.append(error)
+                except Exception:  # noqa: BLE001 - unknown submission, never echo private details
+                    box.append(LndUnavailableError("hold payment submission outcome unknown"))
                 finally:
                     done.set()
 
@@ -180,17 +185,23 @@ class LndHoldPayer:
                     raise HoldPaymentError(_AMBIGUOUS)
             (outcome,) = box
             if not isinstance(outcome, LndObservationError):
+                if outcome == "UNKNOWN":
+                    raise HoldPaymentError(_AMBIGUOUS)
                 return outcome
+            if not entered_sender:
+                raise outcome  # the local queued-work guard proves this worker did not send
             # Unsynced is raised by the attestation before anything is sent.
-            if isinstance(outcome, LndNotSyncedError) and time.monotonic() < submission_deadline:
+            if isinstance(outcome, LndNotSyncedError):
+                if time.monotonic() >= submission_deadline:
+                    raise outcome
                 time.sleep(min(POLL_SECONDS, max(0, submission_deadline - time.monotonic())))
                 continue
             try:
                 status = self.status(payment.payment_hash)
-            except LndObservationError:
+            except Exception:  # noqa: BLE001 - missing reconciliation proves no safe retry
                 raise HoldPaymentError(_AMBIGUOUS) from None
-            if status == "UNKNOWN":  # the call ended and LND has no payment
-                raise outcome
+            if status == "UNKNOWN":  # absence of a record does not prove absence of submission
+                raise HoldPaymentError(_AMBIGUOUS) from None
             return status
 
     def _polled(self, payment_hash: str) -> HoldStatus | None:
@@ -200,7 +211,7 @@ class LndHoldPayer:
                     payment_hash, current=True, payer=self._expected_payer
                 ).status
             return self._sender.track(payment_hash, current=True).status
-        except LndObservationError:
+        except Exception:  # noqa: BLE001 - keep observing without granting another submission
             return None  # not yet known; the send is still running
 
     def status(self, payment_hash: str) -> HoldStatus:

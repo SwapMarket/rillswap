@@ -316,6 +316,9 @@ class LndPaymentSender:
         This is not a restored-request API. Immutable prepared bytes preserve
         the amount/fee/destination checks; only time-dependent bounds are
         refreshed here. Ambiguous outcomes require tracking, never replay.
+        ``LndNotSyncedError`` from this method proves pre-submission refusal;
+        a sync failure while reconciling a submitted attempt is unavailable
+        evidence, not permission to submit again.
 
         An optional absolute monotonic deadline caps the normal call budget.
         The nonconsuming predicate must return exactly True at every check.
@@ -364,7 +367,12 @@ class LndPaymentSender:
         # An attempt failure alone need not prove the whole payment failed.
         # Reconcile the payment-level record; never authorize another shard.
         if attempt.status == lightning_pb2.HTLCAttempt.FAILED:
-            return self.track(payment.payment_hash, payer=payment.payer)
+            try:
+                return self.track(payment.payment_hash, payer=payment.payer)
+            except LndNotSyncedError:
+                raise LndUnavailableError(
+                    "LND payment reconciliation unavailable after submission; outcome unknown"
+                ) from None
         return PaymentOutcome("IN_FLIGHT")
 
     def _attest(
