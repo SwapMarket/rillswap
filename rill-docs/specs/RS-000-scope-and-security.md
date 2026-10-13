@@ -27,6 +27,8 @@ optimization and MUST NOT be required for recovery.
 
 Version 1 excludes zero-confirmation funding, P2WSH contracts, BOLT12, AMP,
 keysend, PTLCs, additional assets, batching, and early cooperative refunds.
+Asset extensions, such as the ERC20 profiles in RS-010, define their own
+profiles outside the base protocol.
 
 ## 3. Security boundary
 
@@ -42,7 +44,8 @@ evidence MUST be independently verified through the configured trust mode.
 
 ## 4. Required invariants
 
-Implementations MUST enforce every invariant in BLUEPRINT section 22. In
+Implementations MUST enforce every invariant in
+[ARCHITECTURE.md](../ARCHITECTURE.md) section 22. In
 particular:
 
 1. A contract with an unexpected internal key, leaf, network, amount, payment

@@ -1,13 +1,38 @@
 # RillSwap specifications
 
-Normative protocol specifications, schemas, vectors, network definitions,
-security analysis, and operational guides for RillSwap.
+Normative protocol specifications, schemas, test vectors and network
+definitions for RillSwap, plus the design document and release test matrix.
 
-Status: pre-release engineering work. No specification here has been audited
-or approved for funded mainnet use.
+Status: pre-release. No specification here has been audited or approved for
+funded mainnet use.
 
-The proposal drafts in `proposals/` are preserved inputs. Interoperability is
-defined by the versioned `specs/`, `schemas/`, and `vectors/` artifacts.
+| Path | Contents |
+|---|---|
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Design overview: goals, decisions, state machines, security invariants, release gates |
+| [`specs/`](specs/) | Normative specifications RS-000 to RS-010 and extensions |
+| `schemas/` | JSON schemas for wire messages, advertisements and recovery files |
+| `vectors/` | Byte-level test vectors |
+| `networks/` | Versioned network identity definitions |
+| [`compatibility/TEST-MATRIX.md`](compatibility/TEST-MATRIX.md) | End-to-end and security acceptance matrix |
+| `proposals/` | BIP and NIP drafts (unassigned, not submitted) |
+| [`SOURCES.md`](SOURCES.md) | External standards referenced by the specifications |
+
+Interoperability is defined by the versioned `specs/`, `schemas/` and
+`vectors/`. The proposal drafts summarize them for the BIP and NIP processes.
+
+| Spec | Topic |
+|---|---|
+| [RS-000](specs/RS-000-scope-and-security.md) | Scope and security boundary |
+| [RS-001](specs/RS-001-wire-and-types.md) | Wire format and types |
+| [RS-002](specs/RS-002-taproot-contract.md) | Taproot contract |
+| [RS-003](specs/RS-003-btc-to-ln.md) | BTC to Lightning profile |
+| [RS-004](specs/RS-004-ln-to-btc.md) | Lightning to BTC profile |
+| [RS-005](specs/RS-005-discovery.md) | Provider discovery |
+| [RS-006](specs/RS-006-nostr-transport.md) | Encrypted Nostr transport |
+| [RS-007](specs/RS-007-recovery.md) | Recovery files |
+| [RS-008](specs/RS-008-backend-capabilities.md) | Backend capabilities |
+| [RS-009](specs/RS-009-conformance.md) | Conformance |
+| [RS-010](specs/RS-010-erc20-swaps.md) | ERC20 to and from Lightning |
 
 ## Local conformance tests
 
@@ -16,9 +41,7 @@ Run the static specification and vector suite with `.venv/bin/pytest -q`.
 GitHub Actions job using Python 3.14, pinned actions and uv, hash-locked test
 dependencies, and an explicit exclusion of the Docker-only Core marker. It
 does not run the pinned Core integration case, publish artifacts, attest
-provenance, or constitute a release gate. There is no configured repository
-remote or hosted run evidence yet; local tests cannot establish that the
-hosted workflow has executed.
+provenance, or constitute a release gate.
 The Bitcoin Core execution suite is opt-in because it starts a container and
 mines a regtest chain:
 

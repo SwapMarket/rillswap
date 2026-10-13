@@ -36,7 +36,8 @@ authorization, crash abandonment, and unilateral fallback.
 
 ## 2. Test requirements
 
-All identifiers in `compatibility/TEST-MATRIX.md` are release requirements.
+All identifiers in [`compatibility/TEST-MATRIX.md`](../compatibility/TEST-MATRIX.md)
+are release requirements.
 Money-path integration tests use real pinned Bitcoin Core and LND processes;
 fake adapters do not satisfy those cases. Regtest block production is explicit
 and deterministic. Tests cover both spend paths, exact timeout boundaries,

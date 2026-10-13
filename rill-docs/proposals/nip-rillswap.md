@@ -9,13 +9,13 @@
 
 Define permissionless discovery and authenticated encrypted communication for a provider-neutral Bitcoin–Lightning swap protocol. Settlement is specified separately; relays do not verify, arbitrate, or guarantee swaps.
 
-This draft uses NIP01 events, NIP44 v2 encryption, and NIP59 wrapping. It is not a replacement for those specifications. Source references resolve in `SOURCES.md`. [S09, S10, S13]
+This draft uses NIP01 events, NIP44 v2 encryption, and NIP59 wrapping. It is not a replacement for those specifications.
 
 ## Kind allocation
 
-RillSwap requires a dedicated addressable provider-announcement kind and an application rumor kind. For private regtest interoperability, this handoff uses experimental values **39417** and **21417**, respectively. These values are not claimed to be registered, globally unused, or final. Require protocol namespace and binding version, and coordinate/freeze the public stable values before deployment. Never publish the private rumor directly.
+RillSwap requires a dedicated addressable provider-announcement kind and an application rumor kind. For private regtest interoperability, this draft uses experimental values **39417** and **21417**, respectively. These values are not claimed to be registered, globally unused, or final. Require protocol namespace and binding version, and coordinate/freeze the public stable values before deployment. Never publish the private rumor directly.
 
-Do not use NIP78 kind 30078 as a generic public provider directory: its current documented purpose and owner-authenticated relay behavior differ from this use case. [S11]
+Do not use NIP78 kind 30078 as a generic public provider directory: its current documented purpose and owner-authenticated relay behavior differ from this use case.
 
 ## Provider announcements
 
@@ -52,7 +52,7 @@ Subsequent messages use per-session mailbox keys. A separate per-swap recovery a
 
 ## Message wrapping
 
-The application rumor contains the canonical RillSwap envelope as its content. For the private-regtest binding only, RS-006 fixes its kind 21417 and tags exactly `[["rillswap","nostr-experimental-1"]]`, matching the separately advertised binding version. The rumor ID uses NIP01 serialization and has **no** `sig` member. Apply NIP59: encrypt the rumor inside an author-signed, empty-tag kind-13 seal, then encrypt that seal inside a one-time-key gift wrap with one matching recipient `p` tag. Use NIP44 v2 at each prescribed encryption step and durable outer kind 1059. Follow NIP59's timestamp, recipient, and signature rules. Do not publish the private rumor directly or treat a valid wrapper as authenticated swap admission. Public kind/version allocation remains open. [S09, S10]
+The application rumor contains the canonical RillSwap envelope as its content. For the private-regtest binding only, RS-006 fixes its kind 21417 and tags exactly `[["rillswap","nostr-experimental-1"]]`, matching the separately advertised binding version. The rumor ID uses NIP01 serialization and has **no** `sig` member. Apply NIP59: encrypt the rumor inside an author-signed, empty-tag kind-13 seal, then encrypt that seal inside a one-time-key gift wrap with one matching recipient `p` tag. Use NIP44 v2 at each prescribed encryption step and durable outer kind 1059. Follow NIP59's timestamp, recipient, and signature rules. Do not publish the private rumor directly or treat a valid wrapper as authenticated swap admission. Public kind/version allocation remains open.
 
 Verify event signatures/size bounds before decrypting, then validate the seal and expected peer. App-level signed quotes are allowed inside the encrypted payload and remain explicitly transferable evidence; do not claim that such quotes are deniable merely because the enclosing rumor is unsigned.
 
@@ -70,7 +70,7 @@ True application expiry and deadlines are inside authenticated content. Randomiz
 
 Relays can observe recipient routing tags, timing, sizes, source addresses, subscriptions, and correlations. Public provider inboxes disclose initial service targeting. Per-session keys and gift wrapping reduce some stable linkage but do not eliminate these observations.
 
-NIP44 is not a forward-secret ratchet. Session-key deletion is only an exposure-reduction measure; recorded traffic can remain vulnerable if relevant keys are later obtained. Expiration/deletion requests do not prove relay erasure. [S09, S12]
+NIP44 is not a forward-secret ratchet. Session-key deletion is only an exposure-reduction measure; recorded traffic can remain vulnerable if relevant keys are later obtained. Expiration/deletion requests do not prove relay erasure.
 
 Clients should avoid stable social/relay-auth identities, use a small explicitly selected relay set, and provide Tor-capable fail-closed transport. Remote DNS is required for Tor proxy mode. A browser uses Tor Browser or a local transport component rather than pretending to set system SOCKS itself. Extra relays increase both availability and observation surface.
 

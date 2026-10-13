@@ -13,7 +13,7 @@ Requires: 65, 327, 340, 341, 342
 
 # Draft notice
 
-This is an initial, unassigned engineering draft. It has not been submitted, assigned, audited, or accepted. The author placeholder must be replaced before submission. Byte-level schemas/vectors and reference implementations remain implementation deliverables; this document does not assert their existence. Follow the current BIP 3 process. Source references resolve in `SOURCES.md`. [S23]
+This is an initial, unassigned engineering draft. It has not been submitted, assigned, audited, or accepted. The author placeholder must be replaced before submission. Byte-level schemas, vectors and a reference implementation are maintained in the RillSwap repository (`rill-docs/schemas/`, `rill-docs/vectors/`); they are unaudited. Follow the current BIP 3 process.
 
 ## Abstract
 
@@ -23,7 +23,7 @@ Discovery, message transport, pricing, and wallet implementation are modular. Th
 
 ## Copyright
 
-This document is licensed under the MIT license included with this handoff. Third-party specifications and implementations retain their licenses.
+This document is licensed under the MIT license included in the RillSwap repository. Third-party specifications and implementations retain their licenses.
 
 ## Motivation
 
@@ -35,7 +35,7 @@ A common settlement profile enables different transports and discovery systems w
 
 A **user** initiates a swap. A **provider** offers the opposite side. A **claimant** is the party authorized to consume the hashlocked branch. A **funder** is the party authorized to consume the timed refund branch. The roles differ by direction.
 
-The initial profile uses BOLT11, an exact 32-byte SHA256 preimage, a fixed invoice amount restricted to whole satoshis, and confirmed Bitcoin funding. It does not support zero-confirmation execution, AMP, keysend, PTLCs, or alternative assets. [S06]
+The initial profile uses BOLT11, an exact 32-byte SHA256 preimage, a fixed invoice amount restricted to whole satoshis, and confirmed Bitcoin funding. It does not support zero-confirmation execution, AMP, keysend, PTLCs, or alternative assets.
 
 The initial identifiers are `rillswap/taproot-htlc/btc-to-ln/v1` and `rillswap/taproot-htlc/ln-to-btc/v1`. They are proposed identifiers, not claims of compatibility with existing service APIs.
 
@@ -53,7 +53,7 @@ For BTC→LN, the invoice receiver controls the secret before payment. For LN→
 
 ### 3. Output construction
 
-The aggregate internal key is computed by BIP327 with ordered input list `[user_key, provider_key]`. Apply the BIP341 Taproot tweak committing to exactly two depth-one leaves. Leaf version is `0xc0`; branch hashing and key parity follow BIP341. [S01, S02, S04]
+The aggregate internal key is computed by BIP327 with ordered input list `[user_key, provider_key]`. Apply the BIP341 Taproot tweak committing to exactly two depth-one leaves. Leaf version is `0xc0`; branch hashing and key parity follow BIP341.
 
 Claim leaf:
 
@@ -80,7 +80,7 @@ Before funding or accepting funding, the verifier MUST reconstruct the aggregate
 
 Funding MUST create the exact contract amount in the exact contract scriptPubKey. V1 funding inputs are native SegWit/Taproot. Each contract is funded once. A replacement MUST preserve the contract output and MUST be tracked as a replacement, not a second independent deposit.
 
-Unilateral spends use transaction version 2 and `SIGHASH_DEFAULT`. The contract input sequence is `0xfffffffd`. A claim has locktime 0; a refund has locktime T, the agreed refund height. The first eligible mined refund block is modeled as R=T+1. Exact boundary behavior MUST be tested against Bitcoin Core. [S05]
+Unilateral spends use transaction version 2 and `SIGHASH_DEFAULT`. The contract input sequence is `0xfffffffd`. A claim has locktime 0; a refund has locktime T, the agreed refund height. The first eligible mined refund block is modeled as R=T+1. Exact boundary behavior MUST be tested against Bitcoin Core.
 
 The initial spend template has one contract input and one preapproved destination output. Fee changes require an explicitly authorized output reduction within the agreed policy. Additional inputs, batching, other sighash modes, and arbitrary outputs require a separate extension/profile. The claimant witness is `[signature, preimage, claim_script, control_block]`; the refund witness is `[signature, refund_script, control_block]`.
 
@@ -120,7 +120,7 @@ Margins MUST account for the implemented backend's behavior, force-close resolut
 
 The parties MAY cooperatively create a BIP327 signature for an exact approved key-path claim. Each attempt binds contract, network, prevout data, transaction, role, participants, and a unique attempt identifier before nonce creation. Partial and final signatures MUST be checked.
 
-Secret MuSig nonces MUST NOT be copied, serialized, reused, restored, or reconstructed for a retry. Restart abandons unfinished attempts; transaction replacement requires new nonces. Implementations MAY store public nonces and previously computed public partial signatures for retransmission. [S08]
+Secret MuSig nonces MUST NOT be copied, serialized, reused, restored, or reconstructed for a retry. Restart abandons unfinished attempts; transaction replacement requires new nonces. Implementations MAY store public nonces and previously computed public partial signatures for retransmission.
 
 Cooperative failure MUST NOT remove unilateral recovery. The protocol does not promise fairness of exchanging the preimage for a cooperative signature.
 
@@ -156,7 +156,7 @@ No Bitcoin consensus or Lightning wire change is required. Existing swap-provide
 
 ## Reference implementation and vectors
 
-Planned repositories are `rill-core`, `rill-crypto`, `rill-provider`, `rill-cli`, and `rill-web`. They are architectural proposals in this handoff, not existing published implementations.
+The unaudited reference implementation is <https://github.com/rillswap/rillswap>: `rill-core` (Python protocol library), `rill-crypto` (libsecp256k1 binding), `rill-provider`, `rill-cli` and `rill-web` (independent TypeScript client). Vectors live in `rill-docs/vectors/`.
 
 Before stable publication, provide exact serialized valid/invalid vectors for keys, aggregation, tree/control blocks, output scripts, transaction/witness construction, signing, canonical terms, network identity, and cross-client recovery. Execute transactions against a pinned Bitcoin Core version and obtain independent review. Do not substitute plausible-looking example hashes for verified vectors.
 

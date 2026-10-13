@@ -1,19 +1,25 @@
-# RillSwap: engineering blueprint
+# RillSwap architecture
 
-**Document version:** 0.1.0 — proposed design, 22 September 2026  
-**Working name:** RillSwap; short project prefix: `rill`  
-**First-party license:** MIT  
-**Status:** engineering handoff, not an audited specification or implemented system
+**Version:** 0.1.0  
+**License:** MIT  
+**Status:** design of the initial release; not audited
 
-The name and package/repository identifiers are proposals, not claims of trademark, domain, or registry availability. This document selects a concrete initial architecture. Items marked **release gate** must be resolved before a funded mainnet release. Source references `[Sxx]` resolve in `SOURCES.md`; unreferenced requirements are proposed RillSwap design decisions, not assertions that an existing implementation already provides them.
+This document describes the design that the RillSwap specifications and
+components implement: goals, decisions, protocol shape, state machines,
+security invariants and release gates. The normative wire and contract rules
+live in [`specs/`](specs/); where this document and a specification disagree,
+the specification wins. Component READMEs describe what each implementation
+currently supports. Items marked **release gate** must be resolved before a
+funded mainnet release. External standards are listed in
+[`SOURCES.md`](SOURCES.md).
 
 ## 1. Objective and non-goals
 
 RillSwap is an open, provider-neutral Bitcoin–Lightning atomic-swap protocol with a locally verifying client, independent recovery, replaceable discovery, and replaceable encrypted transport. The reference implementation consists of a Python provider, a Python CLI, and a separately implemented TypeScript browser client. No hosted RillSwap service, official provider registry, token, coordinator, or account is required for settlement.
 
-The initial release supports Bitcoin mainnet, default and custom signet, regtest, and versioned additional Bitcoin network definitions. It supports two explicitly distinct flows: conventional on-chain-first BTC→LN, and held-Lightning-first LN→BTC. Both use the same two-leaf P2TR construction, with roles reversed. Standard BOLT11 invoices, a 32-byte SHA256 preimage, confirmed funding, and unilateral script-path claim/refund are the baseline. Cooperative MuSig2 key-path claims provide the normal privacy optimization. [S01–S06]
+The initial release supports Bitcoin mainnet, default and custom signet, regtest, and versioned additional Bitcoin network definitions. It supports two explicitly distinct flows: conventional on-chain-first BTC→LN, and held-Lightning-first LN→BTC. Both use the same two-leaf P2TR construction, with roles reversed. Standard BOLT11 invoices, a 32-byte SHA256 preimage, confirmed funding, and unilateral script-path claim/refund are the baseline. Cooperative MuSig2 key-path claims provide the normal privacy optimization.
 
-The baseline excludes zero-confirmation swaps, Electrum-style HTLC-first BTC→LN, AMP/keysend, BOLT12, PTLC/adaptor-signature protocols, additional assets, automatic swap batching, and early cooperative refunds. These require new profiles or negotiated extensions; they are not hidden implementation choices.
+The baseline excludes zero-confirmation swaps, Electrum-style HTLC-first BTC→LN, AMP/keysend, BOLT12, PTLC/adaptor-signature protocols, automatic swap batching, and early cooperative refunds. These require new profiles or negotiated extensions; they are not hidden implementation choices. Assets other than BTC are added only as separate profiles: [RS-010](specs/RS-010-erc20-swaps.md) defines ERC20 ↔ Lightning swaps over a pinned EVM hash-time-lock contract.
 
 **Security objective:** under stated chain, Lightning, fee, key-security, and monitoring assumptions, a counterparty cannot take the principal without providing the corresponding payment, or leaving the honest party an enforceable recovery path. Fees, liquidity lockup, censorship, and missed deadlines remain possible. A refund becoming eligible is not a refund becoming final.
 
@@ -33,155 +39,62 @@ The baseline excludes zero-confirmation swaps, Electrum-style HTLC-first BTC→L
 | Durability | SQLite WAL, durable action journal and inbox/outbox; idempotent reconciliation |
 | Recovery | Versioned, encrypted, independently usable recovery package |
 | LN backend | LND first, capability-based interface for other implementations |
-| Notifications | Optional Apprise adapter; never on the settlement critical path |
+| Notifications | Optional; never on the settlement critical path |
 | Integration | Real Bitcoin/LND/relay/browser processes in an isolated Docker environment |
-| Releases | Immutable spec/vector versions and cross-repository integration lock manifest |
+| Releases | Immutable spec/vector versions; pinned component versions and container digests |
 
 A Python-only browser runtime is not a goal. Shipping Python through a browser interpreter would not remove the need for browser-specific storage, networking, wallet, and cryptographic interfaces. Keep the native applications Python and implement the browser SDK directly in TypeScript.
 
-## 3. Repository structure and ownership
+## 3. Components
 
-Create six repositories under a proposed `rillswap` organization. Each has its own MIT license for project-authored material, contribution instructions, security contact, lockfiles, provenance/SBOM output, release process, and tests.
+RillSwap is developed in one repository. Each component keeps its own
+dependency lock, tests and README.
 
-### 3.1 `rill-docs`: source of interoperability
+| Component | Language | Responsibility |
+|---|---|---|
+| `rill-docs` | Markdown, JSON | Normative specifications (`specs/`), JSON schemas, byte-level vectors, network definitions, BIP/NIP proposal drafts and this document |
+| `rill-crypto` | C, Python, WASM | Narrow binding to official libsecp256k1 (Schnorr, extrakeys, MuSig2) for Python (CFFI) and the browser (Emscripten) |
+| `rill-core` | Python | Side-effect-free wire types, canonicalization, network identities, Taproot contract construction, settlement and recovery validation |
+| `rill-provider` | Python | Liquidity provider (maker): quotes, admission, durable journals, treasury, LND and Bitcoin Core adapters, Nostr transport, ERC20 settlement |
+| `rill-cli` | Python | Command-line client and the independent recovery executable |
+| `rill-web` | TypeScript | Static browser client: discovery, swaps, local verification and encrypted recovery, independently implemented against the same specs and vectors |
+| `rill-payments` | TypeScript | Merchant checkout SDK, merchant ledger and server, shared Lightning/BOLT11 policy |
+| `rill-contracts` | Solidity, TypeScript | Pinned EVM contract sources and compiled artifacts (Boltz `ERC20Swap`, account abstraction contracts for gas-sponsored claims) |
 
-```text
-rill-docs/
-  specs/
-    RS-000-scope-and-security.md
-    RS-001-wire-and-types.md
-    RS-002-taproot-contract.md
-    RS-003-btc-to-ln.md
-    RS-004-ln-to-btc.md
-    RS-005-discovery.md
-    RS-006-nostr-transport.md
-    RS-007-recovery.md
-    RS-008-backend-capabilities.md
-    RS-009-conformance.md
-    extensions/mining-prepayment.md
-  proposals/
-    bip-rillswap.md
-    nip-rillswap.md
-  schemas/{wire,recovery,advertisements}/
-  vectors/{canonicalization,taproot,musig,wire,recovery,invalid}/
-  networks/
-  security/{threat-model,attack-catalogue,key-lifecycle,disclosure}.md
-  adr/
-  guides/{provider,cli,web,self-hosting,recovery,tor}.md
-  compatibility/
-  site/
-```
+The repository root holds the Docker Compose regtest environment (`dev/`,
+see `DEVELOPMENT.md`) and CI workflows.
 
-Human-readable normative rules, schemas, and byte-level vectors are versioned together. JSON Schema does not replace contextual protocol validation. Implementations cannot silently change the protocol by regenerating schemas from whichever Pydantic models happen to be current.
+### 3.1 Boundaries
 
-Publish an **unassigned application-layer BIP draft** for the settlement construction and interoperability requirements, plus a **separate NIP draft** for Nostr discovery and transport. BIP 3 is the current process reference; do not invent a BIP number, author identity, assignment date, or acceptance status. [S23]
-
-### 3.2 `rill-crypto`: minimal native/browser cryptographic boundary
-
-```text
-rill-crypto/
-  vendor-manifest/                 # pinned upstream commit/release + digest
-  c/include/rill_crypto.h
-  c/src/                          # binding and lifecycle code, not curve arithmetic
-  python/src/rill_crypto/
-  wasm/
-  tests/{upstream-vectors,ffi,misuse,differential}/
-  fuzz/
-```
-
-Use official `bitcoin-core/secp256k1`, enabling its Schnorr, extrakeys, and MuSig2 modules. Current upstream includes BIP327 support; verify the chosen pinned release and build flags rather than relying on an old assumption that an experimental fork is necessary. [S07]
-
-Expose opaque validated keys and one-shot MuSig signing handles. Python CFFI and Emscripten/WASM wrappers should call the same small reviewed C interface. Prefer an existing suitable maintained binding if the feasibility spike establishes the same functionality and lifecycle guarantees. Do not create fresh ECC, ECDH, nonce-generation, or signature arithmetic.
-
-This repository must not export a secret-nonce serialization API. A MuSig secret nonce may never be copied, reused, snapshotted, or restored. It lives only in an opaque native handle for one exact message; restart abandons the cooperative attempt. Store public nonces, the public partial signature, and a burned attempt identifier when needed. A missing result after a crash means a new attempt, not reconstruction of the old nonce. Upstream explicitly warns against copying/serializing secret nonces. [S08]
-
-### 3.3 `rill-core`: native protocol and adapters
-
-```text
-rill-core/
-  packages/core/src/rill_core/
-    domain/{amounts,keys,chain,contracts,events,states}.py
-    wire/{messages,canonical,validation,versions}.py
-    profiles/{btc_to_ln,ln_to_btc}/
-    settlement/{taproot,transactions,fees,verification}.py
-    recovery/{format,validation,planning}.py
-    ports/{discovery,transport,chain,wallet,lightning,signer,store,notify}.py
-    errors.py
-  packages/adapters/src/rill_adapters/
-    bitcoin_core/
-    bitcointx/
-    lnd/{generated,conversion,backend}.py
-    nostr/{discovery,transport,privacy}.py
-    age/
-    apprise/
-  tests/{unit,property,vectors,adapter-contracts}/
-```
-
-The core has no network, disk, clock, notification, or database side effects. Adapters are separately installable extras; importing the core must not pull in Apprise, LND, or a Nostr runtime. The provider and CLI reuse this library without importing one another.
-
-### 3.4 `rill-provider`
-
-```text
-rill-provider/
-  src/rill_provider/
-    app.py
-    config.py
-    services/{quotes,admission,swaps,watcher,reconciliation}.py
-    treasury/{selection,reservations,accounting}.py
-    persistence/{models,migrations,inbox,outbox,actions}.py
-    identity/{rotation,keystore}.py
-    admin/                         # local control, not a public custody API
-    observability/
-  config/{example,regtest,signet}.toml
-  docker/
-  tests/e2e/{fixtures,flows,attacks,crashes,privacy,browser,tor}/
-  integration/manifest.lock.json
-  scripts/e2e.sh
-  compose.yaml
-```
-
-This is the authoritative cross-repository E2E harness. Provider operator policy, price calculation, liquidity management, admission limits, and orchestration belong here—not in the normative protocol library.
-
-### 3.5 `rill-cli`
-
-```text
-rill-cli/
-  src/rill_cli/
-    commands/{providers,quote,swap,watch,recover,web}.py
-    wallet_interfaces/
-    agent/                         # optional local integration/watcher
-    storage/
-    rendering/
-  tests/{unit,cli-contracts}/
-```
-
-The CLI is both a usable client and the independent recovery executable. It supports external LN wallets; running a user-side LND is optional. A persistent watcher/agent is available but is not necessary to open the static UI.
-
-### 3.6 `rill-web`
-
-```text
-rill-web/
-  packages/client/src/
-    domain/
-    wire/
-    profiles/
-    verification/
-    discovery/
-    transport/
-    wallet/
-    chain/
-    recovery/
-  apps/web/src/
-    screens/
-    storage/
-    workers/signer.ts
-    components/
-  tests/{unit,vectors,browser}/
-  public/
-  .github/workflows/{ci,pages,release}.yml
-```
-
-Publish `@rillswap/client` separately from the UI, subject to package-name availability. Other websites and wallets should not need to embed the RillSwap interface. The TypeScript domain implementation is independently maintained against the same specification and fixtures; Python-generated transport types are useful but not sufficient validation.
+- **Specifications are the source of interoperability.** Human-readable
+  normative rules, schemas and vectors are versioned together. JSON Schema does
+  not replace contextual protocol validation, and implementations cannot change
+  the protocol by regenerating schemas from whichever models happen to be
+  current. An unassigned application-layer BIP draft covers the settlement
+  construction and a separate NIP draft covers Nostr discovery and transport;
+  neither claims a number, assignment date or acceptance status.
+- **Cryptography stays upstream.** `rill-crypto` uses official
+  `bitcoin-core/secp256k1` with its Schnorr, extrakeys and MuSig2 (BIP327)
+  modules, pinned by release and digest. It exposes opaque validated keys
+  and one-shot MuSig signing handles, and never creates its own ECC, ECDH,
+  nonce generation or signature arithmetic.
+- **MuSig secret nonces are never serialized.** No API exports a secret nonce.
+  It lives only in an opaque native handle for one exact message; restart
+  abandons the cooperative attempt. Public nonces, the public partial signature
+  and a burned attempt identifier may be stored. A missing result after a crash
+  means a new attempt, not reconstruction of the old nonce.
+- **The core has no side effects.** `rill-core` performs no network, disk,
+  clock, notification or database access. The provider and CLI reuse it.
+- **Operator policy belongs to the provider.** Price calculation, liquidity
+  management, admission limits and orchestration live in `rill-provider`, not
+  in the normative protocol library.
+- **The CLI recovers on its own.** `rill-cli` is both a usable client and the
+  independent recovery executable. It works with external Lightning wallets;
+  running a user-side LND is optional.
+- **The browser is a second implementation.** `rill-web` is maintained in
+  TypeScript against the same specifications and fixtures. Generated transport
+  validators are useful but not sufficient validation. Other websites and
+  wallets should not need to embed the RillSwap interface.
 
 ## 4. Dependency and licensing policy
 
@@ -191,29 +104,25 @@ Pin dependencies, native library releases, generated protobuf inputs, container 
 |---|---|---|
 | Native models | Pydantic 2 | Strict boundary validation; domain types remain explicit |
 | Type checks | mypy strict, Pydantic plugin | Generated protobuf code isolated; typed conversions mandatory |
-| Python Bitcoin transactions | Requested `m0wer/python-bitcointx` fork | Pinned dependency behind adapter; not a general wallet or consensus oracle |
-| Signing / key aggregation | Official libsecp256k1 | Narrow native/WASM binding; no Python/JS fallback for swap-secret signing; Nostr uses its selected library |
-| Browser transaction handling | `@scure/btc-signer` | Validate supported release; differential tests against Core and Python [S35] |
-| Native Nostr | `nostr-sdk` maintained FFI project | Currently labels itself alpha; isolate, pin, and test NIP44/59 behavior |
+| Bitcoin transactions | Purpose-built serialization in `rill-core` and `rill-web` | Only the two-leaf contract, funding and spend shapes RillSwap needs; not a general wallet or consensus oracle; executed against Bitcoin Core in tests |
+| Signing / key aggregation | Official libsecp256k1 | Narrow native/WASM binding; no Python/JS fallback for swap-secret signing |
+| Browser cryptography | `@noble/curves`, `@noble/hashes`, `@scure/*` | Pinned releases; differential tests against Python and Core |
+| Native Nostr | Bounded NIP-44 v2 / NIP-59 codec in `rill-provider` | ChaCha20 from `pycryptodomex`, ECDH and signatures through `rill-crypto`; tested against NIP-44 vectors and the browser implementation |
 | Browser Nostr | `nostr-tools` | Use its defined crypto/protocol functions; no copied encryption implementation |
+| EVM | Vendored Boltz `ERC20Swap` v6 | Pinned source and artifact in `rill-contracts`; `web3.py` in the provider, in-house ABI encoding in the browser |
 | Native LN | Official LND protobuf/gRPC | Pin protos and generate typed stubs; least-privilege macaroon |
 | Bitcoin RPC | `httpx` with explicit auth/TLS/proxy policy | No generic RPC credentials in the browser |
 | Persistence | Python `sqlite3` | WAL; one provider writer process initially |
 | Backup encryption | age v1 via `pyrage` / TypeScript `age-encryption` | Cross-language encrypted backup fixtures |
-| Notifications | Apprise optional extra | Queue isolation, redaction, restricted egress |
 | Tests | pytest, Hypothesis, Playwright | Dev dependencies separated from runtime |
 
-The requested `python-bitcointx` fork is **LGPL-3.0-or-later**, not MIT. RillSwap-authored code can be offered under MIT without pretending that this dependency has been relicensed; distribution must satisfy the dependency's terms, with a release compliance review. If the project later requires exclusively permissive dependencies, replace this adapter before making that claim. The library's own documentation also says its Python script verifier is not a complete consensus validator; use Bitcoin Core to execute consensus integration tests. [S16, S17]
-
-JoinMarket-ng is a useful architectural reference for modular wallets, typed configuration, Core integration, Tor, Apprise, and multi-component Docker tests. Its repository root license and current `jmcore` package metadata disagree (MIT versus GPL-3.0). Borrow ideas, not source code, until file-level licensing/provenance is reconciled. [S18, S19]
-
-Apprise is BSD-2-Clause; other dependencies have their own licenses. Keep third-party notices and do not label an entire distribution “MIT-only.” Nostr FFI maturity and browser-library audits must be assessed for the exact version used, not inferred from a project name. [S14, S15, S20, S21]
+RillSwap-authored code is MIT licensed. Third-party dependencies, vendored contracts and compiled artifacts keep their own licenses (see `THIRD_PARTY_NOTICES.md` files and `rill-contracts/licenses/`); do not label an entire distribution "MIT-only." Bitcoin Core executes consensus integration tests; no Python or TypeScript script verifier is treated as a consensus validator. Library maturity and audits must be assessed for the exact version used, not inferred from a project name.
 
 ## 5. Type system, domain boundaries, and execution model
 
 Use frozen Pydantic models with strict validation and `extra='forbid'` for external messages/configuration. Reject duplicate JSON keys before parsing into models. Use frozen domain dataclasses and opaque validated types for `Sats`, `Millisats`, `BlockHeight`, `UnixSeconds`, `Hash32`, `XOnlyPubkey`, `CompressedPubkey`, `Txid`, `ContractId`, and `PaymentHash`. An invoice expiry time must not be interchangeable with an HTLC expiry block height.
 
-Enable mypy strictness, unused-ignore checks, explicit optional handling, disallowed implicit generic `Any`, and checked untyped code where unavoidable. No blanket `ignore_errors` in business logic. Convert loosely typed third-party/protobuf values exactly once at adapter boundaries. Pydantic strictness is not a substitute for checking monetary ranges, network identities, or transaction semantics. [S22]
+Enable mypy strictness, unused-ignore checks, explicit optional handling, disallowed implicit generic `Any`, and checked untyped code where unavoidable. No blanket `ignore_errors` in business logic. Convert loosely typed third-party/protobuf values exactly once at adapter boundaries. Pydantic strictness is not a substitute for checking monetary ranges, network identities, or transaction semantics.
 
 Core execution is conceptually:
 
@@ -256,7 +165,7 @@ NetworkIdentity {
 }
 ```
 
-All signed terms, invoice interpretation, address parsing, recovery records, provider advertisements, and persistence namespaces bind the network identity. Default and custom signet configurations can share a genesis block while using different challenges; include and verify the challenge rather than treating genesis alone as sufficient. [S24]
+All signed terms, invoice interpretation, address parsing, recovery records, provider advertisements, and persistence namespaces bind the network identity. Default and custom signet configurations can share a genesis block while using different challenges; include and verify the challenge rather than treating genesis alone as sufficient.
 
 Regtest deployments additionally bind a test namespace/checkpoint policy to avoid accidental cross-lab discovery. This is application separation, not a new Bitcoin consensus rule. Generate network fixtures from the pinned Core version and verify invoice backend support; do not assume every LND version supports every custom network equally.
 
@@ -264,7 +173,7 @@ Develop on regtest; run public trials on signet. Mainnet is a supported network 
 
 ## 7. Wire format and authentication
 
-Use RFC8785 canonical JSON for signing, with RillSwap restrictions: no floating-point protocol values, no duplicate keys, bounded nesting, bounded arrays and strings, and canonical lower-case hex. Represent all satoshi/millisatoshi amounts as canonical nonnegative decimal strings. Native applications convert to Python integers; browser applications use `bigint`. Heights and timestamps are bounded integer fields within JavaScript's exact range. Contract and invoice values are strictly positive; fees are nonnegative; enforce a maximum of 2,100,000,000,000,000 sats (and its exact millisatoshi equivalent) plus per-provider/client limits. [S25]
+Use RFC8785 canonical JSON for signing, with RillSwap restrictions: no floating-point protocol values, no duplicate keys, bounded nesting, bounded arrays and strings, and canonical lower-case hex. Represent all satoshi/millisatoshi amounts as canonical nonnegative decimal strings. Native applications convert to Python integers; browser applications use `bigint`. Heights and timestamps are bounded integer fields within JavaScript's exact range. Contract and invoice values are strictly positive; fees are nonnegative; enforce a maximum of 2,100,000,000,000,000 sats (and its exact millisatoshi equivalent) plus per-provider/client limits.
 
 Every application message carries:
 
@@ -275,7 +184,7 @@ sequence, in_reply_to, contract_hash,
 message_type, payload, required_features, extensions
 ```
 
-Use separate domain-separated BIP340 tagged-hash signatures for provider-authenticated economic terms and any application envelopes that require transferable authentication. Sign canonical bytes excluding the signature field. Specify exact tags and object schemas in RS-001; freeze their byte vectors before interoperability release. The Nostr rumor itself remains unsigned as required by NIP59; an explicitly signed application object inside it is a different object and forfeits deniability for that object. [S03, S10]
+Use separate domain-separated BIP340 tagged-hash signatures for provider-authenticated economic terms and any application envelopes that require transferable authentication. Sign canonical bytes excluding the signature field. Specify exact tags and object schemas in RS-001; freeze their byte vectors before interoperability release. The Nostr rumor itself remains unsigned as required by NIP59; an explicitly signed application object inside it is a different object and forfeits deniability for that object.
 
 Handshakes negotiate profile, protocol version, encryption suite, capabilities, network, fresh client/provider session keys, random challenges, and transport endpoints. A provider-identity signature binds this transcript. Reject downgrade or unknown mandatory features. Unknown fields are invalid except inside a bounded namespaced extension container; optional extensions cannot alter base-profile safety rules.
 
@@ -291,9 +200,9 @@ Expired terms cannot be newly accepted. Expiry does not erase obligations or inv
 
 The discovery interface returns authenticated advertisements, not trusted liquidity guarantees. Advertisements contain provider identity, supported chain/profile/directions, coarse amount bands, indicative fee policy, communication capabilities, epoch mailbox keys, expiry, and a signed monotonically increasing advertisement revision. Avoid exact balance broadcasts and per-swap capacity updates.
 
-The Nostr adapter uses a dedicated addressable announcement kind, not NIP78's generic app-data kind: current NIP78 explicitly directs interoperable public applications toward dedicated kinds and describes owner-authenticated storage behavior. [S11]
+The Nostr adapter uses a dedicated addressable announcement kind, not NIP78's generic app-data kind: current NIP78 explicitly directs interoperable public applications toward dedicated kinds and describes owner-authenticated storage behavior.
 
-For local interoperability testing only, this blueprint reserves **project-local experimental kind 39417** for advertisements and **21417** for unpublished protocol rumors. These are not claimed to be registered or globally unoccupied. Require a `rillswap` namespace and an experimental binding version. Before a public stable specification, coordinate and freeze dedicated kinds in the companion NIP draft; a change is a binding-version change, not silent reinterpretation. The core protocol never embeds these numbers in settlement semantics.
+For local interoperability testing only, this design reserves **project-local experimental kind 39417** for advertisements and **21417** for unpublished protocol rumors. These are not claimed to be registered or globally unoccupied. Require a `rillswap` namespace and an experimental binding version. Before a public stable specification, coordinate and freeze dedicated kinds in the companion NIP draft; a change is a binding-version change, not silent reinterpretation. The core protocol never embeds these numbers in settlement semantics.
 
 Use a `d` identifier scoped to protocol/network/advertisement slot and minimal public protocol/network tags. Provider names/descriptions are untrusted plain text. Do not put payment hashes, invoices, transaction IDs, swap IDs, individual amounts, or client identities in discovery tags.
 
@@ -303,7 +212,7 @@ Freshness checks include signed revision, application expiry, maximum clock skew
 
 ## 9. Encrypted Nostr transport and relay privacy
 
-The mandatory first transport suite is **NIP-44 v2 inside NIP-59 gift wraps**, with durable outer kind 1059. NIP44 supplies encryption, not a complete messaging protocol. NIP59 separates the application rumor, author-signed encrypted seal, and encrypted one-time outer wrapper. Follow the specifications for empty seal tags, author/recipient validation, randomized outer timestamps, and wrapper signatures. [S09, S10]
+The mandatory first transport suite is **NIP-44 v2 inside NIP-59 gift wraps**, with durable outer kind 1059. NIP44 supplies encryption, not a complete messaging protocol. NIP59 separates the application rumor, author-signed encrypted seal, and encrypted one-time outer wrapper. Follow the specifications for empty seal tags, author/recipient validation, randomized outer timestamps, and wrapper signatures.
 
 Use distinct keys for public provider identity, provider epoch inbox, per-swap provider/client session mailboxes, on-chain swap signing, and recovery authorization. Never use the customer's social Nostr key or general wallet master key.
 
@@ -311,11 +220,11 @@ Bootstrap a session against the provider's advertised epoch inbox, then authenti
 
 Validate outer event shape/signature and payload limits before decryption. Validate the seal author and expected recipient, then validate the application transcript. Apply bounded decryption work and per-peer queues to prevent computational denial of service. Treat malformed ciphertext and plaintext uniformly enough to avoid verbose error oracles.
 
-**Remaining relay visibility:** recipient tags, subscription filters, source IP, arrival time, sizes, retries, and cross-relay correlation. Encryption does not eliminate these observations. NIP44 does not provide forward secrecy or post-compromise security. Fresh keys and deletion limit exposure only to the extent old keys, backups, memory copies, and logs are actually unavailable. Do not market this as an audited ratchet or as anonymity against a global observer. [S09, S10]
+**Remaining relay visibility:** recipient tags, subscription filters, source IP, arrival time, sizes, retries, and cross-relay correlation. Encryption does not eliminate these observations. NIP44 does not provide forward secrecy or post-compromise security. Fresh keys and deletion limit exposure only to the extent old keys, backups, memory copies, and logs are actually unavailable. Do not market this as an audited ratchet or as anonymity against a global observer.
 
 Proposed mitigations are a small explicitly chosen relay set, per-session recipient mailboxes, no stable client relay-auth identity, fresh wrappers on retry, optional application padding in 4/8/16 KiB buckets within a 16 KiB application-message cap, and a 128 KiB maximum accepted outer event. Validate the final encoded size; do not assume encryption overhead is constant. Padding is authenticated but excluded from business semantics. Do not delay deadline-sensitive recovery for batching or cover traffic.
 
-Tor clients use SOCKS with remote DNS and fail closed: no automatic clearnet reconnect. The browser cannot configure its own arbitrary SOCKS transport; users use Tor Browser or the optional local agent. More relays improve availability but expose metadata to more parties. Deletion/expiration requests are retention hints, never a cryptographic erasure guarantee. [S12]
+Tor clients use SOCKS with remote DNS and fail closed: no automatic clearnet reconnect. The browser cannot configure its own arbitrary SOCKS transport; users use Tor Browser or the optional local agent. More relays improve availability but expose metadata to more parties. Deletion/expiration requests are retention hints, never a cryptographic erasure guarantee.
 
 A future direct HTTPS/WebSocket or `.onion` adapter can carry the **same encrypted signed frames** without a relay. This changes transport exposure, not settlement or identity validation. Any future cryptographic suite must use a separately reviewed established construction, authenticate its negotiation, and receive a distinct suite identifier. Cross-transport resume requires authenticated session/recovery authorization and explicit user privacy policy; no silent downgrade or clearnet fallback.
 
@@ -323,7 +232,7 @@ A future direct HTTPS/WebSocket or `.onion` adapter can carry the **same encrypt
 
 This is the proposed new RillSwap construction, not a claim of existing Boltz script compatibility. Freeze serialized vectors only after independent review and Bitcoin Core execution tests.
 
-Given fresh valid compressed public keys `K_user` and `K_provider`, aggregate in **exact order `[K_user, K_provider]`** using BIP327. Reject duplicate keys. Use the aggregate x-only key as the internal key, applying the BIP341 Taproot tweak for exactly two leaf-version `0xc0` leaves. TapBranch ordering and control-block parity follow BIP341; use library APIs, not custom point arithmetic. [S01, S02, S04]
+Given fresh valid compressed public keys `K_user` and `K_provider`, aggregate in **exact order `[K_user, K_provider]`** using BIP327. Reject duplicate keys. Use the aggregate x-only key as the internal key, applying the BIP341 Taproot tweak for exactly two leaf-version `0xc0` leaves. TapBranch ordering and control-block parity follow BIP341; use library APIs, not custom point arithmetic.
 
 Claim leaf, with a direct SHA256 Lightning hash:
 
@@ -348,7 +257,7 @@ BTC→LN assigns claimant=provider, refund party=user. LN→BTC assigns claimant
 
 Initial claim/refund transactions use version 2, one contract input, one approved destination output, and BIP341 `SIGHASH_DEFAULT`. Unilateral claim locktime is 0; refund locktime is the contract's `T`. The contract input sequence is `0xfffffffd`. Required witnesses are `[signature, preimage, claim_script, control_block]` and `[signature, refund_script, control_block]`. Key-path claims use the validated cooperative signature without exposing a leaf.
 
-With refund `nLockTime=T`, model the first eligible block as **R=T+1** and test exact mempool/block boundaries against Core. Claim and refund conditions are independent; the claim does not become invalid at T. [S05]
+With refund `nLockTime=T`, model the first eligible block as **R=T+1** and test exact mempool/block boundaries against Core. Claim and refund conditions are independent; the claim does not become invalid at T.
 
 V1 contract outputs are always P2TR. Funding inputs must be native SegWit/Taproot. Destination/change outputs use an explicitly supported standard script allowlist, preferring fresh P2TR; arbitrary scripts are not accepted. Never subtract a funding fee from the contract output.
 
@@ -397,7 +306,7 @@ Before revealing the preimage, the user independently verifies the funding outpo
 
 The user may then request a cooperative claim. The provider must **not issue a usable key-path partial before it has the valid preimage and a safely settleable held payment**. Otherwise the user could obtain on-chain funds without enabling Lightning settlement. Once the preimage is disclosed, the provider can settle the hold. If it withholds cooperation, the user must broadcast/fee-bump the unilateral claim.
 
-This is not fair signature/preimage exchange. Security depends on the already enforceable unilateral claim and sufficient monitoring/fees. After preimage release, closing a tab and missing the deadline can cause principal loss. Service workers are not a reliable always-on watcher; browser execution can be terminated. [S26]
+This is not fair signature/preimage exchange. Security depends on the already enforceable unilateral claim and sufficient monitoring/fees. After preimage release, closing a tab and missing the deadline can cause principal loss. Service workers are not a reliable always-on watcher; browser execution can be terminated.
 
 If no claim occurs, the provider refunds and verifies the required confirmation evidence before canceling the held invoice. It must not cancel just because the refund height arrived: the claim branch remains valid. The deadline budget must also account for automatic backend cancellation and Lightning force-close resolution; holding indefinitely is not an available strategy.
 
@@ -413,9 +322,9 @@ reveal:  h + Δclaim_confirmation < R
 
 Funding admission additionally budgets funding confirmations, client response/claim time, backend early-cancel behavior, and the refund margin. These are inequalities, **not universal safe constants**. Define operator/client minimums and maxima in blocks, include negotiated values in terms, and test boundary cases. No finite constants guarantee success under unbounded censorship, fee spikes, reorgs, or offline operation.
 
-The LND adapter uses TLS with certificate verification and a restricted macaroon. Implement lookup/subscribe/create-hold/settle/cancel plus outgoing payment tracking through official pinned RPC definitions. Accepted invoice HTLC entries expose expiry heights and values; aggregate them conservatively rather than using only BOLT11's wall-clock expiry. [S27, S28]
+The LND adapter uses TLS with certificate verification and a restricted macaroon. Implement lookup/subscribe/create-hold/settle/cancel plus outgoing payment tracking through official pinned RPC definitions. Accepted invoice HTLC entries expose expiry heights and values; aggregate them conservatively rather than using only BOLT11's wall-clock expiry.
 
-Expose `pay_with_deadline(invoice, max_absolute_expiry, max_fee)` as a semantic interface. Initial LND support should construct/obtain explicit routes, validate `route.total_time_lock` against the absolute deadline before each attempt, and submit through `SendToRouteV2`. A simpler single-part outgoing policy is acceptable initially. Supporting `SendPaymentV2` is acceptable only after the pinned-version implementation proves equivalent deadline enforcement across retries, restarts, and unknown outcomes. Its relative CLTV/timeout options must not be casually treated as a durable absolute bound. Official RPC documentation also warns that canceling further attempts does not necessarily abort in-flight HTLCs. [S29, S30]
+Expose `pay_with_deadline(invoice, max_absolute_expiry, max_fee)` as a semantic interface. Initial LND support should construct/obtain explicit routes, validate `route.total_time_lock` against the absolute deadline before each attempt, and submit through `SendToRouteV2`. A simpler single-part outgoing policy is acceptable initially. Supporting `SendPaymentV2` is acceptable only after the pinned-version implementation proves equivalent deadline enforcement across retries, restarts, and unknown outcomes. Its relative CLTV/timeout options must not be casually treated as a durable absolute bound. Official RPC documentation also warns that canceling further attempts does not necessarily abort in-flight HTLCs.
 
 Persist payment hash, attempt identity, route deadline, and maximum fee before initiation. After ambiguous responses, reconcile with LND by hash/attempt rather than sending again. Support incoming MPP by checking all parts; outgoing AMP is out of scope. A backend unable to expose the required information cannot advertise the corresponding profile.
 
@@ -444,7 +353,7 @@ Coin selection is lexicographic rather than simply cheapest:
 
 Unknown-origin coins start as separate clusters, not one large “unknown” pool. Cluster labels are local heuristics, not proof of anonymity. Change stays labeled with its source cluster and uses a fresh address. A large single input with change may be preferable to consolidating unrelated smaller coins into an exact amount.
 
-Select explicit inputs, reserve them durably, and call Core with `add_inputs=false`. Re-check the resulting PSBT and signed transaction for exact inputs, contract amount/script, change destination, and fee bounds. Explicitly choose supported PSBT version/options, strip unnecessary derivation metadata from any outward-facing artifact, and distinguish `fee_rate` sat/vB from differently named legacy fee units. Do not let Core silently override privacy selection by adding more coins. [S31]
+Select explicit inputs, reserve them durably, and call Core with `add_inputs=false`. Re-check the resulting PSBT and signed transaction for exact inputs, contract amount/script, change destination, and fee bounds. Explicitly choose supported PSBT version/options, strip unnecessary derivation metadata from any outward-facing artifact, and distinguish `fee_rate` sat/vB from differently named legacy fee units. Do not let Core silently override privacy selection by adding more coins.
 
 Mirror reservations in Core locks where useful, but treat the application's durable reservation ledger as authoritative across restart and reconcile wallet state. Cross-cluster funding, automatic consolidation, and multi-customer batching require separate operator approval and are disabled initially. A maintenance process may deliberately rebalance inventory later, never disguised as ordinary swap funding.
 
@@ -478,7 +387,7 @@ Database backups never contain live MuSig secret nonces. Encrypted swap signing 
 
 ## 18. Recovery format and watcher
 
-Export a versioned canonical recovery object inside standard age encryption. Support an independent passphrase or user-provided age recipient; decryptability must not depend on a lost browser origin or wallet master key. Cross-test Python `pyrage` and TypeScript `age-encryption` before freezing the format. [S32, S33]
+Export a versioned canonical recovery object inside standard age encryption. Support an independent passphrase or user-provided age recipient; decryptability must not depend on a lost browser origin or wallet master key. Cross-test Python `pyrage` and TypeScript `age-encryption` before freezing the format.
 
 Include network, profile, contract terms and signatures, script/tree data, public keys, the user's swap secret key or independently usable derivation information, required preimage where applicable, refund height, destinations, funding transaction/outpoint history, chain scan birthday, fee policy, and recovery authorization key. Include no provider credentials, social identity key, or secret MuSig nonce. Communication-session decrypt keys are not required for unilateral recovery and should not be included by default.
 
@@ -486,7 +395,7 @@ Create/export the initial package before principal commitment, then update it wh
 
 `rill recover` must inspect offline, verify contract bindings locally, query a user-selected chain source, build/sign the correct unilateral transaction, and broadcast without provider or discovery availability. Backup import must not automatically contact a provider or reveal the preimage.
 
-The provider always runs a durable watcher. CLI users can run `rill watch`. Browser users get explicit state-dependent warnings and an optional local watcher handoff. A tab may close safely before a secret commitment with bounded abort costs; after preimage disclosure or issuance of an otherwise dangerous signature, monitoring is a financial requirement. Do not label a backup alone as equivalent to a live watcher.
+The provider always runs a durable watcher. CLI users can run `rill recover watch-claim` or `rill recover watch-refund`. Browser users get explicit state-dependent warnings and an optional local watcher handoff. A tab may close safely before a secret commitment with bounded abort costs; after preimage disclosure or issuance of an otherwise dangerous signature, monitoring is a financial requirement. Do not label a backup alone as equivalent to a live watcher.
 
 ## 19. Static web UI, local loading, and chain verification
 
@@ -514,35 +423,37 @@ The optional local agent serves UI and a narrow same-origin API, binds loopback,
 
 UI flow: select network and privacy/chain mode; discover/import provider; compare indicative terms; create selected quote; verify full terms; export recovery; commit; show evidence-backed status and deadlines; complete or recover. Fee/lockup/preimage-exposure warnings remain visible and precise. A remote provider description never injects HTML.
 
-GitHub Pages auto-deploys tested release tags through official Pages artifact/deploy actions and a protected environment. PRs build and test without deploy credentials. Pin action commits; use locked package installation; verify type/unit/vector tests; build once; attach the same bytes and checksums to a release; upload those bytes to Pages. Configure relative base paths for repository/fork hosting. Do not execute untrusted PR code via privileged `pull_request_target`. [S34]
+GitHub Pages deployment is an explicit, manually dispatched workflow using official Pages artifact/deploy actions and a protected environment. PRs build and test without deploy credentials. Pin action commits; use locked package installation; verify type/unit/vector tests; build once; attach the same bytes and checksums to a release; upload those bytes to Pages. Configure relative base paths for repository/fork hosting. Do not execute untrusted PR code via privileged `pull_request_target`.
 
 Signed builds and attestations help a user verify a pinned artifact; they do not automatically verify the JavaScript that every website visitor executes. GitHub Pages' header controls also differ from a custom server, so document which CSP protections are actually delivered rather than claiming unavailable headers.
 
 ## 20. CLI, notifications, and operations
 
-Proposed CLI surface:
+CLI surface (see `rill-cli/README.md` for options):
 
 ```text
-rill providers --network signet --discovery nostr
-rill quote btc-to-ln --invoice-file invoice.txt --provider <identity>
-rill swap btc-to-ln --quote-file quote.json
-rill swap ln-to-btc --amount-sat <sats> --address <address>
-rill watch --all
-rill recover inspect <backup.age>
-rill recover claim <backup.age>
-rill recover refund <backup.age>
-rill web --listen 127.0.0.1:8080
+rill providers list            # verified provider announcements from Nostr relays
+rill swap btc-to-ln            # pay a Lightning invoice with on-chain BTC
+rill swap ln-to-btc            # receive on-chain BTC by paying over Lightning
+rill recover inspect           # redacted offline inspection of a recovery file
+rill recover watch-claim       # claim an LN-to-BTC swap until it confirms
+rill recover watch-refund      # refund a failed BTC-to-LN swap until it confirms
 ```
 
-These commands are an interface proposal, not shipped tools. Passwords/seeds/preimages are read from protected prompts/stdin or configured secret stores, not command-line arguments. Machine-readable output is redacted by default; explicit recovery export is the exception. Distinguish pending/recoverable/unsafe/terminal errors in exit codes. Interrupting the CLI must not delete a live swap.
+Passwords/seeds/preimages are read from protected prompts/stdin or configured secret stores, not command-line arguments. Machine-readable output is redacted by default; explicit recovery export is the exception. Distinguish pending/recoverable/unsafe/terminal errors in exit codes. Interrupting the CLI must not delete a live swap.
 
-Apprise is an optional `Notifier` implementation. Notifications default to “swap requires attention” plus a local opaque reference. No invoice, preimage, destination, exact amount, transaction ID, or secret-bearing URL by default. Richer notifications require explicit disclosure settings. Treat notification tokens/URLs as secrets and honor the same Tor/egress policy. An unavailable notification service must not block invoice settlement, signing, refunds, or the watcher. [S20]
+Notifications are optional. They default to “swap requires attention” plus a local opaque reference. No invoice, preimage, destination, exact amount, transaction ID, or secret-bearing URL by default. Richer notifications require explicit disclosure settings. Treat notification tokens/URLs as secrets and honor the same Tor/egress policy. An unavailable notification service must not block invoice settlement, signing, refunds, or the watcher.
 
 Provider logs/metrics are aggregate and redacted; do not label metrics with payment hashes, addresses, invoices, or stable customer identifiers. Redaction tests use known synthetic secrets. Expose admin actions locally with authentication. Run containers as non-root, restrict writable directories, avoid Docker socket mounts, and use health checks that measure chain/LN/reconciliation readiness rather than process existence.
 
 ## 21. Docker E2E architecture
 
-All E2E orchestration lives in `rill-provider`, with immutable references to the other repositories. Local developers can explicitly override those references with sibling checkouts; CI never implicitly tests six unrelated main branches.
+The repository ships a Docker Compose regtest environment (`dev/`, see
+`DEVELOPMENT.md`) with Bitcoin Core, separate maker, user and merchant LND
+nodes, a Nostr relay, an Anvil EVM chain, makers for all four swap profiles,
+the CLI, the browser app, a gas sponsor and a demo shop. It is the basis for
+manual testing and opt-in funded diagnostics. The full release harness extends
+it to the following shape:
 
 ```text
 pytest driver + deterministic block controller
@@ -565,7 +476,7 @@ Compose profiles: `smoke`, `e2e`, `browser`, `chaos`, `tor`, `custom-signet`, an
 
 Browser tests use a real static HTTP origin and actual browser wallet/backup flows, not only Node unit tests. Python/TypeScript implementations must agree on canonical messages, contract commitments, signatures, and recoveries. Two provider processes sharing one implementation demonstrate deployment independence, not independent protocol implementation; test both client implementations and seek a separate implementation before declaring ecosystem interoperability.
 
-Detailed cases and identifiers are in `TEST-MATRIX.md`. Minimum acceptance includes both directions, both spend paths, timeout/refund races, restarts at every effect boundary, malformed commitments, short HTLC expiries, ambiguous LN outcomes, nonce lifecycle violations, relay replay/censorship, browser backup loss, unilateral CLI recovery with all RillSwap services removed, coin-selection privacy, and chain-source trust enforcement.
+Detailed cases and identifiers are in [`compatibility/TEST-MATRIX.md`](compatibility/TEST-MATRIX.md). Minimum acceptance includes both directions, both spend paths, timeout/refund races, restarts at every effect boundary, malformed commitments, short HTLC expiries, ambiguous LN outcomes, nonce lifecycle violations, relay replay/censorship, browser backup loss, unilateral CLI recovery with all RillSwap services removed, coin-selection privacy, and chain-source trust enforcement.
 
 Tor tests use an isolated private test network where practical, with captured DNS/egress to prove fail-closed behavior. They cannot prove anonymity against a global observer. Public signet smoke tests are scheduled separately and never required for deterministic PR tests; mainnet checks are read-only until release approval.
 
@@ -586,7 +497,7 @@ The attack catalogue records attacker, prerequisites, principal exposure, fee ex
 
 Model the two directional reducers with stateful property tests and a small bounded state model. Include asynchronous observations, reordered messages, counterparty refusal, crash/restart, fees, and block progression. A model passing is not proof that adapter behavior matches it; test adapters against real nodes and document the correspondence.
 
-## 23. Implementation sequence and release gates
+## 23. Milestones and release gates
 
 1. **Feasibility and specification freeze:** verify native/WASM MuSig capability; execute candidate scripts through Core; test LND absolute deadlines and hold visibility; prove age cross-import; establish network identities; review licensing. Produce exact fixtures and threat-model decisions before money UI work.
 2. **Unilateral vertical slice:** pure core + Core wallet + LND + CLI; both directions, script claims/refunds, durable secrets, recovery without provider. No privacy optimization can substitute for this milestone.
@@ -596,7 +507,7 @@ Model the two directional reducers with stateful property tests and a small boun
 6. **Cooperative privacy and hardening:** reviewed MuSig lifecycle, exact transaction authorization, unilateral fallback under withheld signatures, Tor/direct-transport extension tests, cryptographic/state-machine reviews, independent audits.
 7. **Deployment gate:** signet trials; reproducible binaries/assets; dependency/licensing review; documented operational limits; recovery drills by someone other than the author; external review of contract and LND timing; bounded initial mainnet limits.
 
-Supporting mainnet in code is not sufficient to pass the deployment gate. There is no production timeout table or completed security audit in this blueprint.
+Supporting mainnet in code is not sufficient to pass the deployment gate. There is no production timeout table or completed security audit yet.
 
 ## 24. Future interoperability and translation
 
