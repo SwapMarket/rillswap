@@ -53,7 +53,9 @@ jobs:
         run: bun run test:browser
       - name: Check actual HTTPS merchant admission with default browser transport
         run: |
-          RILLSWAP_RUN_MERCHANT_BROWSER=1 bun test tests/regtestMerchantHttpsDiagnostic.test.ts \
+          browser=$(sh scripts/install-merchant-chromium.sh)
+          RILLSWAP_RUN_MERCHANT_BROWSER=1 RILLSWAP_MERCHANT_BROWSER_EXECUTABLE="$browser" \
+            bun test tests/regtestMerchantHttpsDiagnostic.test.ts \
             -t 'default browser reads actual merchant HTTPS'
 
   woocommerce-conformance:

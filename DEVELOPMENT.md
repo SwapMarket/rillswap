@@ -53,6 +53,24 @@ drains mining RPCs and waits for LND to match Core's tip. Mining resumes before
 payment, including on checkout failure. This controls fixture timing without
 relaxing the merchant's freshness checks or retrying checkout creation.
 
+The component CI's actual-HTTPS merchant diagnostic temporarily uses pinned
+Chrome for Testing 157.0.8090.0. Playwright 1.63's bundled Chromium reports
+fully consumed streaming responses as aborted because of
+[an upstream EOF bug](https://chromium.googlesource.com/chromium/src/+/62473ad0f747e245e514c93e741bb8e168a2a207).
+Only this diagnostic uses the fixed development snapshot; other browser tests
+keep Playwright's bundled browser. The SDK's streaming byte limit, TLS checks
+and no-aborted-request assertions remain unchanged. To reproduce on Linux x64:
+
+```sh
+cd rill-payments
+browser=$(sh scripts/install-merchant-chromium.sh)
+RILLSWAP_RUN_MERCHANT_BROWSER=1 RILLSWAP_MERCHANT_BROWSER_EXECUTABLE="$browser" \
+  bun test tests/regtestMerchantHttpsDiagnostic.test.ts -t 'default browser reads actual merchant HTTPS'
+```
+
+Remove this temporary pin once Playwright bundles a Chromium build containing
+the fix and the strict diagnostic passes repeated validation on that build.
+
 Forward Bitcoin browser tests use finalized-PSBT funding. The scoped local
 chain reader does not provide the address-history index required by automatic
 wallet-deposit discovery.

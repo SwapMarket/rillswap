@@ -439,7 +439,8 @@ test.skipIf(process.env.RILLSWAP_RUN_MERCHANT_BROWSER !== "1")("default browser 
     const spki = (certificate: string) => createHash("sha256").update(new X509Certificate(readFileSync(certificate)).publicKey.export({ type: "spki", format: "der" })).digest("base64");
     async function browserFor(name: string, exception: string) {
       const profile = join(f.directory, name), flag = "--ignore-certificate-errors-spki-list=" + exception;
-      const context = await chromium.launchPersistentContext(profile, { headless: true, ignoreHTTPSErrors: false, serviceWorkers: "block", args: [flag] }); contexts.push(context);
+      const context = await chromium.launchPersistentContext(profile, { headless: true, ignoreHTTPSErrors: false, serviceWorkers: "block", args: [flag],
+        executablePath: process.env.RILLSWAP_MERCHANT_BROWSER_EXECUTABLE }); contexts.push(context);
       // Inspect only this runner's owned main browser, without dumping argv.
       const listed = Bun.spawnSync(["ps", "-ww", "-o", "args=", "--ppid", String(process.pid)], { stdout: "pipe", stderr: "pipe" }); expect(listed.exitCode).toBe(0);
       const matches = listed.stdout.toString("utf8").split("\n").map((line) => line.trim().split(/\s+/)).filter((args) => args.includes("--user-data-dir=" + profile));
@@ -467,38 +468,64 @@ test.skipIf(process.env.RILLSWAP_RUN_MERCHANT_BROWSER !== "1")("default browser 
       });
       page.on("request", (request) => { if (request.url() === intentUrl) requests.push(request); });
       await page.goto(expectedOrigin + "/owned-checkout"); await page.waitForFunction(() => typeof window.createCheckout === "function");
-      return { context, page, failures, requests };
+      return { context, page, failures, requests, name };
     }
     const inputs = { intentUrl, token: intent.statusToken as string, origin: expectedOrigin, receiver, invoice };
-    const open = async (page: Awaited<ReturnType<typeof browserFor>>["page"]) => {
-      // A parsed body is not Chromium's terminal network event. Observe the exact
-      // request before evaluating, then wait for its completion before checking
-      // the cumulative requestfailed contract (including the previous read).
-      const observed = page.waitForRequest((request) => request.url() === intentUrl, { timeout: 10000 });
-      const result = page.evaluate(async (input) => {
-      const counters = { wallet: 0, begin: 0, update: 0, load: 0 }, progress: string[] = [];
-      const options = { intentUrl: input.intentUrl, statusToken: input.token,
-        policy: { version: "native-lightning/1" as const, merchantOrigin: input.origin, receiver: input.receiver, network: "regtest" as const, maxBuyerExtraMsat: "0", maxBuyerExtraBps: 0 },
-        wallet: { canLimitFees: true as const, payInvoice: async () => { counters.wallet++; } },
-        recoveryStore: { load: async () => { counters.load++; return null; }, begin: async () => { counters.begin++; return true; }, update: async () => { counters.update++; } } };
-      if (Object.hasOwn(options, "fetch") || !Function.prototype.toString.call(window.fetch).includes("[native code]")) throw new Error("Owned browser transport must remain native");
-      const checkout = window.createCheckout(options); checkout.on("progress", (event) => progress.push(event.state));
-      try { const view = await checkout.open(); return { refused: false, withheld: view.attempt === null, originalInvoice: view.attempt?.invoice === input.invoice, status: view.status, counters, progress }; }
-      catch { return { refused: true, withheld: true, originalInvoice: false, status: "unknown", counters, progress }; }
-      }, inputs);
-      const request = await observed, response = await request.response();
-      if (response) await response.finished();
-      return await result;
+    const open = async (browser: Awaited<ReturnType<typeof browserFor>>) => {
+      const { page, requests, name } = browser, started = performance.now();
+      let owned: import("@playwright/test").Request | undefined, finish!: () => void;
+      const terminal = new Promise<void>((resolve) => { finish = resolve; });
+      const record = (phase: "request" | "response" | "requestfinished" | "requestfailed" | "evaluation" | "evaluation_rejected" | "observation_timeout", status?: number, refused?: boolean) => {
+        console.error(JSON.stringify({ diagnostic: "merchant_browser_observation", browser: name,
+          phase, ordinal: owned ? requests.indexOf(owned) + 1 : 0, elapsedMs: Math.round(performance.now() - started), status, refused }));
+      };
+      const requested = (request: import("@playwright/test").Request) => {
+        if (!owned && request.url() === intentUrl) { owned = request; record("request"); }
+      };
+      const responded = (response: import("@playwright/test").Response) => {
+        if (response.request() === owned) record("response", response.status());
+      };
+      const finished = (request: import("@playwright/test").Request) => {
+        if (request === owned) { record("requestfinished"); finish(); }
+      };
+      const failed = (request: import("@playwright/test").Request) => {
+        if (request === owned) { record("requestfailed"); finish(); }
+      };
+      page.on("request", requested); page.on("response", responded);
+      page.on("requestfinished", finished); page.on("requestfailed", failed);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const result = page.evaluate(async (input) => {
+          const counters = { wallet: 0, begin: 0, update: 0, load: 0 }, progress: string[] = [];
+          const options = { intentUrl: input.intentUrl, statusToken: input.token,
+            policy: { version: "native-lightning/1" as const, merchantOrigin: input.origin, receiver: input.receiver, network: "regtest" as const, maxBuyerExtraMsat: "0", maxBuyerExtraBps: 0 },
+            wallet: { canLimitFees: true as const, payInvoice: async () => { counters.wallet++; } },
+            recoveryStore: { load: async () => { counters.load++; return null; }, begin: async () => { counters.begin++; return true; }, update: async () => { counters.update++; } } };
+          if (Object.hasOwn(options, "fetch") || !Function.prototype.toString.call(window.fetch).includes("[native code]")) throw new Error("Owned browser transport must remain native");
+          const checkout = window.createCheckout(options); checkout.on("progress", (event) => progress.push(event.state));
+          try { const view = await checkout.open(); return { refused: false, withheld: view.attempt === null, originalInvoice: view.attempt?.invoice === input.invoice, status: view.status, counters, progress }; }
+          catch { return { refused: true, withheld: true, originalInvoice: false, status: "unknown", counters, progress }; }
+        }, inputs).then((value) => { record("evaluation", undefined, value.refused); return value; }, (error: unknown) => { record("evaluation_rejected"); throw error; });
+        // response.finished() is resolved by requestfinished, not requestfailed.
+        // Observe both terminal outcomes, without excusing an aborted request.
+        const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => {
+          record("observation_timeout"); reject(new Error("Merchant browser observation timed out"));
+        }, 15000); });
+        return await Promise.race([Promise.all([result, terminal]).then(([value]) => value), deadline]);
+      } finally {
+        clearTimeout(timer); page.off("request", requested); page.off("response", responded);
+        page.off("requestfinished", finished); page.off("requestfailed", failed);
+      }
     };
     const correct = await browserFor("browser-correct", spki(f.listener.cert));
-    expect(await open(correct.page)).toEqual({ refused: false, withheld: true, originalInvoice: false, status: "waiting", counters: { wallet: 0, begin: 0, update: 0, load: 0 }, progress: ["action_required"] });
+    expect(await open(correct)).toEqual({ refused: false, withheld: true, originalInvoice: false, status: "waiting", counters: { wallet: 0, begin: 0, update: 0, load: 0 }, progress: ["action_required"] });
     expect(correct.requests.length).toBe(1); expect(correct.failures).toEqual([]); expect(consumerHistory(consumerPath)).toEqual(unbound);
     const registered = await http(intentUrl + "/order-binding", readFileSync(f.listener.cert), { method: "PUT", headers: parentHeaders, body: JSON.stringify({ orderRef: "browser-original-order", amountMsat: "1000000" }) });
     expect(registered.status).toBe(200); const bound = consumerHistory(consumerPath);
-    expect(await open(correct.page)).toEqual({ refused: false, withheld: false, originalInvoice: true, status: "waiting", counters: { wallet: 0, begin: 0, update: 0, load: 1 }, progress: ["ready"] });
+    expect(await open(correct)).toEqual({ refused: false, withheld: false, originalInvoice: true, status: "waiting", counters: { wallet: 0, begin: 0, update: 0, load: 1 }, progress: ["ready"] });
     expect(correct.requests.length).toBe(2); expect(correct.failures).toEqual([]); await correct.context.close();
     const wrong = await browserFor("browser-wrong", spki(f.lndTls.cert));
-    expect(await open(wrong.page)).toEqual({ refused: true, withheld: true, originalInvoice: false, status: "unknown", counters: { wallet: 0, begin: 0, update: 0, load: 0 }, progress: [] });
+    expect(await open(wrong)).toEqual({ refused: true, withheld: true, originalInvoice: false, status: "unknown", counters: { wallet: 0, begin: 0, update: 0, load: 0 }, progress: [] });
     expect(wrong.requests.length).toBe(1); expect(wrong.failures).toEqual(["net::ERR_CERT_AUTHORITY_INVALID"]); await wrong.context.close();
     expect(consumerHistory(consumerPath)).toEqual(bound); expect(history(f.config.ledgerPath!)).toEqual(original);
     await f.end(serving.child); expect(await serving.errors).toBe("");
