@@ -22,6 +22,7 @@ import httpx
 from rill_core.settlement.unilateral import SchnorrVerifier, validate_unilateral_spend
 from rill_core.wire.canonical import canonicalize, parse_json_strict
 
+from rill_cli.claim_watcher import ClaimSubmission
 from rill_cli.recovery_core_observation import CONNECT_SECONDS, READ_SECONDS, _cookie, _outpoint
 from rill_cli.refund_publication import MAX_INTENT_BYTES, publish_new_broadcast_intent
 
@@ -289,6 +290,18 @@ def core_collaborators(
     Every call opens one short loopback session. Failures are never evidence:
     the chain view and confirmations return ``None`` and submission ``False``.
     """
+    chain, confirmations, submit = core_claim_collaborators(reader, binding=binding)
+    return chain, confirmations, lambda raw, txid: submit(raw, txid) is ClaimSubmission.ACCEPTED
+
+
+def core_claim_collaborators(
+    reader: RecoveryCoreReader, *, binding: FundingBinding
+) -> tuple[
+    Callable[[], ChainView | None],
+    Callable[[str], int | None],
+    Callable[[bytes, str], ClaimSubmission],
+]:
+    """Claim submission distinguishes local refusal from potentially disclosed bytes."""
 
     def client() -> httpx.Client:
         username, password = _cookie(reader._cookie_path)  # noqa: SLF001 - CLI-local RPC boundary
@@ -330,7 +343,8 @@ def core_collaborators(
         depth = result.get("confirmations") if isinstance(result, dict) else None
         return depth if type(depth) is int and result.get("txid") == txid else None
 
-    def submit(raw: bytes, txid: str) -> bool:
+    def submit(raw: bytes, txid: str) -> ClaimSubmission:
+        broadcast_invoked = False
         try:
             with client() as session:
                 reader._attest_session(session)  # noqa: SLF001 - before leaking spend bytes
@@ -344,13 +358,14 @@ def core_collaborators(
                     and preflight[0].get("allowed") is True
                     and preflight[0].get("txid") == txid
                 ):
-                    return False
+                    return ClaimSubmission.NOT_BROADCAST
+                broadcast_invoked = True
                 returned = reader._rpc(  # noqa: SLF001
                     session, "sendrawtransaction", [raw.hex()], 5, submission=True
                 )
         except Exception:  # noqa: BLE001 - the attempt is recorded; the next poll retries
-            return False
-        return bool(returned == txid)
+            return ClaimSubmission.UNKNOWN if broadcast_invoked else ClaimSubmission.NOT_BROADCAST
+        return ClaimSubmission.ACCEPTED if returned == txid else ClaimSubmission.UNKNOWN
 
     return chain, confirmations, submit
 

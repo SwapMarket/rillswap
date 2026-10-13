@@ -6,10 +6,12 @@ may refund, and a refund that wins the race keeps both the Lightning payment
 re-signs the claim at a fee that rises linearly from the initial fee to the
 maximum by ``deadline_height`` and replaces the previous attempt when it
 beats it by the incremental relay fee; otherwise the latest attempt is
-rebroadcast. The preimage is public from the first broadcast, so no attempt
-reveals anything new. Nothing is signed after ``deadline_height`` (the fee is
-at its maximum by then anyway): a first claim that late would reveal the
-preimage while the provider may already refund. Attempts are kept in memory
+rebroadcast. Definitively private attempts cannot be submitted after the height
+deadline. Ambiguous transmissions retain rebroadcast authority because the
+preimage may already be exposed. Nothing is signed after ``deadline_height``:
+a first claim that late would reveal the preimage while the provider may already
+refund. One of the 32 attempt slots is reserved for the maximum fee, with enough
+replacement relay headroom. Attempts are kept in memory
 only: after a restart the schedule starts again, and Core refuses a
 replacement below one already in its mempool, which keeps working for us
 meanwhile.
@@ -21,6 +23,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
@@ -37,6 +40,14 @@ type ClaimOutcome = Literal["claim_confirmed", "outpoint_spent_elsewhere", "clai
 
 class ClaimWatchError(ValueError):
     """The claim could not be signed as scheduled."""
+
+
+class ClaimSubmission(Enum):
+    """Only an affirmative pre-broadcast refusal proves the bytes stayed private."""
+
+    NOT_BROADCAST = "not_broadcast"
+    ACCEPTED = "accepted"
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
@@ -74,13 +85,14 @@ class ClaimWatcher:
         chain: Callable[[], ChainView | None],
         confirmations: Callable[[str], int | None],
         sign: Callable[[int, int], tuple[bytes, str, int, int]],
-        submit: Callable[[bytes, str], bool],
+        submit: Callable[[bytes, str], bool | ClaimSubmission],
         report: Callable[[str], None] = LOG.info,
         poll_seconds: float = 10.0,
         sleep: Callable[[float], None] = time.sleep,
         deadline: float | None = None,
         effect_allowed: Callable[[], bool] | None = None,
         monotonic_clock: Callable[[], float] | None = None,
+        preimage_disclosed: bool = False,
     ) -> None:
         """``sign(fee, tip)`` returns checked ``(raw, txid, fee, vsize)``."""
         if not 0 < initial_fee_sat <= max_fee_sat:
@@ -90,6 +102,8 @@ class ClaimWatcher:
         ):
             raise ClaimWatchError("claim lifetime deadline unsupported")
         self.attempts: list[ClaimAttempt] = []
+        self._transmitted: set[str] = set()
+        self._preimage_disclosed = preimage_disclosed is True
         self._fees = (initial_fee_sat, max_fee_sat)
         self._deadline = deadline_height
         self._start: int | None = None
@@ -132,7 +146,9 @@ class ClaimWatcher:
             )
             self._sleep(delay)
 
-    def step(self, *, deadline: float | None = None) -> tuple[ClaimOutcome, str | None] | None:
+    def step(  # noqa: PLR0911, PLR0912 - one cohesive disclosure and fee state machine
+        self, *, deadline: float | None = None
+    ) -> tuple[ClaimOutcome, str | None] | None:
         """One poll: finish, wait, rebroadcast, or sign and send a replacement."""
         if deadline is not None and (
             type(deadline) not in (int, float) or not math.isfinite(deadline)
@@ -161,10 +177,9 @@ class ClaimWatcher:
             self._start = view.tip_height
         latest = self.attempts[-1] if self.attempts else None
         if view.tip_height > self._deadline:
-            if latest is None:
+            if latest is None or not (self._preimage_disclosed or self._transmitted):
                 return "claim_window_passed", None
-            self._check_authority(deadline)
-            self._submit(latest.raw, latest.txid)
+            self._broadcast(latest, deadline)
             self._check_authority(deadline)
             return None
         initial, maximum = self._fees
@@ -177,28 +192,47 @@ class ClaimWatcher:
         )
         due = latest is None or (
             len(self.attempts) < MAX_ATTEMPTS
+            and (len(self.attempts) < MAX_ATTEMPTS - 1 or fee == maximum)
             and view.tip_height > latest.height
             and fee >= latest.fee_sat + latest.vsize * INCREMENTAL_RELAY_SAT_VB
         )
         if not due:
             if latest is not None:
-                self._check_authority(deadline)
-                self._submit(latest.raw, latest.txid)  # rebroadcast
+                self._broadcast(latest, deadline)
                 self._check_authority(deadline)
             return None
         self._check_authority(deadline)
         raw, txid, signed_fee, vsize = self._sign(fee, view.tip_height)
         if signed_fee != fee:
             raise ClaimWatchError("signed claim fee differs from the scheduled fee")
-        self.attempts.append(ClaimAttempt(txid, raw, fee, vsize, view.tip_height))
-        self._check_authority(deadline)
-        accepted = self._submit(raw, txid)
+        if type(vsize) is not int or vsize <= 0:
+            raise ClaimWatchError("signed claim size unsupported")
+        relay_fee = vsize * INCREMENTAL_RELAY_SAT_VB
+        if latest is not None and (
+            fee < latest.fee_sat + relay_fee or (fee < maximum and fee + relay_fee > maximum)
+        ):
+            self._broadcast(latest, deadline)
+            self._check_authority(deadline)
+            return None
+        attempt = ClaimAttempt(txid, raw, fee, vsize, view.tip_height)
+        self.attempts.append(attempt)
+        accepted = self._broadcast(attempt, deadline)
         self._report(
             f"claim {txid} at {fee} sat (tip {view.tip_height}) "
             f"{'broadcast' if accepted else 'not accepted yet'}"
         )
         self._check_authority(deadline)
         return None
+
+    def _broadcast(self, attempt: ClaimAttempt, deadline: float | None) -> bool:
+        self._check_authority(deadline)
+        previously_transmitted = attempt.txid in self._transmitted
+        # Record ambiguity before invoking a callback that may transmit and then fail.
+        self._transmitted.add(attempt.txid)
+        result = self._submit(attempt.raw, attempt.txid)
+        if result is ClaimSubmission.NOT_BROADCAST and not previously_transmitted:
+            self._transmitted.discard(attempt.txid)
+        return result is True or result is ClaimSubmission.ACCEPTED
 
     def _check_authority(self, deadline: float | None) -> None:
         """Recheck nonconsuming permission and fence a delayed predicate."""

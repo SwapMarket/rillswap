@@ -672,6 +672,7 @@ async def _cooperative_claim(  # noqa: PLR0913, PLR0915 - one original-session k
     wallet: ClaimWallet,
     write_recovery: Callable[[bytes, bytes | None], bytes | None],
     report: Callable[[str], None],
+    on_disclosure: Callable[[], None] = lambda: None,
 ) -> ClaimAttempt | None:
     """Try the private key-path claim once; None means claim unilaterally.
 
@@ -745,6 +746,7 @@ async def _cooperative_claim(  # noqa: PLR0913, PLR0915 - one original-session k
             report("cooperative disclosure not recorded; claiming unilaterally")
             return None
         try:
+            on_disclosure()  # Sending may disclose the preimage even when the reply is lost.
             await session.send(proposal, session.provider_key or "")
             report("cooperative claim proposed; waiting for the provider's signature")
             reply = await session.receive(
@@ -1152,8 +1154,23 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
                 1, min(ceiling, math.ceil(limits.claim_fee_rate_sat_vb * probe_vsize))
             )
             cooperative: ClaimAttempt | None = None
+            fallback: ClaimAttempt | None = None
+            preimage_disclosed = False
+
+            def mark_disclosed() -> None:
+                nonlocal preimage_disclosed
+                preimage_disclosed = True
+
             if COOPERATIVE_CLAIM_FEATURE in terms.required_features:
-                prepared_claim = await lifetime.worker(lambda: sign(initial_fee, 0))
+                prepared_height = await lifetime.worker(wallet.tip_height)
+                prepared_claim = await lifetime.worker(lambda: sign(initial_fee, prepared_height))
+                fallback = ClaimAttempt(
+                    prepared_claim[1],
+                    prepared_claim[0],
+                    prepared_claim[2],
+                    prepared_claim[3],
+                    prepared_height,
+                )
                 successor = await _publish_reverse_fallback(
                     lifetime,
                     funded_document=successor,
@@ -1180,6 +1197,7 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
                     wallet=wallet,
                     write_recovery=write_recovery,
                     report=report,
+                    on_disclosure=mark_disclosed,
                 )
 
             watcher = ClaimWatcher(
@@ -1195,11 +1213,17 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
                 poll_seconds=POLL_SECONDS,
                 deadline=lifetime.deadline,
                 effect_allowed=lifetime.allowed,
+                preimage_disclosed=preimage_disclosed,
             )
             if cooperative is not None:
                 # Rebroadcast the key-path claim; only a due fee bump replaces
                 # it with the (already durable) script-path claim.
                 watcher.attempts.append(cooperative)
+            elif fallback is not None:
+                # The pre-disclosure signed fallback remains recoverable even if
+                # cooperation consumed the height window. Possession alone grants
+                # no late submission authority; the watcher checks exposure evidence.
+                watcher.attempts.append(fallback)
             outcome, claim_txid = await lifetime.worker(watcher.run)
             if outcome == "claim_window_passed":
                 raise SwapError("the claim window closed; " + _UNRESOLVED)

@@ -6,6 +6,7 @@ import asyncio
 import json
 from time import time as wall_clock
 from typing import TYPE_CHECKING
+from unittest.mock import Mock
 
 import pytest
 from rill_core.recovery import REVERSE_DISCLOSURE_EXTENSION
@@ -28,7 +29,7 @@ from rill_cli.live_swap import _Session
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from rill_core.wire.messages import Envelope
+    from rill_core.wire.messages import ContractTerms, Envelope
 
 PROVIDER_CONTRACT = (11).to_bytes(32, "big")
 PROVIDER_SESSION = (9).to_bytes(32, "big")
@@ -127,6 +128,13 @@ def _run(
             # The proposal is sent only after its disclosure snapshot is acknowledged.
             assert REVERSE_DISCLOSURE_EXTENSION in json.loads(fixture.documents[-1])["extensions"]
             fixture.reports.append("test: reply awaited after acknowledged disclosure")
+            if mode == "late timeout":
+                fixture.wallet.tip_height.return_value = (
+                    fixture.terms.refund_lock_height
+                    - fixture.terms.timing_policy.claim_confirmation_blocks
+                    + 1
+                )
+                raise TimeoutError
             if mode == "timeout":
                 raise TimeoutError
             reply = _reply(fixture, mode)
@@ -230,6 +238,60 @@ def test_tip_past_cooperative_deadline_never_discloses(
 
     with Context(library_path=NATIVE_LIBRARY) as crypto:
         asyncio.run(exercise(crypto))
+
+
+@NATIVE_ONLY
+@pytest.mark.native_crypto
+@pytest.mark.parametrize("mode", ["timeout", "relay"])
+def test_possible_cooperative_proposal_delivery_retains_watcher_disclosure_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    watcher_class = reverse.ClaimWatcher
+    evidence: list[bool] = []
+
+    def watcher(**kwargs: object) -> reverse.ClaimWatcher:
+        evidence.append(kwargs["preimage_disclosed"] is True)
+        return watcher_class(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(reverse, "ClaimWatcher", watcher)
+    _fixture, _outcome = _run(tmp_path, monkeypatch, mode)
+    assert evidence == [True]
+
+
+@NATIVE_ONLY
+@pytest.mark.native_crypto
+def test_cooperative_timeout_after_height_deadline_submits_exact_prepared_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture, _outcome = _run(tmp_path, monkeypatch, "late timeout")
+    (raw,) = fixture.broadcasts
+    snapshots = [json.loads(document) for document in fixture.documents]
+    extension = next(
+        document["extensions"][reverse.REVERSE_FALLBACK_EXTENSION]
+        for document in snapshots
+        if reverse.REVERSE_FALLBACK_EXTENSION in document["extensions"]
+    )
+    assert raw.hex() == extension["transaction"]
+
+
+@NATIVE_ONLY
+@pytest.mark.native_crypto
+def test_untransmitted_cooperative_fallback_cannot_be_first_submitted_after_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def refuse(
+        _lifetime: object, *, terms: ContractTerms, wallet: Mock, **_kwargs: object
+    ) -> None:
+        wallet.tip_height.return_value = (
+            terms.refund_lock_height - terms.timing_policy.claim_confirmation_blocks + 1
+        )
+
+    monkeypatch.setattr(reverse, "_cooperative_claim", refuse)
+    submit = Mock()
+    monkeypatch.setattr(reverse, "_submit", submit)
+    with pytest.raises(reverse.SwapError, match="claim window closed"):
+        _run(tmp_path, monkeypatch, "unused")
+    submit.assert_not_called()
 
 
 @NATIVE_ONLY

@@ -120,6 +120,15 @@ The provider settles its hold invoice with the preimage revealed by the
 claim, so the claim must confirm before the provider's refund window. Core
 needs `txindex=1` for the funding depth lookup.
 
+The claim watcher reserves a final attempt for the approved fee ceiling and
+keeps older attempts available for confirmation checks. Claims affirmatively
+refused before broadcast are not first submitted after the safe height deadline.
+Ambiguous transmissions remain eligible for rebroadcast because their preimage
+may already be exposed; that policy cannot guarantee when the network first
+received them. Signed bytes alone, including seeded attempts without disclosure
+evidence, do not authorize late submission. Attempts remain memory-only, with no
+upgrade-triggered action or retroactive disclosure assumption.
+
 ### Limits and relay privacy
 
 | Flag | Use |

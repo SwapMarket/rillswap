@@ -642,7 +642,7 @@ def _watch_claim(  # noqa: PLR0913 - explicit wiring of the collaborators
         bytes.fromhex(binding.contract_script_pubkey),
     )
     authorization = UnilateralAuthorization.from_terms(terms, funding, "claim", keys=crypto)
-    chain, confirmations, submit = refund_watcher.core_collaborators(reader, binding=binding)
+    chain, confirmations, submit = refund_watcher.core_claim_collaborators(reader, binding=binding)
     ciphertext = Path(args.file).read_bytes()
 
     def sign(fee: int, tip: int) -> tuple[bytes, str, int, int]:
