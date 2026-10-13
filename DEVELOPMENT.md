@@ -298,92 +298,46 @@ longer exists.
 
 ## Browser adapters
 
-These small services let the browser page reach the regtest chain and node
-without holding node credentials.
+These regtest-only services let the browser reach the local chain and node
+without holding node credentials:
 
-The chain adapter exposes read-only Esplora-compatible GET routes for block
-hashes by height, tip height/hash, transaction hex/status, and confirmed
-unspent-output observations (`/tx/{txid}/outspend/{vout}`). Raw transaction
-responses are limited to 100,000 bytes. Null, missing, unconfirmed, spent, or
-inconsistent UTXO samples return unavailable, never `spent:false`. An unspent
-response still requires independently checking the raw transaction's identity
-and exact output in the browser. Sequential RPC samples are trusted local
-observations, not atomic snapshots or canonical-chain proofs.
+- `chain`: read-only Esplora-compatible routes for blocks, tip, transactions
+  and confirmed unspent outputs. Missing or inconsistent samples are reported
+  as unavailable, never as unspent, and the browser checks the raw bytes
+  itself.
+- `broadcast`: accepts signed transaction hex at `POST /api/tx`, checks the
+  regtest genesis, preflights and sends once. An uncertain result is never
+  retried.
+- `user-node`: forwards explicit browser payment actions to the fixed user
+  LND node over verified TLS with a URI-restricted macaroon. The browser owns
+  route selection, approval and limits. It is used when you pay a Lightning
+  to BTC swap from a configured node under **Advanced**.
 
-It holds no swap state or keys and never mines, repairs, scans, broadcasts,
-or calls wallet RPC. Host and browser Origin checks follow the
-configured local ports. Its dedicated Core reader is whitelisted, but the
-shared dev network and public privileged credentials are not container
-compromise isolation. Apply updated Core flags and service configuration with
-`docker compose -f dev/compose.yaml up -d --build bitcoind chain web`, not
-`dev/devctl restart`. Existing volumes and wallets are retained; do not reset.
-After building the dev image, reproduce reader authorization on an isolated
-disposable node with `RILLSWAP_TEST_CHAIN_AUTH=1 pytest dev/tests/test_chain_core_auth.py`.
-This check mines and sends only on its isolated disposable node, covers
-confirmed/unconfirmed/spent/reorganized transaction observations, and verifies
-wallet, mining, preflight, and broadcast methods are denied to the reader. It
-does not mount or change existing chain volumes.
+Origin and Host checks are local safeguards, not production authentication;
+the macaroon can make arbitrary routed regtest payments. No recovery secrets
+are uploaded, and credentials stay in browser memory. The adapters never
+repair state, reset wallets, scan, replay transactions or pay at startup.
 
-The separate broadcast adapter accepts only an explicit `POST /api/tx` from
-the configured local web Origin/Host. It receives signed transaction hex, never
-keys or recovery files. The chain adapter remains read-only. Core checks
-regtest genesis before each submission, preflights once, then sends the exact
-transaction once with a fixed 0.1 BTC/kvB fee ceiling and zero burn allowance.
-That ceiling is a coarse 10,000-sat/vB backstop, not a recommended wallet fee.
-Failures after sending may be unknown; neither adapter nor browser retries.
-The broadcast credential allows only `testmempoolaccept,sendrawtransaction`.
-Public disposable privileged credentials and local processes can bypass this
-browser-origin admission boundary; it is not compromise isolation or a public
-authenticated service. Its socket timeout limits inactivity, not total worker
-lifetime. It stores no persistent state and never broadcasts at startup.
+Apply adapter changes without resetting volumes:
 
-Apply broadcast changes with
-`docker compose -f dev/compose.yaml up -d --build bitcoind chain broadcast web`.
-Existing volumes are retained. Missing/partial configuration means unavailable,
-not automatic repair, reindexing, reset, or transaction replay. Override the
-loopback port with `RILL_DEV_BROADCAST_PORT` (default 8092).
+```sh
+docker compose -f dev/compose.yaml up -d --build bitcoind chain broadcast user-node web
+```
 
-The regtest-only `user-node` adapter makes LND's five bounded-payment RPCs
-available to explicit browser actions. `/configuration` returns the expected
-node identity/network and a URI-restricted macaroon only to the configured
-local web Origin/Host, with `Cache-Control: no-store`. It permits `DecodePayReq`,
-`GetInfo`, `QueryRoutes`, `SendToRouteV2`, and `TrackPaymentV2`, not wallet,
-invoice creation, admin, or unrestricted payment-router methods. The browser
-owns route selection, payment approval, limits, and durable dispatch ordering;
-the adapter only transports bounded requests/streamed responses to one fixed
-user node and never retries or logs payment data. Upstream TLS is verified
-against the original LND certificate and expected node/network. LND's TLS
-configuration, existing clients, and wallet volumes are unchanged.
-
-This macaroon still authorizes arbitrary routed **regtest** payments. URI
-restrictions do not impose an amount or destination budget. Local processes
-can forge Origin/Host, and allowed-origin script compromise can steal the
-credential. This is disposable development infrastructure, not a production
-credential service. The browser keeps credentials only in memory. Payment
-responses can contain preimages; the adapter transports them without storing
-or logging them. No recovery secrets are uploaded. Real-node access requires
-explicit user configuration and browser-trusted HTTPS, not certificate bypass.
-
-Explicit bootstrap creates a new dedicated `browser-node` volume containing
-only its scoped credential, public configuration, and TLS certificate. It
-records configuration before baking; interrupted/partial or unsupported files
-remain preserved and block provisioning. Complete matching files are never
-automatically repaired or replaced. Neither adapter startup nor missing
-credentials initiate a payment, reset wallets, or start scans. The adapter
-does not mount the admin-credential/state volume. For a running stack, provision
-only this capability without rerunning funding/bootstrap:
+On an existing stack, provision only the browser node capability:
 
 ```sh
 docker compose -f dev/compose.yaml run --rm --no-deps bootstrap python -c \
   'import sys; sys.path.insert(0,"/src/dev"); from devtool import provision_browser_node; provision_browser_node()'
 docker compose -f dev/compose.yaml up -d --no-deps user-node
-RILLSWAP_TEST_USER_NODE=1 pytest -q dev/tests/test_user_node_live.py
 ```
 
-The opt-in live test reads identity, verifies unrelated native RPC denial,
-and queries a route. It never dispatches a payment. Override the loopback port
-with `RILL_DEV_NODE_PORT` (default 8093). The browser uses it when you pay a
-Lightning to BTC swap from a configured node under **Advanced**.
+A partial provisioning is kept and blocks replacement. Port overrides:
+`RILL_DEV_BROADCAST_PORT` (8092) and `RILL_DEV_NODE_PORT` (8093). Opt-in
+checks: `RILLSWAP_TEST_CHAIN_AUTH=1 pytest dev/tests/test_chain_core_auth.py`
+(isolated disposable node) and
+`RILLSWAP_TEST_USER_NODE=1 pytest -q dev/tests/test_user_node_live.py`
+(never dispatches a payment).
 
 ## Tests
 
