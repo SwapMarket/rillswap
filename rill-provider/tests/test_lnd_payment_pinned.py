@@ -1760,6 +1760,47 @@ def _copy_private_core_cookie(container: str, destination: Path) -> None:
         raise AssertionError("isolated private Core cookie transfer failed")
 
 
+def _merchant_sidecar_identity(generated: Path) -> tuple[str, ...]:
+    # Observe ownership inside the daemon's user namespace. Host IDs are wrong
+    # for rootless Docker; container root is wrong for rootful private binds.
+    probe = f"rillswap-private-owner-{secrets.token_hex(6)}"
+    try:
+        owner = _docker(
+            "run",
+            "--rm",
+            "--name",
+            probe,
+            "--platform",
+            "linux/amd64",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--mount",
+            f"type=bind,src={generated},dst=/work/generated,readonly",
+            PYTHON_IMAGE,
+            "python",
+            "-c",
+            "import os; s=os.stat('/work/generated'); print(f'{s.st_uid}:{s.st_gid}')",
+        )
+    finally:
+        _docker("rm", "--force", probe, check=False)
+    if not re.fullmatch(r"[0-9]{1,10}:[0-9]{1,10}", owner):
+        raise AssertionError("invalid private fixture ownership")
+    uid, gid = (int(value) for value in owner.split(":"))
+    if max(uid, gid) >= 2**32 - 1:
+        raise AssertionError("invalid private fixture ownership")
+    return (
+        "--user",
+        f"{uid}:{gid}",
+        "--tmpfs",
+        f"/tmp:rw,mode=0700,uid={uid},gid={gid},noexec,nosuid,nodev",  # noqa: S108 - test tmpfs
+    )
+
+
 def _merchant_fixture_mounts(profile: str, bundle: Path | None) -> tuple[str, ...]:
     if bundle is None:
         return ()
@@ -1930,6 +1971,29 @@ def _run_two_node_sidecar(  # noqa: PLR0913, PLR0915 - isolated test infrastruct
     generated = tmp_path / "generated"
     _wallet_messages(generated)
     _state_messages(generated)
+    sidecar_identity = (
+        _merchant_sidecar_identity(generated)
+        if merchant_mounts
+        else ("--tmpfs", "/tmp:rw,mode=0700,noexec,nosuid,nodev")  # noqa: S108 - test tmpfs
+    )
+    if merchant_mounts:
+        # Numeric ownership can be an overflow ID under unsupported mappings.
+        # Prove actual access before channel setup, without printing private data.
+        program = (
+            "import sys,tempfile\nfrom pathlib import Path\n"
+            "print('PHASE: merchant_private_inputs', file=sys.stderr)\n"
+            "import walletunlocker_pb2,stateservice_pb2\n"
+            "assert Path('/work/public/a.cert').read_bytes()\n"
+            "assert Path('/work/public/b.cert').read_bytes()\n"
+            + (
+                "assert Path('/work/proof-tls/merchant.cert').read_bytes()\n"
+                "assert Path('/work/proof-tls/merchant.key').read_bytes()\n"
+                if proof_mounts
+                else ""
+            )
+            + "with tempfile.TemporaryDirectory(dir='/tmp'): pass\n"
+            + program
+        )
     run_id = secrets.token_hex(16)
     label = f"org.rillswap.test-run={run_id}"
     core = f"rillswap-{prefix}-core-{secrets.token_hex(6)}"
@@ -2103,8 +2167,7 @@ def _run_two_node_sidecar(  # noqa: PLR0913, PLR0915 - isolated test infrastruct
             "linux/amd64",
             "--network",
             f"container:{core}",
-            "--tmpfs",
-            "/tmp:rw,mode=0700,noexec,nosuid,nodev",  # noqa: S108 - test tmpfs
+            *sidecar_identity,
             "--mount",
             f"type=bind,src={ROOT},dst=/work/provider,readonly",
             "--mount",
