@@ -3,7 +3,7 @@
 Normative protocol specifications, schemas, test vectors and network
 definitions for RillSwap, plus the design document and release test matrix.
 
-Status: pre-release. No specification here has been audited or approved for
+**Status:** experimental and unaudited. No specification here is approved for
 funded mainnet use.
 
 | Path | Contents |
@@ -34,42 +34,31 @@ Interoperability is defined by the versioned `specs/`, `schemas/` and
 | [RS-009](specs/RS-009-conformance.md) | Conformance |
 | [RS-010](specs/RS-010-erc20-swaps.md) | ERC20 to and from Lightning |
 
-## Local conformance tests
+## Tests
 
-Run the static specification and vector suite with `.venv/bin/pytest -q`.
-`../.github/workflows/static-conformance.yml` defines a read-only, source-checkout
-GitHub Actions job using Python 3.14, pinned actions and uv, hash-locked test
-dependencies, and an explicit exclusion of the Docker-only Core marker. It
-does not run the pinned Core integration case, publish artifacts, attest
-provenance, or constitute a release gate.
-The Bitcoin Core execution suite is opt-in because it starts a container and
-mines a regtest chain:
+Run the static conformance suite from `rill-docs/` with Python 3.14:
 
 ```sh
-RILLSWAP_RUN_BITCOIN_CORE=1 .venv/bin/pytest -q -m bitcoin_core
+uv venv --python 3.14 .venv
+uv pip install --python .venv/bin/python --require-hashes -r requirements-dev.txt
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q -m 'not bitcoin_core'
 ```
 
-That test requires Docker and the pinned linux/amd64 image recorded in the
-test. The image digest is immutable but the image publisher is unofficial.
-RPC calls use `bitcoin-cli` through `docker exec`, so no daemon port is exposed
-to the host. Bulk `generatetoaddress` calls have a bounded 180-second process
-timeout (other RPC calls retain 30 seconds); a timed-out mining request is not
-retried blindly because its regtest chain may already have advanced. The test
-removes its disposable container on failure.
-Wallet-selected funding transactions are intentionally dynamic; only the
-versioned synthetic-outpoint vectors have stable transaction bytes.
+The optional Bitcoin Core suite starts a disposable regtest container. It
+needs Docker and the pinned linux/amd64 image recorded in the test:
 
-`vectors/recovery/initial-btc-to-ln-v1.json` is a synthetic decoded-object
-fixture for an initial plaintext export, assembled from signed
-authentication/economics and independently
-reconstructed Taproot vectors. It is unfunded (empty funding history), includes
-public test-only secret material, and uses a decoded invoice-binding fixture,
-not a verified BOLT11 invoice. The test verifies the published signatures and
-schema. The file is pretty-printed for review; canonicalize it to UTF-8 JSON
-before using it as age plaintext. It is not an encrypted age interoperability
-test, durable export proof,
-recovery importer, live funding evidence, or permission to sign or broadcast.
-`vectors/recovery/initial-ln-to-btc-no-prepayment-v1.json` adds a distinct
-signed, base-profile initial export with the user's required preimage. Its
-synthetic decoded invoice amount is recalculated for zero mining prepayment;
-it does not change or activate the existing optional-prepayment vectors.
+```sh
+RILLSWAP_RUN_BITCOIN_CORE=1 .venv/bin/python -m pytest -q -m bitcoin_core
+```
+
+## Fixture notes
+
+- Synthetic-outpoint vectors have stable transaction bytes; wallet-selected
+  funding transactions do not.
+- The initial recovery fixtures are unfunded decoded objects with public
+  test-only secrets. Their invoice-binding fixtures are not verified BOLT11
+  invoices.
+- Canonicalize recovery objects to UTF-8 JSON before using them as age
+  plaintext. The fixtures never authorize signing or broadcasting.
+- The base-profile LN to BTC fixture includes the user preimage and uses no
+  mining prepayment.
