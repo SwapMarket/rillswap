@@ -1,7 +1,7 @@
 # rill-provider
 
 RillSwap provider policy, treasury management, persistence, reconciliation,
-watching, and the authoritative cross-repository integration harness.
+watching, and integration diagnostics.
 
 Status: pre-release and not suitable for real funds. Regtest, signet, and
 testnet4 serve both swap directions; mainnet serving stays refused until a
@@ -135,8 +135,8 @@ future wallet/chain and outstanding-intent reconciliation procedure exists.
 Deployments sharing treasury coins need coordinated ownership, not just
 separate ledgers or application-level network namespaces.
 
-For development alongside the sibling `rill-core` checkout (Python 3.13 or
-later, matching its current supported version):
+For development from `rill-provider/` (Python 3.13 or later, matching
+`rill-core`):
 
 ```sh
 uv venv --python 3.14 .venv
@@ -160,7 +160,7 @@ a live session, local provider secret custody, freshness, received order,
 payment authority, or permission to fund. Explicit operator installation of
 the separately pinned native library is required, a native ABI load failure
 is unavailable diagnostic evidence, and input errors are redacted. From a
-sibling `rill-crypto` build and this virtual environment, run the opt-in
+`rill-crypto` build and this virtual environment, run the opt-in
 native interoperability check with:
 
 ```sh
@@ -1328,7 +1328,7 @@ transport records cannot activate it.
 
 `RILLSWAP_RUN_WEB_NIP59=1 RILL_CRYPTO_LIBRARY=/absolute/path/to/librill_crypto.so
  .venv/bin/pytest -q -m web_nip59_interop` is an **opt-in local** test against
-the sibling working-tree web producer and docs authentication vectors. Install
+the `rill-web` working-tree producer and docs authentication vectors. Install
 the web `bun.lock` dependencies first. It covers both regtest settlement
 profiles using real fixture-signed RS-001 envelopes, independent Bun
 construction and native provider decoding. Missing Bun, configured native
@@ -2043,11 +2043,11 @@ and exact generation-tool versions are checked. The focused fake transport
 and real synthetic loopback gRPC TLS tests run in the normal pytest suite;
 the synthetic tests alone are **not** a real LND regtest integration check.
 
-To run the four opt-in pinned **disposable-regtest** diagnostics, keep `rill-core` and
-`rill-provider` as sibling source checkouts. Install `requirements-dev.txt`
-in this repository's local Python 3.14 `.venv` (including pinned
+To run the four opt-in pinned **disposable-regtest** diagnostics, use the monorepo's
+`rill-core/` and `rill-provider/` directories. Install `requirements-dev.txt`
+in the provider's local Python 3.14 `.venv` (including pinned
 `grpcio-tools`), and have Docker capable of running the pinned `linux/amd64`
-Core, LND, and Python images. From this repository:
+Core, LND, and Python images. From `rill-provider/`:
 
 ```sh
 RILLSWAP_RUN_LND=1 .venv/bin/pytest -q -m lnd --basetemp=tmp/pytest
@@ -2055,7 +2055,7 @@ RILLSWAP_RUN_LND=1 .venv/bin/pytest -q -m lnd --basetemp=tmp/pytest
 
 Each test creates uniquely named, run-labeled containers; Core has no external network,
 and LND and the test client share Core's loopback namespace without published
-ports. It mounts the sibling source and local environment **read-only**, and
+ports. It mounts the component sources and local environment **read-only**, and
 uses tmpfs for Core data, LND wallet/credentials, and the client credential.
 The test-only wallet seed and admin macaroon are handled within the isolated
 sidecar and are not printed. Tmpfs is not a guarantee against host swap or

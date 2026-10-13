@@ -1,7 +1,7 @@
 # Checkout toolkit
 
-Experimental checkout contracts, shared pure policy and merchant ledger for the payment processor
-blueprint. This does not enable funded production use or mainnet routes.
+Experimental checkout SDK, shared payment policy and merchant ledger for
+RillSwap payment processing. This does not enable funded production use or mainnet routes.
 
 `parseTerms` validates terms, not a BOLT11 signature or payment receipt.
 `evaluateNative` explains eligibility and never establishes payment acceptance.

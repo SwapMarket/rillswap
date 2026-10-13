@@ -398,7 +398,7 @@ authenticated by loopback Basic auth. Read timeouts are inactivity limits,
 not a transaction deadline. Do not use this output to sign, fund, pay, or
 claim refund eligibility. Real regtest byte-matching for both swap profiles
 is opt-in with `RILLSWAP_RUN_BITCOIN_CORE=1 .venv/bin/pytest -q -m bitcoin_core`
-and requires the locally built sibling native library plus pinned Docker
+and requires the locally built `rill-crypto` native library plus pinned Docker
 images. Neither test uses funds outside disposable regtest.
 
 `rill recover observe-claim` accepts the same exact selection, trusted regtest
@@ -1125,7 +1125,7 @@ The package declares dependencies on `rill-core`, `rill-crypto`,
 `pyrage==1.4.0`, `httpx==0.28.1`, `pydantic==2.13.5`, and `pycryptodomex==3.23.0`,
 but release wheels do **not** bundle the
 native cryptographic library; a missing or wrong library fails closed. Test-only keys and fixtures
-in `tests/fixtures` are public. To develop alongside the sibling repositories:
+in `tests/fixtures` are public. To develop, run from `rill-cli/`:
 
 ```sh
 uv venv --python 3.14 .venv
@@ -1161,11 +1161,11 @@ so do not log the returned object.
 For a **fail-closed local backup interoperability gate** on Linux amd64,
 download the official Go age v1.3.1 archive from
 `https://github.com/FiloSottile/age/releases/download/v1.3.1/age-v1.3.1-linux-amd64.tar.gz`
-into this repository's `tmp/` directory. The committed gate verifies its
+into `rill-cli/tmp/`. The committed gate verifies its
 SHA-256 `bdc69c09cbdd6cf8b1f333d372a1f58247b3a33146406333e30c0f26e8f51377`
-before extracting or executing `age/age`. Separately build the pinned sibling
+before extracting or executing `age/age`. Separately build the pinned
 `rill-crypto` library and independently record its SHA-256. With the local
-Python 3.14 `.venv` and both sibling checkouts installed:
+Python 3.14 `.venv` and the component dependencies installed:
 
 ```sh
 .venv/bin/python scripts/check_age_interop.py \
@@ -1174,7 +1174,7 @@ Python 3.14 `.venv` and both sibling checkouts installed:
   --native-sha256 YOUR_INDEPENDENTLY_RECORDED_LIBRARY_SHA256
 ```
 
-The gate refuses a wrong archive digest/version, missing sibling source,
+The gate refuses a wrong archive digest/version, missing component source,
 library digest mismatch, a skipped test, or fewer than three passing checks.
 It uses a fresh private test directory rather than deleting an existing
 scratch path, and requires a structured report with exactly the three intended
@@ -1184,7 +1184,6 @@ It exercises Python-to-Go and Go-to-Python age X25519 in both profiles plus
 the separately generated Go scrypt fixture with native inspection. It records
 each component source revision and whether its worktree is dirty; a caller-
 supplied native hash identifies tested bytes but does not attest binary origin.
-This is **local verification only**. There are no repository remotes or hosted
-CI workflows configured yet, so required CI enforcement and independent
+This is **local verification only**. Required CI enforcement and independent
 reproducible artifact provenance remain open release gates. None of these
 checks permits refund signing, broadcast, funding, or payment.

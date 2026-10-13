@@ -1,12 +1,12 @@
 # rill-contracts
 
-Our own files here are MIT (`LICENSE`). Vendored sources and compiled
-third-party artifacts keep their upstream licenses, listed below; the GPL text
-is in `licenses/GPL-3.0.txt`.
-
 Vendored EVM contract sources and their pinned compiled artifacts, shared by
 the provider (`rill-provider`) and the browser client (`rill-web`) for the
 RS-010 ERC20 profiles.
+
+Our own files here are MIT (`LICENSE`). Vendored sources and compiled
+third-party artifacts keep their upstream licenses, listed below; the GPL text
+is in `licenses/GPL-3.0.txt`.
 
 - `vendor/boltz-core/`: Boltz `ERC20Swap` v6 and its `TransferHelper`
   dependency, copied unmodified from boltz-core `v5.0.0`; see `NOTICE.md`

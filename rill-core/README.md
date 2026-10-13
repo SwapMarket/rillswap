@@ -169,7 +169,7 @@ is not enabled. Existing serialized regtest records and scripts are unchanged;
 no migration, scan, or automatic state transition is performed.
 
 Run local tests with `.venv/bin/pytest -q`. For the native crypto contract test,
-install the sibling `rill-crypto/python` package in the test environment, build
+install the `rill-crypto/python` package in the test environment, build
 its pinned native library, and run:
 
 ```sh

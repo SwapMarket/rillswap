@@ -37,9 +37,11 @@ event object for one supported network against an independently entered
 identity and locally defined network/profile, holding a revision maximum in
 memory for this tab only. Never enter secrets or send funds to this preview.
 
-`swap.html` is the **experimental BTC to LN swap client** (signet, testnet4,
-and regtest; mainnet is refused until release acceptance). `src/swap/` ports
-rill-cli's `run_swap`:
+`swap.html` is the **experimental swap client** for BTC to and from Lightning
+and USDC/USDT to and from Lightning (signet, testnet4, and regtest; mainnet
+funding is refused until release acceptance). See
+[Swap direction and assets](#swap-direction-and-assets) for the four profiles.
+For BTC to LN, `src/swap/` ports rill-cli's `run_swap`:
 
 - bounded provider discovery across up to four configured relays (highest valid
   kind-39417 revision per provider slot; same-revision equivocation and a flood
@@ -322,8 +324,9 @@ protocol sessions are not resumed from it, only recovery.
 
 `src/browserRecoveryWallet.ts` provides a browser-stored recovery identity,
 matching-backup checks, and atomic refund-address allocation. The swap form
-uses these defaults without manual key or address input. This does not enable
-mainnet swaps or constitute a complete browser refund or wallet-spending flow.
+uses these defaults without manual key or address input. Mainnet funding
+remains disabled, and this is a swap recovery identity, not a general-purpose
+Bitcoin spending wallet.
 
 The v1 identity uses a 128-bit, 12-word English BIP39 mnemonic, NFKD
 normalization, and an empty passphrase. It stores one validated record in
@@ -397,8 +400,8 @@ the authoritative closed RS-007 schema. Its deeply frozen result is explicitly
 Never log or persist it. Generated schema code is compiled at build time from
 `rill-docs`, not fetched or evaluated at runtime. This code does not verify
 signatures, contract-secret consistency, complete funding history, or
-cooperative reservations, and is not connected to UI imports, signing,
-scanning, or broadcast.
+cooperative reservations, and does not itself authorize recovery actions; UI
+imports and refund actions apply separate authentication and chain checks.
 
 `inspectRecoveryPlaintext(bytes, independentlySelectedNetwork)` in
 `src/recoveryInspection.ts` adds offline, historical BTC to LN inspection.
@@ -423,9 +426,9 @@ with the saved browser key by default, or with an explicitly selected original
 age key file. The key override never replaces the saved identity. Choose the
 original swap's network in Settings before inspecting; a different network
 selected when opening finishes discards the result. No decrypted document or key is shown or stored,
-and neither files nor reports are uploaded. A future refund
-planner must authenticate its own byte snapshot and separately verify the
-funding output and refund conditions, never use the report as authorization.
+and neither files nor reports are uploaded. The refund
+planner authenticates its own byte snapshot and separately verifies the
+funding output and refund conditions; a report is never authorization.
 Upgrades perform no startup work, migration, or automatic recovery; absent or
 partial records trigger nothing and failed imports do not modify the input.
 
@@ -440,8 +443,8 @@ RILLSWAP_TEST_RECOVERY_NATIVE=1 bun test unit/recoveryInspectionNative.test.ts
 The opt-in inspection test is read-only and does not create containers or
 access the chain.
 
-`constructSelectedRecoveryRefund` in the same module is a disconnected offline
-BTC to LN refund constructor. It reauthenticates its own recovery bytes, selects
+`constructSelectedRecoveryRefund` in the same module is a pure offline BTC to
+LN refund constructor used by the browser refund action (`browserRefund.ts`). It reauthenticates its own recovery bytes, selects
 an explicit signed funding attempt/revision, and verifies the actual funding
 transaction's identity, anchor, inputs, and exact contract output. It uses the
 signed client destination only, caps the fee, enforces the 294-sat P2WPKH or

@@ -1,12 +1,15 @@
 # Releasing
 
-The current read-only CI builds from locked dependencies, runs unit/browser
-checks, then stages a deterministic ZIP and SHA-256 manifest from the same
-`dist/`. It verifies the manifest, ZIP members, and a clean Pages candidate
-extracted from that ZIP against every tested file. The candidate is not
-deployed. Nothing is attached to a release or published to Pages yet.
+The read-only component checks build from locked dependencies, run
+unit/browser checks, then stage a deterministic ZIP and SHA-256 manifest from
+the same `dist/`. They verify the manifest, ZIP members, and a clean Pages
+candidate extracted from that ZIP against every tested file. The manually
+dispatched `Publish static RillSwap` workflow (`.github/workflows/pages.yml`)
+separately tests, uploads and deploys the Pages artifact. Release ZIP
+publication is not automated yet.
 
-Before enabling a separately reviewed publisher, an administrator must verify
+Before running the Pages publisher or enabling release publication, an
+administrator must verify
 release-tag creation/update/deletion rules, a protected production environment
 with required reviewers, self-review/bypass restrictions and selected tag
 rules, and protection of the release workflow itself. Missing GitHub
