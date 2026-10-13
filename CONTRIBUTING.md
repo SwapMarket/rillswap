@@ -7,7 +7,6 @@ normative behavior. Report vulnerabilities privately as described in
 
 ## Ground rules
 
-- Sign off every commit (Developer Certificate of Origin, `git commit -s`).
 - Contributions must be original or identify their source and a compatible
   license. Vendored or generated material records its origin.
 - Never rewrite a published protocol version in place; protocol changes go
