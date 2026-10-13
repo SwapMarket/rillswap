@@ -6,6 +6,7 @@ import { createRecoveryKey } from "../src/recoveryKeys";
 import { swapLinkFragment } from "../src/swapLink";
 import type { RecoveryRefundCase } from "../unit/fixtures/recoveryRefundCases";
 import type { BrowserRefundJournal } from "../src/browserRefundJournal";
+import { testInvoice } from "../../rill-payments/tests/helpers";
 
 declare global { interface Window { uiRefundJournal: typeof BrowserRefundJournal; refundExposurePending: boolean; releaseRefundExposure: () => void } }
 
@@ -74,6 +75,109 @@ test("a swap link reopens its encrypted record locally in the tracking view with
   await page.goto("http://127.0.0.1:18765/test-only/swap.html#swap=not*base64&network=regtest");
   await expect(page.locator("#swap-form")).toBeVisible(); // malformed links are ignored, not partially used
   await expect(page.locator("#swap-tracking")).toBeHidden();
+});
+
+for (const failStorage of [false, true]) test(`funded callback ${failStorage ? "refuses publication but keeps downloadable bytes" : "survives a URL-less reload with explicit local opening"}`, async ({ page }, testInfo) => {
+  const item = corpus()[0]!, calls = await chainApi(page, item);
+  const sockets: string[] = []; page.on("websocket", (socket) => sockets.push(socket.url()));
+  const url = "http://127.0.0.1:18765/test-only/swap.html";
+  await page.goto(url);
+  const recipient = await page.evaluate(async () => {
+    const wallet = await window.uiFixture.wallet.open();
+    try { return (await wallet.recoveryKey()).recipient; } finally { wallet.close(); }
+  });
+  const encrypted = await encryptCanonicalRecoveryForRecipient(new TextEncoder().encode(canonicalize(item.record)!), recipient);
+  await page.evaluate(({ bytes, failStorage }) => {
+    window.uiFixture.fundedRecovery = bytes;
+    if (failStorage) {
+      const original = IDBObjectStore.prototype.add;
+      IDBObjectStore.prototype.add = function(this: IDBObjectStore, ...args: Parameters<typeof original>) {
+        if (typeof args[1] === "string" && args[1].startsWith("funded:")) throw new DOMException("quota", "QuotaExceededError");
+        return original.apply(this, args);
+      };
+    }
+  }, { bytes: Array.from(encrypted), failStorage });
+  const now = Math.floor(Date.now() / 1000);
+  await page.locator("#swap-invoice").fill(testInvoice("funded_storage", "1000000", now, now + 7200));
+  await page.locator("#swap-start").click();
+  await page.locator("#swap-quote-accept").click();
+  await expect(page.locator("#swap-error")).toContainText(failStorage ? "Browser recovery storage" : "Fixture stopped after funded checkpoint");
+  expect(await page.evaluate(() => !!window.uiFixture.fundingPublished)).toBe(!failStorage);
+  const downloading = page.waitForEvent("download");
+  await page.locator('#swap-backups a[download*="funded-recovery"]').click();
+  const path = testInfo.outputPath("funded.age"); await (await downloading).saveAs(path);
+  expect(readFileSync(path)).toEqual(Buffer.from(encrypted));
+  expect(new URL(page.url()).hash).toBe(swapLinkFragment({ file: encrypted, network: "regtest" }));
+  if (failStorage) return;
+  const before = calls.length;
+  await page.goto("about:blank"); await page.goto(url); // No URL fragment or download is used.
+  await page.locator("#swap-wallet-setup summary").first().click();
+  await page.locator("#swap-saved-recoveries summary").click();
+  await page.getByRole("button", { name: "Open saved swap", exact: true }).click();
+  await expect(page.locator("#swap-recovery-result h3")).toHaveText("Recovery record verified");
+  await expect(page.locator("#swap-status")).toHaveText("Saved funded recovery opened locally");
+  expect(calls).toHaveLength(before); expect(sockets).toEqual([]);
+});
+
+test("opening a saved checkpoint clears a different linked record's URL authority", async ({ page }) => {
+  const item = corpus()[0]!, calls = await chainApi(page, item);
+  const url = "http://127.0.0.1:18765/test-only/swap.html";
+  await page.goto(url);
+  const recipient = await page.evaluate(async () => {
+    const wallet = await window.uiFixture.wallet.open();
+    try { return (await wallet.recoveryKey()).recipient; } finally { wallet.close(); }
+  });
+  const plaintext = new TextEncoder().encode(canonicalize(item.record)!);
+  const linked = await encryptCanonicalRecoveryForRecipient(plaintext, recipient);
+  const saved = await encryptCanonicalRecoveryForRecipient(plaintext, recipient);
+  await page.evaluate(async (bytes) => {
+    const wallet = await window.uiFixture.wallet.open();
+    try { await wallet.saveFundedRecovery("regtest", Uint8Array.from(bytes)); } finally { wallet.close(); }
+  }, Array.from(saved));
+  await page.goto(url + swapLinkFragment({ file: linked, network: "regtest" }));
+  await expect(page.locator("#swap-recovery-result h3")).toHaveText("Recovery record verified");
+  await expect(page.locator("#swap-link")).toBeVisible();
+  await page.locator("#swap-saved-recoveries summary").click();
+  await page.getByRole("button", { name: "Open saved swap", exact: true }).click();
+  await expect(page.locator("#swap-status")).toHaveText("Saved funded recovery opened locally");
+  await expect(page.locator("#swap-link")).toBeHidden();
+  expect(new URL(page.url()).hash).toBe("");
+  const bytes = await page.locator("#swap-recovery-file").evaluate(async (input) =>
+    Array.from(new Uint8Array(await (input as HTMLInputElement).files![0]!.arrayBuffer())));
+  expect(bytes).toEqual(Array.from(saved));
+  await page.reload(); await expect(page.locator("#swap-form")).toBeVisible();
+  await expect(page.locator("#swap-recovery-result h3")).toHaveCount(0);
+  expect(calls).toEqual([]);
+});
+
+test("a delayed local Open cannot replace an active quote's network or recovery view", async ({ page }) => {
+  const item = corpus()[0]!; await chainApi(page, item);
+  await page.goto("http://127.0.0.1:18765/test-only/swap.html");
+  await page.evaluate(async () => {
+    const wallet = await window.uiFixture.wallet.open();
+    try { await wallet.saveFundedRecovery("signet", Uint8Array.of(1)); } finally { wallet.close(); }
+  });
+  await page.reload();
+  await page.locator("#swap-saved-recoveries summary").click();
+  await page.evaluate(() => {
+    const prototype = window.uiFixture.wallet.prototype, original = prototype.readFundedRecovery;
+    prototype.readFundedRecovery = async function(id) {
+      const result = await original.call(this, id);
+      await new Promise<void>((resolve) => { window.uiFixture.releaseInfo = resolve; window.uiFixture.infoPending = true; });
+      return result;
+    };
+  });
+  await page.getByRole("button", { name: "Open saved swap", exact: true }).click();
+  await page.waitForFunction(() => window.uiFixture.infoPending);
+  const now = Math.floor(Date.now() / 1000);
+  await page.locator("#swap-invoice").fill(testInvoice("busy_saved_open", "1000000", now, now + 7200));
+  await page.locator("#swap-start").click();
+  await expect(page.locator("#swap-quote-accept")).toBeEnabled();
+  await page.evaluate(() => window.uiFixture.releaseInfo!());
+  await expect(page.getByRole("button", { name: "Open saved swap", exact: true })).toBeEnabled();
+  await expect(page.locator("#swap-network")).toHaveValue("regtest");
+  await expect(page.locator("#swap-recovery-result h3")).toHaveCount(0);
+  await expect(page.locator("#swap-quote-accept")).toBeEnabled();
 });
 
 test("local inspection connects to nothing; an explicit funding check reports trusted mature observations", async ({ page }) => {

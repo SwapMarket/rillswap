@@ -13,11 +13,13 @@ import { parseStrictEventJson } from "./strictEventJson";
 import { scriptAddress } from "./swap/address";
 import { NETWORK_NAMES, type NetworkName } from "./swap/config";
 import type { RecoveryKey } from "./recoveryKeys";
+import { MAX_RECOVERY_CIPHERTEXT_BYTES } from "./recoveryAgeContainer";
 
 export const WALLET_DATABASE = "rillswap-browser-wallet-v1";
 export const WALLET_SCHEME = "bip84-rillswap-v1";
 const STORE = "identity";
 const RECORD = "wallet";
+const SNAPSHOT_PREFIX = "funded:";
 const INDEX_LIMIT = 2 ** 31;
 const encoder = new TextEncoder();
 
@@ -153,6 +155,10 @@ function openDatabase(): Promise<IDBDatabase> {
       if (db.objectStoreNames.length !== 1 || !db.objectStoreNames.contains(STORE)) {
         db.close(); reject(new BrowserWalletError()); return;
       }
+      const store = db.transaction(STORE).objectStore(STORE);
+      if (store.keyPath !== null || store.autoIncrement || store.indexNames.length !== 0) {
+        db.close(); reject(new BrowserWalletError()); return;
+      }
       db.onversionchange = () => db.close();
       resolve(db);
     };
@@ -194,7 +200,10 @@ export class BrowserRecoveryWallet {
           nextIndex: { mainnet: 0, signet: 0, testnet4: 0, regtest: 0 }, backupVerified: false };
         created = await access(db, "readwrite", (value, store) => {
           if (value !== undefined) { validateRecord(value); return false; }
-          store.add(candidate, RECORD); return true;
+          // A surviving recovery record proves prior use, not a fresh identity.
+          const count = store.count();
+          count.onsuccess = () => { if (count.result !== 0) store.transaction.abort(); else store.add(candidate, RECORD); };
+          return true;
         });
       }
       await access(db, "readonly", (value) => validateRecord(value));
@@ -206,6 +215,51 @@ export class BrowserRecoveryWallet {
   }
 
   close(): void { this.db.close(); }
+
+  /** Immutable encrypted checkpoint: strict commit and independent exact readback. */
+  async saveFundedRecovery(network: NetworkName, ciphertext: Uint8Array): Promise<string> {
+    const record = snapshotRecord(network, ciphertext);
+    const id = snapshotId(record);
+    await snapshotAccess(this.db, "readwrite", (store, done) => {
+      const request = store.get(id);
+      request.onsuccess = () => {
+        try {
+          if (request.result === undefined) store.add(record, id);
+          else if (!snapshotEqual(validateSnapshot(id, request.result), record)) throw new BrowserWalletError();
+          done(undefined);
+        } catch { store.transaction.abort(); }
+      };
+    });
+    const saved = await this.readFundedRecovery(id);
+    if (!snapshotEqual(saved, record)) throw new BrowserWalletError("Funded recovery readback failed. Keep the download; funding publication was refused.");
+    return id;
+  }
+
+  async readFundedRecovery(id: string): Promise<FundedRecoverySnapshot> {
+    if (!id.startsWith(SNAPSHOT_PREFIX)) throw new BrowserWalletError();
+    return snapshotAccess(this.db, "readonly", (store, done) => {
+      const request = store.get(id);
+      request.onsuccess = () => {
+        try { done(validateSnapshot(id, request.result)); } catch { store.transaction.abort(); }
+      };
+    });
+  }
+
+  /** Damaged entries remain present and visible without hiding valid backups. */
+  async listFundedRecoveries(): Promise<readonly FundedRecoveryDescriptor[]> {
+    return snapshotAccess(this.db, "readonly", (store, done) => {
+      const entries: FundedRecoveryDescriptor[] = [];
+      const request = store.openCursor(IDBKeyRange.bound(SNAPSHOT_PREFIX, `${SNAPSHOT_PREFIX}\uffff`));
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) { done(entries); return; }
+        const id = String(cursor.key);
+        try { entries.push({ id, network: validateSnapshot(id, cursor.value).network }); }
+        catch { entries.push({ id, error: "Saved recovery is damaged or unsupported. Keep existing backups." }); }
+        cursor.continue();
+      };
+    });
+  }
 
   async info(): Promise<{ fingerprint: string; backupVerified: boolean; recipient: string }> {
     const record = await access(this.db, "readonly", validateRecord);
@@ -245,4 +299,44 @@ export class BrowserRecoveryWallet {
     return Object.freeze({ version: 1, scheme: WALLET_SCHEME, identityFingerprint: fingerprint(allocation.backup),
       network, index: allocation.index, path: derived.path, script: derived.script, address: scriptAddress(derived.script, network) });
   }
+}
+
+export interface FundedRecoverySnapshot {
+  readonly version: 1;
+  readonly network: NetworkName;
+  readonly ciphertext: Uint8Array;
+}
+export type FundedRecoveryDescriptor = { readonly id: string; readonly network: NetworkName } | { readonly id: string; readonly error: string };
+
+function snapshotRecord(network: NetworkName, ciphertext: Uint8Array): FundedRecoverySnapshot {
+  if (!NETWORK_NAMES.includes(network) || !(ciphertext instanceof Uint8Array) || ciphertext.length === 0 ||
+      ciphertext.length > MAX_RECOVERY_CIPHERTEXT_BYTES) throw new BrowserWalletError("Funded recovery bytes or network are invalid");
+  return { version: 1, network, ciphertext: Uint8Array.from(ciphertext) };
+}
+const snapshotId = (record: FundedRecoverySnapshot): string => `${SNAPSHOT_PREFIX}${record.network}:${bytesToHex(sha256(record.ciphertext))}`;
+function validateSnapshot(id: string, value: unknown): FundedRecoverySnapshot {
+  if (!value || typeof value !== "object" || !exactKeys(value, ["version", "network", "ciphertext"])) throw new BrowserWalletError();
+  const record = value as FundedRecoverySnapshot;
+  if (record.version !== 1) throw new BrowserWalletError();
+  const validated = snapshotRecord(record.network, record.ciphertext);
+  if (snapshotId(validated) !== id) throw new BrowserWalletError();
+  return validated;
+}
+const snapshotEqual = (a: FundedRecoverySnapshot, b: FundedRecoverySnapshot): boolean => a.version === b.version && a.network === b.network &&
+  a.ciphertext.length === b.ciphertext.length && a.ciphertext.every((byte, index) => byte === b.ciphertext[index]);
+
+/** Snapshot authority cannot use the wallet helper's weaker-durability fallback. */
+function snapshotAccess<T>(db: IDBDatabase, mode: IDBTransactionMode, action: (store: IDBObjectStore, done: (result: T) => void) => void): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let tx: IDBTransaction;
+    try {
+      tx = db.transaction(STORE, mode, { durability: mode === "readwrite" ? "strict" : "default" });
+      if (mode === "readwrite" && tx.durability !== "strict") { tx.abort(); throw new BrowserWalletError(); }
+    } catch { reject(new BrowserWalletError()); return; }
+    let result: T, completed = false;
+    tx.oncomplete = () => completed ? resolve(result) : reject(new BrowserWalletError());
+    tx.onabort = tx.onerror = () => reject(new BrowserWalletError());
+    try { action(tx.objectStore(STORE), (value) => { result = value; completed = true; }); }
+    catch { tx.abort(); }
+  });
 }

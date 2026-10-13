@@ -5,6 +5,7 @@ declare global {
     uiFixture: { requests: unknown[]; executed: number; executedProviders: string[]; disposed: number;
       fundingScript?: string; fundingSource?: { psbt: string } | { depositTxid: string };
       reverseEvents?: string[]; reverseFunded?: boolean;
+      fundedRecovery?: number[]; fundingPublished?: boolean;
       wallet: typeof BrowserRecoveryWallet; releaseInfo?: () => void; infoPending: boolean };
   }
 }
@@ -37,6 +38,11 @@ export const quoteProviders = async (_providers: unknown[], request: unknown) =>
       execute: async (hooks: { saveRecovery: (file: Uint8Array, stage: string) => Promise<void>; fundingSource: (request: unknown) => Promise<unknown> }) => {
         window.uiFixture.executed++; window.uiFixture.executedProviders.push(id.repeat(64));
         await hooks.saveRecovery(new Uint8Array([7, 7, 7]), "terms");
+        if (window.uiFixture.fundedRecovery) {
+          await hooks.saveRecovery(Uint8Array.from(window.uiFixture.fundedRecovery), "funded");
+          window.uiFixture.fundingPublished = true;
+          throw new Error("Fixture stopped after funded checkpoint");
+        }
         if (window.uiFixture.fundingScript) {
           // Exercise the funding prompt with the test's contract script; record what it resolved with.
           const source = await hooks.fundingSource({ contractScript: window.uiFixture.fundingScript, amountSat: 101_000n, maxFundingFeeSat: 500n,

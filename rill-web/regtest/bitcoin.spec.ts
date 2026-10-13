@@ -23,5 +23,11 @@ test("browser validates a finalized Bitcoin PSBT and receives Lightning, with co
   await expect(backup).toBeVisible();
   const downloading = page.waitForEvent("download"); await backup.click();
   await (await downloading).saveAs(testInfo.outputPath("paid-recovery.age"));
+  await page.goto("about:blank"); await page.goto(webURL());
+  await page.locator("#swap-wallet-setup summary").first().click();
+  await page.locator("#swap-saved-recoveries summary").click();
+  await page.getByRole("button", { name: "Open saved swap", exact: true }).last().click();
+  await expect(page.locator("#swap-recovery-result h3")).toHaveText("Recovery record verified");
+  expect(new URL(page.url()).hash).toBe("");
   expect(errors).toEqual([]);
 });

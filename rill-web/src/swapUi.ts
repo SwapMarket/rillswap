@@ -520,6 +520,45 @@ function mount(root: HTMLElement): void {
   network.onchange = applyNetwork;
   updateNetwork();
   // A swap link reopens its encrypted record locally: inspection decrypts and parses, nothing connects.
+  const savedRecoveries = node("details", "", "swap-saved-recoveries");
+  savedRecoveries.append(node("summary", "Saved funded swaps in this browser"));
+  const savedList = node("div", "Loading local recovery checkpoints...", "swap-saved-recoveries-list");
+  savedRecoveries.append(savedList); card.insertBefore(savedRecoveries, recovery.element);
+  const refreshSavedRecoveries = async (): Promise<void> => {
+    try {
+      const wallet = await walletPromise, entries = await wallet.listFundedRecoveries();
+      savedList.replaceChildren();
+      if (!entries.length) savedList.append(node("p", "No funded checkpoints saved here. This does not prove earlier swaps were unfunded; keep your existing backups."));
+      for (const entry of entries) {
+        const row = node("div"); savedList.append(row);
+        if ("error" in entry) { row.append(node("p", entry.error)); continue; }
+        row.append(node("p", `${entry.network}: ${entry.id.slice(-16)}`));
+        for (const label of ["Open saved swap", "Prepare download"]) {
+          const button = node("button", label); button.type = "button";
+          button.onclick = () => {
+            if (busy) return;
+            button.disabled = true;
+            void wallet.readFundedRecovery(entry.id).then((snapshot) => {
+              if (busy) return;
+              if (label === "Prepare download") {
+                offerDownload(row, snapshot.ciphertext, `rillswap-funded-${entry.id.slice(-16)}.age`);
+              } else {
+                if (network.value !== snapshot.network) { network.value = snapshot.network; applyNetwork(); }
+                history.replaceState(null, "", location.pathname + location.search);
+                linkPublished = false; linkAnchor.removeAttribute("href"); linkBox.hidden = true;
+                showTracking("Saved funded swap");
+                setStatus("Saved funded recovery opened locally", -1, "ready");
+                recovery.load(snapshot.ciphertext, "saved-funded-swap.age");
+              }
+            }).catch((error: Error) => { row.append(node("p", error.message)); })
+              .finally(() => { button.disabled = false; });
+          };
+          row.append(button);
+        }
+      }
+    } catch (error) { savedList.textContent = `Could not read saved recoveries: ${(error as Error).message}`; }
+  };
+  void refreshSavedRecoveries();
   const link = parseSwapLink(location.hash);
   if (link) {
     if (link.network in NETWORKS && network.value !== link.network) { network.value = link.network; applyNetwork(); }
@@ -1137,7 +1176,10 @@ function mount(root: HTMLElement): void {
         arrivals = [accepted];
         showTracking("Bitcoin to Lightning swap");
         const paid = await run(accepted, name, panel, report, (file) => publishLink(file, name),
-          () => validateMempoolApi(chainApi.value.trim(), name));
+          () => validateMempoolApi(chainApi.value.trim(), name), async (file) => {
+            await (await walletPromise).saveFundedRecovery(name, file);
+            await refreshSavedRecoveries();
+          });
         if (paid) setStatus("Lightning invoice paid", 4, "success");
       } catch (error) {
         if (!cancelled) {
@@ -1260,6 +1302,7 @@ async function run(
   report: (line: string) => void,
   publish: (file: Uint8Array) => void,
   chainApi: () => string,
+  persistFunded: (file: Uint8Array) => Promise<void>,
 ): Promise<boolean> {
   let fundsMayBeCommitted = false;
   // Backups stay visible while the stage prompts below them change.
@@ -1275,6 +1318,7 @@ async function run(
       saveRecovery: async (file, kind) => {
         offerDownload(backups, file, `rillswap-${kind}-recovery-${Math.floor(Date.now() / 1000)}.age`);
         publish(file);
+        if (kind === "funded") await persistFunded(file);
         report(kind === "terms" ? "recovery file saved to the backups list" : "funded recovery file added to the backups list");
       },
       // Showing the address can commit funds: anything sent there is the user's deposit from that moment.

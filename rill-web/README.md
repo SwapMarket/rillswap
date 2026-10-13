@@ -85,6 +85,15 @@ and can withhold execution. After reload, older recovery files without operation
 proof show a qualified claim observation, not verified sponsored completion.
 Unknown exposure remains blocked from automatic retry.
 
+Funded Bitcoin recovery checkpoints are saved encrypted in browser storage with
+strict commit and exact readback before funding publication. On a URL-less reload,
+open **Saved funded swaps in this browser** beside the recovery panel. Opening is local,
+not a payment or chain check. Keep downloads independently: browser eviction and
+the interval before an external deposit is observed remain recovery risks.
+Upgrades preserve existing recovery identities and counters, without retroactive
+checkpoints or automatic network actions. Surviving checkpoints with a missing
+identity cause a safe refusal, never a replacement key.
+
 ## Scripts
 
 From `rill-web/`:
