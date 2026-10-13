@@ -1,7 +1,90 @@
-# Checkout toolkit
+# rill-payments
 
-Experimental checkout SDK, shared payment policy and merchant ledger for
-RillSwap payment processing. This does not enable funded production use or mainnet routes.
+Merchant checkout tools for developers integrating RillSwap payments. The
+browser SDK provides `mountRillPay`, a reusable checkout dialog; the Bun
+merchant server manages a durable ledger, Lightning invoice issuance and
+signed payment acceptance. The dialog alone never pays, creates orders or
+establishes payment acceptance.
+
+The [demo shop](examples/demo-shop) shows the local payment methods:
+Lightning, Bitcoin through a RillSwap swap to Lightning, test fUSDC/fUSDT on
+Anvil, and regtest Monero receipts. These are development integrations, not
+production payment rails.
+
+**Status:** experimental and unaudited. Mainnet funding is disabled.
+
+## Install
+
+Use Bun 1.3.11, matching CI. From the repository checkout:
+
+```sh
+cd rill-payments
+bun install --frozen-lockfile
+```
+
+The package is not published to npm; use the checked-out source.
+
+## Quick start
+
+Run the complete Docker development stack from the repository root:
+
+```sh
+dev/devctl up
+```
+
+Open the shop at http://127.0.0.1:8090/ or the swap page at
+http://127.0.0.1:5273/swap.html. See [DEVELOPMENT.md](../DEVELOPMENT.md) for
+the payment walkthrough. The stack uses disposable test funds and public
+development credentials.
+
+For a browser integration, run `bun run build:rillpay` and serve
+`dist/rillpay.js` with your checkout page. This presentation-only example
+shows an unavailable method until your merchant backend is connected:
+
+```js
+import { mountRillPay } from "./dist/rillpay.js";
+
+const checkout = mountRillPay(document.body, {
+  merchant: "Example shop", item: "Demo item", total: "Quote required",
+  methods: [{
+    id: "lightning", label: "Lightning", network: "Bitcoin regtest",
+    available: false, unavailableReason: "Connect your merchant backend",
+    price: null, merchantFee: null, providerFee: null, walletFee: null,
+    confirmationTime: null, usdCents: null, minutesToConfirmation: null,
+  }],
+  onPay: async () => {}, // Replace with order creation and instructions.
+  onCancel: () => checkout.destroy(),
+});
+```
+
+For the standalone merchant server, first prepare the private configuration,
+keys and regtest LND credentials described in the reference below:
+
+```sh
+bun src/cli.ts provision /absolute/private/config.json
+bun src/cli.ts serve /absolute/private/config.json
+```
+
+Provision only a new ledger. `serve` opens the existing ledger on
+`127.0.0.1:8787`; put an HTTPS reverse proxy at the merchant origin in front
+of it.
+
+## Tests
+
+```sh
+bun run check:schemas
+bun run check:sandbox-fixture
+bun run typecheck
+bun run test
+bunx playwright install chromium
+bun run test:browser
+```
+
+The reference below covers detailed behavior and safety rules.
+
+## Reference
+
+### Policy basics
 
 `parseTerms` validates terms, not a BOLT11 signature or payment receipt.
 `evaluateNative` explains eligibility and never establishes payment acceptance.
@@ -21,7 +104,7 @@ bun test
 Canonical schemas and public fixtures live in `rill-docs/`. Generated validators
 are checked in and use no runtime schema compilation in browser consumers.
 
-## Recognizable RillPay checkout
+### Recognizable RillPay checkout
 
 `@rillswap/payments/rillpay` exports `mountRillPay(container, options)`, or build
 the browser module with `bun run build:rillpay`. The demo shop uses this same
@@ -61,7 +144,7 @@ invoice URL fragment, not a server-visible query; RillSwap removes it after
 inertly prefilling, without automatically requesting a quote or moving funds.
 Existing order persistence and signed-acceptance verification are unchanged.
 
-## Explicit invoice metadata binding
+### Explicit invoice metadata binding
 
 `@rillswap/payments/bolt11` exports `invoiceMetadataBinding(invoice, network,
 metadata)` for an optional strict hash-bound invoice profile. It uses the
@@ -83,7 +166,7 @@ no HTTP request or invoice issuance. Signature authentication and a metadata
 match do not independently establish the expected merchant/order/amount,
 current expiry, custody or settlement. Those checks remain the caller's duty.
 
-## Lightning Address discovery (no invoice request)
+### Lightning Address discovery (no invoice request)
 
 `@rillswap/payments/lnurl-pay` exports
 `discoverLightningAddress(address, approvedOrigins, transport?)`. The caller
@@ -169,7 +252,7 @@ an independent settlement observer. A local marker alone cannot recover an
 unknown remote invoice. Existing installations gain no startup, migration or
 automatic network behavior; production integration remains disabled.
 
-## Durable bound Lightning acceptance consumer
+### Durable bound Lightning acceptance consumer
 
 `@rillswap/payments/acceptance-consumer` exports the Bun-only
 `LightningAcceptanceConsumer`. Explicit `provision(path, identity)` creates a
@@ -205,7 +288,7 @@ waiting; native sandbox, bridge/provider evidence and public status are not
 Lightning acceptance. Actual ecommerce order authentication, external effect
 idempotency and production deployment remain separate release gates.
 
-### Opt-in merchant invoice exposure gate
+#### Opt-in merchant invoice exposure gate
 
 Pass an already opened `acceptanceConsumer` to `createMerchantService` to require
 existing full order bindings before exposing invoices. The configured merchant
@@ -249,7 +332,7 @@ uses the provider cooperative paid collector nor proves its historical failures
 resolved. This is not production fulfillment or process-crash/power-loss proof.
 Execution requires both existing LND/Bun opt-ins and pinned disposable fixtures.
 
-## Keyless acceptance signing
+### Keyless acceptance signing
 
 `createMerchantService` also accepts `KeylessMerchantServiceOptions`: omit
 `eventSigningKey` and supply `acceptanceSigner: { publicKey, sign }` instead.
@@ -287,7 +370,7 @@ not establish different-UID isolation, hardware custody, human approval or
 production signer conformance. Dedicated acceptance keys must never be reused
 as wallet/spending keys. Production custody remains a separate release gate.
 
-### Weak acceptance-key rejection and upgrades
+#### Weak acceptance-key rejection and upgrades
 
 Public `verifyAcceptance` and consumer identity validation now reject small-order
 public keys. Those points have no nonzero prime-order component: the underlying
@@ -313,7 +396,7 @@ any separately authorized replacement provisioning. Changing configuration canno
 bless its old acceptances. This intentional availability loss applies to weak-key
 installations, not to normal generated-key or supported mixed-order installations.
 
-## Advisory native Lightning merchant manifest
+### Advisory native Lightning merchant manifest
 
 `createMerchantService({ ...options, publishManifest: true })` explicitly
 publishes public `GET /v1/manifest`. The default and explicit false retain 404.
@@ -353,7 +436,7 @@ The named regtest network does not identify a unique private chain or topology.
 `productionEnabled` is always false; no bridge, swap or sandbox-native route is
 advertised. Publication is an in-memory opt-in, not a migration or funding gate.
 
-## Merchant ledger
+### Merchant ledger
 
 Import `MerchantLedger` from `@rillswap/payments/merchant` in Bun. Provision
 explicitly into a private directory (mode 0700). The database is mode 0600;
@@ -403,7 +486,7 @@ issuance refusal, invalid-signature and foreign-CA refusal, and denial of an
 empty `SendPaymentV2` call. This is not formal minimum privilege, comprehensive
 spending isolation or production key custody. No raw secrets leave the sidecar.
 
-### Disposable web-to-merchant swap diagnostic
+#### Disposable web-to-merchant swap diagnostic
 
 The explicit fresh-regtest happy-path diagnostic exercises the actual
 `executeMerchantSwap` SDK adapter with Core standing in for the payer wallet.
@@ -470,7 +553,7 @@ merchant/LND restart, machine-crash durability, production deployment or
 stablecoin route conformance. Ordinary installations have no startup or storage
 migration changes. Existing checkpoints never authorize replacement funding.
 
-### Isolated HTTPS listener profile (diagnostic only)
+#### Isolated HTTPS listener profile (diagnostic only)
 
 The existing `scripts/regtest-merchant.ts provision|serve` configuration and
 ephemeral plain-HTTP listener remain unchanged. That diagnostic records
@@ -583,7 +666,7 @@ identity, source-credit provenance or funded conversion. Exact leaf pinning befo
 sending a capability remains a separate acquisition-client requirement. Existing
 installations receive no automatic profile selection, listener or migration.
 
-## Regtest merchant API and SDK
+### Regtest merchant API and SDK
 
 Lightning SDK merchant status reads now use a setup-inclusive ten-second
 header/body/decode budget. `merchantReadTimeoutMs` selects an integer from 1
@@ -692,7 +775,7 @@ order fulfillment. Signature verification alone does not prevent replay.
 `createMerchantService().deliverEvents` retries unchanged event IDs until the
 consumer acknowledges. `GET .../events` retains history after acknowledgment.
 
-## WooCommerce-priced buyer checkout (opt-in)
+### WooCommerce-priced buyer checkout (opt-in)
 
 `createWooCommerceOrderSource` (`@rillswap/payments/woocommerce`) reads an order
 through the WooCommerce REST API v3 (`GET /wp-json/wc/v3/orders/:id`, HTTPS basic
@@ -775,7 +858,7 @@ Public references: [REST API v3 order retrieval](https://woocommerce.github.io/w
 [WooCommerce 11.1.2 BTC currencies](https://github.com/woocommerce/woocommerce/blob/11.1.2/plugins/woocommerce/i18n/currencies.php),
 and [decimal formatting](https://github.com/woocommerce/woocommerce/blob/11.1.2/plugins/woocommerce/includes/wc-formatting-functions.php).
 
-### Disposable real-store diagnostic
+#### Disposable real-store diagnostic
 
 `bun run test:woocommerce` explicitly starts isolated WordPress, MariaDB and
 WP-CLI containers with pinned official-image digests, verifies the SHA-256 of
@@ -804,7 +887,7 @@ store's hosting configuration, checkout plugin, rate limits, settlement, signer
 custody, mainnet authority or production readiness. The synthetic invoice issuer
 does not contact a Lightning node and the fixture never spends funds.
 
-### Fulfillment writeback to a test store (opt-in, best effort)
+#### Fulfillment writeback to a test store (opt-in, best effort)
 
 `createWooCommerceFulfillment({ storeOrigin, consumerKey, consumerSecret,
 acceptances: consumer, testStoreOnly: true })` marks a WooCommerce order paid
@@ -850,7 +933,7 @@ The disposable real-store diagnostic exercises the full path (checkout,
 synthetic settlement, signed delivery, consumer acceptance, writeback, replay)
 and checks that a cancelled order stays untouched.
 
-## External provider readiness
+### External provider readiness
 
 `bun run probe:providers` performs bounded read-only GET requests to the official
 Atomiq and Boltz token/limit/pair/contract endpoints. It follows no redirects,
@@ -866,7 +949,7 @@ contract describe external invoices and USDT0/tBTC composition; operational
 pairs/deployments and refund asset remain unverified. Stablecoin and LayerZero
 checkout execution is not yet implemented or advertised by this service.
 
-## Experimental EVM receipt verification
+### Experimental EVM receipt verification
 
 `@rillswap/payments/evm-receipt` verifies prebound direct EOA ERC20 transfers.
 It is an observer, not an enabled checkout rail. Ethereum mainnet and Sepolia
@@ -897,7 +980,7 @@ flags must be affirmative deployment evidence supplied by trusted configuration,
 not assumed from a symbol or copied from customer requests. No production token,
 live native checkout pricing or public-network receipt conformance is claimed here.
 
-### Sepolia native payment and inventory ledger
+#### Sepolia native payment and inventory ledger
 
 `NativeReceiptLedger` from `@rillswap/payments/native-ledger` explicitly provisions
 a separate private Sepolia database, or an explicitly scoped disposable sandbox
@@ -923,7 +1006,7 @@ Native events currently have only an internal outbox, not a signed public API.
 No native SDK send path, deployed affordable asset, or automatic merchant
 conversion is enabled. Operational native checkout remains a separate gate.
 
-### Disposable native RPC conformance
+#### Disposable native RPC conformance
 
 The opt-in native sandbox test deploys the source-controlled `SandboxToken.sol`
 fixture and exercises real RPC transactions against a private Anvil child.
@@ -985,7 +1068,7 @@ This test proves local execution and ledger conformance for this fixture only.
 It does not prove Ethereum consensus finality, production token behavior,
 pricing, provider settlement, or native checkout SDK/service integration.
 
-### Sandbox-only native HTTP service
+#### Sandbox-only native HTTP service
 
 `createNativeSandboxService` from `@rillswap/payments/native-server` is a separate,
 manually mounted Fetch handler. It requires an explicitly provisioned local
@@ -1050,7 +1133,7 @@ and after signed evidence. It also exercises the sandbox SDK below with a
 private file-backed scripted wallet. No production deployment or supported
 browser-wallet adapter is enabled.
 
-### Native sandbox funding SDK
+#### Native sandbox funding SDK
 
 `createNativeSandboxCheckout` from `@rillswap/payments/native-sdk` requires
 authoritative sandbox terms, an independently pinned merchant event key, scoped
@@ -1104,7 +1187,7 @@ the same hash without another broadcast. The browser fixture uses a wallet stub
 and does not establish browser-wallet private durability. Real wallet deployment,
 pricing, ecommerce hosting and production fulfillment remain separate gates.
 
-## Monero regtest receipt rail
+### Monero regtest receipt rail
 
 A separate, local-regtest-only Monero rail, used by the demo shop in the dev
 stack (`DEVELOPMENT.md`). Modules: `@rillswap/payments/monero-rpc` (minimal
@@ -1155,7 +1238,7 @@ transaction. Amounts are parsed losslessly as `bigint`.
 Verify events with a pinned key and the expected terms. They are local regtest
 evidence only, never a mainnet payment claim.
 
-## Constrained treasury payout foundation
+### Constrained treasury payout foundation
 
 `TreasuryTransferJournal` from `@rillswap/payments/treasury` is an explicitly
 provisioned private Sepolia journal, not an automatic conversion adapter or a
@@ -1180,7 +1263,7 @@ spend budgets, not inventory balances. No signer/observer deployment, native
 inventory synchronization, batching, conversion output or automatic job runner
 is enabled. Payout failure cannot reopen a paid native or Lightning order.
 
-## LayerZero quote/receive/retry artifacts
+### LayerZero quote/receive/retry artifacts
 
 `@rillswap/payments/layerzero` implements an inactive, source-pinned PacketV1
 observer and unsigned direct-delivery retry builder, not an enabled bridge rail.
@@ -1220,7 +1303,7 @@ Only nonupgradeable Ethereum L1/Sepolia profiles are handled; proxies, L2s,
 custom implementations and compose require dedicated profiles. No deployed
 USDT/USDT0 pathway or operational fee/recovery conformance is configured here.
 
-### Explicit ULN302 configuration observations
+#### Explicit ULN302 configuration observations
 
 `observeUln302Configuration(request, reader)` now observes one caller-recognized
 send or receive library's effective messaging configuration. Its separate
@@ -1280,7 +1363,7 @@ does not enforce it. A signing consumer must persist operation identity,
 enforce expiry and full fresh pathway/commitment/nonce/simulation checks before
 authorizing gas. Permissionless receive retry does not bypass verification.
 
-## Sequential admission and resume controls
+### Sequential admission and resume controls
 
 `@rillswap/payments/routing` evaluates explicit merchant-approved frozen routes,
 not untrusted discovery catalogs. Capabilities must have exact adapter/deployment

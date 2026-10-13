@@ -1,11 +1,104 @@
 # rill-cli
 
-RillSwap command-line client, optional local watcher, static web server, and
-independent recovery executable.
+`rill` is the RillSwap command-line client. It discovers providers, swaps
+between on-chain Bitcoin and Lightning, and inspects or recovers encrypted
+swap records on its own, without the provider or any RillSwap service.
 
-Status: pre-release and not suitable for real funds.
+It is for users testing swaps with their own Bitcoin Core wallet and LND
+node. You select the provider explicitly; a directory listing is not proof of
+liquidity, availability or honesty.
 
-## Provider directory: `rill providers list`
+**Status:** experimental and unaudited. Regtest, signet and testnet4 only;
+mainnet funding is disabled in code. Do not use real funds.
+
+## Install
+
+Use a checkout of this monorepo, Python 3.13 or later (CI uses 3.14), `uv`,
+and CMake with a C compiler. From `rill-cli/`:
+
+```sh
+uv venv --python 3.14 .venv
+uv pip install --python .venv/bin/python -r requirements-dev.txt
+source .venv/bin/activate
+cmake -S ../rill-crypto -B tmp/native -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+cmake --build tmp/native --parallel 2
+```
+
+Pass the absolute native library path with `--crypto-library`. The examples
+below use `tmp/native/librill_crypto.so`, the Linux build output.
+
+## Quick start
+
+For a ready-made trial, run `dev/devctl up` and `dev/devctl smoke` from the
+repository root, or `dev/devctl swap btc-to-ln 50000`. See
+[DEVELOPMENT.md](../DEVELOPMENT.md).
+
+For your own signet nodes, the Bash example below runs from `rill-cli/`. Set
+`RELAY`, `CORE_COOKIE`, `WALLET`, `LND_TLS_CERT`, `AGE_RECIPIENT` and
+`AGE_IDENTITY` to your relay, local node credentials, wallet and age keys,
+and `INVOICE` to a signet BOLT11 invoice. It assumes a local Tor
+`HTTPTunnelPort` on port 9080, synced nodes, wallet funds and channel
+liquidity.
+
+```bash
+discovery=(--network ../rill-docs/networks/signet.json
+  --crypto-library "$PWD/tmp/native/librill_crypto.so"
+  --relay "$RELAY" --relay-proxy http://127.0.0.1:9080)
+rill providers list "${discovery[@]}"
+
+common=("${discovery[@]}" --max-success-fee-sat 1000
+  --core-port 38332 --core-cookie "$CORE_COOKIE" --wallet "$WALLET"
+  --lnd-port 10009 --lnd-tls-cert "$LND_TLS_CERT"
+  --recipient "$AGE_RECIPIENT" --identity "$AGE_IDENTITY")
+
+# Pick a provider identity offering each direction.
+rill swap btc-to-ln "${common[@]}" --provider "$BTC_TO_LN_PROVIDER" \
+  --invoice "$INVOICE" --lnd-macaroon "$DECODE_MACAROON" \
+  --recovery-output btc-to-ln.age
+rill swap ln-to-btc "${common[@]}" --provider "$LN_TO_BTC_PROVIDER" \
+  --payout-sat 10000 --lnd-macaroon "$PAYMENT_MACAROON" \
+  --recovery-output ln-to-btc.age
+
+# Inspect a recovery snapshot without moving funds.
+rill recover inspect --network ../rill-docs/networks/signet.json \
+  --crypto-library "$PWD/tmp/native/librill_crypto.so" \
+  --identity "$AGE_IDENTITY" btc-to-ln.age.funded
+```
+
+The forward macaroon must decode invoices; the reverse macaroon must also send
+payments. Use a new recovery filename for each swap and keep every successor
+file. A timeout does not prove that a payment failed: inspect the retained
+evidence before retrying.
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `providers list` | List verified provider announcements |
+| `swap btc-to-ln` | Pay a Lightning invoice with on-chain BTC |
+| `swap ln-to-btc` | Receive on-chain BTC by paying over Lightning |
+| `recover inspect`, `export`, `export-update` | Inspect or write encrypted recovery snapshots |
+| `recover observe-funding`, `observe-claim` | Read chain evidence for a recorded swap |
+| `recover sign-refund`, `broadcast-refund`, `watch-refund` | Prepare, submit or watch a refund |
+| `recover prepare-claim`, `broadcast-claim`, `watch-claim` | Prepare, submit or watch a Lightning to BTC claim |
+| `treasury status`, `reconcile` | Inspect or reconcile existing regtest conversion jobs |
+
+## Tests
+
+From `rill-cli/`, run the default CI selection:
+
+```sh
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q \
+  -m 'not native_crypto and not bitcoin_core and not age_interop' \
+  --basetemp=tmp/pytest-ci
+```
+
+The reference below covers detailed behavior, safety rules and opt-in
+diagnostics.
+
+## Reference
+
+### Provider directory: `rill providers list`
 
 Anyone can run a provider: publishing a signed kind-39417 announcement is the
 only requirement, and no allowlist or registry exists. This read-only command
@@ -28,7 +121,7 @@ availability, nor honesty, and relays can withhold events or be flooded (each
 relay's query stops after 4096 events, so use several independent relays).
 Choosing a provider stays an explicit `--provider` argument to `swap`.
 
-### Relay privacy
+#### Relay privacy
 
 On signet, testnet4, and mainnet, `providers list` and `swap` refuse to
 connect to relays unless `--relay-proxy http://127.0.0.1:9080` names a local
@@ -37,7 +130,7 @@ Tor) or `--allow-direct-relay` explicitly accepts revealing your IP address.
 There is no fallback from the proxy to a direct connection. Regtest connects
 directly.
 
-## Live swap: `rill swap btc-to-ln`
+### Live swap: `rill swap btc-to-ln`
 
 Supported networks: regtest, signet, and testnet4. Mainnet wallet funding is
 refused in code until release acceptance.
@@ -92,7 +185,7 @@ Exit codes:
 - `2`: any other failure. Check whether a `.funded` file exists before
   assuming nothing was committed.
 
-## Live swap: `rill swap ln-to-btc`
+### Live swap: `rill swap ln-to-btc`
 
 Receives on-chain BTC by paying a provider's hold invoice from your own LND
 (RS-004). Same networks and mainnet gate as above. It runs these steps in order:
@@ -629,7 +722,7 @@ contact, payment, funding, migration, or broadcasts are implemented by these
 offline commands. The separate `sign-refund` command signs only after its
 explicitly requested regtest checks.
 
-## Merchant inventory journal (internal, not an executable conversion service)
+### Merchant inventory journal (internal, not an executable conversion service)
 
 `rill_cli.conversion_journal` provides an operator-only allocation boundary for
 merchant-held Lightning to an owned Taproot BTC treasury destination. It does
@@ -697,7 +790,7 @@ owner must supply the affirmative journal source pin, never learn it from a read
 Existing CLI callers omitting the pin retain their original behavior and call
 contracts; no automatic learning, configuration migration or payment is added.
 
-### Original reserved reverse execution (internal regtest only)
+#### Original reserved reverse execution (internal regtest only)
 
 `rill_cli.reverse_conversion.run_reserved_conversion()` binds one original
 instance-local journal reservation to the existing reverse SDK. It validates
@@ -728,7 +821,7 @@ positive LND accounting projector or production route is enabled. The separate
 regtest reconciliation/status commands below cannot start execution. Compatible
 existing installations undergo no migration, automatic provisioning or work.
 
-### Original-invocation funding inclusion hints (explicit regtest opt-in)
+#### Original-invocation funding inclusion hints (explicit regtest opt-in)
 
 `run_reserved_conversion(..., retain_funding_inclusion=True)` additionally retains
 an encrypted historical lookup hint during the **original** invocation. The
@@ -785,7 +878,7 @@ No SQL transaction covers the file publication, and no current-state atomicity i
 claimed. This gate does not establish original-SDK interruption recovery or enable
 production funding.
 
-### Historical Core wallet recognition (read-only, not custody authority)
+#### Historical Core wallet recognition (read-only, not custody authority)
 
 `WalletRpc.observe_historical_wallet_output(txid, treasury_script)` reads the
 configured named wallet's historical transaction bytes twice, independently
@@ -815,7 +908,7 @@ establish destination selection, not destination-key ownership or Core identity;
 unknown existing wallets require affirmative custody before any future completion.
 No marker migration, automatic wallet work or production conversion is enabled.
 
-### Original conversion receipt collection (read-only regtest only)
+#### Original conversion receipt collection (read-only regtest only)
 
 `rill_cli.reverse_reconciliation.collect_conversion_receipt()` verifies the
 original encrypted journal checkpoint, an explicitly selected signed funded
@@ -863,7 +956,7 @@ dispatched holds remain until an explicit successful action. This does not enabl
 production funding/accounting, guarantee later finality or cover restoring both
 the database and external fence.
 
-### Explicit regtest operator commands
+#### Explicit regtest operator commands
 
 `rill treasury status` inspects one existing job. `rill treasury reconcile` is an
 explicit financial action: fresh original evidence can consume the actual debit
@@ -955,7 +1048,7 @@ A compatible hint is historical input subject to fresh proof. Older binaries
 reject v2. There is no startup read, backfill or migration, and no claim that
 general original-SDK process-death recovery or restored database/fence authority is solved.
 
-### Bounded original-SDK interruption conformance
+#### Bounded original-SDK interruption conformance
 
 The funded conformance fixture isolates one SDK death boundary: the original
 process owns its reservation/invocation, publishes the actual funded recovery and
@@ -988,7 +1081,7 @@ recovery, database rollback or production custody. `watch-claim` is not used as
 proof of this route. No runtime recovery controller, startup action, migration or
 production funding enablement is added; upgrades retain existing behavior.
 
-#### Signed-fallback acknowledgment boundary
+##### Signed-fallback acknowledgment boundary
 
 A separate case lets the original SDK acquire its signer and make both local
 signatures (probe and fallback). It awaits the real encrypted fallback publisher.
@@ -1014,7 +1107,7 @@ This adds only a separate controlled interruption test, not automatic recovery,
 new SDK rights, a byte-replay runtime adapter or production funding. Existing
 installations and missing, partial or older artifacts gain no new behavior.
 
-### Merchant credit correspondence (internal, provenance only)
+#### Merchant credit correspondence (internal, provenance only)
 
 `rill_cli.merchant_credit.verify_merchant_credit` verifies the existing merchant
 PureEd25519 acceptance format against an independently pinned key, matching paid
@@ -1041,7 +1134,7 @@ invoice interoperability, safe outgoing capacity/economic projections, encrypted
 swap recovery, runner wiring and funded receipt-to-treasury conversion remain
 required. This verifier performs no import, migration, provisioning or payment.
 
-### Leaf-pinned merchant acquisition (internal diagnostic)
+#### Leaf-pinned merchant acquisition (internal diagnostic)
 
 `rill_cli.merchant_https.MerchantHttpsReader` reads the current view and events
 from M24's explicit numeric-loopback regtest HTTPS profile. Configure a validated
@@ -1079,7 +1172,7 @@ payments. Run it from `rill-payments` with
 CI runs this against the CLI's pinned Python environment. Existing installations
 receive no automatic acquisition, provisioning, import or persisted-format change.
 
-### Composed merchant/source provenance acquisition (internal diagnostic)
+#### Composed merchant/source provenance acquisition (internal diagnostic)
 
 `rill_cli.merchant_source.MerchantCreditCollector` owns the concrete read sequence:
 leaf-pinned merchant HTTPS, strict structural paid-view/single-event extraction,

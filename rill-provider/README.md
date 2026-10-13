@@ -1,13 +1,121 @@
 # rill-provider
 
-RillSwap provider policy, treasury management, persistence, reconciliation,
-watching, and integration diagnostics.
+`rill-provider` runs the provider (maker) side of RillSwap: it announces swap
+terms over Nostr relays, handles client sessions, and coordinates Bitcoin,
+Lightning and ERC20 settlement using your own Bitcoin Core and LND nodes.
 
-Status: pre-release and not suitable for real funds. Regtest, signet, and
-testnet4 serve both swap directions; mainnet serving stays refused until a
-release accepts it.
+It is for operators testing a self-hosted liquidity provider, not a hosted
+service. Running it requires node credentials, liquidity, and careful
+handling of encrypted keys and persistent swap state.
 
-## Operator quickstart (signet)
+**Status:** experimental and unaudited. Regtest, signet and testnet4 only;
+mainnet funding is disabled in code. Do not use real funds.
+
+## Install
+
+Use a checkout of this monorepo, Python 3.13 or later (CI uses 3.14), `uv`,
+and CMake with a C compiler. From `rill-provider/`:
+
+```sh
+uv venv --python 3.14 .venv
+uv pip install --python .venv/bin/python -r requirements-dev.txt
+source .venv/bin/activate
+cmake -S ../rill-crypto -B tmp/native -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+cmake --build tmp/native --parallel 2
+```
+
+Set `native_crypto_library` in your provider config to the absolute path of
+`tmp/native/librill_crypto.so` (the Linux build output). Identity
+provisioning takes that path through `--native-crypto-library`.
+
+## Quick start
+
+For the easiest trial, use the disposable Docker stack: from the repository
+root, run `dev/devctl up`, then `dev/devctl smoke`. See
+[DEVELOPMENT.md](../DEVELOPMENT.md) for requirements and controls.
+
+To run your own signet provider, first prepare synced local Bitcoin Core and
+LND nodes, channel liquidity, scoped LND macaroons, `age-keygen`, and a Tor
+`HTTPTunnelPort`. From `rill-provider/`, with the environment above active:
+
+```sh
+mkdir -p -m 700 tmp/signet
+age-keygen -o tmp/signet/custody.key
+chmod 600 tmp/signet/custody.key
+rill-provider provision-identity --out tmp/signet/provider-identity.age \
+  --recipient "$(age-keygen -y tmp/signet/custody.key)" \
+  --native-crypto-library "$PWD/tmp/native/librill_crypto.so"
+cp examples/provider.signet.json tmp/signet/provider.json
+```
+
+Edit the copied config: set the printed provider identity, your custody
+recipient, the absolute library path, node credentials, destination script,
+relay URLs and terms. Relative paths resolve from the config file. The
+example offers BTC to Lightning; the reference below explains Lightning to
+BTC setup. Only affirm the store authority declarations if they are true.
+
+```sh
+rill-provider provision-store --config tmp/signet/provider.json
+rill-provider serve --config tmp/signet/provider.json
+```
+
+Provision the store once. Run one service per store, never restore an older
+store snapshot, and back up the custody key and encrypted identity offline.
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `provision-identity` | Create an encrypted provider identity file |
+| `provision-store` | Create a new empty live session store |
+| `serve` | Run the provider until SIGINT or SIGTERM |
+| `inspect-swaps` | Inspect retained swap state offline |
+| `reconcile-payment` | Track one `PAYING` swap without sending another payment |
+| `migrate-store` | Explicitly upgrade a v5 to v7 store offline |
+
+## Tests
+
+From `rill-provider/`, run the default CI selection:
+
+```sh
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q \
+  -m 'not native_crypto and not bitcoin_core and not lnd and not web_nip59_interop' \
+  --basetemp=tmp/pytest-ci
+```
+
+The reference below covers detailed behavior, safety rules and opt-in
+diagnostics.
+
+## Reference
+
+- [Operator quickstart (signet)](#operator-quickstart-signet)
+- [Reservation ledger and development checks](#reservation-ledger-and-development-checks)
+- [Authoritative live session store](#authoritative-live-session-store)
+- [Required cooperation and provider identity](#required-cooperation-and-provider-identity)
+- [Relay service and request admission](#relay-service-and-request-admission)
+- [BTC to Lightning settlement](#btc-to-lightning-settlement)
+- [Lightning to BTC settlement](#lightning-to-btc-settlement)
+- [Reverse proposal evidence and debt admission](#reverse-proposal-evidence-and-debt-admission)
+- [Live reverse cooperation and repayment](#live-reverse-cooperation-and-repayment)
+- [Offline swap inspection](#offline-swap-inspection)
+- [Payment reconciliation and payer binding](#payment-reconciliation-and-payer-binding)
+- [Operator configuration](#operator-configuration)
+- [Offline handshake custody](#offline-handshake-custody)
+- [Nostr transport primitives](#nostr-transport-primitives)
+- [Offline handshake and issuance registries](#offline-handshake-and-issuance-registries)
+- [Bitcoin Core transaction and fee observations](#bitcoin-core-transaction-and-fee-observations)
+- [Payment journal and LND observers](#payment-journal-and-lnd-observers)
+- [Core source and historical transaction observations](#core-source-and-historical-transaction-observations)
+- [Merchant proof and order admission conformance](#merchant-proof-and-order-admission-conformance)
+- [Merchant conversion and completion conformance](#merchant-conversion-and-completion-conformance)
+- [Funding inclusion and encrypted hint retention](#funding-inclusion-and-encrypted-hint-retention)
+- [Paid refusal diagnostics](#paid-refusal-diagnostics)
+- [Treasury accounting observations](#treasury-accounting-observations)
+- [Recording payment tracking evidence](#recording-payment-tracking-evidence)
+- [Invoice observation and protobuf generation](#invoice-observation-and-protobuf-generation)
+- [Disposable LND diagnostics](#disposable-lnd-diagnostics)
+
+### Operator quickstart (signet)
 
 The rest of this README is design and upgrade notes. This section is the
 supported path to a running signet provider.
@@ -107,6 +215,8 @@ Tor; relay traffic must not reveal your IP), Python 3.13 or later,
 
    Your identity key should appear with your terms.
 
+#### Cooperative claims and daily operation
+
 **Cooperative claims.** Every new swap negotiates `cooperative-claim/v1`; you
 cannot turn it off. After the swap settles, the provider and client cosign a
 MuSig2 key-path spend that looks like any single-key Taproot payment. The
@@ -121,6 +231,8 @@ trusted). Keep exactly one `serve` per store. Use `inspect-swaps` to list
 retained swaps offline and `reconcile-payment` for a stuck `PAYING` swap. On
 upgrade, stop the service, install the new version, and start it again: stores
 v8 to v13 upgrade on open; v5 to v7 need `migrate-store` first (below).
+
+### Reservation ledger and development checks
 
 The provider's first implementation is an append-only SQLite reservation
 ledger. Its explicit `create` operation refuses existing files and remains
@@ -173,6 +285,8 @@ Existing reservation and payment journals are neither opened nor migrated
 by this diagnostic. Missing, partial, old, or restored session records prove
 no historical safety and must not trigger reconstruction or an action.
 
+#### Handshake signing primitives
+
 `handshake_signing.session_reservation_for_init` constructs a public,
 independently constrained binding from bounded inner initiation bytes. The
 purpose-scoped `sign_handshake_accept` requires a separately held, currently
@@ -189,6 +303,8 @@ durably committed response, no acceptance may be sent. Upgrading from the
 previous provider release does not create, migrate, or scan any session state;
 absent, partial, old, or restored state grants no key allocation or action
 authority.
+
+### Authoritative live session store
 
 `live_session_store.LiveSessionStore` is the **authoritative** handshake
 session store (SQLite `RLS1` v14; v5-v7 require explicit migration and unreleased v1-v4 files are refused unchanged), and the only provider store whose rows may
@@ -249,9 +365,9 @@ host. The store cannot verify that attestation. Behavior:
    This is not deadline, payment, nonce, chain, or signing authority. Handshakes
    contain no signed session expiry; mutable activity timestamps are not one.
    Restored or previous-release sessions receive no provenance backfill and keep
-   independent unilateral recovery and settlement-debt repayment. The existing
-   production rejection of featured reverse acceptance remains unchanged until
-   independently verified reverse admission and signing safeguards are complete.
+   independent unilateral recovery and settlement-debt repayment. Live reverse
+   cooperation is wired through `ReverseSettlement.cosign_cooperative_proposal`
+   (see [Live reverse cooperation and repayment](#live-reverse-cooperation-and-repayment)).
    The preparatory `ReverseCooperationWindow` freezes a maximum 30-second
    monotonic deadline intersecting the signed proposal deadline. Time expiry is
    exclusive, height equality at the signed refund margin is allowed, and any
@@ -321,12 +437,14 @@ host. The store cannot verify that attestation. Behavior:
   block the session. For init, a stranger can trigger this, and the cost is
   loss of availability, not exposure.
 
+#### Mailbox transport and epoch rotation
+
 The store does not detect an in-place rollback of the authoritative volume or
 a clone on another host. Admission grants no funding, payment, or claim
 authority. Upgrading does not create this store. The diagnostic
 `PreparedHandshakeStore` and `IssuanceReservationStore` are never read,
-migrated, or promoted, and there is still no relay listener or publisher
-wired to the store. Two transport operations keep the session secret inside
+migrated, or promoted. `handshake_service.HandshakeService` connects the
+relays to this store. Two transport operations keep the session secret inside
 the store:
 
 - `wrap_pending(message_id, transport=Context)` returns a fresh RS-006 NIP-59
@@ -374,6 +492,8 @@ Capacity is counted from the durable rows, so a restart does not reset it.
 A refused session raises `SessionCapacityError`. When the tombstones are
 full, new sessions stay refused until the operator acts. Strangers can still
 fill capacity, but only at the configured rate.
+
+#### Economic capacity and reservation release
 
 Economic capacity is separate. Every firm offer atomically creates an
 `economic_reservations` row next to its permanent payment-hash reservation,
@@ -443,6 +563,8 @@ assumed. Raise
 `max_active_reservations` to accept more exposure. Doing so does not resolve
 uncertainty, and freeing a slot does not replenish Lightning liquidity.
 
+#### Idle expiry and epoch-bound sessions
+
 `expire_idle(now=, idle_timeout=)` expires sessions that sit idle before any
 economic step: reserved, accepted, or confirmed with nothing after the
 confirm. It deletes their key, messages, and conflict evidence (with SQLite
@@ -480,6 +602,8 @@ an existing installation. Omitted features keep the existing legacy policy;
 there is no silent configuration upgrade. The browser's disconnected Nostr
 verifier recognizes the same signed requirement, not live swap authority.
 
+### Required cooperation and provider identity
+
 Cooperative MuSig2 claims (`cooperative-claim/v1`) are intrinsic, not a
 configuration option: the store policy always includes the feature, every new
 session must request it, every new accept echoes it, and every new firm offer
@@ -513,6 +637,8 @@ that names this identity, or a single-network RS-005 announcement
 announcement `revision` equals `created_at`. The real web verifier accepts
 these announcements (opt-in interop test). Back up the identity file
 separately. It is small, long-lived, and not in the live store's volume.
+
+### Relay service and request admission
 
 `relay_client.RelayConnection` is a minimal NIP-01 WebSocket client (aiohttp).
 It returns True from `publish` only on an explicit relay `OK`, keeps one
@@ -556,6 +682,8 @@ The same applies to a validly signed message at the next sequence that is not
 a `quote_request`. Nothing is admitted, so the client stream stays at that
 sequence.
 
+#### Quote pricing and invoice policy
+
 `quote_policy.answer_quote` is that responder. It prices indicative quotes as
 `base + ceil(L * ppm / 1e6)` within the announced bands. It takes the
 reference height from Bitcoin Core (`tip_height`, from the optional
@@ -586,6 +714,8 @@ the custody recipient like the session key (`contract_keys`). The payment
 hash is written to `payment_hashes` in the same transaction as the offer.
 That table is never deleted, not even when the session expires. A terms
 offer grants no funding or payment action by itself.
+
+### BTC to Lightning settlement
 
 **Acceptance and settlement.** A signed `terms_accept` that replies to the
 recorded offer, before `terms_expiry`, moves the session to `ACCEPTED`
@@ -692,6 +822,8 @@ Settlement steps:
   wait restarts. `LOST` releases the economic reservation as `claim-lost`:
   the Lightning payment is gone and nothing further can happen to the swap.
 
+### Lightning to BTC settlement
+
 **LN to BTC (RS-004).** A service whose `handshake.profile` is
 `ln-to-btc/v1` serves that profile only. Firm offers need
 `lnd.invoices_macaroon` (`invoices:read` and `invoices:write`, for
@@ -728,6 +860,8 @@ advances each swap one step per tick:
 
 The client normally claims with a cooperative key-path spend that the provider
 cosigns (described below); its own script-path claim stays the fallback.
+
+#### Bound LND invoice operations
 
 `LndHoldInvoices.settle` accepts optional transport guards: an absolute
 monotonic `deadline` and a repeatable, nonconsuming `submission_allowed`
@@ -783,6 +917,8 @@ An expired cooperation window supplies no new deadline or signing authority.
 Positive bound SETTLED reconciliation remains required before future cooperative
 partial signing; transport success alone never permits a partial signature.
 
+#### Positive settlement observation and permissions
+
 `observe_bound_settled_invoice` is the separate positive reconciliation query:
 the original-bound, identity-bracketed three-read batch must report SETTLED with
 paid amount at least the original invoice amount. Exact payment and overpayment
@@ -829,6 +965,8 @@ partial, mixed, unsupported, or invalid archives retain debt and reservations
 without dispatch or refund; operator repair may be needed. Missing debt never
 triggers repayment, backfill, or a startup scan.
 
+### Reverse proposal evidence and debt admission
+
 The private reverse public-key snapshot is preparatory for Core evidence
 acquisition. The owner computes native curve results before queuing a worker;
 the immutable snapshot holds only public keys, tweak, results, and parities.
@@ -863,8 +1001,8 @@ negotiation caller or native nonce allocation uses this boundary yet. Featured
 repayment uses the original-backend bound path described above, not the
 acquisition observations as authorization for another connection.
 
-`ReverseSettlement._acquire_proposal_debt` is an internal, nonactivated consumer
-of that writer. Inside one store-owned operation it retains authenticated private
+`ReverseSettlement._acquire_proposal_debt` is the internal consumer of that
+writer, called from live reverse cosigning. Inside one store-owned operation it retains authenticated private
 knowledge, reserves the exact proposal, and preflights the original live context.
 Replays, including after restart, return receipts without backend work, new
 windows, or debt. Fresh acquisition captures public curve results on the owner,
@@ -878,12 +1016,14 @@ LND receives the captured operation/window submission predicate, not an absolute
 deadline copied from a different clock domain. Its real-monotonic transport
 budget remains separate. Expiry, backend failure, cancellation, or owner loss
 abandons cooperation without clearing knowledge or any already committed debt.
-No settlement RPC, nonce, partial signature, reply, or production negotiation is
-enabled by this entry. Evidence eligibility is bounded, not physical execution:
+This entry itself sends no settlement RPC and creates no nonce, partial
+signature or reply. Evidence eligibility is bounded, not physical execution:
 a started read may outlive expiry, and a trickling Core endpoint can retain the
 gate indefinitely while drainage preserves exclusion. Upgrading installations
 gain no startup action; absent original memory and partial or older reservations
 never trigger acquisition or reconstruct authority.
+
+#### Paid proposal preflight
 
 The private live-proposal context getter requires an explicit purpose.
 Acquisition still requires FUNDED without debt. The preparatory paid-signing
@@ -891,7 +1031,7 @@ purpose requires local SETTLED with the exact authenticated proposal preimage,
 the original process-local window and negotiation, and the unchanged owned
 native-valid version-2 BURNED cooperation reservation without refund artifacts.
 Released economic exposure after repayment does not erase that distinct
-cooperation reservation. No paid-signing consumer exists yet. Local SETTLED does
+cooperation reservation. Live reverse repayment consumes this purpose. Local SETTLED does
 not prove repayment provenance or current original-node payment; future signing
 still requires fresh actual bound positive SETTLED, Core, fee, custody, and
 original-clock evidence. The getter changes no durable lifecycle state, but a
@@ -920,8 +1060,7 @@ now exercises native original-session context, actual wallet funding and two
 confirmations, proposal-debt acquisition, one bound settlement dispatch, and
 paid preflight under the unchanged real-clock window. The measured complete
 acquisition and preflight intervals remain strictly below one second. It creates
-no provider MuSig nonce and explicitly bypasses the still-disabled reverse
-acceptance guard only in the fixture; it is not relay, client nonce-custody, or
+no provider MuSig nonce and uses the component provenance fixtures; it is not relay, client nonce-custody, or
 production-signing acceptance. An actual blocked executor queue is also checked
 to consume that complete interval. Broader adversarial/public-network acceptance
 and authority-bearing integration remain separate requirements. Neither these
@@ -940,8 +1079,10 @@ This separation adds no native signing or startup action. Future native effects
 must collect and authorize through consumption and commit in one uninterrupted
 original operation/window, never await a diagnostic and then assume permission.
 
-The internal store-owned `_commit_reverse_signed_reply` is a separate,
-nonactivated native effect. It requires that exact operation's actually
+#### Signed replies and replay
+
+The internal store-owned `_commit_reverse_signed_reply` is the separate native
+signing effect called from live reverse cosigning. It requires that exact operation's actually
 collected paid evidence, revalidates the original reservation and full interval
 around private contract-key decryption and native work, and permanently
 tombstones allocation before native begin. It consumes the provider attempt
@@ -961,9 +1102,7 @@ attempts and never reconstructs signing permission.
 Authorization is checked immediately before COMMIT, not guaranteed at return
 time. A slow successful COMMIT preserves its archived contribution without
 renewing its original deadline; future delivery must establish its own allowed
-handoff and cannot reinterpret the bytes as fresh signing authority. This
-primitive has no production caller. Archived reply routing, live client custody,
-and public/adversarial activation acceptance remain separate work. Schema 14,
+handoff and cannot reinterpret the bytes as fresh signing authority. Schema 14,
 stored formats, and startup behavior are unchanged.
 
 The internal `_reverse_signed_reply_replay` read returns the exact archived
@@ -983,6 +1122,8 @@ archive is refused without writes. Retrieval works for blocked sessions and
 acknowledged replies; it is historical knowledge, not delivery or signing
 authority. Upgrading installations need no migration: no prior release wrote
 reverse COMPLETE rows.
+
+### Live reverse cooperation and repayment
 
 At runtime, an `ln-to-btc/v1` service routes each inbound
 `cooperative_claim_propose` request to `ReverseSettlement.cosign_cooperative_proposal`.
@@ -1022,7 +1163,7 @@ does not prove an unpaid invoice or create a recovery action. Older terminal
 A preimage already lost by a previous-release crash cannot be reconstructed by
 this fix and remains an unresolved recovery case.
 
-### Cooperative repayment sync refusals
+#### Cooperative repayment sync refusals
 
 Original cooperative debt repayment may observe LND briefly unsynchronized after
 a block. The bound adapter distinguishes only a sync refusal inside its read-only
@@ -1048,7 +1189,7 @@ backfill or reconstruction changes are added on upgrade; absent or partial live
 state confers no cooperation rights. This bounded fix does not establish general
 cooperative stability, rollback safety or production readiness.
 
-### Operator entrypoint
+#### Operator entrypoint
 
 ```sh
 rill-provider provision-identity --out id.age --recipient age1... \
@@ -1056,6 +1197,8 @@ rill-provider provision-identity --out id.age --recipient age1... \
 rill-provider provision-store --config provider.json
 rill-provider serve --config provider.json           # until SIGINT/SIGTERM
 ```
+
+#### Automatic store upgrades
 
 A v8, v9, v10, v11, v12, or v13 store upgrades to v14 automatically when `serve` (or any
 command) opens it. v9 adds the `claim_attempts` table, and each `CLAIMING` swap's
@@ -1097,6 +1240,8 @@ is bound to that contract in the same transaction. Mixed feature commitments
 are refused instead of silently downgraded. Old or fully unfeatured accepted
 swaps get no row. `ADMITTED` alone starts no cooperation window and does not
 delay the normal unilateral claim. Every new live quote requires this feature.
+
+#### Explicit legacy store migration
 
 Upgrading an authoritative v5, v6, or v7 installation is an explicit offline operation:
 
@@ -1141,6 +1286,8 @@ subset fail before dispatch if tracking establishes no existing payment and
 the store has an explicit unsent grant. Unknown or consumed grants still permit
 reconciliation only. Neither case shortens the client's on-chain refund delay.
 
+### Offline swap inspection
+
 For bounded offline inspection, stop the service and run:
 
 ```sh
@@ -1170,6 +1317,8 @@ dispatch bytes. Presence flags do not validate that material. `UNKNOWN` dispatch
 state is not evidence of an unsent payment, and `UNSENT` still requires every
 live funding, deadline, and conflict check. This command never grants resend,
 refund, deletion, or admission-capacity authority.
+
+### Payment reconciliation and payer binding
 
 For bounded payment-witness reconciliation, stop the service and run:
 
@@ -1232,6 +1381,8 @@ rows are not automatically reopened. Legitimate failures of legacy dispatches
 after a lost response can therefore remain `PAYING` indefinitely. Definitive
 failure recovery and economic-capacity release remain production gates.
 
+### Operator configuration
+
 `provider.json` is strict JSON (`operator_config.OperatorConfig`, unknown
 fields refused). It sets the network identity, the identity key printed
 above, the identity and store paths, the age `custody_recipient`, the
@@ -1249,6 +1400,8 @@ must be a regular, owner-owned `0600` file with exactly one
 `AGE-SECRET-KEY-` line. Keep it out of the store volume's images. Both
 provisioning commands refuse to overwrite anything. Refusals print one
 redacted line and exit with status 2.
+
+### Offline handshake custody
 
 `handshake_custody_offline.OfflineHandshakeCustody` is an optional, **offline
 key-availability primitive**, deliberately not an implementation of the live
@@ -1279,35 +1432,36 @@ create or migrate them and no startup path reads them. Independent non-rollback
 admission ownership, protected production signing, and authenticated ordered
 delivery remain required before this primitive can be connected to live swaps.
 
-`_nip44_v2` is an **internal, disconnected NIP-44 v2 decoder** exercised by
+### Nostr transport primitives
+
+`_nip44_v2` is an **internal NIP-44 v2 codec**, used by the NIP-59 send and
+receive modules (`_nip59_send`, `_nip59_receive`) and exercised by
 official, attributed interoperability vectors. It uses the matching native
 `rill-crypto` optional constant-time ECDH primitive and a pinned ChaCha20
 backend. It bounds encoded payloads to 128 KiB, checks canonical base64,
 version, size, HMAC **before** decryption, padding, and UTF-8, and returns
 only decoded text to an in-process caller. NIP-44 requires verifying the
-enclosing signed NIP-01 event **before** calling this decoder; there is no
-provider caller, relay subscription, signed event verifier, NIP-59 gift-wrap
-or seal processing, authenticated application frame, or session admission.
-Never pass relay input directly to this private helper. Missing or mismatched
+enclosing signed NIP-01 event **before** calling this decoder, which the
+NIP-59 modules do. Never pass relay input directly to this private helper. Missing or mismatched
 native capability produces a distinct sanitized configuration failure; an
 unsupported version is distinct from malformed v2 input. Neither the native
 ECDH result nor decoded Python text is guaranteed erased from process memory.
-An installation upgrading from the previous release gains a dependency and
-these unused functions only: absent, partial, older, or restored transport
-state cannot enable receive, key creation, migration, a rescan, or a swap.
+Absent, partial, older, or restored transport state cannot enable receive,
+key creation, migration, a rescan, or a swap.
 
-`_nip01_event` is another **disconnected internal primitive**. It verifies a
+`_nip01_event` is another **internal primitive**, used by the NIP-59 modules
+and provider identity. It verifies a
 bounded NIP-01 signed event's seven fields, recomputed compact-JSON ID, and
 native BIP340 signature. Its exact-member, tag-shape, and timestamp bounds
 are a stricter RillSwap input policy, not universal Nostr rules. The verifier
 does not check event kind, recipient routing, peer session ownership, rumor
-author, or application transcript. No relay traffic reaches it yet. Raw
+author, or application transcript. Raw
 events may remain in caller-owned memory; exception handling does not erase
 caller frames or the signed event returned on success. Existing installations
 gain no transport activation or state migration from this module.
 
-`_nip59_receive` composes those two internal primitives into a **disconnected,
-read-only candidate decoder** for the private-regtest RS-006 binding. The
+`_nip59_receive` composes those two internal primitives into a **read-only
+candidate decoder**, used by the live session store, for the private-regtest RS-006 binding. The
 caller explicitly supplies the selected mailbox scalar and independently
 expected mailbox public key, complete network and profile. It verifies the
 signed outer gift wrap **before** decrypting, requires durable kind 1059 and
@@ -1338,6 +1492,8 @@ Repeated fresh wraps preserve the signed application message while changing
 the outer identity; replaying one wrap still decodes. Session admission and
 replay disposition are **not exercised**. This is neither relay delivery nor
 authorization.
+
+### Offline handshake and issuance registries
 
 `handshake_store.PreparedHandshakeStore` is a separate **offline-only**,
 explicitly bootstrapped SQLite PREPARED registry. It can record a canonical
@@ -1389,6 +1545,8 @@ new file can reserve a challenge. Do not expose the challenge through a
 handshake accept until separately durable signed-result and outbox ownership
 exist.
 
+### Bitcoin Core transaction and fee observations
+
 The separate `core_tx_bytes.CoreTransactionReader` is an explicit,
 read-only Bitcoin Core v30 RPC probe for the supported complete networks. It takes a numeric
 loopback address, port, owner-private Core cookie file, and a complete trusted
@@ -1425,6 +1583,8 @@ use integer ceiling arithmetic and never override signed caps or dust policy.
 Runtime still must bound acquisition and evidence age, independently verify
 the selected outpoint, and recheck before native effects. This reader alone
 does not authorize a partial signature; independent completion preflight uses it.
+
+#### Cooperative completion coordination
 
 `cooperative_completion_candidate` is a nonauthorizing read snapshot containing
 the current prepared fallback and canonical burned binding. It exposes no
@@ -1469,6 +1629,9 @@ A malfunctioning or malicious configured listener can trickle headers and
 block this synchronous call indefinitely. Do not integrate it into a daemon,
 background polling, service handler, or time-critical action without a new
 bounded transport contract and tests.
+
+#### Core integration diagnostics
+
 An opt-in integration check runs pinned Bitcoin Core v30 in an isolated Docker
 network namespace with `-txindex=1` and a separate pinned Python test image:
 
@@ -1493,6 +1656,8 @@ Core RPC and observes only the exact binding supplied by that test. This is
 test-local interoperability, **not** a provider admission API, proof of a
 complete/current replacement history, F10 closure, or permission to release a
 preimage.
+
+### Payment journal and LND observers
 
 The separate `payment_journal` records immutable BTC-to-LN outgoing payment
 requests and append-only backend-reported observations. Its database is bound
@@ -1557,6 +1722,8 @@ result. It does not exercise an initiated, failed, or settled real payment.
 Actual payment-flow interoperability, multi-instance fencing, persisted
 intent/backend correlation, and the L03/D01-D09 release gates remain open.
 
+### Core source and historical transaction observations
+
 `CoreTransactionReader.observe_source(source_height)` is a separate explicit
 read-only primitive for a known LND-reported height. It checks Core's chain label,
 IBD flag, genesis and configured signet challenge, reads the active hash at that
@@ -1606,6 +1773,8 @@ active-block hint refuses without a global lookup fallback. This is actual Core
 byte-acquisition conformance, not HTLC claim validation or funded treasury
 conversion. CI runs this separate opt-in case alongside existing Core checks.
 
+### Merchant proof and order admission conformance
+
 The explicit `merchant_proof` sidecar profile combines receiver REST with Core
 cookie observation inside the existing owned network namespace. Its separate
 `tests/test_merchant_source_pinned.py` scenario runs the verified Bun HTTPS factory
@@ -1641,6 +1810,8 @@ The existing fixture owns private TLS/bundle staging, child reaping and
 label-verified cleanup. This native-payer case does not rerun or classify the
 historical cooperative paid-refusal diagnostic. No external fulfillment,
 production funding or process-crash/power-loss durability is established.
+
+### Merchant conversion and completion conformance
 
 The separate `merchant_conversion` profile in
 `tests/test_merchant_conversion_pinned.py` combines those protected mounts with
@@ -1699,6 +1870,8 @@ settlement alone do not establish that depth. Fixed diagnostic tags distinguish
 SDK cooperation, actual observation/validation boundaries and receipt joins
 without revealing payloads or changing the cooperative-path expectation.
 
+#### LND restart and operator CLI conformance
+
 The separate `merchant_restart` profile supervises only source B with exactly
 two possible foreground LND launches inside one surviving owned container. Its
 TERM/INT trap exits without relaunching, and a nonzero daemon exit never retries.
@@ -1730,6 +1903,8 @@ dispatched status, verified one-time completion and terminal/status calls after
 removing the evidence/identity and supplying an unavailable native library. Actual
 funding/claim/source and original accounting/privacy assertions remain unchanged.
 The CLI is regtest-only and introduces no provisioning or fresh SDK invocation.
+
+### Funding inclusion and encrypted hint retention
 
 `CoreTransactionReader.observe_funding_inclusion()` is a separate explicit,
 bounded observation of a **known** parsed funding binding and terms. It associates
@@ -1777,6 +1952,8 @@ and selecting a missing native library. Original recovery artifacts remain
 untouched; no runtime command deletes them. This is explicit regtest admission,
 not producer authentication, automatic recovery or production accounting.
 
+#### SDK interruption and settlement-depth conformance
+
 The separate original-SDK process-death case starts the original SDK in a child
 with its own fresh reservation and invocation right, waits for actual funding
 capture acknowledgment, and kills it before claim-signer acquisition. The
@@ -1818,6 +1995,8 @@ SDK return still requires separate fresh receipt reconciliation before merchant
 completion. Defaults, persisted formats and upgrade behavior do not enable the
 mode automatically or restore rights to existing jobs.
 
+### Paid refusal diagnostics
+
 Test-local paid-refusal diagnostics can name prevalidated explicit raise sites
 in the synchronous live-context and bound-invoice methods before sanitization.
 The probe uses a copied paid-phase context and temporary thread-scoped tracing,
@@ -1846,6 +2025,8 @@ This characterizes one known current refusal, not the historical gate04 or
 timeout incidents. Their correlated leaf evidence remains unavailable; they
 remain unknown. No product guards, deadlines, persisted formats, startup paths
 or upgrade behavior change, and no additional paid diagnostic is triggered.
+
+### Treasury accounting observations
 
 An internal **treasury accounting observer** is available as
 `rill_provider.lnd_treasury_observation.LndTreasuryObserver`. Provision a protected
@@ -1901,6 +2082,8 @@ budget and single cancellation. This is not a zero-wallet assertion, proof of
 atomicity, or permission to add pending income to inventory. No accounting formula,
 invoice-metadata refusal, spending policy or upgrade behavior changes.
 
+#### Completed payment debit observations
+
 `observe_completed_payment(hash, expected_amount_msat)` requires payment-level
 `SUCCEEDED` and reconciles successful shard recipient amounts and settled route
 fees with exact reported value/fees. Failed attempts contribute neither settled
@@ -1927,6 +2110,8 @@ remain in that scenario. It establishes neither positive spendability nor
 receipt-to-treasury conversion. No startup
 call, journal migration, automatic observation, provisioning or conversion is
 introduced for upgrading installations.
+
+### Recording payment tracking evidence
 
 To durably attach a bounded **diagnostic report** to an already recorded
 outgoing intent, run this only with an explicitly initialized v1 journal and an
@@ -1963,6 +2148,8 @@ reports. Older, partial, or foreign journals are refused without upgrade or
 backfill. Previous installations do no startup polling, reindexing, migration,
 submission, or retry.
 
+### Invoice observation and protobuf generation
+
 The pinned LND source also includes exact `invoicesrpc/invoices.proto`
 and generated **message classes only**. Although their descriptors list mutating
 `AddHoldInvoice`, `CancelInvoice`, and `SettleInvoice` RPCs, no callable
@@ -1998,6 +2185,8 @@ after installing `requirements-dev.txt` with
 and exact generation-tool versions are checked. The focused fake transport
 and real synthetic loopback gRPC TLS tests run in the normal pytest suite;
 the synthetic tests alone are **not** a real LND regtest integration check.
+
+### Disposable LND diagnostics
 
 To run the four opt-in pinned **disposable-regtest** diagnostics, use the monorepo's
 `rill-core/` and `rill-provider/` directories. Install `requirements-dev.txt`
@@ -2060,7 +2249,7 @@ container. After confirming the associated runner is no longer active, use
 other test runs or any host wallet. A missing/older journal remains unknown
 after this test, never a reason to send or retry.
 
-### Funded Bun merchant conformance
+#### Funded Bun merchant conformance
 
 The independent `tests/test_bun_merchant_pinned.py` diagnostic uses the actual
 `rill-payments` Bun HTTPS/macaroons transport, merchant ledger and HTTP Fetch
@@ -2092,6 +2281,8 @@ as well. The standard x64 binary requires a compatible AVX2 CPU; the actual
 artifact was exercised in the existing pinned Python image on Linux amd64.
 No executable is automatically downloaded by the test. Missing opted-in
 prerequisites fail rather than silently skip.
+
+#### Merchant fixture isolation and restart checks
 
 Only the verified executable and generated bundle are mounted at fixed read-only
 destinations. The client root filesystem is read-only, capabilities are dropped,
@@ -2128,6 +2319,8 @@ checks the TypeScript fixture and negative mount guards offline; this additional
 funded diagnostic stays explicitly manual and gated by both environment flags.
 Interrupted runs use the same label-checked cleanup procedure above for exact
 `rillswap-bun-merchant-*` resources, never unrelated wallets or containers.
+
+#### Scoped merchant credentials and denial probes
 
 The same opt-in command also runs an independent scoped-credential scenario.
 The Python controller bakes exactly `info:read`, `invoices:read` and

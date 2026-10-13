@@ -1,13 +1,101 @@
 # rill-web
 
-Independent strict TypeScript RillSwap client SDK and static browser UI.
+The RillSwap browser app: a static site that swaps Bitcoin to or from
+Lightning, and USDC/USDT to or from Lightning, with no backend of its own.
+It discovers providers over Nostr, validates contracts, transactions and
+signatures locally, and keeps encrypted recovery records in the browser.
 
-All runtime assets are bundled locally. Localhost static serving is supported;
-reliable `file://` operation is not promised.
+Lightning to stablecoin claims can use a configured gas sponsor, so the
+receiving address needs no ETH, or an injected EVM wallet that pays its own
+gas. `swap.html` is the swap app; `index.html` is a disconnected diagnostic
+preview.
 
-Status: pre-release and not suitable for real funds.
+**Status:** experimental and unaudited. Mainnet funding is disabled.
 
-## Merchant invoice adapter
+## Install
+
+Use Bun 1.3.11, matching CI. This component depends on the `rill-payments`
+directory of the same checkout.
+
+```sh
+cd rill-web
+bun install --frozen-lockfile
+```
+
+## Quick start
+
+Run the complete Docker development stack from the repository root:
+
+```sh
+dev/devctl up
+```
+
+Open http://127.0.0.1:5273/swap.html. The demo shop is at
+http://127.0.0.1:8090/. See [DEVELOPMENT.md](../DEVELOPMENT.md) for a
+walkthrough of each swap type against the local Bitcoin, Lightning, EVM and
+gas sponsor services.
+
+For standalone development, from `rill-web/`:
+
+```sh
+VITE_RILLSWAP_NETWORK=signet bunx vite --host 127.0.0.1   # dev server, open /swap.html
+VITE_RILLSWAP_NETWORK=signet bun run build                # static files in dist/
+```
+
+## Configuration
+
+Deployment defaults are set at build time and validated:
+
+| Variable | Meaning |
+| --- | --- |
+| `VITE_RILLSWAP_NETWORK` | `mainnet`, `signet`, `testnet4` or `regtest` |
+| `VITE_RILLSWAP_RELAYS` | Nostr relay URLs, comma or whitespace separated |
+| `VITE_RILLSWAP_MEMPOOL_API` | Esplora-compatible chain API |
+| `VITE_RILLSWAP_BROADCAST_API` | Explicit transaction broadcast API |
+| `VITE_RILLSWAP_NODE_API` | Optional user-node browser transport |
+| `VITE_RILLSWAP_EVM_RPC` | Read-only EVM RPC endpoint |
+| `VITE_RILLSWAP_EVM_SPONSOR` | Gas sponsor endpoint |
+| `VITE_RILLSWAP_EVM_ENTRY_POINT` | Pinned ERC-4337 EntryPoint address |
+| `VITE_RILLSWAP_EVM_7702_DELEGATE` | Pinned EIP-7702 delegate address |
+| `VITE_RILLSWAP_EVM_SPONSOR_POLICY` | Optional sponsor gas policy ID |
+
+Set the sponsor endpoint, EntryPoint and delegate together or omit all three.
+The Alchemy Wallet API sponsor path has not been tested live yet (CORS and
+responses). Builds without configuration open a blocked mainnet preview.
+
+## Scripts
+
+```sh
+bun run typecheck
+bun test unit
+bunx playwright install chromium
+bun run test
+bun run build:pages
+bun run test:pages
+```
+
+`build:pages` creates `tmp/pages/` for GitHub Pages, with the mainnet preview
+at the root and a signet site under `/signet/`. It discards local overrides
+and never publishes anything; deployment is the manually dispatched
+`Publish static RillSwap` workflow.
+
+The reference below covers detailed behavior and safety rules.
+
+## Reference
+
+- [Merchant invoice adapter](#merchant-invoice-adapter)
+- [Preview and experimental swap pages](#preview-and-experimental-swap-pages)
+- [Swap interface and deployment defaults](#swap-interface-and-deployment-defaults)
+- [Reverse execution and payment authorization](#reverse-execution-and-payment-authorization)
+- [Reverse recovery and claim construction](#reverse-recovery-and-claim-construction)
+- [Funding checks and refund actions](#funding-checks-and-refund-actions)
+- [Cooperative claims and nonce custody](#cooperative-claims-and-nonce-custody)
+- [Privacy and browser security](#privacy-and-browser-security)
+- [Nostr transport and advertisement verification](#nostr-transport-and-advertisement-verification)
+- [Recovery encryption and release limitations](#recovery-encryption-and-release-limitations)
+- [Development and integration tests](#development-and-integration-tests)
+
+### Merchant invoice adapter
 
 `src/swap/merchantCheckout.ts` adapts the existing regtest BTC-to-Lightning
 flow to independently pinned merchant checkout terms. Supply the merchant's
@@ -27,6 +115,8 @@ sign refunds. This adapter is not yet advertised by the native-only merchant
 HTTP service. An explicit disposable scripted BTC-to-LN merchant checkout now
 has funded happy-path conformance evidence, not browser-wallet, restart or
 production conformance.
+
+### Preview and experimental swap pages
 
 The site has two pages. `index.html` is a **local-only development preview**
 that makes no connection: chain-mode selection does not contact or verify a
@@ -82,6 +172,8 @@ For BTC to LN, `src/swap/` ports rill-cli's `run_swap`:
   MuSig2 code as the CLI and provider). It then verifies the provider's
   partial and the aggregate signature before its receipt.
 
+### Swap interface and deployment defaults
+
 The swap page uses a compact card, a settings dialog for provider/network and
 fee caps, progressive wallet setup, a simple progress indicator, and collapsed
 technical activity. Public builds default to **mainnet preview**, with the
@@ -116,6 +208,8 @@ local deployment endpoint. Relay settings are public, not wallet credentials.
 Relay operators can see IP and transport metadata; encrypted swap messages do
 not hide that metadata. A relay preset is not an endorsement of providers.
 
+#### Chain API and hosting configuration
+
 `VITE_RILLSWAP_MEMPOOL_API` configures an Esplora-compatible chain API. Defaults
 are `https://mempool.space/api`, `/signet/api`, or `/testnet4/api` on that
 origin, and `http://127.0.0.1:8091/api` on regtest. Switching networks resets
@@ -137,7 +231,7 @@ records are migrated, and no swap or background work is resumed. The relative
 Vite asset base supports static hosting under a repository or signet subpath;
 this configuration does not authorize a funded mainnet release or publish it.
 
-### Mainnet and signet Pages artifact
+#### Mainnet and signet Pages artifact
 
 ```sh
 bun run build:pages
@@ -158,7 +252,7 @@ the source and assembled sites before uploading/deploying. Local build/test
 commands never publish, and no deployment has been triggered by this work.
 `component-checks.yml` also tests the assembled artifact without publishing.
 
-### Swap direction and assets
+#### Swap direction and assets
 
 The card's **You send / You receive** selectors and the switch button choose
 the pair. `src/swapPairs.ts` is the single table mapping display assets to
@@ -171,6 +265,8 @@ quotable and payable from an injected EVM wallet; LN to USDC/USDT
 payment, and a claim to a typed address through a gas sponsor (or, without a
 sponsor, a direct claim from an injected EVM wallet). Unavailable pairs explain
 why and never connect anywhere.
+
+#### Stablecoin swap execution
 
 Stablecoin to LN (`src/swap/erc20Swap.ts`, `src/erc20Ui.ts`) discovers
 providers announcing the `rillswap/evm-assets-v1` extension, picks the
@@ -199,7 +295,7 @@ page recomputes the EIP-7702 authorization digest and the EntryPoint v0.7 user
 operation hash over calldata it built, pins chain, delegate, and EntryPoint,
 refuses any other signature request, and confirms the destination's Transfer
 in the included transaction. The sponsor learns the preimage and destination.
-In production the sponsor is Alchemy's Wallet API (what Boltz uses behind its
+On public networks the intended sponsor is Alchemy's Wallet API (what Boltz uses behind its
 own proxy): set `VITE_RILLSWAP_EVM_SPONSOR=https://api.g.alchemy.com/v2/<key>`
 (restrict the key to your origin in the Alchemy dashboard), the canonical
 EntryPoint `0x0000000071727de22e5e9d8baf0edac6f37da032` and SMA7702 v1.1.0
@@ -231,6 +327,8 @@ remain readable; upgrading does not start chain scans or alter existing records.
 Regenerate the standalone bytecode fingerprint after a contract artifact update
 with `bun scripts/generate-evm-identity.ts`; unit tests compare it to the source artifact.
 
+#### Lightning to BTC estimates
+
 LN to BTC estimates (`src/swap/reverseSwap.ts`) send RS-004 *indicative*
 requests naming only the payout, over the same authenticated handshake as
 BTC to LN. No address, payment hash, key, or chain API request is involved,
@@ -243,7 +341,7 @@ invoice (`checkReverseTermsOffer` in `src/swap/wire.ts`) are requested only
 after persistence. Continuing pins the chosen provider and opens a fresh firm
 session, as RS-003/RS-004 require. Indicative sessions never become firm sessions.
 
-### Provider directory
+#### Provider directory
 
 **Providers** opens a directory of every provider announced for the selected
 network, before any amount or invoice is entered. Nothing connects until
@@ -256,7 +354,7 @@ Choosing an entry pins its identity (the same field as Settings); the form
 shows the current choice. Announced limits and fees are indicative; only a
 signed quote binds a provider.
 
-### Automatic quote selection
+#### Automatic quote selection
 
 Leave the provider identity empty for automatic discovery, choose one under
 Providers, or pin it in Settings. **Swap** queries the configured relays, filters authenticated
@@ -304,7 +402,7 @@ Provider-advertised endpoints are never automatically contacted. Existing
 manual `runSwap` callers retain their prepare-and-execute behavior, and no
 persisted state or journal schema changes.
 
-### Swap links and the tracking view
+#### Swap links and the tracking view
 
 Starting a swap replaces the form with a tracking view. Each time the swap
 produces an encrypted recovery container (terms, funded, paid, or claim
@@ -320,7 +418,7 @@ fragments are ignored entirely. The link is as sensitive as the `.age` file:
 anyone holding it and the recovery key can act on the swap, and in-tab
 protocol sessions are not resumed from it, only recovery.
 
-### Browser recovery wallet
+#### Browser recovery wallet
 
 `src/browserRecoveryWallet.ts` provides a browser-stored recovery identity,
 matching-backup checks, and atomic refund-address allocation. The swap form
@@ -376,6 +474,8 @@ or implicit migration occurs. Complete storage loss is indistinguishable from
 first use, so a newly created identity does not restore earlier swaps. Keep
 the original backup files and do not clear browser storage while funds remain.
 
+#### Recovery backups and refund timing
+
 The observed or explicitly overridden block height sets the refund-height
 ceiling (`tip + max refund delay`) and the recovery scan birthday. A wrong
 height can lengthen the lock or make offers fail. Contract secrets exist only
@@ -390,7 +490,7 @@ wallet, or use the external refund-address override for a conventional wallet.
 No upgrade or
 reload resumes a swap; retain the original downloaded recovery files.
 
-### Refunding a stopped swap
+#### Refunding a stopped swap
 
 `src/recoveryDocument.ts` currently provides a local, bounded plaintext
 admission building block. It requires fatal UTF-8 decoding, Core-compatible
@@ -443,6 +543,8 @@ RILLSWAP_TEST_RECOVERY_NATIVE=1 bun test unit/recoveryInspectionNative.test.ts
 The opt-in inspection test is read-only and does not create containers or
 access the chain.
 
+#### Offline refund construction
+
 `constructSelectedRecoveryRefund` in the same module is a pure offline BTC to
 LN refund constructor used by the browser refund action (`browserRefund.ts`). It reauthenticates its own recovery bytes, selects
 an explicit signed funding attempt/revision, and verifies the actual funding
@@ -474,6 +576,8 @@ keys only, no chain access):
 ```sh
 RILLSWAP_TEST_RECOVERY_NATIVE=1 bun test unit/recoveryRefundNative.test.ts
 ```
+
+### Reverse execution and payment authorization
 
 The recovery panel now supports explicit BTC to LN refund preparation,
 identical-byte download, and broadcast, including existing mainnet contracts.
@@ -508,6 +612,8 @@ than waiting for hold settlement. Errors remain UNKNOWN and never authorize
 repayment. The in-memory one-use plan guard is not a cross-tab payment journal;
 the execution controller supplies cross-tab durable payment authorization.
 
+#### Reverse journals and node configuration
+
 `browserReverseJournal.ts` stores encrypted snapshots for the explicit
 `swap/reverseExecution.ts` controller. Fresh sessions retain separate secrets,
 terms, payment-attempt, funded, and signed-claim snapshots. Funding never clears
@@ -536,6 +642,8 @@ and prefills its public endpoint. Public builds supply no node by default;
 regtest defaults to loopback 8093. Custom nodes need browser-trusted TLS, CORS,
 and scoped LND permissions. Never put a macaroon in build configuration.
 Wildcard, credential-bearing, and non-regtest HTTP API URLs are refused.
+
+#### Funded browser acceptance checks
 
 For an opt-in real browser acceptance check, use a **separate disposable
 Compose project** and the already-built development images. From the repository
@@ -570,6 +678,8 @@ Fake-money encrypted backups and diagnostics remain under repository `tmp/`.
 Ordinary CI runs the unit, disconnected browser, and Pages regressions; the
 real-node check requires this explicit opt-in and isolated resources.
 
+#### Reverse execution approvals
+
 The reverse execution UI connects to a node only through the Advanced
 node-connect action; the default path connects nowhere but the relays and the
 configured chain API. The browser-stored recovery key is the approval
@@ -583,6 +693,8 @@ binds the approved transport to the payer's immutable normalized endpoint.
 Its initial private intent is encrypted before a firm request; native terms,
 funding, and exact claim backups are saved separately before later actions.
 Neither reload nor import restores acceptance or payment authority.
+
+### Reverse recovery and claim construction
 
 Explicit funded recovery also works without the original browser execution
 history. `browserReverseRecovery.ts` authenticates the file, actual funding
@@ -633,6 +745,8 @@ block higher-fee urgent historical claims; it is not full native acceptance
 parity. Differential tests classify native construction independently from
 browser results and separately validate funded/fallback successor ordering.
 
+#### Funding mailbox recovery and unilateral negotiation
+
 `restoreReverseFundingReader` restores only an authenticated funding mailbox
 from the original client session secret and independently checked transcript.
 It has no send/handshake/acknowledgment API and cannot renew payment authority.
@@ -657,6 +771,8 @@ Historical signed sessions and stored provider policy are not rewritten,
 and upgrades trigger no new negotiation, scan, funding, or payment. Unfeatured
 reverse sessions gain no cooperative nonce/signing authority. This explicit
 authenticated mode is not inferred from missing browser or provider metadata.
+
+### Funding checks and refund actions
 
 After local inspection, **Check funding** explicitly connects to the API
 selected in Settings. It reopens and authenticates the selected file, checks
@@ -700,6 +816,8 @@ durability is not protection against eviction, deletion, or another browser.
 Keep the original encrypted backups. Chromium fault/concurrency tests cover
 the journal, not a universal browser durability guarantee.
 
+#### Refund preparation and exposure
+
 Review the fixed signed destination and prefilled total fee, confirm ownership,
 then click **Approve and prepare refund**. The button is the approval: a consent
 note states what it confirms, and no checkbox gates it (the same holds for the
@@ -726,6 +844,8 @@ adapter on 8091 remains read-only. Both deployment defaults are configurable
 through `VITE_RILLSWAP_MEMPOOL_API` and `VITE_RILLSWAP_BROADCAST_API`; custom
 origins need deployment CSP allowance. Browser POST availability/CORS depends
 on the operator; unavailable transport still permits approved signed export.
+
+#### Native CLI refund recovery
 
 You need `rill-cli` (see its README), a synced Bitcoin Core node for the same
 network, the funded recovery file, its age key, and the funding attempt ID that
@@ -758,6 +878,8 @@ your own node's, use `--lnd-port`, `--lnd-tls-cert`, and
 `rill recover broadcast-refund` (one fixed `--fee-sat`, `--intent FILE`) sends
 a single refund without escalation.
 
+### Cooperative claims and nonce custody
+
 Cooperation never blocks the swap. The client cosigns only after it holds the
 verified payment preimage, and BIP341 signatures commit the exact outpoint,
 amount, and output, so a cosignature can only let the provider take the output
@@ -781,6 +903,8 @@ cache never signs. After payment the page offers an optional paid recovery file
 with the preimage and any reservation.
 There is no service worker or in-page update check: a new release takes
 effect only when the user reloads, which also discards the in-memory keys.
+
+### Privacy and browser security
 
 What relays learn: each gift wrap shows its recipient key (the provider's
 epoch inbox or session key, or this tab's fresh session key), a randomly
@@ -807,10 +931,12 @@ read, and best-effort deletion in a unique diagnostic database. It may request
 persistent browser storage. Startup and reload do not open a database or ask
 for persistence. A successful diagnostic proves neither long-term durability
 nor recovery; interruption may leave an inert diagnostic database. The preview
-never scans, repairs, or reuses old/partial databases automatically. There is
-no swap database, encrypted-record format, or auto-migration to claim; the
-swap page's cooperation journal is separate and refusal-only.
+never scans, repairs, or reuses old/partial databases automatically. Swap
+records (for example `browserReverseJournal.ts` and the cooperation journal)
+live in separate encrypted stores that this diagnostic never touches.
 Absence of a database proves nothing about prior browser use or safe funding.
+
+### Nostr transport and advertisement verification
 
 `src/nip59Transport.ts` is the gift-wrap producer the swap client uses
 (`src/swap/session.ts` owns the keys, envelopes, and relay publishing). Given an already application-validated
@@ -854,19 +980,24 @@ networks are not selectable here. A missing, partial, older-version, or
 restored cache proves no revision/currentness and triggers no automatic repair,
 rescan, network access, or state migration on upgrade.
 
-`src/nostrProviderAnnouncement.ts` is an offline-only verifier for the
-private-regtest RS-005 kind-39417 event binding. It requires a separately
+#### Signed Nostr announcement verification
+
+`src/nostrProviderAnnouncement.ts` verifies one RS-005 kind-39417 event for
+mainnet, signet, testnet4 or regtest. Live discovery
+(`src/swap/marketplace.ts`) and the manual-import panel both use it. It requires a separately
 approved provider identity and complete network/profile, authenticates the
 outer NIP-01 ID/signature and the nested application signature, and checks
-exact ordered tags, address `d`, matching signer/timestamp, size and nesting
-bounds, and the single-regtest-network restriction. The manual-import panel
-calls it only after explicit selection of the private-regtest NIP-01 paste
-format and a verification click. Its default application-signed import mode
-is unchanged. It does not subscribe to a relay; the swap client's
+exact ordered tags, address `d`, matching signer/timestamp, and size and
+nesting bounds. The manual-import panel calls it only after explicit selection
+of the NIP-01 paste format and a verification click; its default
+application-signed import mode is unchanged. It does not subscribe to a relay
+itself; the swap client's
 `src/swap/relay.ts` caps each raw relay message at 128 KiB **before**
 extracting the event-object bytes. It returns a historical signed candidate, not globally
 current revision, endpoint approval, session ownership, or financial
 authority. No new state is read or written during startup or upgrade.
+
+### Recovery encryption and release limitations
 
 `src/recoveryAgeContainer.ts` is the age boundary the swap client's
 `src/swap/recovery.ts` uses.
@@ -893,6 +1024,8 @@ The embedded build label is disclosure, **not** authenticated release pinning.
 There is no automatic update check, but reloading a mutable hosted URL can run
 different executable code. Active-swap upgrade handling, independent recovery,
 and the full W01/W07/W11 matrix gates remain open.
+
+### Development and integration tests
 
 Develop and test from this directory with Bun and a Playwright Chromium build:
 
