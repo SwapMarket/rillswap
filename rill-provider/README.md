@@ -1337,51 +1337,7 @@ of skipping it.
 Repeated fresh wraps preserve the signed application message while changing
 the outer identity; replaying one wrap still decodes. Session admission and
 replay disposition are **not exercised**. This is neither relay delivery nor
-authorization. The v2 local integration lock executes these two exact cases
-from pinned clean archives, but it does not establish a release set.
-
-An explicit historical baseline gate lives at
-`scripts/check_integration_lock.py`. In the monorepo, run the **root wrapper**
-`../scripts/replay_provider_v2.py --source-root ..` instead. It verifies the
-original v2 lock and runner and creates disposable Git views of the six pinned
-commits before calling this unchanged historical gate. The commands below are
-for older separate checkouts with six nested `.git` directories. Use a trusted
-Python 3.14 environment, `uv`, CMake, a C compiler, Bun **1.3.11**, and network
-access to the pinned upstream native source and Python/Bun dependency indexes:
-
-```sh
-.venv/bin/python scripts/check_integration_lock.py --source-root .. --verify-only
-.venv/bin/python scripts/check_integration_lock.py --source-root ..
-```
-
-`integration-lock.json` v2 records **six exact Git commits and trees**, two
-independently compared Python producer-wheel SHA-256 digests, the exact
-53-case native inventory (including all 23 historical v1 cases), and the
-two-profile web NIP-59 interoperability
-inventory. The runner archives the five **consumed** components (docs, crypto,
-core, provider, web); the historical CLI pin remains reference-only, **not**
-tested or representative of current CLI HEAD. Missing, partial, unsupported,
-unavailable, or changed source refs refuse execution. After preflighting the
-exact Bun version, it checks that the executing runner matches the pinned
-provider source, installs archived web dependencies with a frozen `bun.lock`
-and ignored lifecycle scripts, builds crypto/core/provider from clean
-archives, compiles and tests native crypto, compares producer-wheel digests
-before installing **non-editable wheels** into a disposable venv, and requires
-both separate provider test inventories to execute without skips or failures.
-The printed receipt includes executing runner and lock hashes, actual consumed
-artifact digests, and `authority: none`. The native shared library and
-provider wheel are **recorded, not independently release-pinned**; Python
-packages use version pins rather than verified hashes, and Bun package
-integrity depends on the pinned lock and trusted registry/toolchain. This
-snapshot pins the provider commit immediately **before the v2 lock update**:
-a file committed inside provider cannot contain its own resulting commit ID.
-The runner still accepts an explicitly supplied historical v1 lock and runs
-only its original 23 native cases; it does not silently upgrade v1 to web
-coverage. No startup, sync, database, or persisted application state changes
-on upgrade. Missing, partial, older, or restored integration metadata proves
-no release readiness and never triggers automatic rebuilds or scans. This is
-local interoperability evidence, not a relay, session, money-path, hosted CI,
-or live-swap authorization. Re-pin and execute all gates before any release.
+authorization.
 
 `handshake_store.PreparedHandshakeStore` is a separate **offline-only**,
 explicitly bootstrapped SQLite PREPARED registry. It can record a canonical
