@@ -9,6 +9,7 @@ description = "Pre-release, independent RillSwap recovery command-line tools"
 readme = "README.md"
 requires-python = ">=3.13"
 license = "MIT"
+authors = [{ name = "RillSwap contributors" }]
 dependencies = [
   "rill-core==0.1.0.dev0",
   "rill-crypto==0.1.0.dev0",
@@ -18,6 +19,11 @@ dependencies = [
   "pydantic==2.13.5",
   "pycryptodomex==3.23.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/rillswap/rillswap/tree/main/rill-cli"
+Repository = "https://github.com/rillswap/rillswap"
+Issues = "https://github.com/rillswap/rillswap/issues"
 
 [project.scripts]
 rill = "rill_cli.main:main"

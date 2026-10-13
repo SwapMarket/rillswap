@@ -9,6 +9,7 @@ description = "Pre-release RillSwap provider services"
 readme = "README.md"
 requires-python = ">=3.13"
 license = "MIT"
+authors = [{ name = "RillSwap contributors" }]
 dependencies = [
     "rill-core==0.1.0.dev0",
     "rill-crypto==0.1.0.dev0",
@@ -21,6 +22,11 @@ dependencies = [
     "pydantic==2.13.5",
     "web3==7.16.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/rillswap/rillswap/tree/main/rill-provider"
+Repository = "https://github.com/rillswap/rillswap"
+Issues = "https://github.com/rillswap/rillswap/issues"
 
 [project.scripts]
 rill-provider = "rill_provider.cli:main"

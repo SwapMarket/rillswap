@@ -9,10 +9,16 @@ description = "Pure RillSwap protocol domain"
 readme = "README.md"
 requires-python = ">=3.13"
 license = "MIT"
+authors = [{ name = "RillSwap contributors" }]
 dependencies = [
   "pydantic==2.13.5",
   "rfc8785==0.1.4",
 ]
+
+[project.urls]
+Homepage = "https://github.com/rillswap/rillswap/tree/main/rill-core"
+Repository = "https://github.com/rillswap/rillswap"
+Issues = "https://github.com/rillswap/rillswap/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rill_core"]

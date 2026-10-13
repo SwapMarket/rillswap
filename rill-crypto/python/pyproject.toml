@@ -9,7 +9,13 @@ description = "Python binding for the RillSwap cryptographic facade"
 readme = "README.md"
 requires-python = ">=3.13"
 license = "MIT"
+authors = [{ name = "RillSwap contributors" }]
 dependencies = ["cffi==2.0.0"]
+
+[project.urls]
+Homepage = "https://github.com/rillswap/rillswap/tree/main/rill-crypto"
+Repository = "https://github.com/rillswap/rillswap"
+Issues = "https://github.com/rillswap/rillswap/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rill_crypto"]

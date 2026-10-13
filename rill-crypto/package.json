@@ -2,6 +2,13 @@
   "name": "@rillswap/crypto-verify-dev",
   "version": "0.1.0-dev.0",
   "private": true,
+  "license": "MIT",
+  "homepage": "https://github.com/rillswap/rillswap/tree/main/rill-crypto",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rillswap/rillswap.git",
+    "directory": "rill-crypto"
+  },
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
