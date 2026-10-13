@@ -188,6 +188,12 @@ owner-lock file belong to one host and one service.
 Store acquisition checks ownership and provisioned file identity, but it
 cannot verify your deployment attestations or detect every storage rollback.
 
+Reverse funding failures release only the complete input set identified by that
+build. Persistence refusal requires a same-owner check proving funding remains
+ungranted; uncertain commits retain locks. Existing installations' earlier locks
+are not swept or inferred from missing metadata. Unknown funding-creation replies
+and cancellation after a completed worker may still require operator inspection.
+
 ### Upgrades
 
 Stop the service before installing a new version. Current stores use schema

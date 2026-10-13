@@ -55,6 +55,7 @@ HASH_HEX_LENGTH = 64
 MAX_ESTIMATE_TARGET = 1008  # Core's estimatesmartfee bound
 SATS_PER_BTC = Decimal(100_000_000)
 MAX_SATS = 21_000_000 * 100_000_000
+MAX_VOUT = 0xFFFFFFFF
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +68,7 @@ class FundedOutput:
     fee_sat: int
     anchor_txid: str  # first input: the RS-003 lineage anchor
     anchor_vout: int
+    selected_inputs: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -911,56 +913,87 @@ class CoreTransactionReader:
             "conf_target": FUNDING_ESTIMATE_TARGET,
             "estimate_mode": "economical",
         }
+        selected_inputs: tuple[tuple[str, int], ...] = ()
         try:
             with self._client() as client:
                 described = self._rpc(client, "decodescript", [script_pubkey.hex()], 1)
                 address = described.get("address") if isinstance(described, dict) else None
                 if type(address) is not str:
-                    raise CoreProtocolError("contract script has no address")
+                    raise CoreProtocolError("contract script has no address")  # noqa: TRY301 - cleanup scope
                 created = self._rpc(
                     client, "walletcreatefundedpsbt", [[], [{address: amount}], 0, options], 2
                 )
+                if not isinstance(created, dict) or type(created.get("psbt")) is not str:
+                    raise CoreProtocolError("Core wallet returned no PSBT")  # noqa: TRY301 - cleanup scope
+                psbt = self._rpc(client, "decodepsbt", [created["psbt"]], 3)
+                selected_inputs = _funding_inputs(
+                    psbt.get("tx") if isinstance(psbt, dict) else None
+                )
                 fee = _fee_sat(created)
                 if fee > max_fee_sat:
-                    raise CoreProtocolError("funding fee exceeds the signed maximum")
+                    raise CoreProtocolError("funding fee exceeds the signed maximum")  # noqa: TRY301
                 signed = self._rpc(client, "walletprocesspsbt", [created["psbt"], True], 3)
                 if not isinstance(signed, dict) or type(signed.get("psbt")) is not str:
-                    raise CoreProtocolError("Core wallet could not sign the funding")
+                    raise CoreProtocolError("Core wallet could not sign the funding")  # noqa: TRY301
                 final = self._rpc(client, "finalizepsbt", [signed["psbt"], True], 4)
                 if not isinstance(final, dict) or final.get("complete") is not True:
-                    raise CoreProtocolError("Core wallet could not sign every funding input")
+                    raise CoreProtocolError("Core wallet could not sign every funding input")  # noqa: TRY301
                 raw = _transaction_bytes(final.get("hex"))
                 decoded = self._rpc(client, "decoderawtransaction", [raw.hex()], 5)
+            txid = decoded.get("txid") if isinstance(decoded, dict) else None
+            outputs = decoded.get("vout") if isinstance(decoded, dict) else None
+            if (
+                type(txid) is not str
+                or not _hash(txid)
+                or not isinstance(outputs, list)
+                or not outputs
+                or not isinstance(outputs[0], dict)
+                or outputs[0].get("scriptPubKey", {}).get("hex") != script_pubkey.hex()
+                or _btc_to_sat(outputs[0].get("value")) != value_sat
+                or _funding_inputs(decoded) != selected_inputs
+            ):
+                raise CoreProtocolError("Core wallet signed a different funding than requested")  # noqa: TRY301
+            return FundedOutput(
+                txid=txid,
+                vout=0,
+                raw=raw,
+                fee_sat=fee,
+                anchor_txid=selected_inputs[0][0],
+                anchor_vout=selected_inputs[0][1],
+                selected_inputs=selected_inputs,
+            )
+        except Exception as error:  # builder owns identified inputs until successful return
+            refusal = (
+                CoreUnavailableError("Core RPC transport unavailable")
+                if isinstance(error, httpx.HTTPError)
+                else error
+            )
+            if selected_inputs:
+                try:
+                    self.release_funding_inputs(selected_inputs)
+                except Exception:  # noqa: BLE001 - preserve original refusal, never claim cleanup
+                    refusal.add_note(
+                        "Funding input cleanup failed; inspect this wallet's locked coins."
+                    )
+            if refusal is not error:
+                raise refusal from None
+            raise
+
+    def release_funding_inputs(self, inputs: tuple[tuple[str, int], ...]) -> None:
+        """Release exactly this invocation's identified inputs, never all wallet locks."""
+        _funding_inputs({"vin": [{"txid": txid, "vout": vout} for txid, vout in inputs]})
+        try:
+            with self._client() as client:
+                released = self._rpc(
+                    client,
+                    "lockunspent",
+                    [True, [{"txid": txid, "vout": vout} for txid, vout in inputs]],
+                    1,
+                )
         except httpx.HTTPError:
-            raise CoreUnavailableError("Core RPC transport unavailable") from None
-        txid = decoded.get("txid") if isinstance(decoded, dict) else None
-        outputs = decoded.get("vout") if isinstance(decoded, dict) else None
-        inputs = decoded.get("vin") if isinstance(decoded, dict) else None
-        anchor = inputs[0] if isinstance(inputs, list) and inputs else None
-        anchor_txid = anchor.get("txid") if isinstance(anchor, dict) else None
-        anchor_vout = anchor.get("vout") if isinstance(anchor, dict) else None
-        if (
-            type(txid) is not str
-            or len(txid) != HASH_HEX_LENGTH
-            or type(anchor_txid) is not str
-            or len(anchor_txid) != HASH_HEX_LENGTH
-            or type(anchor_vout) is not int
-            or anchor_vout < 0
-            or not isinstance(outputs, list)
-            or not outputs
-            or not isinstance(outputs[0], dict)
-            or outputs[0].get("scriptPubKey", {}).get("hex") != script_pubkey.hex()
-            or _btc_to_sat(outputs[0].get("value")) != value_sat
-        ):
-            raise CoreProtocolError("Core wallet signed a different funding than requested")
-        return FundedOutput(
-            txid=txid,
-            vout=0,
-            raw=raw,
-            fee_sat=fee,
-            anchor_txid=anchor_txid,
-            anchor_vout=anchor_vout,
-        )
+            raise CoreUnavailableError("Core funding input cleanup unavailable") from None
+        if released is not True:
+            raise CoreProtocolError("Core did not release the selected funding inputs")
 
     def find_spender(self, txid: str, vout: int, *, from_height: int, to_height: int) -> SpendScan:
         """Look for the transaction spending ``txid:vout``: mempool first, then blocks.
@@ -1194,6 +1227,8 @@ class CoreTransactionReader:
             # wallet and looks for the client's claim spending them.
             "decodescript",
             "walletcreatefundedpsbt",
+            "decodepsbt",
+            "lockunspent",
             "walletprocesspsbt",
             "finalizepsbt",
             "decoderawtransaction",
@@ -1201,7 +1236,7 @@ class CoreTransactionReader:
             "getblock",
         ):
             raise CoreProtocolError("unsupported Core RPC method")
-        path = self._wallet_path if method.startswith("wallet") else "/"
+        path = self._wallet_path if method.startswith("wallet") or method == "lockunspent" else "/"
         max_bytes = MAX_BLOCK_RESPONSE_BYTES if method == "getblock" else MAX_RESPONSE_BYTES
         try:
             with client.stream(
@@ -1304,6 +1339,26 @@ def _checked_outpoint(output: object, binding: FundingBinding, tip_height: int) 
     ):
         raise CoreProtocolError("Core contract outpoint evidence is inconsistent")
     return count
+
+
+def _funding_inputs(decoded: object) -> tuple[tuple[str, int], ...]:
+    inputs = decoded.get("vin") if isinstance(decoded, dict) else None
+    if (
+        not isinstance(inputs, list)
+        or not inputs
+        or any(
+            not isinstance(item, dict)
+            or not _hash(item.get("txid"))
+            or type(item.get("vout")) is not int
+            or not 0 <= item["vout"] <= MAX_VOUT
+            for item in inputs
+        )
+    ):
+        raise CoreProtocolError("Core funding input identities unavailable")
+    outpoints = tuple((item["txid"], item["vout"]) for item in inputs)
+    if len(set(outpoints)) != len(outpoints):
+        raise CoreProtocolError("Core funding input identities are duplicated")
+    return outpoints
 
 
 def _fee_sat(created: object) -> int:

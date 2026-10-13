@@ -50,6 +50,8 @@ def _funding_replies(**changes: Any) -> dict[str, Any]:  # noqa: ANN401
     replies: dict[str, Any] = {
         "decodescript": {"address": ADDRESS},
         "walletcreatefundedpsbt": {"psbt": "cHNidP8B", "fee": 0.00000300, "changepos": 1},
+        "decodepsbt": {"tx": decoded},
+        "lockunspent": True,
         "walletprocesspsbt": {"psbt": "cHNidP8C", "complete": True},
         "finalizepsbt": {"hex": "0200", "complete": True},
         "decoderawtransaction": decoded,
@@ -73,10 +75,12 @@ def test_fund_output_signs_exactly_the_requested_payment_at_index_zero(tmp_path:
         300,
     )
     assert (funded.anchor_txid, funded.anchor_vout) == (ANCHOR, 7)
+    assert funded.selected_inputs == ((ANCHOR, 7),)
     methods = [(r["method"], r["path"]) for r in requests]
     assert methods == [
         ("decodescript", "/"),
         ("walletcreatefundedpsbt", "/wallet/rill"),
+        ("decodepsbt", "/"),
         ("walletprocesspsbt", "/wallet/rill"),
         ("finalizepsbt", "/"),
         ("decoderawtransaction", "/"),
@@ -90,7 +94,8 @@ def test_fund_output_signs_exactly_the_requested_payment_at_index_zero(tmp_path:
         "conf_target": 6,
         "estimate_mode": "economical",
     }
-    assert requests[2]["params"] == ["cHNidP8B", True]
+    assert requests[2]["params"] == ["cHNidP8B"]
+    assert requests[3]["params"] == ["cHNidP8B", True]
     assert not any(r["method"] == "sendrawtransaction" for r in requests)
 
 
@@ -134,6 +139,101 @@ def test_fund_output_refuses_anything_but_the_exact_payment(
         )
     with pytest.raises(ValueError, match="unsupported"):
         reader.fund_output(SCRIPT, 0, max_fee_sat=400)
+
+
+@pytest.mark.parametrize("failure", ["fee", "signing", "finalization", "validation"])
+def test_builder_refusal_releases_every_identified_input_only(tmp_path: Path, failure: str) -> None:
+    _, _, network = _context()
+    replies = _funding_replies()
+    inputs = [{"txid": ANCHOR, "vout": 7}, {"txid": "b2" * 32, "vout": 8}]
+    replies["decodepsbt"] = {"tx": {"vin": inputs}}
+    replies["decoderawtransaction"]["vin"] = inputs
+    if failure == "fee":
+        replies["walletcreatefundedpsbt"]["fee"] = 0.00000401
+    elif failure == "signing":
+        replies["walletprocesspsbt"] = {}
+    elif failure == "finalization":
+        replies["finalizepsbt"]["complete"] = False
+    else:
+        replies["decoderawtransaction"]["vout"][0]["value"] = 0.00100400
+    requests: list[dict[str, Any]] = []
+    with _server(_by_method(replies), requests) as port:
+        reader = CoreTransactionReader(
+            port=port, cookie_path=_cookie(tmp_path), network=network, wallet="rill"
+        )
+        with pytest.raises(CoreProtocolError, match="funding"):
+            reader.fund_output(SCRIPT, 100_500, max_fee_sat=400)
+    releases = [request for request in requests if request["method"] == "lockunspent"]
+    assert len(releases) == 1
+    assert releases[0]["path"] == "/wallet/rill"
+    assert releases[0]["params"] == [True, inputs]
+    assert not any(request["method"] == "sendrawtransaction" for request in requests)
+
+
+def test_unknown_input_identity_never_authorizes_partial_or_global_unlock(tmp_path: Path) -> None:
+    _, _, network = _context()
+    replies = _funding_replies(decodepsbt={"tx": {"vin": [{"txid": ANCHOR, "vout": 7}, {}]}})
+    requests: list[dict[str, Any]] = []
+    with _server(_by_method(replies), requests) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        with pytest.raises(CoreProtocolError, match="identities unavailable"):
+            reader.fund_output(SCRIPT, 100_500, max_fee_sat=400)
+        with pytest.raises(CoreProtocolError, match="identities unavailable"):
+            reader.release_funding_inputs(())
+    assert not any(request["method"] == "lockunspent" for request in requests)
+
+
+@pytest.mark.parametrize("invalid", [True, -1, 2**32, "7", None])
+def test_invalid_input_index_never_authorizes_cleanup(tmp_path: Path, invalid: object) -> None:
+    _, _, network = _context()
+    requests: list[dict[str, Any]] = []
+    replies = _funding_replies(decodepsbt={"tx": {"vin": [{"txid": ANCHOR, "vout": invalid}]}})
+    with _server(_by_method(replies), requests) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        with pytest.raises(CoreProtocolError, match="identities unavailable"):
+            reader.fund_output(SCRIPT, 100_500, max_fee_sat=400)
+    assert not any(request["method"] == "lockunspent" for request in requests)
+
+
+def test_duplicate_input_identity_never_authorizes_cleanup(tmp_path: Path) -> None:
+    _, _, network = _context()
+    requests: list[dict[str, Any]] = []
+    inputs = [{"txid": ANCHOR, "vout": 7}] * 2
+    with _server(
+        _by_method(_funding_replies(decodepsbt={"tx": {"vin": inputs}})), requests
+    ) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        with pytest.raises(CoreProtocolError, match="duplicated"):
+            reader.fund_output(SCRIPT, 100_500, max_fee_sat=400)
+    assert not any(request["method"] == "lockunspent" for request in requests)
+
+
+def test_changed_final_input_set_releases_original_selected_inputs_only(tmp_path: Path) -> None:
+    _, _, network = _context()
+    replies = _funding_replies()
+    replies["decodepsbt"] = {"tx": {"vin": [{"txid": ANCHOR, "vout": 7}]}}
+    replies["decoderawtransaction"]["vin"] = [{"txid": "b3" * 32, "vout": 8}]
+    requests: list[dict[str, Any]] = []
+    with _server(_by_method(replies), requests) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        with pytest.raises(CoreProtocolError, match="different funding"):
+            reader.fund_output(SCRIPT, 100_500, max_fee_sat=400)
+    releases = [request for request in requests if request["method"] == "lockunspent"]
+    assert [request["params"] for request in releases] == [[True, [{"txid": ANCHOR, "vout": 7}]]]
+
+
+def test_cleanup_failure_keeps_original_fee_refusal_and_reports_uncertain_locks(
+    tmp_path: Path,
+) -> None:
+    _, _, network = _context()
+    replies = _funding_replies(
+        walletcreatefundedpsbt={"psbt": "x", "fee": 0.00000401}, lockunspent=False
+    )
+    with _server(_by_method(replies), []) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        with pytest.raises(CoreProtocolError, match="fee exceeds") as error:
+            reader.fund_output(SCRIPT, 100_500, max_fee_sat=400)
+    assert any("cleanup failed" in note for note in error.value.__notes__)
 
 
 def _spend(txid: str = FUNDING_TXID, vout: int = 0) -> dict[str, Any]:

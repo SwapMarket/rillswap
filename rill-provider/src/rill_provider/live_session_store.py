@@ -5905,6 +5905,52 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - no secret or storage details escape
             raise LiveSessionStoreError("reverse settlement intent refused") from None
 
+    def reverse_funding_is_ungranted(self, session_id: str, *, operation: ReverseOperation) -> bool:
+        """Certify absent funding authority under the same live settlement owner.
+
+        A failed transition alone is not a rollback certificate. Return only
+        after this owner-authenticated checking transaction commits successfully.
+        Missing or partial records never authorize wallet input cleanup.
+        """
+        self.reverse_operations.check(operation)
+        ungranted = False
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT state,terms_offer,funding_binding,funding_txid,funding_vout,funding_tx "
+                    "FROM swaps WHERE session_id=?",
+                    (session_id,),
+                ).fetchone()
+                reservations = connection.execute(
+                    "SELECT payment_hash,state,release_evidence FROM economic_reservations "
+                    "WHERE session_id=?",
+                    (session_id,),
+                ).fetchall()
+                outbox = connection.execute(
+                    "SELECT canonical_bytes FROM outbox WHERE session_id=?", (session_id,)
+                ).fetchall()
+                if (
+                    row is not None
+                    and row[0] == "LN_HELD"
+                    and all(value is None for value in row[2:])
+                ):
+                    terms = _offer_terms(row[1])
+                    ungranted = (
+                        terms.profile_id == "ln-to-btc/v1"
+                        and terms.network_identity == self._network
+                        and len(reservations) == 1
+                        and reservations[0][0] == terms.invoice_binding.payment_hash
+                        and reservations[0][1] in {"UNSENT", "UNKNOWN"}
+                        and reservations[0][2] is None
+                        and all(
+                            _canonical_envelope(document).message_type != "funding_binding"
+                            for (document,) in outbox
+                        )
+                    )
+        except sqlite3.Error:
+            raise LiveSessionStoreError("reverse funding refusal evidence unavailable") from None
+        return ungranted
+
     def advance_reverse_swap(  # noqa: PLR0912, PLR0913 - one atomic transition's explicit parts
         self,
         session_id: str,

@@ -163,6 +163,9 @@ class ReverseChainBackend(Protocol):
     ) -> FundedOutput:
         """Sign, never broadcast, a wallet payment to the script at index 0."""
 
+    def release_funding_inputs(self, inputs: tuple[tuple[str, int], ...]) -> None:
+        """Release identified, affirmatively ungranted funding inputs only."""
+
     def broadcast(self, raw: bytes, txid: str) -> str:
         """Submit exact bytes; idempotent."""
 
@@ -743,7 +746,21 @@ class ReverseSettlement:
         )
         # The grant (and the signed funding_binding for the client) is durable
         # before any broadcast; FUNDING_SENT rebroadcasts.
-        state = self._move(item, "FUNDING_SENT", now, funding=(binding, funded.raw))
+        try:
+            state = self._move(item, "FUNDING_SENT", now, funding=(binding, funded.raw))
+        except Exception as refusal:  # commit failure is not proof of rollback
+            if funded.selected_inputs:
+                try:
+                    operation = self._check_operation()
+                    if self._store.reverse_funding_is_ungranted(
+                        item.session_id, operation=operation
+                    ):
+                        await self._worker(
+                            self._chain.release_funding_inputs, funded.selected_inputs
+                        )
+                except Exception:  # noqa: BLE001 - uncertain authority retains locks and original error
+                    refusal.add_note("Funding input cleanup unconfirmed; inspect wallet locks.")
+            raise
         await self._worker(self._chain.broadcast, funded.raw, funded.txid)
         return state
 

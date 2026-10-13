@@ -295,6 +295,7 @@ jobs:
         run: |
           RILLSWAP_RUN_BITCOIN_CORE=1 .venv/bin/python -m pytest -q \
             tests/test_core_tx_bytes_bitcoin_core.py tests/test_core_block_transaction_pinned.py \
+            tests/test_funding_input_cleanup_pinned.py \
             --basetemp=tmp/pytest-ci-core-source
       - name: Check native funding inclusion without txindex or wallet discovery
         run: |

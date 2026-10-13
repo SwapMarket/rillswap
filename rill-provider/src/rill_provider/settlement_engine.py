@@ -134,6 +134,9 @@ class ChainBackend(Protocol):
     ) -> FundedOutput:
         """Sign (never broadcast) a wallet payment to the script at index 0 (RS-004)."""
 
+    def release_funding_inputs(self, inputs: tuple[tuple[str, int], ...]) -> None:
+        """Release identified, affirmatively ungranted funding inputs only."""
+
     def find_spender(self, txid: str, vout: int, *, from_height: int, to_height: int) -> SpendScan:
         """Look for the transaction spending the outpoint (RS-004)."""
 
