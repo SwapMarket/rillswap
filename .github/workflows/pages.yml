@@ -27,7 +27,11 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: '1.3.11'
-      - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Install shared payment dependencies
+        working-directory: rill-payments
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Install frozen web dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
       - name: Verify source and static deployment behavior
         run: |
           (cd src/vendor/rill-crypto && sha256sum -c SHA256SUMS)
