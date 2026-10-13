@@ -33,8 +33,10 @@ website or any RillSwap service.
   relays. There is no registry or allowlist, and all session traffic is
   end-to-end encrypted (NIP-44 inside NIP-59 gift wraps).
 - **Browser client without a backend.** A static web app with bundled
-  WebAssembly cryptography, no CDN or analytics, which can be served from
-  localhost or GitHub Pages.
+  WebAssembly cryptography and no CDN or analytics, published to
+  [GitHub Pages](https://rillswap.github.io/rillswap/) (signet at
+  [`/signet/`](https://rillswap.github.io/rillswap/signet/)) or served from
+  localhost.
 - **Gas-sponsored stablecoin claims.** Receive USDC/USDT at a fresh address
   that holds no ETH, through an EIP-7702 / ERC-4337 sponsor that the browser
   verifies but does not trust.

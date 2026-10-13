@@ -76,8 +76,9 @@ bun run test:pages
 
 `build:pages` creates `tmp/pages/` for GitHub Pages, with the mainnet preview
 at the root and a signet site under `/signet/`. It discards local overrides
-and never publishes anything; deployment is the manually dispatched
-`Publish static RillSwap` workflow.
+and never publishes anything. The `Publish static RillSwap` workflow
+(`.github/workflows/pages.yml`) tests and deploys it to GitHub Pages on every
+push to `main`.
 
 The reference below covers detailed behavior and safety rules.
 
@@ -246,10 +247,11 @@ local `VITE_RILLSWAP_*` overrides so regtest endpoints cannot leak into this
 artifact. Mainnet new funding stays blocked; existing refund actions remain
 explicitly approved. Neither site connects on load or network navigation.
 
-Enable GitHub Pages with **GitHub Actions** as its source, then manually run
-**Publish static RillSwap** (`.github/workflows/pages.yml`). That workflow tests
-the source and assembled sites before uploading/deploying. Local build/test
-commands never publish, and no deployment has been triggered by this work.
+Enable GitHub Pages with **GitHub Actions** as its source. **Publish static
+RillSwap** (`.github/workflows/pages.yml`) then runs on every push to `main`
+(or manually), tests the source and assembled sites, and uploads and deploys
+them. Pull requests never deploy, and local build/test commands never
+publish.
 `component-checks.yml` also tests the assembled artifact without publishing.
 
 #### Swap direction and assets

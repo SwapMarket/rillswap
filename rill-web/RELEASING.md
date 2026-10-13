@@ -3,9 +3,9 @@
 The read-only component checks build from locked dependencies, run
 unit/browser checks, then stage a deterministic ZIP and SHA-256 manifest from
 the same `dist/`. They verify the manifest, ZIP members, and a clean Pages
-candidate extracted from that ZIP against every tested file. The manually
-dispatched `Publish static RillSwap` workflow (`.github/workflows/pages.yml`)
-separately tests, uploads and deploys the Pages artifact. Release ZIP
+candidate extracted from that ZIP against every tested file. The
+`Publish static RillSwap` workflow (`.github/workflows/pages.yml`) separately
+tests, uploads and deploys the Pages artifact on every push to `main`. Release ZIP
 publication is not automated yet.
 
 Before running the Pages publisher or enabling release publication, an

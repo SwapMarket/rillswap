@@ -1,7 +1,11 @@
 name: Publish static RillSwap
 
-# Publication is an explicit repository-owner action, never a local build side effect.
+# Publishes the tested static web UI on every push to main, or on demand.
+# Pull requests never run this workflow, so untrusted code never gets deploy
+# credentials. Local builds never publish.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:

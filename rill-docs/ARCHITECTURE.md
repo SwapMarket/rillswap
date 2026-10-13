@@ -423,7 +423,7 @@ The optional local agent serves UI and a narrow same-origin API, binds loopback,
 
 UI flow: select network and privacy/chain mode; discover/import provider; compare indicative terms; create selected quote; verify full terms; export recovery; commit; show evidence-backed status and deadlines; complete or recover. Fee/lockup/preimage-exposure warnings remain visible and precise. A remote provider description never injects HTML.
 
-GitHub Pages deployment is an explicit, manually dispatched workflow using official Pages artifact/deploy actions and a protected environment. PRs build and test without deploy credentials. Pin action commits; use locked package installation; verify type/unit/vector tests; build once; attach the same bytes and checksums to a release; upload those bytes to Pages. Configure relative base paths for repository/fork hosting. Do not execute untrusted PR code via privileged `pull_request_target`.
+GitHub Pages deployment runs on pushes to `main` (never on pull requests) through official Pages artifact/deploy actions and a protected environment. PRs build and test without deploy credentials. Pin action commits; use locked package installation; verify type/unit/vector tests; build once; attach the same bytes and checksums to a release; upload those bytes to Pages. Configure relative base paths for repository/fork hosting. Do not execute untrusted PR code via privileged `pull_request_target`.
 
 Signed builds and attestations help a user verify a pinned artifact; they do not automatically verify the JavaScript that every website visitor executes. GitHub Pages' header controls also differ from a custom server, so document which CSP protections are actually delivered rather than claiming unavailable headers.
 
