@@ -126,6 +126,8 @@ export interface LnErc20Hooks {
   markExposure(contractHash: string): Promise<void>;
   /** Submit the claim and return its transaction hash once known (sponsored claims: after inclusion). */
   claim(lock: HtlcLock, preimage: string, htlc: string): Promise<string>;
+  /** Sponsored execution must bind the final-depth receipt to the locally verified operation. */
+  verifyClaim?(txHash: string): Promise<void>;
   /** Who pays claim gas: the claim account itself (`wallet`) or a gas sponsor (`sponsored`). */
   readonly claimGas: "wallet" | "sponsored";
 }
@@ -226,6 +228,9 @@ async function prepareFirm(relay: RelayLink, request: LnErc20Request, options: {
         if (used) throw new SwapError("firm offer already used"); used = true;
         const window = (): void => { if (seconds() >= Math.min(terms.terms_expiry, terms.invoice_binding.expires_at)) throw new SwapError("firm offer expired before invoice exposure"); };
         try {
+          if (hooks.claimGas === "sponsored" && typeof hooks.verifyClaim !== "function") {
+            throw new SwapError("Sponsored claims require operation-bound completion verification");
+          }
           window();
           const acceptance = { contract_hash: contractHash, handshake_hash: transcript, session_id: session.sessionId,
             client_session_xonly_key: session.key, provider_session_xonly_key: session.providerKey! };
@@ -260,6 +265,7 @@ async function prepareFirm(relay: RelayLink, request: LnErc20Request, options: {
           record = { ...record, claimTxHash, updatedAt: seconds() }; await save("claim-submitted");
           const receipt = await awaitReceipt(hooks.rpc, claimTxHash, terms.settlement_confirmations, hooks.signal ? { signal: hooks.signal } : {});
           if (!receipt.status) throw new SwapError("Claim reverted after preimage exposure. Do not assume Lightning was refunded; inspect the chain before any retry");
+          if (hooks.claimGas === "sponsored") await hooks.verifyClaim!(claimTxHash);
           // A bundled claim can be included without taking effect; the lock itself is the proof.
           if (await hooks.rpc.lockActive(request.asset.htlc_contract, lock)) throw new SwapError("Claim transaction confirmed but the token lock is still active. Inspect the chain before any retry");
           record = { ...record, updatedAt: seconds() };

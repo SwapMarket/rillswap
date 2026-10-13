@@ -30,3 +30,19 @@ test("a delayed exposure commit leaves UNKNOWN but sends no stale claim", async 
   const result = await run("stale"); expect(result.error).toContain("safety check became stale");
   expect(result.events).toContain("exposure:commit"); expect(result.events).not.toContain("wallet:claim");
 });
+test("sponsored execution without a verifier exposes neither acceptance nor invoice", async () => {
+  const result = await run("sponsored-missing");
+  expect(result.error).toContain("operation-bound completion verification");
+  expect(result.events).not.toContain("send:terms_accept:");
+  expect(result.events).not.toContain("invoice");
+  expect(result.events).not.toContain("wallet:claim");
+});
+test("sponsored proof refusal retains submitted recovery without recording completion or retrying", async () => {
+  const result = await run("sponsored-rejected");
+  expect(result.error).toContain("operation proof rejected");
+  expect(result.events).toContain(`verify:${"ab".repeat(32)}`);
+  expect(result.events.indexOf("exposure:commit")).toBeLessThan(result.events.indexOf("wallet:claim"));
+  expect(result.events.indexOf("recovery:claim-submitted")).toBeLessThan(result.events.indexOf(`verify:${"ab".repeat(32)}`));
+  expect(result.events).not.toContain("recovery:claimed");
+  expect(result.events.filter((event) => event === "wallet:claim")).toHaveLength(1);
+});

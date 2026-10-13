@@ -77,6 +77,14 @@ from its existing deployment without redeploying contracts. Builds without pins
 refuse new stablecoin swaps, but can still open existing recovery files. Forward
 execution checks the deployed HTLC runtime before any approval or lock.
 
+Sponsored completion requires the locally verified operation hash and staging
+account, successful EntryPoint operation evidence, and the expected claim and
+payout in that operation's receipt at settlement depth. An unrelated transfer
+cannot prove completion. The sponsor still learns the preimage during preparation
+and can withhold execution. After reload, older recovery files without operation
+proof show a qualified claim observation, not verified sponsored completion.
+Unknown exposure remains blocked from automatic retry.
+
 ## Scripts
 
 From `rill-web/`:

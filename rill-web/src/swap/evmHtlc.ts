@@ -7,7 +7,7 @@
 import { keccak_256 } from "@noble/hashes/sha3.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import artifact from "../generated/erc20SwapIdentity.json";
+import artifact from "../generated/erc20SwapIdentity.json" with { type: "json" };
 
 const encoder = new TextEncoder();
 const ADDRESS = /^0x[0-9a-f]{40}$/;
@@ -71,7 +71,20 @@ export const ABI = Object.freeze({
   claimTopic: `0x${bytesToHex(keccak_256(encoder.encode("Claim(bytes32,bytes32)")))}`,
   refundTopic: `0x${bytesToHex(keccak_256(encoder.encode("Refund(bytes32)")))}`,
   transferTopic: `0x${bytesToHex(keccak_256(encoder.encode("Transfer(address,address,uint256)")))}`,
+  userOperationTopic: `0x${bytesToHex(keccak_256(encoder.encode("UserOperationEvent(bytes32,address,address,uint256,bool,uint256,uint256)")))}`,
+  beforeExecutionTopic: `0x${bytesToHex(keccak_256(encoder.encode("BeforeExecution()")))}`,
 });
+
+/** Locally verified submission identity, never taken from sponsor status. */
+export interface SponsoredClaimProof {
+  readonly userOpHash: string;
+  readonly entryPoint: string;
+  readonly sender: string;
+  readonly htlc: string;
+  readonly lock: HtlcLock;
+  readonly preimage: string;
+  readonly destination: string;
+}
 
 const lockWords = (lock: HtlcLock): string =>
   hashWord(lock.preimageHash) + word(lock.amount) + addressWord(lock.token) +
@@ -238,6 +251,72 @@ export class EvmRpc {
     return result.logs.filter((log) => !log.removed && log.address.toLowerCase() === checkEvmAddress(token, "token") && log.topics[0] === ABI.transferTopic &&
       log.topics.length === 3 && wordAddress(log.topics[2]!.slice(2).toLowerCase()) === checkEvmAddress(to, "recipient"))
       .reduce((sum, log) => sum + wordUint(wordAt(log.data, 0)), 0n);
+  }
+
+  /** Prove this operation's claim and forwarding effects from one canonical, sufficiently deep receipt. */
+  async verifySponsoredClaim(txHash: string, proof: SponsoredClaimProof, confirmations: number): Promise<void> {
+    if (!Number.isSafeInteger(confirmations) || confirmations < 1 || !/^0x[0-9a-f]{64}$/.test(proof.userOpHash) ||
+        checkEvmAddress(proof.sender, "staging account") !== proof.lock.claimAddress ||
+        bytesToHex(sha256(hexToBytes(hashWord(proof.preimage)))) !== proof.lock.preimageHash) {
+      throw new EvmError("Sponsored claim proof identity is inconsistent");
+    }
+    const entryPoint = checkEvmAddress(proof.entryPoint, "EntryPoint");
+    const htlc = checkEvmAddress(proof.htlc, "HTLC");
+    const destination = checkEvmAddress(proof.destination, "destination");
+    const token = checkEvmAddress(proof.lock.token, "token");
+    const receipt = await this.call("eth_getTransactionReceipt", [`0x${hashWord(txHash)}`]) as {
+      transactionHash?: string; blockHash?: string; blockNumber?: string; status?: string; logs?: RawLog[];
+    } | null;
+    if (!receipt || receipt.status !== "0x1" || receipt.transactionHash?.toLowerCase() !== `0x${txHash}` ||
+        !receipt.blockHash || !/^0x[0-9a-fA-F]{64}$/.test(receipt.blockHash) || !Array.isArray(receipt.logs)) {
+      throw new EvmError("Sponsored claim receipt is unavailable or unsuccessful");
+    }
+    const height = hexInt(receipt.blockNumber, "receipt block number");
+    const tip = await this.blockNumber();
+    const block = await this.call("eth_getBlockByNumber", [`0x${height.toString(16)}`, false]) as { hash?: string } | null;
+    if (tip - height + 1 < confirmations || block?.hash?.toLowerCase() !== receipt.blockHash.toLowerCase()) {
+      throw new EvmError("Sponsored claim receipt lacks canonical settlement depth");
+    }
+    const logs = receipt.logs;
+    for (const [index, log] of logs.entries()) {
+      if (!log || typeof log.address !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(log.address) || log.removed ||
+          !Array.isArray(log.topics) || !log.topics.every((topic) => typeof topic === "string" && /^0x[0-9a-fA-F]{64}$/.test(topic)) ||
+          typeof log.data !== "string" || !/^0x(?:[0-9a-fA-F]{2})*$/.test(log.data) ||
+          log.transactionHash?.toLowerCase() !== `0x${txHash}` || hexInt(log.blockNumber, "log block number") !== height ||
+          (index > 0 && hexInt(log.logIndex, "log index") !== hexInt(logs[index - 1]!.logIndex, "log index") + 1)) {
+        throw new EvmError("Sponsored claim receipt logs are incomplete or malformed");
+      }
+    }
+    // EntryPoint v0.7 emits BeforeExecution after validation and ends each operation
+    // with UserOperationEvent (including failed operations). Never borrow another op's logs.
+    let start = -1;
+    const matches: { start: number; end: number; event: RawLog }[] = [];
+    for (const [index, log] of logs.entries()) {
+      if (log.address.toLowerCase() !== entryPoint) continue;
+      const topic = log.topics[0]?.toLowerCase();
+      if (topic === ABI.beforeExecutionTopic && log.topics.length === 1 && log.data === "0x") start = index + 1;
+      if (topic === ABI.userOperationTopic) {
+        if (log.topics[1]?.toLowerCase() === proof.userOpHash) matches.push({ start, end: index, event: log });
+        start = index + 1;
+      }
+    }
+    const match = matches[0];
+    if (matches.length !== 1 || !match || match.start < 0 || match.event.topics.length !== 4 ||
+        match.event.topics[2]?.toLowerCase() !== `0x${addressWord(proof.sender)}` ||
+        match.event.data.length !== 2 + 4 * 64 || wordAt(match.event.data, 1).toLowerCase() !== word(1n)) {
+      throw new EvmError("Sponsored claim operation is not proven by this receipt");
+    }
+    const effects = logs.slice(match.start, match.end);
+    const claimed = effects.some((log) => log.address.toLowerCase() === htlc && log.topics.length === 2 &&
+      log.topics[0]?.toLowerCase() === ABI.claimTopic && log.topics[1]?.toLowerCase() === `0x${proof.lock.preimageHash}` &&
+      log.data.toLowerCase() === `0x${proof.preimage}`);
+    const forwarded = effects.filter((log) => log.address.toLowerCase() === token && log.topics.length === 3 &&
+      log.topics[0]?.toLowerCase() === ABI.transferTopic && log.topics[1]?.toLowerCase() === `0x${addressWord(proof.sender)}` &&
+      log.topics[2]?.toLowerCase() === `0x${addressWord(destination)}` && log.data.length === 66)
+      .reduce((sum, log) => sum + wordUint(wordAt(log.data, 0)), 0n);
+    if (!claimed || forwarded < proof.lock.amount || await this.lockActive(htlc, proof.lock)) {
+      throw new EvmError("Sponsored operation did not prove the expected claim and payout");
+    }
   }
 }
 

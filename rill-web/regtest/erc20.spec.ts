@@ -6,6 +6,7 @@ import { test, expect, type Page } from "@playwright/test";
 import { execFile, execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { assertDisposableStack, composeEnabled } from "./stack";
+import { EvmRpc } from "../src/swap/evmHtlc";
 
 const root = resolve(import.meta.dirname, "../..");
 const enabled = process.env.RILLSWAP_RUN_BROWSER_ERC20_REGTEST === "1" || composeEnabled;
@@ -215,7 +216,63 @@ test("browser receives fUSDC at a typed address with no wallet extension, throug
   await expect(page.locator("#swap-recovery-result h3")).toHaveText("Lightning to fUSDC recovery verified");
   await expect(page.locator("#swap-recovery-result")).toContainText(`forwarded to ${destination}`);
   await page.locator("#swap-evm-recovery-check").click();
-  await expect(page.locator("#swap-evm-recovery-message")).toContainText("Tokens claimed");
+  await expect(page.locator("#swap-evm-recovery-message")).toContainText("sponsored completion is unverified");
   await expect(page.locator("#swap-evm-recovery-claim")).toBeDisabled();
   expect(errors).toEqual([]);
+});
+
+test("sponsored recovery rejects an old real transfer while its new lock remains active", async ({ page }) => {
+  test.skip(!enabled, "Explicit dev-stack opt-in required");
+  test.setTimeout(240000);
+  const deployment = JSON.parse(execFileSync("docker", ["exec", `${project}-tools-1`, "cat", "/state/evm/contracts.json"],
+    { encoding: "utf8", timeout: 10000 })) as { token_contract: string; htlc_contract: string };
+  const destination = `0x${"d1".repeat(20)}`;
+  const old = JSON.parse(command("cast", "send", deployment.token_contract, "transfer(address,uint256)", destination,
+    "20000000", "--unlocked", "--from", USER, "--legacy", "--gas-price", "0", "--json")) as { transactionHash: string };
+  const rpc = new EvmRpc(`http://127.0.0.1:${anvilPort}`);
+  expect(await rpc.transferred(old.transactionHash.slice(2), deployment.token_contract, destination)).toBe(20_000_000n);
+  await page.goto(`http://127.0.0.1:${webPort}/swap.html`);
+  await page.locator("#swap-from").selectOption("ln"); await page.locator("#swap-to").selectOption("usdc");
+  await page.locator("#swap-receive-address").fill(destination);
+  await page.locator("#swap-receive-amount").fill("20"); await page.locator("#swap-start").click();
+  await page.locator("#swap-quote-accept").click({ timeout: 60000 });
+  await expect(page.locator("#swap-reverse-invoice")).toBeVisible({ timeout: 60000 });
+  const invoice = (await page.locator("#swap-reverse-invoice").textContent())!;
+  const paymentHash = JSON.parse(command("lncli", "user", "decodepayreq", invoice)).payment_hash as string;
+  await page.reload(); // Recovery must be explicit; do not execute the live claim.
+  const paid = new Promise<{ output: string; error: Error | null }>((resolve) => execFile(`${root}/dev/devctl`, ["pay", invoice, "--node", "user"],
+    { cwd: root, env: process.env, encoding: "utf8", timeout: 150000 }, (error, output) => resolve({ output, error })));
+  await expect(async () => {
+    await page.locator("#swap-evm-recovery-check").click();
+    await expect(page.locator("#swap-evm-recovery-check")).toBeEnabled();
+    await expect(page.locator("#swap-evm-recovery-claim")).toBeEnabled({ timeout: 2000 });
+  }).toPass({ timeout: 60000 });
+  const [funded] = await rpc.findLockups(deployment.htlc_contract, paymentHash, 0, await rpc.blockNumber());
+  expect(funded).toBeDefined();
+  try {
+    const sponsorPort = process.env.RILL_DEV_SPONSOR_PORT ?? "8094";
+    await page.route(`http://127.0.0.1:${sponsorPort}/**`, async (route) => {
+      const request = route.request().postDataJSON() as { id: number; method: string };
+      if (request.method === "wallet_sendPreparedCalls" || request.method === "wallet_getCallsStatus") {
+        await route.fulfill({ json: { jsonrpc: "2.0", id: request.id, result: request.method === "wallet_sendPreparedCalls"
+          ? { id: "withheld-security-claim" } : { status: 200, receipts: [{ transactionHash: old.transactionHash }] } } });
+      } else await route.fallback(); // Actual sponsor preparation and all chain reads remain real.
+    });
+    await page.locator("#swap-evm-recovery-claim").click();
+    await expect(page.locator("#swap-evm-recovery-message")).toContainText("operation is not proven", { timeout: 30000 });
+    expect(await rpc.lockActive(deployment.htlc_contract, funded!.lock)).toBe(true);
+    expect(await rpc.findClaim(deployment.htlc_contract, paymentHash, 0, await rpc.blockNumber())).toBeNull();
+    await page.reload();
+    await page.locator("#swap-evm-recovery-check").click();
+    await expect(page.locator("#swap-evm-recovery-message")).toContainText("Claim exposure is unknown");
+    await expect(page.locator("#swap-evm-recovery-claim")).toBeDisabled();
+  } finally {
+    await page.unrouteAll({ behavior: "wait" });
+    // Resolve the real held payment only after the real provider refund, not via unsafe early cancellation.
+    const blocks = Math.max(1, funded!.lock.timelock - await rpc.blockNumber() + 2);
+    command("cast", "rpc", "anvil_mine", `0x${blocks.toString(16)}`);
+    await expect.poll(() => rpc.lockActive(deployment.htlc_contract, funded!.lock), { timeout: 60000 }).toBe(false);
+    const result = await paid;
+    expect(result.error).not.toBeNull();
+  }
 });

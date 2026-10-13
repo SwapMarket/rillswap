@@ -5,9 +5,9 @@
  */
 import { type Erc20SwapOutcome, type EvmRecoveryRecord, parseEvmRecovery, type PreparedErc20Swap } from "./swap/erc20Swap";
 import {
-  awaitReceipt, encodeApprove, encodeClaim, encodeLock, encodeRefund, encodeTransfer, EvmError, EvmRpc, EvmWallet, type HtlcLock, injectedProvider,
+  awaitReceipt, encodeApprove, encodeClaim, encodeLock, encodeRefund, encodeTransfer, EvmError, EvmRpc, EvmWallet, type HtlcLock, injectedProvider, type SponsoredClaimProof,
 } from "./swap/evmHtlc";
-import { GasSponsor, type SponsorConfig } from "./swap/gasSponsor";
+import { GasSponsor, type SponsorConfig, stagingAddress } from "./swap/gasSponsor";
 import type { EvmSponsorDefaults } from "./swap/config";
 import type { EvmAssetIdentity } from "./manualProviderAdvertisement";
 import { assertFreshEvmClaim, assertSafeEvmClaim, type PreparedLnErc20Execution } from "./swap/lnErc20Swap";
@@ -140,16 +140,16 @@ export type LnErc20Claimer =
  * received the payout from that very transaction. The sponsor's own status is not trusted for that.
  */
 async function sponsoredClaim(rpc: EvmRpc, claimer: Extract<LnErc20Claimer, { kind: "sponsored" }>, lock: HtlcLock, preimage: string, htlc: string,
-  report: (line: string) => void, signal?: AbortSignal): Promise<string> {
-  const { callId } = await claimer.sponsor.submit(rpc, claimer.secret, [
+  report: (line: string) => void, signal?: AbortSignal): Promise<{ txHash: string; proof: SponsoredClaimProof }> {
+  const { callId, userOpHash } = await claimer.sponsor.submit(rpc, claimer.secret, [
     { to: htlc, data: encodeClaim(lock, preimage) }, { to: lock.token, data: encodeTransfer(claimer.destination, lock.amount) },
   ]);
   report(`Claim submitted to the gas sponsor (call ${callId}); waiting for inclusion`);
   const txHash = await claimer.sponsor.awaitInclusion(callId, signal ? { signal } : {});
-  if (await rpc.transferred(txHash, lock.token, claimer.destination) < lock.amount) {
-    throw new EvmError(`Sponsored transaction ${txHash} did not deliver the tokens to ${claimer.destination}. Inspect the chain before any retry`);
-  }
-  return txHash;
+  const proof = { userOpHash, entryPoint: claimer.sponsor.config.entryPoint, sender: stagingAddress(claimer.secret),
+    lock, preimage, htlc, destination: claimer.destination };
+  await rpc.verifySponsoredClaim(txHash, proof, 1);
+  return { txHash, proof };
 }
 
 /** Reopen an RS-010 record: show the signed lock, check it on request, and refund through the wallet after the timelock. */
@@ -252,7 +252,12 @@ function reverseEvmRecoveryControls(root: HTMLElement, record: EvmRecoveryRecord
       const tip = await chain.blockNumber();
       const found = await chain.findClaim(terms.evm_asset.htlc_contract, record.lock.preimageHash, Math.max(0, terms.evm_reference_block - 12), tip);
       current();
-      if (found) { message.textContent = `Tokens claimed in ${found.txHash}. The provider can settle the Lightning hold.`; return; }
+      if (found) {
+        message.textContent = record.claimKey !== null
+          ? `Claim observed in ${found.txHash}; sponsored completion is unverified. This record does not retain the submitted operation proof. Inspect the exact payout; do not retry automatically.`
+          : `Tokens claimed in ${found.txHash}. The provider can settle the Lightning hold.`;
+        return;
+      }
       const entry = await journal.read(record.contractHash); current();
       if (!entry || entry.exposure !== "unexposed") {
         message.textContent = "Claim exposure is unknown (or this browser has no exposure journal). No automatic retry is allowed. Keep the recovery file and inspect any pending wallet transaction.";
@@ -286,12 +291,18 @@ function reverseEvmRecoveryControls(root: HTMLElement, record: EvmRecoveryRecord
       assertFreshEvmClaim(safety);
       message.textContent = claimer.kind === "wallet" ? "Confirm the claim in your wallet. The preimage may be disclosed even if the request fails."
         : "Claiming through the gas sponsor. The preimage is disclosed to it even if the request fails.";
-      const hash = claimer.kind === "wallet" ? await claimer.wallet.send(claimer.account, terms.evm_asset.htlc_contract, encodeClaim(record.lock, record.preimage!))
-        : await sponsoredClaim(chain, claimer, record.lock, record.preimage!, terms.evm_asset.htlc_contract, (line) => { message.textContent = line; });
+      let hash: string, sponsored: { txHash: string; proof: SponsoredClaimProof } | null = null;
+      if (claimer.kind === "wallet") {
+        hash = await claimer.wallet.send(claimer.account, terms.evm_asset.htlc_contract, encodeClaim(record.lock, record.preimage!));
+      } else {
+        sponsored = await sponsoredClaim(chain, claimer, record.lock, record.preimage!, terms.evm_asset.htlc_contract, (line) => { message.textContent = line; });
+        hash = sponsored.txHash;
+      }
       const document = JSON.parse(new TextDecoder().decode(plaintext)) as Record<string, unknown>;
       document.claim_tx_hash = hash; document.updated_at = Math.floor(Date.now() / 1000);
       await journal.save(record.contractHash, await encryptCanonicalRecoveryForRecipient(new TextEncoder().encode(canonicalize(document)!), recipient));
       const receipt = await awaitReceipt(chain, hash, terms.settlement_confirmations);
+      if (receipt.status && sponsored) await chain.verifySponsoredClaim(hash, sponsored.proof, terms.settlement_confirmations);
       current(); message.textContent = receipt.status ? `Tokens claimed in ${hash}. The provider can settle the Lightning hold.`
         : "Claim reverted after preimage exposure. Inspect the chain and Lightning payment; do not assume a refund.";
     })().catch((error: unknown) => { if (!disposed) message.textContent = `Claim stopped: ${error instanceof Error ? error.message : "unknown error"}`; })
@@ -309,6 +320,7 @@ export async function mountLnErc20Execution(panel: HTMLElement, options: {
   const { prepared, rpc, claimer, journal } = options, asset = prepared.terms.evm_asset;
   const files = node("section", "", "swap-erc20-files"), invoice = node("section"), message = node("p", "Preparing durable recovery before exposing the invoice");
   panel.replaceChildren(message, invoice, files);
+  let sponsored: { txHash: string; proof: SponsoredClaimProof } | null = null;
   const outcome = await prepared.execute({
     rpc, report: (line) => { options.report(line); message.textContent = line; options.status(line, 3); },
     saveRecovery: async (file, stage, contract) => {
@@ -325,8 +337,15 @@ export async function mountLnErc20Execution(panel: HTMLElement, options: {
     checkWallet: async () => { if (claimer.kind === "wallet") await claimer.wallet.assertAccount(asset.chain_id, claimer.account); },
     markExposure: (contract) => journal.expose(contract),
     claimGas: claimer.kind,
-    claim: (lock, preimage, htlc) => claimer.kind === "wallet" ? claimer.wallet.send(claimer.account, htlc, encodeClaim(lock, preimage))
-      : sponsoredClaim(rpc, claimer, lock, preimage, htlc, (line) => { options.report(line); message.textContent = line; }, options.signal),
+    claim: async (lock, preimage, htlc) => {
+      if (claimer.kind === "wallet") return claimer.wallet.send(claimer.account, htlc, encodeClaim(lock, preimage));
+      sponsored = await sponsoredClaim(rpc, claimer, lock, preimage, htlc, (line) => { options.report(line); message.textContent = line; }, options.signal);
+      return sponsored.txHash;
+    },
+    ...(claimer.kind === "sponsored" ? { verifyClaim: async (txHash: string) => {
+      if (!sponsored || sponsored.txHash !== txHash) throw new EvmError("Submitted sponsored operation proof is unavailable");
+      await rpc.verifySponsoredClaim(txHash, sponsored.proof, prepared.terms.settlement_confirmations);
+    } } : {}),
   });
   invoice.replaceChildren();
   message.textContent = `${tokenLabel(BigInt(prepared.terms.economics.payout_token_base), asset)} received in ${outcome.claimTxHash}.`;
