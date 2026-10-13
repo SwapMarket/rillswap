@@ -5557,6 +5557,21 @@ class LiveSessionStore:
                     "WHERE session_id=? AND sender_key=? AND (message_id=? OR seq=?)",
                     (outer.session_id, client, outer.message_id, outer.sequence),
                 ).fetchall()
+                if outer.message_type not in CLIENT_REQUEST_TYPES:
+                    raise LiveSessionStoreError("request not admissible")  # noqa: TRY301
+                if not seen and (
+                    outer.sequence != client_seq
+                    or client_seq - FIRST_REQUEST_SEQUENCE >= MAX_REQUESTS_PER_SESSION
+                    or (
+                        outer.in_reply_to is not None
+                        and connection.execute(
+                            "SELECT 1 FROM outbox WHERE session_id=? AND message_id=?",
+                            (outer.session_id, outer.in_reply_to),
+                        ).fetchone()
+                        is None
+                    )
+                ):
+                    raise LiveSessionStoreError("request not admissible")  # noqa: TRY301
         except LiveSessionStoreError:
             raise
         except Exception:  # noqa: BLE001 - never echo caller documents or crypto details

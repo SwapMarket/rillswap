@@ -611,6 +611,12 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: P
 
         request = _signed_quote_request(harness, crypto)
         request.update(payload=FIRM | {"extensions": {}}, signature=None)
+        for identifier in ("21", "22", "23"):
+            invalid = dict(request, message_type="error", message_id=identifier * 32)
+            unsigned = unsigned_envelope_hash(Envelope.model_validate_json(json.dumps(invalid)))
+            invalid["signature"] = crypto.schnorr_sign(CLIENT_SECRET, unsigned, b"\x69" * 32).hex()
+            assert deliver(invalid) == "refused"
+            assert decoded == []
         unsigned = unsigned_envelope_hash(Envelope.model_validate_json(json.dumps(request)))
         request["signature"] = crypto.schnorr_sign(CLIENT_SECRET, unsigned, b"\x69" * 32).hex()
         assert deliver(request) == "request-answered"

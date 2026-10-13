@@ -821,6 +821,7 @@ class HandshakeService:
         payload = envelope.get("payload")
         if (
             self._invoice_decoder is None
+            or envelope.get("message_type") != "quote_request"
             or envelope.get("sequence") != FIRST_REQUEST_SEQUENCE
             or not isinstance(payload, dict)
             or payload.get("mode") != "firm"
@@ -855,6 +856,7 @@ class HandshakeService:
             or self._invoice_decoder is None
             or terms.firm is None
             or terms.profile not in REVERSE_PROFILES
+            or envelope.get("message_type") != "quote_request"
             or envelope.get("sequence") != FIRST_REQUEST_SEQUENCE
             or not isinstance(payload, dict)
             or payload.get("mode") != "firm"

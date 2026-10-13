@@ -7,6 +7,7 @@ opened with, and that an invoice no offer bound is canceled again.
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
@@ -134,6 +135,22 @@ def test_hold_is_opened_for_exactly_h_with_the_schedule_cltv() -> None:
     service._hold_invoices.add.assert_called_once_with(  # type: ignore[union-attr] # noqa: SLF001
         HASH, value_msat=100_700_000, expiry_seconds=3_600, cltv_expiry_delta=185
     )
+
+
+@pytest.mark.parametrize("message_type", ["error", "terms_accept", "funding_binding"])
+def test_non_quote_requests_never_invoke_invoice_or_hold_rpc(message_type: str) -> None:
+    hold = _hold()
+    service, store = _service(hold)
+    decoder = Mock()
+    service._invoice_decoder = decoder  # noqa: SLF001 - assert the external effect boundary
+    document = json.loads(_document(REVERSE_FIRM | {"invoice": "untrusted"}))
+    document["message_type"] = message_type
+    encoded = json.dumps(document).encode()
+    assert asyncio.run(service._decode_invoice(encoded)) is None  # noqa: SLF001
+    assert asyncio.run(_open(service, encoded, _terms())) is None
+    decoder.assert_not_called()
+    hold.add.assert_not_called()
+    store.classify_request.assert_not_called()
 
 
 @pytest.mark.parametrize(
