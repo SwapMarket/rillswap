@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { LndInvoiceBackend, LndNotFound, lndRestTransport, type LndTransport } from "../src/lnd";
 import { receiver, testInvoice } from "./helpers";
@@ -39,3 +39,19 @@ test("rotation, mismatched receiver and unsupported transport are refused", asyn
     expect(() => lndRestTransport(url, new Uint8Array([1]), new Uint8Array([1]))).toThrow();
   }
 });
+
+for (const reason of ["receiver_mismatch", "chain_mismatch", "not_synced"] as const) {
+  test(`LND identity diagnostic exposes only the fixed ${reason} reason`, async () => {
+    const log = spyOn(console, "error").mockImplementation(() => {});
+    const secret = "private_backend_identity_do_not_log";
+    const info = { identity_pubkey: reason === "receiver_mismatch" ? secret : receiver,
+      chains: [{ chain: reason === "chain_mismatch" ? secret : "bitcoin", network: "regtest" }], synced_to_chain: reason !== "not_synced", private: secret };
+    const backend = new LndInvoiceBackend({ call: async () => info },
+      { origin: "https://merchant.example", receiver, network: "regtest" }, new Uint8Array(32).fill(9));
+    try {
+      await expect(backend.identity()).rejects.toThrow("LND receiver identity, chain or freshness mismatch");
+      expect(log.mock.calls).toEqual([[JSON.stringify({ diagnostic: "lnd_identity_refused", reason })]]);
+      expect(JSON.stringify(log.mock.calls)).not.toContain(secret);
+    } finally { log.mockRestore(); }
+  });
+}

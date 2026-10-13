@@ -1,12 +1,13 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
-import { MerchantLedger, type ReceiptObservation } from "../src/merchant";
+import { MerchantLedger, type InvoiceIssuer, type ReceiptObservation } from "../src/merchant";
 import { createMerchantService, verifyAcceptance } from "../src/server";
 import { createCheckout, type CheckoutCheckpoint, type CheckoutStore, type IntentView } from "../src/sdk";
 import { receiver, testInvoice } from "./helpers";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
+import { LndInvoiceBackend } from "../src/lnd";
 
 const cleanups: (() => void)[] = []; afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); });
 async function fixture() {
@@ -15,7 +16,7 @@ async function fixture() {
   const ledger = MerchantLedger.provision(directory + "/ledger", identity);
   cleanups.push(() => { ledger.close(); rmSync(directory, { recursive: true, force: true }); });
   let paid = false;
-  const issuer = { identity: async () => identity, create: async (op: { operationId: string }) => testInvoice(op.operationId) };
+  const issuer: InvoiceIssuer = { identity: async () => identity, create: async (op: { operationId: string }) => testInvoice(op.operationId) };
   const observer = { identity: async () => identity, lookup: async (paymentHash: string): Promise<ReceiptObservation> => ({
     receiver, network: "regtest", paymentHash, invoiceAmountMsat: "1000000", paidMsat: paid ? "1000000" : "0", state: paid ? "SETTLED" : "OPEN", settledAt: paid ? 1200 : null,
   }) };
@@ -34,7 +35,7 @@ async function fixture() {
     policy: { version: "native-lightning/1" as const, merchantOrigin: identity.origin, receiver, network: "regtest" as const, maxBuyerExtraMsat: "100000", maxBuyerExtraBps: 1000 },
     recoveryStore: store, now: () => 1200,
     fetch: (input: RequestInfo | URL, init?: RequestInit) => service.fetch(new Request(input, init)) };
-  return { service, ledger, call, created, adminToken, options, rows, expectedPublicKey: bytesToHex(ed25519.getPublicKey(new Uint8Array(32).fill(3))), settle: () => { paid = true; } };
+  return { service, ledger, issuer, call, created, adminToken, options, rows, expectedPublicKey: bytesToHex(ed25519.getPublicKey(new Uint8Array(32).fill(3))), settle: () => { paid = true; } };
 }
 test("status capabilities cannot set price, create attempts or fulfill using evidence", async () => {
   const f = await fixture(), url = `/v1/intents/${f.created.id}`;
@@ -87,3 +88,58 @@ test("expiry is rechecked after the durable checkpoint and invalid invoice never
     fetch: async () => { const view = await (await f.call(`/v1/intents/${f.created.id}`)).json(); view.attempt.invoice = testInvoice("wrong", "2000000"); return Response.json(view); } });
   await expect(invalid.pay()).rejects.toThrow("differs"); expect(calls).toBe(0);
 });
+
+test("valid shop intent with an unsynced backend is refused without creating an intent or leaking inputs", async () => {
+  const f = await fixture(), log = spyOn(console, "error").mockImplementation(() => {});
+  const creation = spyOn(f.ledger, "createIntent");
+  const backend = new LndInvoiceBackend({ call: async () => ({ identity_pubkey: receiver,
+    chains: [{ chain: "bitcoin", network: "regtest" }], synced_to_chain: false, private: "private-backend-response" }) },
+    { origin: "https://merchant.example", receiver, network: "regtest" }, new Uint8Array(32).fill(9));
+  f.issuer.identity = () => backend.identity();
+  try {
+    const response = await f.call("/v1/intents", f.adminToken, "POST", { orderRef: "0123456789abcdef", amountMsat: "2000000", expiresAt: 2000 });
+    expect(response.status).toBe(400); expect(await response.json()).toEqual({ error: "Checkout request refused" });
+    expect(creation).not.toHaveBeenCalled();
+    expect(log.mock.calls).toEqual([
+      [JSON.stringify({ diagnostic: "lnd_identity_refused", reason: "not_synced" })],
+      [JSON.stringify({ diagnostic: "merchant_intent_refused", phase: "health", reason: "unknown" })],
+    ]);
+    for (const secret of [f.adminToken, "0123456789abcdef", "private-backend-response"]) expect(JSON.stringify(log.mock.calls)).not.toContain(secret);
+  } finally { creation.mockRestore(); log.mockRestore(); }
+});
+
+test("merchant intent diagnostics never expose arbitrary backend errors or unauthenticated requests", async () => {
+  const f = await fixture(), log = spyOn(console, "error").mockImplementation(() => {});
+  f.issuer.identity = async () => { throw new Error("private-invoice-and-credential-do-not-log"); };
+  try {
+    const input = { orderRef: "0123456789abcdef", amountMsat: "2000000", expiresAt: 2000 };
+    expect((await f.call("/v1/intents", "unauthorized", "POST", input)).status).toBe(401);
+    expect(log).not.toHaveBeenCalled();
+    const response = await f.call("/v1/intents", f.adminToken, "POST", input);
+    expect(response.status).toBe(400); expect(await response.json()).toEqual({ error: "Checkout request refused" });
+    expect(log.mock.calls).toEqual([[JSON.stringify({ diagnostic: "merchant_intent_refused", phase: "health", reason: "unknown" })]]);
+  } finally { log.mockRestore(); }
+});
+
+for (const phase of ["parse", "create_intent", "snapshot"] as const) {
+  test(`intent ${phase} refusal keeps the HTTP contract and logs only allowlisted diagnostics`, async () => {
+    const f = await fixture(), intent = f.ledger.getIntent(f.created.id);
+    const log = spyOn(console, "error").mockImplementation(() => {});
+    const create = spyOn(f.ledger, "createIntent"), get = spyOn(f.ledger, "getIntent");
+    const secret = "private_database_or_payload_do_not_log";
+    if (phase === "create_intent") create.mockImplementation(() => { throw Object.assign(new Error(secret), { code: "SQLITE_BUSY" }); });
+    if (phase === "snapshot") {
+      create.mockReturnValue(intent);
+      get.mockImplementation(() => { throw Object.assign(new Error(secret), { code: secret }); });
+    }
+    try {
+      const input = phase === "parse" ? { secret } : { orderRef: "0123456789abcdef", amountMsat: "2000000", expiresAt: 2000 };
+      const response = await f.call("/v1/intents", f.adminToken, "POST", input);
+      expect(response.status).toBe(400); expect(await response.json()).toEqual({ error: "Checkout request refused" });
+      expect(log.mock.calls).toEqual([[JSON.stringify({ diagnostic: "merchant_intent_refused", phase,
+        reason: phase === "parse" ? "http" : phase === "create_intent" ? "SQLITE_BUSY" : "unknown" })]]);
+      expect(JSON.stringify(log.mock.calls)).not.toContain(secret);
+      if (phase === "parse") expect(create).not.toHaveBeenCalled();
+    } finally { get.mockRestore(); create.mockRestore(); log.mockRestore(); }
+  });
+}

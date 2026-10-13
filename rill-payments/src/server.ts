@@ -174,6 +174,7 @@ export function createMerchantService(options: MerchantServiceOptions | KeylessM
   };
   return {
     async fetch(request: Request): Promise<Response> {
+      let intentPhase: "parse" | "health" | "create_intent" | "snapshot" | undefined;
       try {
         const url = new URL(request.url);
         if (url.search || url.hash || (request.headers.has("Origin") && request.headers.get("Origin") !== ledger.identity.origin)) throw new HttpError(403);
@@ -186,10 +187,14 @@ export function createMerchantService(options: MerchantServiceOptions | KeylessM
         const admin = equal(authorization, `Bearer ${options.adminToken}`);
         if (url.pathname === "/v1/intents" && request.method === "POST") {
           if (!admin) throw new HttpError(401);
+          intentPhase = "parse";
           const input = await body(request);
           if (Object.keys(input).sort().join(",") !== "amountMsat,expiresAt,orderRef" || typeof input.orderRef !== "string" || typeof input.amountMsat !== "string" || typeof input.expiresAt !== "number") throw new HttpError(400);
+          intentPhase = "health";
           await health();
+          intentPhase = "create_intent";
           const intent = ledger.createIntent(input.orderRef, input.amountMsat, input.expiresAt, request.headers.get("Idempotency-Key") ?? "", now());
+          intentPhase = "snapshot";
           return response({ ...snapshot(intent.id), statusToken: token(intent.id) }, 201);
         }
         const wooOrder = /^\/v1\/woocommerce\/orders\/([1-9][0-9]{0,15})\/checkout$/.exec(url.pathname);
@@ -285,7 +290,17 @@ export function createMerchantService(options: MerchantServiceOptions | KeylessM
           await body(request); return response({ authoritative: false, accepted: false }, 202);
         }
         throw new HttpError(405);
-      } catch (error) { return response({ error: "Checkout request refused" }, error instanceof HttpError ? error.status : 400); }
+      } catch (error) {
+        if (intentPhase) {
+          // Only authenticated intent creation reaches this diagnostic. Do not
+          // expose request fields, headers, identifiers or arbitrary exceptions.
+          const code = error instanceof Error ? Object.getOwnPropertyDescriptor(error, "code")?.value : null;
+          const databaseCode = ["SQLITE_BUSY", "SQLITE_LOCKED", "SQLITE_CONSTRAINT", "SQLITE_READONLY", "SQLITE_CORRUPT", "SQLITE_IOERR", "SQLITE_FULL"].find((value) => value === code);
+          console.error(JSON.stringify({ diagnostic: "merchant_intent_refused", phase: intentPhase,
+            reason: error instanceof HttpError ? "http" : databaseCode ?? "unknown" }));
+        }
+        return response({ error: "Checkout request refused" }, error instanceof HttpError ? error.status : 400);
+      }
     },
     async tick(): Promise<{ failedAttemptIds: string[] }> {
       const failedAttemptIds: string[] = [];

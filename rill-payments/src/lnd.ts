@@ -53,8 +53,14 @@ export class LndInvoiceBackend implements InvoiceIssuer, ReceiptObserver {
   async identity(): Promise<MerchantIdentity> {
     const info = await this.transport.call("GET", "/v1/getinfo");
     const chains = info.chains as { chain: string; network: string }[];
-    if (info.identity_pubkey !== this.configuredIdentity.receiver || !Array.isArray(chains) || chains.length !== 1 ||
-        chains[0]?.chain !== "bitcoin" || chains[0]?.network !== this.configuredIdentity.network || info.synced_to_chain !== true) throw new Error("LND receiver identity, chain or freshness mismatch");
+    const reason = info.identity_pubkey !== this.configuredIdentity.receiver ? "receiver_mismatch"
+      : !Array.isArray(chains) || chains.length !== 1 || chains[0]?.chain !== "bitcoin" || chains[0]?.network !== this.configuredIdentity.network ? "chain_mismatch"
+      : info.synced_to_chain !== true ? "not_synced" : null;
+    if (reason) {
+      // Fixed reasons only, never backend identities, credentials or responses.
+      console.error(JSON.stringify({ diagnostic: "lnd_identity_refused", reason }));
+      throw new Error("LND receiver identity, chain or freshness mismatch");
+    }
     return this.configuredIdentity;
   }
   private validate(raw: Json, expectedHash: string, operation?: IssueOperation): string {
