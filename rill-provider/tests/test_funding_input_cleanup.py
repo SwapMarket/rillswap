@@ -195,6 +195,7 @@ def test_cleanup_refusal_preserves_original_error_and_conservative_locks(
         session = insert_reverse_swap(store, harness, "LN_HELD")
         engine, chain = _engine(store, harness, monkeypatch)
         original = LiveSessionStoreError("grant refused")
+
         def refuse(*_args: object, **_kwargs: object) -> None:
             if mode == "stale":
                 engine._check_operation().abandon()  # noqa: SLF001 - genuine stale token
