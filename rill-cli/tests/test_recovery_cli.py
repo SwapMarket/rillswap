@@ -1205,3 +1205,77 @@ def test_watch_claim_signs_from_the_recovery_file_until_the_claim_confirms(
         checked = validate_unilateral_spend(raw, authorization, verifier=crypto)
     assert (checked.txid, checked.fee_sat) == (txid, 300)
     assert package["monotonic_knowledge"]["preimage"] in raw.hex()  # the claim reveals it
+
+
+@NATIVE_ONLY
+@pytest.mark.native_crypto
+def test_watch_claim_waits_for_the_signed_funding_depth_before_signing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import pyrage  # noqa: PLC0415
+
+    from rill_cli import main as cli_main  # noqa: PLC0415
+    from rill_cli import refund_watcher  # noqa: PLC0415
+
+    package, _ = _fixture("ln-to-btc")
+    package["funding_history"].append(_signed_binding(package, 0, str(NATIVE_LIBRARY)))
+    common, _, _ = _inputs(tmp_path, "ln-to-btc")
+    identity = x25519.Identity.from_str(Path(common[-1]).read_text().strip())
+    recovery = tmp_path / "selected.age"
+    recovery.write_bytes(pyrage.encrypt(canonicalize(package), [identity.to_public()]))
+    binding = FundingBinding.model_validate(package["funding_history"][0]["binding"])
+    selected_txid = binding.funding_txid
+    required = package["contract_terms"]["funding_confirmations"]
+    assert required >= 2
+    polls: list[int] = []
+    sent: list[tuple[int, str]] = []
+
+    def depth(txid: str) -> int | None:
+        if txid == binding.funding_txid:
+            return min(len(polls) - 1, required)  # 0, 1, ... up to the signed depth
+        return 1 if sent and txid == sent[0][1] else None
+
+    def collaborators(_reader: object, *, binding: FundingBinding) -> tuple:  # type: ignore[type-arg]
+        assert binding.funding_txid == selected_txid
+
+        def chain() -> refund_watcher.ChainView:
+            polls.append(1)
+            return refund_watcher.ChainView(1000, not sent)
+
+        return chain, depth, lambda _raw, txid: sent.append((len(polls), txid)) is None
+
+    monkeypatch.setattr(cli_main, "RecoveryCoreReader", lambda **_kwargs: object())
+    monkeypatch.setattr(refund_watcher, "core_claim_collaborators", collaborators)
+    args = [
+        "recover",
+        "watch-claim",
+        *common,
+        "--funding-attempt-id",
+        "11" * 32,
+        "--binding-revision",
+        "0",
+        "--rpc-cookie",
+        str(tmp_path / "test-only-cookie"),
+        "--rpc-port",
+        "18443",
+        "--initial-fee-sat",
+        "300",
+        "--max-fee-sat",
+        "400",
+        "--poll-seconds",
+        "0",
+        str(recovery),
+    ]
+    assert cli_main.main(args) == 0
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert (report["outcome"], report["attempts"]) == ("claim_confirmed", 1)
+    # Signed and sent only on the poll that first saw the signed depth.
+    ((poll, txid),) = sent
+    assert poll == required + 1
+    assert report["claim_txid"] == txid
+    for seen in range(required):
+        assert f"at depth {seen}/{required}; waiting" in captured.err
+    assert f"claim {txid} at 300 sat" in captured.err

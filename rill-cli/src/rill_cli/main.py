@@ -644,6 +644,33 @@ def _watch_claim(  # noqa: PLR0913 - explicit wiring of the collaborators
     authorization = UnilateralAuthorization.from_terms(terms, funding, "claim", keys=crypto)
     chain, confirmations, submit = refund_watcher.core_claim_collaborators(reader, binding=binding)
     ciphertext = Path(args.file).read_bytes()
+    deadline_height = terms.refund_lock_height - terms.timing_policy.claim_confirmation_blocks
+    required = terms.funding_confirmations
+    reached = False
+    reported: int | None = None
+
+    def report(line: str) -> None:
+        sys.stderr.write(line + "\n")
+        sys.stderr.flush()
+
+    def funded_chain() -> refund_watcher.ChainView | None:
+        # The claim reveals the preimage, so it is signed only at the signed
+        # funding depth; until then wait. Once reached, a reorg no longer
+        # withholds a claim whose preimage may already be public. Past the
+        # deadline the watcher itself decides (no first claim that late).
+        nonlocal reached, reported
+        view = chain()
+        if reached or view is None or view.tip_height > deadline_height:
+            return view
+        depth = confirmations(binding.funding_txid)
+        depth = depth if type(depth) is int and depth > 0 else 0
+        if depth >= required:
+            reached = True
+            return view
+        if depth != reported:
+            reported = depth
+            report(f"funding {binding.funding_txid} at depth {depth}/{required}; waiting")
+        return None
 
     def sign(fee: int, tip: int) -> tuple[bytes, str, int, int]:
         signed = construct_container_selected_claim(
@@ -665,11 +692,12 @@ def _watch_claim(  # noqa: PLR0913 - explicit wiring of the collaborators
     watcher = ClaimWatcher(
         initial_fee_sat=args.initial_fee_sat,
         max_fee_sat=min(args.max_fee_sat, max_spendable_fee(authorization)),
-        deadline_height=terms.refund_lock_height - terms.timing_policy.claim_confirmation_blocks,
-        chain=chain,
+        deadline_height=deadline_height,
+        chain=funded_chain,
         confirmations=confirmations,
         sign=sign,
         submit=submit,
+        report=report,
         poll_seconds=args.poll_seconds,
     )
     outcome, claim_txid = watcher.run()
