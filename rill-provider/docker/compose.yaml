@@ -1,0 +1,116 @@
+# RillSwap provider (maker) for operators. Setup and operation are described
+# in rill-provider/README.md, section "Docker". In short:
+#   cp example.env .env                      # then edit it
+#   install -d -m 0700 makers stores credentials
+#   docker compose run --rm setup rill-provider-init ...
+#   docker compose up -d
+# Each maker profile (btc-to-ln, ln-to-btc, erc20-to-ln, ln-to-erc20) is its
+# own service, process, store, identity and custody key; COMPOSE_PROFILES in
+# .env selects which ones `up` starts. They share one Tor client for relays.
+name: rill-provider
+
+x-hardened: &hardened
+  image: ${RILL_PROVIDER_IMAGE:-ghcr.io/rillswap/rill-provider:latest}
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
+# The provider reaches Core, LND and the Tor tunnel only through numeric
+# loopback ports, which the entrypoint forwards to the hosts named here.
+x-maker: &maker
+  <<: *hardened
+  restart: unless-stopped
+  user: "${RILL_UID:-1000}:${RILL_GID:-1000}"
+  depends_on:
+    tor:
+      condition: service_healthy
+  environment:
+    RILL_FORWARD: >-
+      8332=${BITCOIN_RPC_HOST:-host.docker.internal}:${BITCOIN_RPC_PORT:-8332}
+      10009=${LND_GRPC_HOST:-host.docker.internal}:${LND_GRPC_PORT:-10009}
+      9080=tor:9080
+  extra_hosts:
+    - host.docker.internal:host-gateway
+  tmpfs:
+    - /tmp:size=16m,mode=1777
+  command: [rill-provider, serve, --config, /rill/config/provider.json]
+  healthcheck:
+    test: [CMD, rill-provider-healthcheck, provider, --config, /rill/config/provider.json]
+    interval: 60s
+    timeout: 30s
+    start_period: 60s
+    retries: 3
+  # serve stops on SIGTERM; give it time to close relay sessions and the store.
+  stop_grace_period: 1m
+  mem_limit: 512m
+  cpus: 1.0
+  pids_limit: 128
+
+services:
+  tor:
+    <<: *hardened
+    restart: unless-stopped
+    command: [tor, -f, /etc/rill/torrc]
+    tmpfs:
+      - /var/lib/rill-tor:size=64m,mode=0700,uid=1000,gid=1000
+    healthcheck:
+      test: [CMD, rill-provider-healthcheck, tor]
+      interval: 15s
+      timeout: 10s
+      start_period: 3m
+      retries: 4
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
+  # One-off commands: `docker compose run --rm setup rill-provider-init ...`.
+  # It has no network and writes only into the three host directories.
+  setup:
+    <<: *hardened
+    profiles: [setup]
+    user: "${RILL_UID:-1000}:${RILL_GID:-1000}"
+    network_mode: none
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    command: [rill-provider-init, --help]
+    volumes:
+      - ./makers:/rill/makers
+      - ./stores:/rill/stores
+      - ./credentials:/rill/credentials
+
+  btc-to-ln:
+    <<: *maker
+    profiles: [btc-to-ln]
+    volumes:
+      - ./makers/btc-to-ln:/rill/config:ro
+      - ./stores/btc-to-ln:/rill/store
+      - ./credentials:/rill/credentials:ro
+
+  ln-to-btc:
+    <<: *maker
+    profiles: [ln-to-btc]
+    volumes:
+      - ./makers/ln-to-btc:/rill/config:ro
+      - ./stores/ln-to-btc:/rill/store
+      - ./credentials:/rill/credentials:ro
+
+  erc20-to-ln:
+    <<: *maker
+    profiles: [erc20-to-ln]
+    volumes:
+      - ./makers/erc20-to-ln:/rill/config:ro
+      - ./stores/erc20-to-ln:/rill/store
+      - ./credentials:/rill/credentials:ro
+
+  ln-to-erc20:
+    <<: *maker
+    profiles: [ln-to-erc20]
+    volumes:
+      - ./makers/ln-to-erc20:/rill/config:ro
+      - ./stores/ln-to-erc20:/rill/store
+      - ./credentials:/rill/credentials:ro

@@ -1,0 +1,5 @@
+# Operator state when running compose.yaml from a checkout: keys, stores and
+# node credentials never belong in git.
+/makers/
+/stores/
+/credentials/
