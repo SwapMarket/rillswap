@@ -57,16 +57,22 @@ def _close(_connection: socket.socket) -> None:
     """Accept and close, like socat whose target refused the connection."""
 
 
-def test_relay_proxy_accepts_the_tunnel_reply() -> None:
+def test_relay_proxy_accepts_the_tunnel_reply_and_closes_cleanly() -> None:
     received: list[bytes] = []
 
     def tunnel(connection: socket.socket) -> None:
         received.append(connection.recv(4096))
-        connection.sendall(TOR_REFUSAL)
+        # Bytes the probe does not need: closing over them unread would send a
+        # reset, which the forwarder logs as an error on every probe.
+        connection.sendall(TOR_REFUSAL + b"x" * 512)
+        try:
+            received.append(connection.recv(1))  # b"" is a clean half-close
+        except ConnectionResetError:
+            received.append(b"reset")
 
     with _proxy(tunnel) as url:
         healthcheck.check_relay_proxy(url)
-    assert received == [healthcheck.RELAY_PROXY_PROBE]
+    assert received == [healthcheck.RELAY_PROXY_PROBE, b""]
     assert received[0].startswith(b"CONNECT 127.0.0.1:1 HTTP/1.1\r\n")
 
 

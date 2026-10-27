@@ -28,6 +28,7 @@ TOR_CONTROL = ("127.0.0.1", 9051)
 TOR_COOKIE = Path("/var/lib/rill-tor/control_auth_cookie")
 CORE_CHAIN = {"mainnet": "main"}  # Core's chain name when it differs from RillSwap's
 RELAY_PROXY_PROBE = b"CONNECT 127.0.0.1:1 HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n"
+DRAIN_LIMIT_BYTES = 64 * 1024
 
 
 class UnhealthyError(Exception):
@@ -65,6 +66,22 @@ def check_core(core: dict[str, Any], base: Path, network: str) -> None:
         raise UnhealthyError(f"Core reports chain {chain!r}, config expects {network!r}")
 
 
+def _drain(connection: socket.socket) -> None:
+    """Half-close and read to EOF before closing.
+
+    Closing with unread data (a TLS session ticket, the rest of an HTTP reply)
+    sends a TCP reset, which the loopback forwarder logs as an error on every
+    probe. The probe already has its answer, so failures here are ignored.
+    """
+    try:
+        connection.shutdown(socket.SHUT_WR)
+        received = 0
+        while received < DRAIN_LIMIT_BYTES and (chunk := connection.recv(4096)):
+            received += len(chunk)
+    except OSError:
+        pass
+
+
 def check_lnd(lnd: dict[str, Any], base: Path) -> None:
     """Require a TLS handshake with LND verified by the configured certificate."""
     context = ssl.create_default_context(cafile=str(base / lnd["tls_certificate"]))
@@ -72,9 +89,9 @@ def check_lnd(lnd: dict[str, Any], base: Path) -> None:
     try:
         with (
             socket.create_connection(("127.0.0.1", lnd["port"]), TIMEOUT_SECONDS) as raw,
-            context.wrap_socket(raw, server_hostname="127.0.0.1"),
+            context.wrap_socket(raw, server_hostname="127.0.0.1") as tls,
         ):
-            pass
+            _drain(tls)
     except OSError as error:
         raise UnhealthyError(f"LND TLS handshake failed: {type(error).__name__}") from None
 
@@ -90,13 +107,17 @@ def check_relay_proxy(url: str) -> None:
     parts = urlsplit(url)
     try:
         with socket.create_connection((parts.hostname, parts.port), TIMEOUT_SECONDS) as proxy:
-            proxy.settimeout(TIMEOUT_SECONDS)
             proxy.sendall(RELAY_PROXY_PROBE)
-            status = proxy.recv(64)
+            reply = b""
+            while b"\r\n\r\n" not in reply and len(reply) < DRAIN_LIMIT_BYTES:
+                if not (chunk := proxy.recv(1024)):
+                    break
+                reply += chunk
+            _drain(proxy)
     except OSError as error:
         detail = f"relay proxy {parts.netloc} failed: {type(error).__name__}"
         raise UnhealthyError(detail) from None
-    if not status.startswith(b"HTTP/1."):
+    if not reply.startswith(b"HTTP/1."):
         raise UnhealthyError(f"relay proxy {parts.netloc} gave no HTTP reply")
 
 
