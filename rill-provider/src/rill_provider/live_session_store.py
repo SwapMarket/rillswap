@@ -123,7 +123,7 @@ if TYPE_CHECKING:
     from rill_provider.reverse_operations import ReverseOperation, ReverseOperations
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
-SCHEMA_VERSION = 15  # v8-v14 upgrade on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
+SCHEMA_VERSION = 16  # v8-v15 upgrade on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
 CONTRACT_KEY_RECORD_KIND = "rillswap-provider-contract-key"
 OPEN_PHASES = ("CONFIRMED", "ACCEPTED")  # sessions that may still send requests
 SWAP_TRANSITIONS = frozenset(
@@ -451,6 +451,24 @@ EVM_SWAP_SCHEMA = (
     "CHECK ((refund_tx_hash IS NULL) = (refund_tx IS NULL)))"
 )
 SCHEMA = (*SCHEMA_V14, EVM_SWAP_SCHEMA)
+# Exact deployed variants, not permissive column-count recognition. Non-NULL
+# evidence that cannot be represented losslessly remains an acquisition refusal.
+SWAPS_HEIGHT_ONLY_V10_SCHEMA = (
+    "CREATE TABLE swaps (session_id TEXT PRIMARY KEY, contract_hash TEXT NOT NULL UNIQUE, "
+    "terms_offer BLOB NOT NULL, terms_accept BLOB NOT NULL, state TEXT NOT NULL CHECK "
+    "(state IN ('ACCEPTED', 'FUNDING_SEEN', 'PAYING', 'PAID', 'FAILED', 'CLAIMING', "
+    "'CLAIMED', 'LOST')), funding_binding BLOB, preimage TEXT, claim_txid TEXT, claim_tx BLOB, "
+    "updated_at INTEGER NOT NULL, outpoint_spent_height INTEGER "
+    "CHECK (outpoint_spent_height > 0))"
+)
+EVM_HASH_ONLY_V15_SCHEMA = (
+    "CREATE TABLE evm_swaps (session_id TEXT PRIMARY KEY NOT NULL, "
+    "lock_tx_hash TEXT, lock_log_index INTEGER CHECK (lock_log_index >= 0), "
+    "lock_block INTEGER CHECK (lock_block >= 0), provider_tx_hash TEXT, "
+    "claim_tx_hash TEXT, refund_tx_hash TEXT, "
+    "CHECK ((lock_tx_hash IS NULL) = (lock_log_index IS NULL) AND "
+    "(lock_tx_hash IS NULL) = (lock_block IS NULL)))"
+)
 MAX_CLAIM_ATTEMPTS = 32
 COOPERATION_BUDGET_SECONDS = 30
 COOPERATION_OBSERVATION_MAX_AGE_SECONDS = 5
@@ -1116,7 +1134,7 @@ class LiveSessionStore:
                 location.as_uri() + "?mode=rw", uri=True, isolation_level=None
             )
             connection.execute("PRAGMA busy_timeout=5000")
-            version = _check_schema(connection, allow_v5=upgrade_from_v5 is True)
+            version, variant = _check_schema(connection, allow_v5=upgrade_from_v5 is True)
             _configure(connection)
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -1149,6 +1167,7 @@ class LiveSessionStore:
                 raise LiveSessionStoreError(  # noqa: TRY301 - copied or restored file
                     "store files are not the provisioned authoritative copy"
                 )
+            _normalize_historical_schema(connection, variant)
             if version == 5:  # noqa: PLR2004 - exact legacy schema
                 _upgrade_v5(connection)
             if version in (5, 6):
@@ -1172,6 +1191,7 @@ class LiveSessionStore:
             if version != SCHEMA_VERSION:
                 connection.execute("UPDATE meta SET schema_version=?", (SCHEMA_VERSION,))
                 connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                _check_schema(connection)
             _epoch_watermark(connection)
             if connection.execute(
                 "SELECT 1 FROM epochs e LEFT JOIN epoch_key_history h "
@@ -7807,14 +7827,16 @@ def _configure(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA secure_delete=ON")  # expired sealed keys leave no old pages
 
 
-def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> int:
+def _check_schema(
+    connection: sqlite3.Connection, *, allow_v5: bool = False
+) -> tuple[int, Literal["canonical", "height-only-v10", "hash-only-v15"]]:
     (version,) = connection.execute("PRAGMA user_version").fetchone()
     if connection.execute("PRAGMA application_id").fetchone() != (
         APPLICATION_ID,
     ) or version not in (
-        (5, 6, 7, 8, 9, 10, 11, 12, 13, SCHEMA_VERSION)
+        (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, SCHEMA_VERSION)
         if allow_v5
-        else (8, 9, 10, 11, 12, 13, SCHEMA_VERSION)
+        else (8, 9, 10, 11, 12, 13, 14, 15, SCHEMA_VERSION)
     ):
         raise LiveSessionStoreError("live session store version unsupported")
     objects = {
@@ -7834,6 +7856,7 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
         12: SCHEMA_V12,
         13: SCHEMA_V13,
         14: SCHEMA_V14,
+        15: SCHEMA,
         SCHEMA_VERSION: SCHEMA,
     }[version]
     indexes = {
@@ -7845,6 +7868,7 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
         12: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
         13: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
         14: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
+        15: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
         SCHEMA_VERSION: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
     }
     expected = {("table", statement.split()[2]): statement for statement in schema}
@@ -7857,11 +7881,61 @@ def _check_schema(connection: sqlite3.Connection, *, allow_v5: bool = False) -> 
             for sql in indexes.get(version, ())
         }
     )
+    variant: Literal["canonical", "height-only-v10", "hash-only-v15"] = "canonical"
+    if objects != expected and version in (10, 15):
+        table, definition = (
+            ("swaps", SWAPS_HEIGHT_ONLY_V10_SCHEMA)
+            if version == 10  # noqa: PLR2004 - exact historical marker
+            else ("evm_swaps", EVM_HASH_ONLY_V15_SCHEMA)
+        )
+        expected[("table", table)] = definition
+        variant = "height-only-v10" if version == 10 else "hash-only-v15"  # noqa: PLR2004
     if objects != expected:
         raise LiveSessionStoreError("live session store schema incompatible")
     if connection.execute("PRAGMA quick_check").fetchone() != ("ok",):
         raise LiveSessionStoreError("live session store integrity unavailable")
-    return int(version)
+    return int(version), variant
+
+
+def _normalize_historical_schema(
+    connection: sqlite3.Connection,
+    variant: Literal["canonical", "height-only-v10", "hash-only-v15"],
+) -> None:
+    """Lossless representation conversion, never proof that a send is safe."""
+    if variant == "height-only-v10":
+        if connection.execute(
+            "SELECT 1 FROM swaps WHERE outpoint_spent_height IS NOT NULL LIMIT 1"
+        ).fetchone():
+            raise LiveSessionStoreError(
+                "historical spent-height evidence requires operator recovery"
+            )
+        connection.execute("ALTER TABLE swaps RENAME TO swaps_height_only")
+        connection.execute(SWAPS_V10_SCHEMA)
+        connection.execute(
+            "INSERT INTO swaps (session_id,contract_hash,terms_offer,terms_accept,state,"
+            "funding_binding,preimage,claim_txid,claim_tx,updated_at,outpoint_spent_height,"
+            "outpoint_spent_block) SELECT session_id,contract_hash,terms_offer,terms_accept,state,"
+            "funding_binding,preimage,claim_txid,claim_tx,updated_at,outpoint_spent_height,NULL "
+            "FROM swaps_height_only"
+        )
+        connection.execute("DROP TABLE swaps_height_only")
+    elif variant == "hash-only-v15":
+        if connection.execute(
+            "SELECT 1 FROM evm_swaps WHERE provider_tx_hash IS NOT NULL OR "
+            "claim_tx_hash IS NOT NULL OR refund_tx_hash IS NOT NULL LIMIT 1"
+        ).fetchone():
+            raise LiveSessionStoreError(
+                "historical transaction-hash evidence requires operator recovery"
+            )
+        connection.execute("ALTER TABLE evm_swaps RENAME TO evm_swaps_hash_only")
+        connection.execute(EVM_SWAP_SCHEMA)
+        connection.execute(
+            "INSERT INTO evm_swaps (session_id,lock_tx_hash,lock_log_index,lock_block,"
+            "provider_tx_hash,provider_tx,claim_tx_hash,claim_tx,refund_tx_hash,refund_tx) "
+            "SELECT session_id,lock_tx_hash,lock_log_index,lock_block,provider_tx_hash,NULL,"
+            "claim_tx_hash,NULL,refund_tx_hash,NULL FROM evm_swaps_hash_only"
+        )
+        connection.execute("DROP TABLE evm_swaps_hash_only")
 
 
 def _upgrade_v5(connection: sqlite3.Connection) -> None:

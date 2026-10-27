@@ -78,8 +78,8 @@ def test_supported_upgrade_chains_add_empty_knowledge_without_authority(
     harness.provision()
     _historical(harness, version)
     with harness.acquire() as store:
-        assert store._connection.execute("PRAGMA user_version").fetchone() == (15,)
-        assert store._connection.execute("SELECT schema_version FROM meta").fetchone() == (15,)
+        assert store._connection.execute("PRAGMA user_version").fetchone() == (16,)
+        assert store._connection.execute("SELECT schema_version FROM meta").fetchone() == (16,)
         assert store._connection.execute(
             "SELECT count(*) FROM reverse_preimage_evidence"
         ).fetchone() == (0,)
@@ -251,9 +251,9 @@ def test_populated_v13_preserves_finances_and_only_existing_restart_reconciliati
     abandoned[6] = "ABANDONED"
     for _ in range(2):
         with harness.acquire() as upgraded:
-            assert upgraded._connection.execute("PRAGMA user_version").fetchone() == (15,)
+            assert upgraded._connection.execute("PRAGMA user_version").fetchone() == (16,)
             assert upgraded._connection.execute("SELECT schema_version FROM meta").fetchone() == (
-                15,
+                16,
             )
             for table in tables:
                 assert (

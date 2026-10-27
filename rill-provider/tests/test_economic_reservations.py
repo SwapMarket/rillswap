@@ -157,7 +157,7 @@ def test_v7_upgrade_is_explicit_and_backfills_conservatively(harness: Harness) -
         session, state, evidence = ledger[tombstoned]
         assert (session, state) == ("dd" * 32, "RELEASED")
         assert evidence == b'{"reason":"expired-offer","source":"migration","version":1}'
-        assert store._connection.execute("PRAGMA user_version").fetchone() == (15,)  # noqa: SLF001
+        assert store._connection.execute("PRAGMA user_version").fetchone() == (16,)  # noqa: SLF001
     with harness.acquire() as store:  # idempotent: no further migration
         assert len(_ledger(store)) == 4
 

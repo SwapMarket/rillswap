@@ -173,6 +173,16 @@ relays. Regtest allows direct connections.
 
 ## Persistent state and backups
 
+Store format 16 automatically upgrades exact recognized v8 to v15 schemas after
+custody and authoritative-file verification. Earlier v5 to v7 stores still need
+the explicit migration command. A deployed hash-only v15 EVM table is converted
+only when all transaction hashes are NULL; a height-only v10 table is converted
+only when all spent heights are NULL. Other evidence-bearing historical variants
+remain unchanged and require operator recovery. NULL permits lossless storage
+conversion, not a payment retry or a conclusion that no funds were committed.
+Both version markers advance atomically. No RPC, rescan, or new dispatch is
+performed by this compatibility upgrade; older binaries must not reopen it.
+
 The live store is the authoritative swap state, not a cache. Its database and
 owner-lock file belong to one host and one service.
 
