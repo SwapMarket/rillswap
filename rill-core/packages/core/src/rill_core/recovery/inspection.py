@@ -73,6 +73,7 @@ MAX_RECOVERY_BYTES = 128 * 1024
 COOPERATIVE_RESERVATION_EXTENSION = "rillswap/cooperative-claim-reservation"
 REVERSE_FALLBACK_EXTENSION = "rillswap/reverse-claim-fallback"
 REVERSE_DISCLOSURE_EXTENSION = "rillswap/reverse-preimage-disclosure"
+REVERSE_COOPERATIVE_RESERVATION_EXTENSION = "rillswap/reverse-cooperative-reservation"
 FUNDING_ATTEMPT_HEX_LENGTH = 64
 SCHNORR_AUXILIARY_BYTES = 32
 PURPOSE_KEY_COUNT = 6
@@ -199,6 +200,13 @@ class _ReverseClaimFallback(StrictModel):
             strict=True, min_length=2, max_length=MAX_RECOVERY_BYTES, pattern=r"^(?:[0-9a-f]{2})+$"
         ),
     ]
+
+
+class _ReverseCooperativeReservation(StrictModel):
+    """A consumed live attempt identifier, never restored nonce authority."""
+
+    funding_binding_hash: Hex32
+    cooperation_id: Hex32
 
 
 class _ReversePreimageDisclosure(StrictModel):
@@ -579,6 +587,8 @@ def _require_extension_successor(
     fallback = later.pop(REVERSE_FALLBACK_EXTENSION, None)
     prior_disclosure = earlier.pop(REVERSE_DISCLOSURE_EXTENSION, None)
     disclosure = later.pop(REVERSE_DISCLOSURE_EXTENSION, None)
+    prior_burn = earlier.pop(REVERSE_COOPERATIVE_RESERVATION_EXTENSION, None)
+    burn = later.pop(REVERSE_COOPERATIVE_RESERVATION_EXTENSION, None)
     _require(canonicalize(earlier) == canonicalize(later), "recovery extensions changed")
     if COOPERATIVE_RESERVATION_EXTENSION in previous.extensions:
         _require(canonicalize(prior_marker) == canonicalize(marker), "reservation changed")
@@ -616,6 +626,28 @@ def _require_extension_successor(
             prepared.funding_binding_hash
             == funding_binding_hash(candidate.funding_history[-1].binding).hex(),
             "fallback does not select latest funding",
+        )
+    if REVERSE_COOPERATIVE_RESERVATION_EXTENSION in previous.extensions:
+        _require(canonicalize(prior_burn) == canonicalize(burn), "reverse reservation changed")
+    elif REVERSE_COOPERATIVE_RESERVATION_EXTENSION in candidate.extensions:
+        _require(REVERSE_FALLBACK_EXTENSION in previous.extensions, "reservation before fallback")
+        _require(
+            REVERSE_DISCLOSURE_EXTENSION not in candidate.extensions, "reservation after disclosure"
+        )
+        _require(
+            previous.funding_history == candidate.funding_history, "reservation changed funding"
+        )
+        _require(
+            previous.monotonic_knowledge == candidate.monotonic_knowledge,
+            "reservation changed knowledge",
+        )
+        reserved_burn = _ReverseCooperativeReservation.model_validate_json(
+            canonicalize(burn), strict=True
+        )
+        _require(
+            reserved_burn.funding_binding_hash
+            == funding_binding_hash(candidate.funding_history[-1].binding).hex(),
+            "reservation does not select latest funding",
         )
     if REVERSE_DISCLOSURE_EXTENSION in previous.extensions:
         _require(
@@ -767,6 +799,7 @@ def _inspect(
         _require(stored == reconstructed_value, "Taproot artifact")
     _check_static_history(record, crypto)
     prepared = _inspect_reverse_fallback(record, crypto)
+    _inspect_reverse_cooperative_reservation(record, prepared)
     _inspect_reverse_disclosure(record, prepared, crypto)
     _inspect_cooperative_reservation(record, crypto)
     return OfflineRecoveryInspection(
@@ -830,6 +863,28 @@ def _inspect_reverse_fallback(
     return fallback
 
 
+def _inspect_reverse_cooperative_reservation(
+    record: _RecoveryPlaintext, prepared: _ReverseClaimFallback | None
+) -> None:
+    """Check immutable historical burn evidence, never infer original live authority."""
+    if REVERSE_COOPERATIVE_RESERVATION_EXTENSION not in record.extensions:
+        return
+    reservation = _ReverseCooperativeReservation.model_validate_json(
+        canonicalize(record.extensions[REVERSE_COOPERATIVE_RESERVATION_EXTENSION]), strict=True
+    )
+    _require(
+        record.profile_id == "ln-to-btc/v1" and record.monotonic_knowledge.preimage_known,
+        "reservation requires prepared reverse claim",
+    )
+    if prepared is None:
+        raise ValidationError("reservation requires prepared reverse claim")
+    _require(
+        reservation.funding_binding_hash == prepared.funding_binding_hash,
+        "reservation fallback binding changed",
+    )
+    _require(reservation.cooperation_id != "00" * 32, "reservation identifier is zero")
+
+
 def _inspect_reverse_disclosure(
     record: _RecoveryPlaintext, prepared: _ReverseClaimFallback | None, crypto: RecoveryCrypto
 ) -> None:
@@ -871,6 +926,13 @@ def _inspect_reverse_disclosure(
     )
     if not isinstance(payload, CooperativeClaimPropose):
         raise ValidationError("disclosure is not a proposal")
+    if REVERSE_COOPERATIVE_RESERVATION_EXTENSION in record.extensions:
+        burn = _ReverseCooperativeReservation.model_validate_json(
+            canonicalize(record.extensions[REVERSE_COOPERATIVE_RESERVATION_EXTENSION]), strict=True
+        )
+        _require(
+            burn.cooperation_id == payload.cooperation_id, "disclosure differs from burned attempt"
+        )
     _require(
         payload.payment_preimage == record.monotonic_knowledge.preimage
         and payload.deadline_at > 0

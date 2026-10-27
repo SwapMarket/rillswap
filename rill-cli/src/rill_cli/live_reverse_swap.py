@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol, TypeVar, cast
 
 from rill_core.recovery import (
+    REVERSE_COOPERATIVE_RESERVATION_EXTENSION,
     REVERSE_DISCLOSURE_EXTENSION,
     REVERSE_FALLBACK_EXTENSION,
     inspect_recovery_successor,
@@ -656,7 +657,68 @@ async def _publish_reverse_disclosure(  # noqa: PLR0913 - exact acknowledged pre
     return candidate
 
 
-async def _cooperative_claim(  # noqa: PLR0913, PLR0915 - one original-session key-path attempt
+async def _publish_reverse_cooperation_reservation(  # noqa: PLR0913 - exact durable predecessor boundary
+    lifetime: _ReverseLifetime,
+    *,
+    acknowledged_fallback: bytes,
+    binding: FundingBinding,
+    cooperation_id: bytes,
+    session: _Session,
+    write_recovery: Callable[[bytes, bytes | None], bytes | None],
+    check_window: Callable[[], None],
+) -> bytes:
+    """Burn one original live attempt before allocating any native nonce."""
+
+    def prepare() -> bytes:
+        lifetime.check()
+        check_window()
+        record = parse_json_strict(acknowledged_fallback)
+        if not isinstance(record, dict):
+            raise SwapError("reverse reservation predecessor unavailable")
+        extensions, record_time = record.get("extensions"), record.get("updated_at")
+        if (
+            not isinstance(extensions, dict)
+            or REVERSE_FALLBACK_EXTENSION not in extensions
+            or REVERSE_COOPERATIVE_RESERVATION_EXTENSION in extensions
+            or REVERSE_DISCLOSURE_EXTENSION in extensions
+            or type(record_time) is not int
+        ):
+            raise SwapError("reverse reservation predecessor unavailable")
+        wall = time.time()
+        if type(wall) not in (int, float) or not math.isfinite(wall) or wall < record_time:
+            raise SwapError("reverse reservation time refused")
+        record["updated_at"] = int(wall)
+        extensions[REVERSE_COOPERATIVE_RESERVATION_EXTENSION] = {
+            "funding_binding_hash": funding_binding_hash(binding).hex(),
+            "cooperation_id": cooperation_id.hex(),
+        }
+        candidate = canonicalize(record)
+        inspect_recovery_successor(
+            acknowledged_fallback, candidate, session.network, crypto=session.crypto
+        )
+        check_window()
+        return candidate
+
+    try:
+        candidate = await lifetime.worker(prepare)
+
+        def publish() -> bytes | None:
+            lifetime.check()
+            check_window()
+            return write_recovery(candidate, acknowledged_fallback)
+
+        acknowledged = await lifetime.worker(publish)
+        check_window()
+    except (TimeoutError, asyncio.CancelledError):
+        raise
+    except Exception:  # noqa: BLE001 - no recovery or signer details in diagnostics
+        raise SwapError("reverse cooperation reservation uncertain; " + _UNRESOLVED) from None
+    if type(acknowledged) is not bytes or acknowledged != candidate:
+        raise SwapError("reverse cooperation reservation not acknowledged; " + _UNRESOLVED)
+    return candidate
+
+
+async def _cooperative_claim(  # noqa: PLR0911, PLR0912, PLR0913, PLR0915 - keep the ordered one-shot custody boundaries together
     lifetime: _ReverseLifetime,
     *,
     session: _Session,
@@ -682,42 +744,84 @@ async def _cooperative_claim(  # noqa: PLR0913, PLR0915 - one original-session k
     and closed on every path. Any refusal, timeout, or invalid reply returns
     None; the caller's watcher then claims with the preimage as before.
     """
-    crypto = session.crypto
-    funding = FundingOutput(
-        txid=bytes.fromhex(binding.funding_txid),
-        output_index=binding.contract_vout,
-        value_sat=int(terms.economics.contract_amount_sat),
-        script_pubkey=script,
+    # The one window starts before any native authorization/plan preparation.
+    lifetime.check()
+    started, wall_started = time.monotonic(), time.time()
+    needed = (
+        REVERSE_PROPOSAL_SECONDS + REVERSE_REPLY_GRACE_SECONDS + REVERSE_UNILATERAL_RESERVE_SECONDS
     )
-    authorization = UnilateralAuthorization.from_terms(terms, funding, "claim", keys=crypto)
-    plan = build_cooperative_claim(authorization, fee_sat=fee_sat)
-    tweak = reconstruct_taproot_contract(terms, keys=crypto).tap_tweak
+    if lifetime.deadline - started < needed:
+        report("cooperative claim window unavailable; claiming unilaterally")
+        return None
+    deadline = min(
+        started + REVERSE_PROPOSAL_SECONDS + REVERSE_REPLY_GRACE_SECONDS,
+        lifetime.deadline - REVERSE_UNILATERAL_RESERVE_SECONDS,
+    )
+    deadline_at = int(wall_started + deadline - started)
+    wall_high_water = wall_started
+
+    def check_window() -> None:
+        nonlocal wall_high_water
+        lifetime.check()
+        now, wall = time.monotonic(), time.time()
+        if not math.isfinite(now) or not math.isfinite(wall):
+            raise SwapError("cooperative clock unavailable")
+        wall_high_water = max(wall_high_water, wall)
+        if now < started or now >= deadline or wall_high_water >= deadline_at:
+            raise SwapError("cooperative window expired")
+
+    crypto = session.crypto
     deadline_height = terms.refund_lock_height - terms.timing_policy.claim_confirmation_blocks
     try:
+        check_window()
+        funding = FundingOutput(
+            txid=bytes.fromhex(binding.funding_txid),
+            output_index=binding.contract_vout,
+            value_sat=int(terms.economics.contract_amount_sat),
+            script_pubkey=script,
+        )
+        authorization = UnilateralAuthorization.from_terms(terms, funding, "claim", keys=crypto)
+        plan = build_cooperative_claim(authorization, fee_sat=fee_sat)
+        tweak = reconstruct_taproot_contract(terms, keys=crypto).tap_tweak
         tip = await lifetime.worker(wallet.tip_height)
+        check_window()
     except (TimeoutError, asyncio.CancelledError):
         raise
     except Exception:  # noqa: BLE001 - no fresh tip, no disclosure; claim unilaterally
         tip = None
-    remaining = lifetime.deadline - time.monotonic()
-    needed = (
-        REVERSE_PROPOSAL_SECONDS + REVERSE_REPLY_GRACE_SECONDS + REVERSE_UNILATERAL_RESERVE_SECONDS
-    )
-    if type(tip) is not int or tip >= deadline_height or remaining < needed:
+    if type(tip) is not int or tip > deadline_height:
         report("cooperative claim window unavailable; claiming unilaterally")
         return None
     user_key = bytes.fromhex(terms.client_contract_compressed_key)
     provider_key = bytes.fromhex(terms.provider_contract_compressed_key)
     cooperation_id = secrets.token_bytes(32)
-    lifetime.check()
-    attempt, nonce = crypto.musig_begin(
-        secret_key=contract_secret,
-        user_public_key=user_key,
-        provider_public_key=provider_key,
-        tap_tweak=tweak,
-        message=plan.signature_hash,
-        cooperation_id=cooperation_id,
-    )
+    try:
+        burned = await _publish_reverse_cooperation_reservation(
+            lifetime,
+            acknowledged_fallback=acknowledged_fallback,
+            binding=binding,
+            cooperation_id=cooperation_id,
+            session=session,
+            write_recovery=write_recovery,
+            check_window=check_window,
+        )
+        check_window()
+    except SwapError:
+        report("cooperative attempt not reserved; claiming unilaterally")
+        return None
+    try:
+        attempt, nonce = crypto.musig_begin(
+            secret_key=contract_secret,
+            user_public_key=user_key,
+            provider_public_key=provider_key,
+            tap_tweak=tweak,
+            message=plan.signature_hash,
+            cooperation_id=cooperation_id,
+        )
+    except Exception:  # noqa: BLE001 - the durable burn is never retried after native failure
+        lifetime.check()
+        report("cooperative nonce unavailable; claiming unilaterally")
+        return None
     try:
         proposal = session.envelope(
             "action_request",
@@ -727,7 +831,7 @@ async def _cooperative_claim(  # noqa: PLR0913, PLR0915 - one original-session k
                 "unsigned_transaction": plan.base_transaction.hex(),
                 "payment_preimage": preimage.hex(),
                 "public_nonce": nonce.hex(),
-                "deadline_at": int(time.time()) + REVERSE_PROPOSAL_SECONDS,
+                "deadline_at": deadline_at,
                 "deadline_height": deadline_height,
             },
             contract=contract_hash(terms).hex(),
@@ -736,7 +840,7 @@ async def _cooperative_claim(  # noqa: PLR0913, PLR0915 - one original-session k
         try:
             await _publish_reverse_disclosure(
                 lifetime,
-                acknowledged_fallback=acknowledged_fallback,
+                acknowledged_fallback=burned,
                 binding=binding,
                 proposal=proposal,
                 session=session,
@@ -746,13 +850,16 @@ async def _cooperative_claim(  # noqa: PLR0913, PLR0915 - one original-session k
             report("cooperative disclosure not recorded; claiming unilaterally")
             return None
         try:
-            on_disclosure()  # Sending may disclose the preimage even when the reply is lost.
-            await session.send(proposal, session.provider_key or "")
-            report("cooperative claim proposed; waiting for the provider's signature")
-            reply = await session.receive(
-                lambda item: item.in_reply_to == proposal.message_id,
-                timeout=REVERSE_PROPOSAL_SECONDS + REVERSE_REPLY_GRACE_SECONDS,
-            )
+            check_window()
+            async with asyncio.timeout(max(0, deadline - time.monotonic())):
+                on_disclosure()  # Sending may disclose the preimage even when the reply is lost.
+                await session.send(proposal, session.provider_key or "")
+                check_window()
+                report("cooperative claim proposed; waiting for the provider's signature")
+                reply = await session.receive(
+                    lambda item: item.in_reply_to == proposal.message_id,
+                    timeout=max(0, deadline - time.monotonic()),
+                )
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - relay loss or reply timeout; the claim must proceed
@@ -761,6 +868,7 @@ async def _cooperative_claim(  # noqa: PLR0913, PLR0915 - one original-session k
             return None
         lifetime.check()
         try:
+            check_window()
             payload = check_cooperative_action_context(
                 reply, terms, init, accept, prior_request=proposal
             )
@@ -779,16 +887,38 @@ async def _cooperative_claim(  # noqa: PLR0913, PLR0915 - one original-session k
             crypto.musig_partial_verify(
                 **transcript, signer_index=1, partial_signature=provider_partial
             )
+            check_window()
             user_partial = attempt.partial_sign_once(transcript["provider_public_nonce"])
+            check_window()
             signature = crypto.musig_aggregate(
                 **transcript,
                 user_partial_signature=user_partial,
                 provider_partial_signature=provider_partial,
             )
             claim = finalize_cooperative_claim(plan, signature, verifier=crypto)
+            check_window()
         except Exception:  # noqa: BLE001 - an invalid reply only costs privacy, never funds
             report("provider cooperative signature invalid; claiming unilaterally")
             return None
+        try:
+            check_window()
+            complete = session.envelope(
+                "action_request",
+                {
+                    "action": "cooperative_claim_complete",
+                    "cooperation_id": cooperation_id.hex(),
+                    "partial_signature": user_partial.hex(),
+                },
+                contract=contract_hash(terms).hex(),
+                required_features=(COOPERATIVE_CLAIM_FEATURE,),
+            )
+            async with asyncio.timeout(max(0, deadline - time.monotonic())):
+                await session.send(complete, session.provider_key or "")
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a receipt is not required for the verified key-path claim
+            lifetime.check()
+            report("cooperative completion delivery uncertain; continuing with verified claim")
     finally:
         attempt.close()
     accepted = await lifetime.worker(

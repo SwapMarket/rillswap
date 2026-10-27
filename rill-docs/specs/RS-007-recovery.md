@@ -184,6 +184,30 @@ than being silently discarded. Valid historical evidence never resumes cooperati
 and never disables independently authorized, explicitly selected unilateral recovery.
 No format-version bump or migration is required for this named, versioned extension.
 
+### 3.4 Reverse pre-nonce reservation
+
+The CLI records `rillswap/reverse-cooperative-reservation` before allocating a
+reverse claimant nonce. This closed object contains only `funding_binding_hash`
+and `cooperation_id`, both lowercase 32-byte hex strings; the ID is nonzero.
+The binding must match the independently verified private fallback. The exact
+transaction and fee are already committed by that fallback, so no additional
+transaction digest is stored.
+
+Insertion requires the fallback in the predecessor and selects the latest binding.
+It changes no funding, knowledge, secrets, or unrelated extensions, and cannot be
+combined with fallback or disclosure insertion. The reservation is immutable.
+A later disclosure containing this reservation must use its cooperation ID.
+Live production requires exact durable acknowledgment in this order: fallback,
+pre-nonce reservation, nonce allocation, disclosure reservation, transmission.
+Each operation consumes the original bounded cooperation window.
+
+This marker consumes eligibility, never grants it. An absent marker proves
+nothing; a reservation-only or disclosed record cannot resume cooperative signing.
+Inspection of independently valid disclosure evidence does not require a marker
+to prove past publication order. No backfill, migration, or automatic work follows
+from inspection. The browser uses its separate origin-local create-only journal
+for the same pre-nonce invariant.
+
 ## 4. Import and use
 
 The top-level format identifier and specification version are immutable exact

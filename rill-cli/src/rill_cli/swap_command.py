@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from rill_core.recovery import (
     COOPERATIVE_RESERVATION_EXTENSION,
+    REVERSE_COOPERATIVE_RESERVATION_EXTENSION,
     REVERSE_DISCLOSURE_EXTENSION,
     REVERSE_FALLBACK_EXTENSION,
     inspect_recovery_successor,
@@ -140,7 +141,7 @@ def _funded_path(path: Path) -> Path:
     return path.with_name(path.name + ".funded")
 
 
-def _snapshot_path(path: Path, document: bytes, previous: bytes | None) -> Path:
+def _snapshot_path(path: Path, document: bytes, previous: bytes | None) -> Path:  # noqa: PLR0911 - closed checkpoint destinations
     """Select distinct create-only destinations, never overwrite learned knowledge.
 
     Cryptographic successor verification is mandatory before publication;
@@ -171,6 +172,16 @@ def _snapshot_path(path: Path, document: bytes, previous: bytes | None) -> Path:
         return path.with_name(path.name + ".paid")
     prior_extensions = prior.get("extensions")
     current_extensions = current.get("extensions")
+    if (
+        prior.get("profile_id") == "ln-to-btc/v1"
+        and prior_knowledge == current_knowledge
+        and isinstance(prior_extensions, dict)
+        and isinstance(current_extensions, dict)
+        and REVERSE_FALLBACK_EXTENSION in prior_extensions
+        and REVERSE_COOPERATIVE_RESERVATION_EXTENSION not in prior_extensions
+        and REVERSE_COOPERATIVE_RESERVATION_EXTENSION in current_extensions
+    ):
+        return path.with_name(path.name + ".cooperating")
     if (
         prior.get("profile_id") == "ln-to-btc/v1"
         and prior_knowledge == current_knowledge

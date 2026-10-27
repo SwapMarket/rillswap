@@ -159,11 +159,17 @@ and recover a swap. Protect both the files and their age identity.
 - `--recovery-output swap.age` creates the initial snapshot.
 - `swap.age.funded` adds the signed funding binding.
 - `swap.age.paid` keeps a verified forward payment preimage.
-- `.fallback` and `.cooperating` successors record later claim activity.
+- `.fallback` saves the signed unilateral claim before cooperative disclosure.
+- `.cooperating` durably burns the reverse attempt before nonce allocation.
+- `.disclosing` retains the exact signed proposal before possible disclosure.
 - Files are create-only; existing paths are never overwritten.
 
 Keep every successor and recover from the newest one. An older file can be
 valid but miss later funding or payment evidence.
+Cooperation has one original bounded window, including preparation, durable
+publication, and relay waits. Failure leaves the unilateral claim available;
+recovery never restores nonce authority. The claimant sends its completion
+partial without waiting for a receipt before broadcasting a verified claim.
 
 `--identity` takes a file path, never the key itself. The file must hold one
 X25519 `AGE-SECRET-KEY-1...` line, be a regular file (not a symlink), and have

@@ -9,7 +9,10 @@ from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
 import pytest
-from rill_core.recovery import REVERSE_DISCLOSURE_EXTENSION
+from rill_core.recovery import (
+    REVERSE_COOPERATIVE_RESERVATION_EXTENSION,
+    REVERSE_DISCLOSURE_EXTENSION,
+)
 from rill_core.settlement import (
     FundingOutput,
     UnilateralAuthorization,
@@ -57,6 +60,7 @@ def _proposal(fixture: NativeSdk) -> Envelope:
         call.args[0]
         for call in fixture.session.send.call_args_list
         if call.args[0].message_type == "action_request"
+        and call.args[0].payload.get("action") == "cooperative_claim_propose"
     )
     return proposal
 
@@ -115,16 +119,32 @@ def _reply(fixture: NativeSdk, mode: str) -> Envelope:
 
 
 def _run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    *,
+    receive_timeouts: list[float] | None = None,
 ) -> tuple[NativeSdk, reverse.ReverseSwapOutcome]:
     async def exercise(crypto: Context) -> tuple[NativeSdk, reverse.ReverseSwapOutcome]:
         fixture = NativeSdk(crypto, tmp_path, monkeypatch)
         _featured(fixture, monkeypatch)
         # Snapshots are stamped by the real wall clock; keep the claimant on it.
         monkeypatch.setattr(reverse.time, "time", wall_clock)
+        if mode == "cutoff":
+            fixture.wallet.tip_height.return_value = (
+                fixture.terms.refund_lock_height
+                - fixture.terms.timing_policy.claim_confirmation_blocks
+            )
 
         async def receive(wanted: object, *, timeout: float | None = None) -> Envelope:  # noqa: ASYNC109
-            assert timeout == reverse.REVERSE_PROPOSAL_SECONDS + reverse.REVERSE_REPLY_GRACE_SECONDS
+            assert timeout is not None
+            if receive_timeouts is not None:
+                receive_timeouts.append(timeout)
+            assert (
+                0
+                < timeout
+                <= reverse.REVERSE_PROPOSAL_SECONDS + reverse.REVERSE_REPLY_GRACE_SECONDS
+            )
             # The proposal is sent only after its disclosure snapshot is acknowledged.
             assert REVERSE_DISCLOSURE_EXTENSION in json.loads(fixture.documents[-1])["extensions"]
             fixture.reports.append("test: reply awaited after acknowledged disclosure")
@@ -218,14 +238,18 @@ def test_tip_past_cooperative_deadline_never_discloses(
         fixture = NativeSdk(crypto, tmp_path, monkeypatch)
         _featured(fixture, monkeypatch)
         fixture.wallet.tip_height.return_value = (
-            fixture.terms.refund_lock_height - fixture.terms.timing_policy.claim_confirmation_blocks
+            fixture.terms.refund_lock_height
+            - fixture.terms.timing_policy.claim_confirmation_blocks
+            + 1
         )
 
         def write(candidate: bytes, previous: bytes | None) -> bytes:
             fixture.write(candidate, previous)
             return candidate
 
-        await fixture.run(write, settle_timeout=LIFETIME)
+        with pytest.raises(reverse.SwapError, match="claim window closed"):
+            await fixture.run(write, settle_timeout=LIFETIME)
+        assert fixture.broadcasts == []
         assert "cooperative claim window unavailable; claiming unilaterally" in fixture.reports
         assert all(
             call.args[0].message_type != "action_request"
@@ -329,3 +353,35 @@ def test_short_settlement_lifetime_never_discloses(
 
 def test_client_window_stays_inside_the_provider_cap() -> None:
     assert reverse.REVERSE_PROPOSAL_SECONDS + reverse.REVERSE_REPLY_GRACE_SECONDS < 30
+
+
+@NATIVE_ONLY
+@pytest.mark.native_crypto
+def test_exact_cooperative_height_cutoff_is_allowed_by_the_spec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture, _outcome = _run(tmp_path, monkeypatch, "cutoff")
+    (raw,) = fixture.broadcasts
+    assert [len(item) for item in _segwit_claim(raw)[1]] == [KEY_PATH_SIGNATURE]
+
+
+@NATIVE_ONLY
+@pytest.mark.native_crypto
+def test_completion_contains_the_claimant_partial_and_has_no_reply_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture, _outcome = _run(tmp_path, monkeypatch, "signed")
+    proposal = _proposal(fixture)
+    (completion,) = (
+        call.args[0]
+        for call in fixture.session.send.call_args_list
+        if call.args[0].payload.get("action") == "cooperative_claim_complete"
+    )
+    assert completion.in_reply_to is None
+    assert completion.sequence > proposal.sequence
+    assert completion.payload["cooperation_id"] == proposal.payload["cooperation_id"]
+    assert len(bytes.fromhex(completion.payload["partial_signature"])) == 32
+    marker = json.loads(fixture.documents[-1])["extensions"][
+        REVERSE_COOPERATIVE_RESERVATION_EXTENSION
+    ]
+    assert marker["cooperation_id"] == proposal.payload["cooperation_id"]

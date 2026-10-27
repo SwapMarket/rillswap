@@ -30,6 +30,8 @@ from rill_cli.wallet_rpc import ConfirmedOutput
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from rill_provider.core_tx_bytes import SpendScan
+
 PAYOUT = 50_000
 TIP_HASH = "61" * 32  # the one block both Core and LND report at TIP
 
@@ -185,15 +187,37 @@ class FakeChain:
     def confirmations(self, txid: str) -> int:
         return 2 if txid in self.provider_broadcasts else 0
 
-    def find_spender(self, txid: str, vout: int, *, from_height: int, to_height: int) -> Any:  # noqa: ANN401
+    def block_hash(self, height: int) -> str:
+        assert 0 <= height <= TIP
+        if height == TIP:
+            return TIP_HASH
+        if height == TIP - 1:
+            return "62" * 32  # the funding inclusion reported below
+        return hashlib.sha256(f"fixture-block-{height}".encode()).hexdigest()
+
+    def funding_scan_boundary(self, txid: str, required_depth: int) -> tuple[int, str]:
+        depth = self.confirmations(txid)
+        assert depth >= required_depth >= 1
+        inclusion = TIP - depth + 1
+        return inclusion - 1, self.block_hash(inclusion - 1)
+
+    def find_spender(
+        self, txid: str, vout: int, *, from_height: int, to_height: int, anchor_block: str
+    ) -> SpendScan:
         from rill_provider.core_tx_bytes import SpendObservation, SpendScan  # noqa: PLC0415
 
-        assert (vout, from_height <= to_height) == (0, True)
+        assert vout == 0
+        assert from_height <= to_height + 1
+        assert anchor_block == self.block_hash(from_height - 1)
         for raw in self.claims:
             claim_txid, witness = _segwit_claim(raw)
             if bytes.fromhex(txid)[::-1] == raw[7:39]:
-                return SpendScan(SpendObservation(claim_txid, witness, None), to_height)
-        return SpendScan(None, to_height)
+                return SpendScan(
+                    SpendObservation(claim_txid, witness, TIP),
+                    to_height,
+                    self.block_hash(to_height),
+                )
+        return SpendScan(None, to_height, self.block_hash(to_height))
 
     def fee_rate_sat_vb(self, _target: int) -> float | None:
         return None
@@ -349,7 +373,7 @@ def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(  # noqa:
             _write_recovery_snapshot(
                 output, document, previous, NETWORK, credentials=credentials, crypto=crypto
             )
-            suffix = ("", ".funded", ".fallback", ".disclosing")[len(recoveries)]
+            suffix = ("", ".funded", ".fallback", ".cooperating", ".disclosing")[len(recoveries)]
             target = tmp_path / f"swap.age{suffix}"
             verify_export_ciphertext(
                 target.read_bytes(), document, NETWORK, credentials=credentials, crypto=crypto
@@ -435,8 +459,8 @@ def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(  # noqa:
     preimage = initial["monotonic_knowledge"]["preimage"]
     assert hold.settled == [hashlib.sha256(bytes.fromhex(preimage)).hexdigest()]
     assert hold.canceled == []
-    # terms (with preimage), funded, signed fallback, then the disclosure reservation
-    assert len(recoveries) == 4
+    # terms, funded, signed fallback, pre-nonce burn, then disclosure reservation
+    assert len(recoveries) == 5
     # The client claimed by key path with the provider's partial: no preimage on chain.
     (claim,) = chain.claims
     _, witness = _segwit_claim(claim)

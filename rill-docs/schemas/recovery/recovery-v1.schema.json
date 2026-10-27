@@ -113,6 +113,9 @@
             },
             "rillswap/reverse-preimage-disclosure": {
               "$ref": "#/$defs/reversePreimageDisclosure"
+            },
+            "rillswap/reverse-cooperative-reservation": {
+              "$ref": "#/$defs/reverseCooperativeReservation"
             }
           }
         }
@@ -120,6 +123,16 @@
     }
   },
   "$defs": {
+    "reverseCooperativeReservation": {
+      "description": "Consumed reverse attempt identifier recorded before nonce allocation. Historical evidence only, never permission to resume signing.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["funding_binding_hash", "cooperation_id"],
+      "properties": {
+        "funding_binding_hash": { "$ref": "../wire/common-v1.schema.json#/$defs/hex32" },
+        "cooperation_id": { "$ref": "../wire/common-v1.schema.json#/$defs/hex32" }
+      }
+    },
     "reversePreimageDisclosure": {
       "description": "Possible disclosure reservation only, not transmission, payment, publication, nonce custody, or live signing authority. RS-007 native semantic and successor verification is required.",
       "type": "object",
