@@ -92,7 +92,9 @@ explains the design, state machines and security invariants.
 | [`dev`](dev/) | Docker | Local regtest environment (`dev/devctl`) |
 
 Each component has its own README with usage, configuration and test
-commands.
+commands. To run your own provider, use the published
+`ghcr.io/rillswap/rill-provider` image and its Docker Compose setup
+([rill-provider/README.md](rill-provider/README.md#docker)).
 
 ## Project status
 

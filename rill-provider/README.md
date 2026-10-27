@@ -67,6 +67,87 @@ rill-provider serve --config tmp/signet/provider.json
 Provision the store once and run one service per store. Stop with SIGINT or
 SIGTERM. Never restore an older store snapshot.
 
+## Docker
+
+CI publishes `ghcr.io/rillswap/rill-provider` for amd64 and arm64. It holds
+`rill-provider`, the `rill` CLI, the native crypto library and a Tor client,
+and runs as uid 1000. `latest` follows `main`; pin `sha-<commit>` or a
+release tag in production.
+
+[docker/compose.yaml](docker/compose.yaml) runs one service per swap profile
+(`btc-to-ln`, `ln-to-btc`, `erc20-to-ln`, `ln-to-erc20`), each with its own
+store, identity and custody key, plus one shared Tor client that offers only
+an HTTP tunnel inside the Compose network. Core and LND stay on your host or
+network; the containers reach them through the hosts set in `.env`.
+
+1. In an empty directory, fetch the compose file and the environment
+   template, then edit `.env` (profiles, Core and LND addresses, uid):
+
+   ```sh
+   base=https://raw.githubusercontent.com/rillswap/rillswap/main/rill-provider/docker
+   curl -fsSLO "$base/compose.yaml"
+   curl -fsSL -o .env "$base/example.env"
+   install -d -m 0700 makers stores credentials
+   ```
+
+   Core and LND must accept connections from the Docker network: set Core's
+   `rpcbind` and `rpcallowip` and LND's `rpclisten` accordingly.
+
+2. Put the LND credentials in `./credentials`, readable by the container
+   uid: `tls.cert` (it must be valid for `127.0.0.1`, as LND's generated
+   certificate is) and the `read`, `payment` and `invoices` macaroons from
+   [LND credentials](#lnd-credentials). Then create the Core credential:
+
+   ```sh
+   docker compose run --rm setup rill-provider-init core-credential
+   ```
+
+   It writes `credentials/core.cookie` and prints an `rpcauth` line for the
+   `__cookie__` user, plus an optional `rpcwhitelist` limited to the methods
+   the provider calls. Add them to `bitcoin.conf` and restart Core. This works
+   alongside existing `rpcuser`/`rpcpassword` or `rpcauth` logins.
+
+3. Create each maker. Bitcoin profiles need a destination scriptPubKey from
+   your wallet (`bitcoin-cli getaddressinfo <address>` shows it); LN to BTC
+   also needs the Core wallet that funds swaps:
+
+   ```sh
+   docker compose run --rm setup rill-provider-init maker --profile ln-to-btc \
+     --network signet --destination-script 0014... --core-wallet rillswap \
+     --affirm-store-authority
+   ```
+
+   Pass `--affirm-store-authority` only when `./stores` is outside every
+   backup and snapshot restore domain and used by one host; stores refuse to
+   open without that attestation. Review `makers/<profile>/provider.json`
+   (amount bands, fees, relays, `quote`). ERC20 makers print an EVM signer
+   address to fund with gas, and their `evm` section must be completed
+   (every `REPLACE` and zero value) before the store can be provisioned.
+
+4. Provision each store once, then start:
+
+   ```sh
+   docker compose run --rm --no-deps ln-to-btc \
+     rill-provider provision-store --config /rill/config/provider.json
+   docker compose up -d
+   docker compose ps
+   ```
+
+   A maker turns healthy once Core, LND and the Tor tunnel answer.
+
+Back up `./makers` (custody keys, identities, configs). Never back up,
+restore or copy `./stores`; `./credentials` can be recreated. For offline
+commands, stop the maker first and use the same mounts, for example
+`docker compose stop ln-to-btc` and then `docker compose run --rm --no-deps
+ln-to-btc rill-provider inspect-swaps --config /rill/config/provider.json`.
+Upgrade with `docker compose pull && docker compose up -d`.
+
+To build the image from a checkout, run
+`docker build -f rill-provider/docker/Dockerfile -t rill-provider .` at the
+repository root and check it with `rill-provider/docker/smoke-test.sh
+rill-provider`. Third-party dependencies are hash-locked in
+`docker/requirements.txt`; regenerate the locks with `docker/lock.sh`.
+
 ## Commands
 
 | Command | Purpose |
