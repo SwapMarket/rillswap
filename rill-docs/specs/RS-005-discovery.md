@@ -54,8 +54,9 @@ filters only; fetch by kind (or a known address's `d`) and verify locally.
 Only this Nostr adapter restricts the application advertisement to exactly
 one `network_identities` entry, which must be a supported execution identity
 (default mainnet, default signet, testnet4, or namespaced default regtest; not
-testnet3 or custom signets) whose `name` equals `N`, and to empty
-`extensions` or the exact epoch-admission requirement below. Produce separate signed advertisements for separate complete
+testnet3 or custom signets) whose `name` equals `N`, and to `extensions`
+holding only these keys: the exact epoch-admission requirement below, RS-010's
+`rillswap/evm-assets-v1`, and RS-006's `rillswap/transport-pow`. Produce separate signed advertisements for separate complete
 network identities; the schema and out-of-band manual application import
 remain compatible with multiple networks. The producer MUST strictly
 increase both signed revision and outer timestamp for an address (waiting
@@ -74,8 +75,8 @@ in `extensions`. Both signatures cover this requirement. New clients select
 the advertised epoch before deriving their session ID and MUST negotiate the
 RS-001 epoch-bound feature in both initiation and acceptance. Unknown or
 malformed requirements, or additional extension keys in this Nostr adapter,
-are refused rather than downgraded. Empty extensions retain the legacy handshake
-contract. Replaying an older signed legacy announcement after provider opt-in
+are refused rather than downgraded. Without the epoch requirement, the legacy
+handshake contract applies. Replaying an older signed legacy announcement after provider opt-in
 cannot enable legacy admission: the provider's durable policy independently
 refuses new unbound sessions. An advertisement is still discovery evidence,
 not permission to fund or a proof that its epoch is currently usable.

@@ -98,6 +98,7 @@ relevant. Each component also runs its own unit, property and vector tests.
 | N11 | Tor proxy failure or DNS request | Fail closed; no clearnet/DNS escape, including notification egress |
 | N12 | Relay demands stable social-key authentication | Default refusal; no silent key reuse |
 | N13 | Transport switched to private onion direct endpoint | Same authenticated semantics; no downgrade or settlement change |
+| N14 | Provider requires transport proof of work (RS-006) | Clients mine every provider-bound outer event to the declared target, keeping randomized timestamps; provider drops insufficient or uncommitted work before decryption; declared targets survive requirement changes; unfinished undeclared sessions are not stranded; Python and browser agree on `nostr-transport-pow-v1` |
 
 ## Wallet and notification privacy
 

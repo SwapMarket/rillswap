@@ -16,6 +16,7 @@ ROOT = Path(__file__).parents[1]
 AUTHENTICATION_PATH = ROOT / "vectors" / "authentication" / "cases-v1.json"
 ECONOMICS_PATH = ROOT / "vectors" / "economics" / "cases-v1.json"
 RUMOR_PATH = ROOT / "vectors" / "wire" / "nostr-rumor-experimental-1.json"
+TRANSPORT_POW_PATH = ROOT / "vectors" / "wire" / "nostr-transport-pow-v1.json"
 
 
 def test_private_regtest_nip59_rumor_binding_preserves_canonical_envelope() -> None:
@@ -440,8 +441,51 @@ def test_economics_rejects_valid_acceptance_from_unrelated_key() -> None:
     assert not _economic_case_is_valid(case, authentication_by_profile)
 
 
+def _transport_work(event: dict[str, Any]) -> int | None:
+    """RS-006 transport work: recomputed-ID zero bits capped by one committed target."""
+    serialized = json.dumps(
+        [0, event["pubkey"], event["created_at"], event["kind"], event["tags"], event["content"]],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    recomputed = hashlib.sha256(serialized).hexdigest()
+    if recomputed != event["id"]:
+        return None  # a claimed ID proves nothing
+    nonces = [tag for tag in event["tags"] if tag[0] == "nonce"]
+    if len(nonces) != 1 or len(nonces[0]) != 3:
+        return 0
+    target = nonces[0][2]
+    if not target.isdigit() or str(int(target)) != target or int(target) > 256:
+        return 0
+    return min(256 - int(recomputed, 16).bit_length(), int(target))
+
+
+def test_transport_work_counts_only_committed_recomputed_leading_zero_bits() -> None:
+    vector = load_json(TRANSPORT_POW_PATH)
+    assert vector["vector_version"] == "nostr-transport-pow-v1"
+    required = vector["required_bits"]
+    assert vector["announcement_extensions"] == {"rillswap/transport-pow": {"bits": required}}
+    assert vector["init_extensions"] == vector["announcement_extensions"]
+    secret = bytes.fromhex(vector["wrapper_secret_key_fixture_only"])
+    names = set()
+    for case in vector["cases"]:
+        event = case["event"]
+        names.add(case["name"])
+        assert event["kind"] == 1059
+        assert event["tags"][0] == ["p", vector["recipient_xonly_key"]]
+        assert [tag for tag in event["tags"] if tag[0] == "p"] == [event["tags"][0]]
+        assert event["pubkey"] == public_key(secret).hex()
+        proven = _transport_work(event)
+        assert proven == case["proven_work"], case["name"]
+        assert (proven is not None and proven >= required) == case["accepted"], case["name"]
+        if proven is not None:
+            assert verify(bytes.fromhex(event["id"]), public_key(secret), bytes.fromhex(event["sig"]))
+    assert [case["accepted"] for case in vector["cases"]].count(True) == 1
+    assert {"lucky_hash_low_commitment", "claimed_id_not_recomputed"} <= names
+
+
 def test_fixture_secrets_are_explicitly_test_only() -> None:
-    for path in (AUTHENTICATION_PATH, ECONOMICS_PATH):
+    for path in (AUTHENTICATION_PATH, ECONOMICS_PATH, TRANSPORT_POW_PATH):
         vectors = load_json(path)
         assert vectors["fixture_key_warning"] == (
             "public deterministic test keys; never use for funds"

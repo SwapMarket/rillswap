@@ -1,0 +1,187 @@
+{
+  "vector_version": "nostr-transport-pow-v1",
+  "scope": "RS-006 transport proof of work on provider-bound kind-1059 outer events only; content is an opaque placeholder, not NIP-44 ciphertext; fixture keys only",
+  "fixture_key_warning": "public deterministic test keys; never use for funds",
+  "announcement_extensions": {
+    "rillswap/transport-pow": {
+      "bits": 16
+    }
+  },
+  "init_extensions": {
+    "rillswap/transport-pow": {
+      "bits": 16
+    }
+  },
+  "required_bits": 16,
+  "wrapper_secret_key_fixture_only": "0000000000000000000000000000000000000000000000000000000000000005",
+  "recipient_xonly_key": "5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc",
+  "cases": [
+    {
+      "name": "mined_to_target",
+      "event": {
+        "id": "00005d8528e05afdfe8a609cd87f4a6304bfe4ae2d44e020effbc1e8a7d06577",
+        "pubkey": "2f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "created_at": 1703000000,
+        "kind": 1059,
+        "tags": [
+          [
+            "p",
+            "5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc"
+          ],
+          [
+            "nonce",
+            "25809",
+            "16"
+          ]
+        ],
+        "content": "AnRpbGwgc3dhcCB0cmFuc3BvcnQgcG93IHZlY3RvciBwbGFjZWhvbGRlciBjaXBoZXJ0ZXh0",
+        "sig": "1c7ab8ddcc1af3cd431679ea4f5c84f7384ab7fad805a87dee65c2e9b11d87f8dc05aac7c8fdb5f5b8bff809f781978451c91431ec63f0b547f5d539d69a0fc1"
+      },
+      "proven_work": 16,
+      "accepted": true
+    },
+    {
+      "name": "lucky_hash_low_commitment",
+      "event": {
+        "id": "0000d8eed9673bbe645bfda7a6e6703a4def873a494987c1ec7a7fb7b5f8d868",
+        "pubkey": "2f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "created_at": 1703000000,
+        "kind": 1059,
+        "tags": [
+          [
+            "p",
+            "5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc"
+          ],
+          [
+            "nonce",
+            "174883",
+            "8"
+          ]
+        ],
+        "content": "AnRpbGwgc3dhcCB0cmFuc3BvcnQgcG93IHZlY3RvciBwbGFjZWhvbGRlciBjaXBoZXJ0ZXh0",
+        "sig": "40e6bae64e096e4a1cdaa2b4c1406ea5e6a449e6e2afa8d4f55b00e563c005dff42396f5226967155014d066ebc72afb07c715ce625d844eca62f5a471021928"
+      },
+      "proven_work": 8,
+      "accepted": false
+    },
+    {
+      "name": "no_nonce_tag",
+      "event": {
+        "id": "7e41f043d71fb5d5c6518c8705ed331606420ad036f16e3ac50da6dc106e8b7c",
+        "pubkey": "2f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "created_at": 1703000000,
+        "kind": 1059,
+        "tags": [
+          [
+            "p",
+            "5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc"
+          ]
+        ],
+        "content": "AnRpbGwgc3dhcCB0cmFuc3BvcnQgcG93IHZlY3RvciBwbGFjZWhvbGRlciBjaXBoZXJ0ZXh0",
+        "sig": "dca75e3dfe862d51dd758f40a8883915f8b0c7d23702509fc78a228d457154e703b631931e68d0ac3714dca9de63bb20a7a1f8b28f516c8c4ed871641c546b07"
+      },
+      "proven_work": 0,
+      "accepted": false
+    },
+    {
+      "name": "non_canonical_target",
+      "event": {
+        "id": "fc8bc058a8d0ac9b080498624ce570f8c69d94474881662b09e0aef589425183",
+        "pubkey": "2f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "created_at": 1703000000,
+        "kind": 1059,
+        "tags": [
+          [
+            "p",
+            "5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc"
+          ],
+          [
+            "nonce",
+            "25809",
+            "016"
+          ]
+        ],
+        "content": "AnRpbGwgc3dhcCB0cmFuc3BvcnQgcG93IHZlY3RvciBwbGFjZWhvbGRlciBjaXBoZXJ0ZXh0",
+        "sig": "84430cb5d62ba3ac78a45bf33665115ffcba3dbb505c47f9c76fbdbb7c5e6d0ffdb48a50f7b42cae61e4cb018f361415737ba3007a190e698892ad5867b21cb9"
+      },
+      "proven_work": 0,
+      "accepted": false
+    },
+    {
+      "name": "missing_target",
+      "event": {
+        "id": "67579b655e7a7b1086362e9e96f34d87497242a44a0a137fe9a86662c44c9030",
+        "pubkey": "2f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "created_at": 1703000000,
+        "kind": 1059,
+        "tags": [
+          [
+            "p",
+            "5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc"
+          ],
+          [
+            "nonce",
+            "25809"
+          ]
+        ],
+        "content": "AnRpbGwgc3dhcCB0cmFuc3BvcnQgcG93IHZlY3RvciBwbGFjZWhvbGRlciBjaXBoZXJ0ZXh0",
+        "sig": "89d0245992c121b6ed07104420266e9a5d6263efb250f3eac61815ea4437ff0ae173f2452b55e713ca1fc73c7654aa6a16042c4ce1eba69c0f39511d0a39d2d7"
+      },
+      "proven_work": 0,
+      "accepted": false
+    },
+    {
+      "name": "duplicate_nonce_tags",
+      "event": {
+        "id": "b484b75f470deb53ec893c68397661f5a9028f160e5310a516bdc882456a46ce",
+        "pubkey": "2f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "created_at": 1703000000,
+        "kind": 1059,
+        "tags": [
+          [
+            "p",
+            "5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc"
+          ],
+          [
+            "nonce",
+            "25809",
+            "16"
+          ],
+          [
+            "nonce",
+            "25809",
+            "16"
+          ]
+        ],
+        "content": "AnRpbGwgc3dhcCB0cmFuc3BvcnQgcG93IHZlY3RvciBwbGFjZWhvbGRlciBjaXBoZXJ0ZXh0",
+        "sig": "226769fe2b69c2049490a65a99fba2a6e7104cd5d01458f4675682c2a7d1bc89919da6ce52c2aa9369ae43a1ac9dc2d03db1d6eff96cdd896aff455810a48b91"
+      },
+      "proven_work": 0,
+      "accepted": false
+    },
+    {
+      "name": "claimed_id_not_recomputed",
+      "event": {
+        "id": "0000000000000000000000000000000000000000000000000000000000000000",
+        "pubkey": "2f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "created_at": 1703000000,
+        "kind": 1059,
+        "tags": [
+          [
+            "p",
+            "5cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc"
+          ],
+          [
+            "nonce",
+            "0",
+            "16"
+          ]
+        ],
+        "content": "AnRpbGwgc3dhcCB0cmFuc3BvcnQgcG93IHZlY3RvciBwbGFjZWhvbGRlciBjaXBoZXJ0ZXh0",
+        "sig": "5ba69c5ec6a6ceb6bf88215c7b3a1147a55cfca72b5607074ed8494b82f33fe467f60db8a3c668e47042817dc02ae7703aaf1852dcc2d9ff09f1ac6fef99a9b9"
+      },
+      "proven_work": null,
+      "accepted": false
+    }
+  ]
+}

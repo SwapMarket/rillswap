@@ -44,7 +44,8 @@ identity, epoch inbox, session mailboxes, contract signing keys, and recovery
 authorization keys MUST be distinct.
 
 Before decryption, reject an outer event with bad shape, signature, kind,
-recipient tag, or encoded size over 128 KiB. Bound concurrent decryptions and
+recipient tag, encoded size over 128 KiB, or insufficient transport proof of
+work (below). Bound concurrent decryptions and
 per-peer queues. Decrypt the outer content using the intended local epoch-inbox
 or session-mailbox secret, **never** the provider identity or contract key.
 Verify the decrypted seal ID/signature, kind and empty tags before its NIP-44
@@ -63,6 +64,44 @@ specified binding version and explicit negotiation; do not guess it from
 extra JSON fields, whitespace, or ciphertext length. The final encoded outer
 event size is checked after construction. Retries use a fresh seal/wrapper
 and randomness around the unchanged logical application message.
+
+**Transport proof of work.** A provider MAY require NIP-13 proof of work on
+every kind-1059 outer event a client sends to it. It advertises the
+requirement as `extensions["rillswap/transport-pow"] = {"bits": N}` with
+integer `1 <= N <= 20`, and omits the key when it requires none. Clients
+MUST refuse an advertisement with any other value, or with `N` above their
+own limit, rather than ignore the key. A client contacting such a provider
+MUST declare its target in the initiation as
+`extensions["rillswap/transport-pow"] = {"bits": T}` with `N <= T <= 20`,
+and MUST mine every outer event it sends in that session, the initiation
+and every later session-mailbox message, to `T`. The declaration binds the
+session: a later change of `N` neither raises nor lowers the work its
+messages carry. It is an optional RS-001 extension that providers not
+requiring work ignore; it changes neither the session ID nor any safety rule.
+
+Mining adds exactly one tag `["nonce", <counter>, <target>]` after the `p`
+routing tag, where `<target>` is `T` in canonical decimal (no sign or leading
+zero) and `<counter>` is a decimal string. The outer `created_at` keeps its
+randomized past value; unlike NIP-13's reference miners, a client MUST NOT
+advance it while mining. The outer event is signed after mining. The work an
+event proves is the number of leading zero bits of its **recomputed** NIP-01
+ID, capped at its committed target; zero or several `nonce` tags, a tag
+without exactly three members, or a non-canonical target prove zero work,
+and a claimed `id` other than the recomputed hash proves nothing.
+
+The provider checks work with one hash before any custody unsealing,
+signature verification, or decryption, and before recording the event as
+seen. An epoch inbox and any unknown recipient require `N`; a session mailbox
+requires the target its initiation declared. The provider refuses an
+initiation whose declaration is malformed, or, while `N > 0`, missing or below
+`N`. A session admitted without a declaration (before the provider required
+work) remains exempt only until its swap reaches a terminal state, so enabling
+work never strands a live swap; a missing or unrecognized swap state counts as
+unfinished. Provider-to-client events carry no work. Work raises the cost of
+floods; at a browser-friendly difficulty it does not stop one determined
+sender from filling admission limits, and it is not authentication, rate
+limiting, Sybil resistance, or principal protection (RS-005). See
+`vectors/wire/nostr-transport-pow-v1.json`.
 
 Relay `OK` is delivery information only. Messages are at least once and may be
 missing or reordered. The durable outbox retains a logical message until an
