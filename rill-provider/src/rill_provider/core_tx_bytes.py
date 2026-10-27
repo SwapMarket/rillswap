@@ -16,8 +16,8 @@ import stat
 import time
 from contextlib import suppress
 from dataclasses import dataclass
+from decimal import ROUND_CEILING, Decimal, InvalidOperation, localcontext
 from decimal import Context as DecimalContext
-from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -54,6 +54,7 @@ CONNECT_SECONDS = 2.0
 READ_SECONDS = 5.0
 HASH_HEX_LENGTH = 64
 MAX_ESTIMATE_TARGET = 1008  # Core's estimatesmartfee bound
+MAX_FEE_ESTIMATE_CEILING_SAT_VB = 10_000
 SATS_PER_BTC = Decimal(100_000_000)
 MAX_SATS = 21_000_000 * 100_000_000
 # Every Core RPC method the provider may call. Operators can restrict the
@@ -369,7 +370,7 @@ class CoreTransactionReader:
     Construction makes no RPC call and does not open or migrate any ledger.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - keyword-only endpoint settings
         self,
         *,
         port: int,
@@ -377,10 +378,24 @@ class CoreTransactionReader:
         wallet: str | None = None,
         network: NetworkIdentity,
         host: str = "127.0.0.1",
+        max_fee_estimate_sat_vb: int | None = None,
     ) -> None:
-        """Configure a numeric loopback endpoint without connecting to it."""
+        """Configure a numeric loopback endpoint without connecting to it.
+
+        ``max_fee_estimate_sat_vb`` is an operator ceiling on Core's fee
+        estimates, for chains whose estimator is skewed (signet's spam and
+        empty blocks). It lowers only the estimate: relay and mempool floors,
+        signed caps and every evidence check stay as they are. ``None`` keeps
+        Core's estimates and every RPC request unchanged.
+        """
         if host not in ("127.0.0.1", "::1") or type(port) is not int or not 1 <= port <= MAX_PORT:
             raise ValueError("Core RPC must be a numeric loopback host and valid port")
+        if max_fee_estimate_sat_vb is not None and (
+            type(max_fee_estimate_sat_vb) is not int
+            or not 1 <= max_fee_estimate_sat_vb <= MAX_FEE_ESTIMATE_CEILING_SAT_VB
+        ):
+            raise ValueError("fee estimate ceiling out of range")
+        self._max_fee_estimate_sat_vb = max_fee_estimate_sat_vb
         try:
             self._chain = backend_names(network).core_chain
         except ValidationError:
@@ -963,6 +978,11 @@ class CoreTransactionReader:
         selected_inputs: tuple[tuple[str, int], ...] = ()
         try:
             with self._client() as client:
+                if self._max_fee_estimate_sat_vb is not None:
+                    # Core refuses fee_rate next to conf_target, so the ceiling
+                    # needs the estimate first; no estimate means the ceiling.
+                    del options["conf_target"], options["estimate_mode"]
+                    options["fee_rate"] = self._capped_funding_rate(client)
                 described = self._rpc(client, "decodescript", [script_pubkey.hex()], 1)
                 address = described.get("address") if isinstance(described, dict) else None
                 if type(address) is not str:
@@ -1025,6 +1045,26 @@ class CoreTransactionReader:
             if refusal is not error:
                 raise refusal from None
             raise
+
+    def _capped_funding_rate(self, client: httpx.Client) -> str:
+        """Return the economical funding estimate, at most the ceiling, as sat/vB text."""
+        ceiling = Decimal(self._max_fee_estimate_sat_vb or 0)
+        try:
+            result = self._rpc(
+                client, "estimatesmartfee", [FUNDING_ESTIMATE_TARGET, "ECONOMICAL"], 1
+            )
+        except CoreRpcError:
+            result = None
+        rate = result.get("feerate") if isinstance(result, dict) else None
+        if (
+            isinstance(result, dict)
+            and not result.get("errors")
+            and isinstance(rate, (int, float, Decimal))
+            and not isinstance(rate, bool)
+            and 0 < rate < 1
+        ):
+            ceiling = min(ceiling, Decimal(str(rate)) * 100_000)  # BTC/kvB to sat/vB
+        return f"{ceiling.quantize(Decimal('0.001'), rounding=ROUND_CEILING)}"
 
     def release_funding_inputs(self, inputs: tuple[tuple[str, int], ...]) -> None:
         """Release exactly this invocation's identified inputs, never all wallet locks."""
@@ -1239,6 +1279,7 @@ class CoreTransactionReader:
                         raise CoreProtocolError(
                             "Core cooperative estimate exceeds confirmation budget"
                         )
+                    rate = self._capped_estimate_sat_kvb(rate)
                 end_hash, end_height = _chain_tip(
                     self._rpc(client, "getblockchaininfo", [], 5), self._network
                 )
@@ -1256,6 +1297,12 @@ class CoreTransactionReader:
             rate,
             estimate["blocks"],
         )
+
+    def _capped_estimate_sat_kvb(self, rate: int) -> int:
+        """Lower only the estimate; relay and mempool floors still bind cooperation."""
+        if self._max_fee_estimate_sat_vb is None:
+            return rate
+        return min(rate, self._max_fee_estimate_sat_vb * 1000)
 
     def fee_rate_sat_vb(self, target_blocks: int) -> float | None:
         """Return Core's conservative feerate estimate in sat/vB, or ``None``.
@@ -1280,7 +1327,10 @@ class CoreTransactionReader:
             or not 0 < rate < 1
         ):
             return None  # BTC per kvB; anything at or above 1 BTC/kvB is nonsense
-        return float(Decimal(str(rate)) * 100_000)  # 1e8 sat per BTC over 1000 vB per kvB
+        estimate = float(Decimal(str(rate)) * 100_000)  # 1e8 sat per BTC over 1000 vB per kvB
+        if self._max_fee_estimate_sat_vb is None:
+            return estimate
+        return min(estimate, float(self._max_fee_estimate_sat_vb))
 
     def block_hash(self, height: int) -> str:
         """Return the active-chain block hash at ``height``; failures raise."""

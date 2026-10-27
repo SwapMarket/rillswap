@@ -107,6 +107,17 @@ def test_bitcoin_maker_config_passes_the_provider_schema(tmp_path: Path, profile
     assert (config.lnd.invoices_macaroon is not None) is (profile == "ln-to-btc")
 
 
+@pytest.mark.parametrize(("network", "ceiling"), [("signet", 2), ("mainnet", None)])
+def test_only_signet_makers_cap_core_fee_estimates(
+    tmp_path: Path, network: str, ceiling: int | None
+) -> None:
+    identity = json.loads((NETWORKS / f"{network}.json").read_text())
+    config = load_config(_write(tmp_path, _config("ln-to-btc", network=identity)))
+
+    assert config.bitcoin_core is not None
+    assert config.bitcoin_core.max_fee_estimate_sat_vb == ceiling
+
+
 @pytest.mark.parametrize("profile", ["erc20-to-ln", "ln-to-erc20"])
 def test_erc20_maker_config_is_refused_until_the_operator_fills_it(
     tmp_path: Path, profile: str

@@ -21,6 +21,7 @@ from rill_core.wire.types import (
 )
 
 from rill_provider._transport_pow import MAX_WORK_BITS
+from rill_provider.core_tx_bytes import MAX_FEE_ESTIMATE_CEILING_SAT_VB
 from rill_provider.evm_quote_policy import EVM_PROFILES, EvmSchedule
 from rill_provider.handshake_service import ServicePolicy
 from rill_provider.handshake_store import HandshakePolicy
@@ -69,6 +70,11 @@ class BitcoinCore(_Strict):
     cookie_file: Path
     # Wallet that funds LN to BTC contracts (RS-004); default wallet when absent.
     wallet: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.-]{1,64}$")
+    # Ceiling on Core's fee estimates (sat/vB) for chains with a skewed
+    # estimator, such as signet. Unset trusts Core's estimates.
+    max_fee_estimate_sat_vb: int | None = Field(
+        default=None, ge=1, le=MAX_FEE_ESTIMATE_CEILING_SAT_VB
+    )
 
 
 class QuoteSettings(_Strict):

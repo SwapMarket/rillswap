@@ -31,6 +31,7 @@ NETWORKS = Path("/opt/rill/networks")
 CORE_PORT = 8332
 LND_PORT = 10009
 RELAY_PROXY = "http://127.0.0.1:9080"
+SIGNET_FEE_ESTIMATE_CEILING_SAT_VB = 2
 CREDENTIALS = "/rill/credentials"
 # The relays the web app queries by default (rill-web/src/swap/config.ts).
 DEFAULT_RELAYS = ("wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net")
@@ -137,6 +138,9 @@ def maker_config(  # noqa: PLR0913 - one flat operator choice per argument
     core: dict[str, Any] = {"port": CORE_PORT, "cookie_file": f"{CREDENTIALS}/core.cookie"}
     if core_wallet is not None:
         core["wallet"] = core_wallet
+    if network["name"] == "signet":
+        # Signet's few high-fee transactions skew estimatesmartfee past the signed caps.
+        core["max_fee_estimate_sat_vb"] = SIGNET_FEE_ESTIMATE_CEILING_SAT_VB
     config: dict[str, Any] = {
         "network": network,
         "provider_identity_xonly": xonly,

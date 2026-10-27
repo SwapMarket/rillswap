@@ -236,6 +236,7 @@ def _settlement(
             cookie_path=core.cookie_file,
             network=config.network,
             wallet=core.wallet,
+            max_fee_estimate_sat_vb=core.max_fee_estimate_sat_vb,
         )
     except ValueError:
         raise OperatorConfigError("settlement requires a supported network") from None

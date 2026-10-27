@@ -175,7 +175,7 @@ The configuration is strict JSON; unknown fields are refused.
 | `store_path` | Authoritative live SQLite store |
 | `custody_recipient`, `custody_identity_file` | Age recipient and matching private custody key file |
 | `native_crypto_library` | Path to the built native crypto library |
-| `bitcoin_core` | Loopback RPC `port`, `cookie_file`, and optional `wallet` |
+| `bitcoin_core` | Loopback RPC `port`, `cookie_file`, optional `wallet` and `max_fee_estimate_sat_vb` |
 | `lnd` | Loopback gRPC `port`, `tls_certificate` and scoped macaroon paths |
 | `provider_destination_script` | Provider's P2WPKH or P2TR destination script; enables Bitcoin firm offers |
 | `handshake` | Selected profile, features, encryption suites and capabilities |
@@ -206,6 +206,23 @@ plain HTTP pages (no WebCrypto) take several times longer, and a swap sends
 several messages. Work makes floods more expensive, but
 it is not rate limiting or Sybil protection, because a native sender can
 still produce messages much faster than a browser.
+
+`bitcoin_core.max_fee_estimate_sat_vb` (1 to 10,000, unset by default) caps
+Core's fee estimates. Use it where the estimator is skewed: on signet, a few
+transactions paying hundreds of sat/vB next to empty blocks make
+`estimatesmartfee` report over 200 sat/vB for 6 blocks. Without a cap, Lightning
+to BTC funding then exceeds the signed `max_funding_fee_sat` and the swap waits
+until its funding window closes, cooperative claims are refused because their
+fee is below the estimate, and script-path claims start at the signed fee cap.
+With a cap, funding uses an explicit rate of at most the cap (the cap itself
+when Core has no estimate), and claim, refund and cooperative fee checks use
+the capped estimate. Core's relay and mempool minimum fees, the signed caps and
+fee bumping are unchanged. On mainnet, leave it unset unless you understand
+that a low cap also lowers the starting fee of your claims and refunds. The
+signet example and signet makers created by `rill-provider-init` set 2
+sat/vB. Clients checking a cooperative claim against
+their own Core need the same cap (`rill swap btc-to-ln
+--max-fee-estimate-sat-vb`).
 
 ### Swap profiles
 

@@ -15,7 +15,8 @@
   "native_crypto_library": "/opt/rill-crypto/librill_crypto.so",
   "bitcoin_core": {
     "port": 38332,
-    "cookie_file": "/var/lib/bitcoind/signet/.cookie"
+    "cookie_file": "/var/lib/bitcoind/signet/.cookie",
+    "max_fee_estimate_sat_vb": 2
   },
   "lnd": {
     "port": 10009,
