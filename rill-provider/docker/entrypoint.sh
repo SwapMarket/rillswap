@@ -2,7 +2,7 @@
 # The provider only connects to Bitcoin Core, LND and the relay proxy over
 # numeric loopback, so forward local ports to those services before starting.
 # RILL_FORWARD is a space-separated list of LOCAL_PORT=HOST:PORT entries, for
-# example "8332=bitcoind:8332 10009=lnd:10009 9080=tor:9080".
+# example "8332=bitcoind:8332 10009=lnd:10009 9080=rill-provider-tor:9080".
 set -eu
 
 is_port() {

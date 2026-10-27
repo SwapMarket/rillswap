@@ -2,7 +2,8 @@
 # Offline checks of a built provider image through compose.yaml: the bundled
 # tools start, the native library loads, and the documented setup flow
 # (core-credential, maker init, provision-store) works under the compose
-# hardening and refuses to overwrite. Used by CI before publishing; run it
+# hardening and refuses to overwrite, and the maker health probe reaches the
+# Tor service through the forward. Used by CI before publishing; run it
 # locally with: rill-provider/docker/smoke-test.sh rill-provider:test
 set -euo pipefail
 
@@ -50,4 +51,19 @@ status=0
 compose run --rm --no-deps ln-to-erc20 \
     rill-provider provision-store --config /rill/config/provider.json || status=$?
 test "$status" -eq 2
+
+# The maker health probe must see Tor's HTTP tunnel through the compose
+# forward, not just the local forwarder: down without Tor, up with it. Tor
+# refuses the probe's private-address CONNECT locally, so no network is used.
+install -d "$work/probe"
+echo '{"relay_proxy": "http://127.0.0.1:9080"}' >"$work/probe/provider.json"
+probe() {
+    compose run --rm --no-deps -v "$work/probe:/probe:ro" btc-to-ln sh -c \
+        "sleep 1; for i in \$(seq $1); do rill-provider-healthcheck provider --config /probe/provider.json && exit 0; sleep 1; done; exit 1"
+}
+status=0
+probe 1 || status=$?
+test "$status" -eq 1
+compose up -d tor
+probe 60
 echo "smoke test passed: $image"

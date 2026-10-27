@@ -21,7 +21,9 @@ x-hardened: &hardened
       max-file: "3"
 
 # The provider reaches Core, LND and the Tor tunnel only through numeric
-# loopback ports, which the entrypoint forwards to the hosts named here.
+# loopback ports, which the entrypoint forwards to the hosts named here. Tor is
+# addressed by a unique alias: a service name such as "tor" also resolves to
+# other projects' containers when a maker joins an external network.
 x-maker: &maker
   <<: *hardened
   restart: unless-stopped
@@ -33,7 +35,7 @@ x-maker: &maker
     RILL_FORWARD: >-
       8332=${BITCOIN_RPC_HOST:-host.docker.internal}:${BITCOIN_RPC_PORT:-8332}
       10009=${LND_GRPC_HOST:-host.docker.internal}:${LND_GRPC_PORT:-10009}
-      9080=tor:9080
+      9080=rill-provider-tor:9080
   extra_hosts:
     - host.docker.internal:host-gateway
   tmpfs:
@@ -56,6 +58,9 @@ services:
     <<: *hardened
     restart: unless-stopped
     command: [tor, -f, /etc/rill/torrc]
+    networks:
+      default:
+        aliases: [rill-provider-tor]
     tmpfs:
       - /var/lib/rill-tor:size=64m,mode=0700,uid=1000,gid=1000
     healthcheck:
