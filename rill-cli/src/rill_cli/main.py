@@ -37,6 +37,7 @@ from rill_cli.age_container import (
     decrypt_verified_plaintext,
     encrypt_verified_plaintext,
     inspect_container,
+    inspect_container_recorded_claim_txid,
     inspect_container_selected_funding_context,
     verify_export_ciphertext,
 )
@@ -648,18 +649,42 @@ def _watch_claim(  # noqa: PLR0913 - explicit wiring of the collaborators
     required = terms.funding_confirmations
     reached = False
     reported: int | None = None
+    unavailable_reported = False
 
     def report(line: str) -> None:
         sys.stderr.write(line + "\n")
         sys.stderr.flush()
+
+    # The live swap may already have broadcast the claim it prepared (and then
+    # given up waiting): watch that one too, observation only.
+    recorded = inspect_container_recorded_claim_txid(
+        ciphertext,
+        network,
+        credentials=credentials,
+        funding_attempt_id=args.funding_attempt_id,
+        binding_revision=args.binding_revision,
+        crypto=crypto,
+    )
+    if recorded is not None:
+        report(f"also watching the claim {recorded} prepared by the live swap")
 
     def funded_chain() -> refund_watcher.ChainView | None:
         # The claim reveals the preimage, so it is signed only at the signed
         # funding depth; until then wait. Once reached, a reorg no longer
         # withholds a claim whose preimage may already be public. Past the
         # deadline the watcher itself decides (no first claim that late).
-        nonlocal reached, reported
+        nonlocal reached, reported, unavailable_reported
         view = chain()
+        if view is None and not unavailable_reported:
+            # Absence proves nothing: unconfirmed, spent, or Core unavailable.
+            unavailable_reported = True
+            report(
+                f"no unspent confirmed contract output {binding.funding_txid}:"
+                f"{binding.contract_vout} (unconfirmed, already spent, or Core "
+                "unavailable); waiting"
+            )
+        elif view is not None:
+            unavailable_reported = False
         if reached or view is None or view.tip_height > deadline_height:
             return view
         depth = confirmations(binding.funding_txid)
@@ -699,6 +724,7 @@ def _watch_claim(  # noqa: PLR0913 - explicit wiring of the collaborators
         submit=submit,
         report=report,
         poll_seconds=args.poll_seconds,
+        recorded_txids=() if recorded is None else (recorded,),
     )
     outcome, claim_txid = watcher.run()
     return json.dumps(

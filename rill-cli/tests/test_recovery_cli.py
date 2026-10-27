@@ -1279,3 +1279,107 @@ def test_watch_claim_waits_for_the_signed_funding_depth_before_signing(
     for seen in range(required):
         assert f"at depth {seen}/{required}; waiting" in captured.err
     assert f"claim {txid} at 300 sat" in captured.err
+
+
+@NATIVE_ONLY
+@pytest.mark.native_crypto
+def test_watch_claim_ends_when_the_live_swaps_recorded_claim_confirms(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import pyrage  # noqa: PLC0415
+    from rill_core.recovery import REVERSE_FALLBACK_EXTENSION  # noqa: PLC0415
+    from rill_core.settlement import (  # noqa: PLC0415
+        FundingOutput,
+        UnilateralAuthorization,
+        build_unilateral_spend,
+        finalize_unilateral_spend,
+    )
+
+    from rill_cli import main as cli_main  # noqa: PLC0415
+    from rill_cli import refund_watcher  # noqa: PLC0415
+
+    package, _ = _fixture("ln-to-btc")
+    package["funding_history"].append(_signed_binding(package, 0, str(NATIVE_LIBRARY)))
+    binding = FundingBinding.model_validate(package["funding_history"][0]["binding"])
+    terms = ContractTerms.model_validate_json(json.dumps(package["contract_terms"]))
+    with Context(library_path=str(NATIVE_LIBRARY)) as crypto:
+        funding = FundingOutput(
+            bytes.fromhex(binding.funding_txid),
+            binding.contract_vout,
+            int(binding.contract_value_sat),
+            bytes.fromhex(binding.contract_script_pubkey),
+        )
+        authorization = UnilateralAuthorization.from_terms(terms, funding, "claim", keys=crypto)
+        plan = build_unilateral_spend(
+            authorization,
+            fee_sat=310,
+            claim_preimage=bytes.fromhex(package["monotonic_knowledge"]["preimage"]),
+        )
+        signature = crypto.schnorr_sign(
+            bytes.fromhex(package["user_secret"]["contract_secret_key"]),
+            plan.signature_hash,
+            b"\x55" * 32,
+        )
+        prepared = finalize_unilateral_spend(plan, signature, verifier=crypto)
+    # What the live swap records before it broadcasts its own claim.
+    package["extensions"][REVERSE_FALLBACK_EXTENSION] = {
+        "version": 1,
+        "funding_binding_hash": funding_binding_hash(binding).hex(),
+        "transaction": prepared.raw_transaction.hex(),
+    }
+    common, _, _ = _inputs(tmp_path, "ln-to-btc")
+    identity = x25519.Identity.from_str(Path(common[-1]).read_text().strip())
+    recovery = tmp_path / "fallback.age"
+    recovery.write_bytes(pyrage.encrypt(canonicalize(package), [identity.to_public()]))
+    prepared_binding = binding
+    polls: list[int] = []
+    sent: list[str] = []
+
+    def collaborators(_reader: object, *, binding: FundingBinding) -> tuple:  # type: ignore[type-arg]
+        assert binding.funding_txid == prepared_binding.funding_txid
+
+        def chain() -> None:
+            polls.append(1)  # the output is already spent: no chain view at all
+
+        def depth(txid: str) -> int | None:
+            return 1 if txid == prepared.txid and len(polls) >= 3 else None
+
+        return chain, depth, lambda _raw, txid: sent.append(txid) is None
+
+    monkeypatch.setattr(cli_main, "RecoveryCoreReader", lambda **_kwargs: object())
+    monkeypatch.setattr(refund_watcher, "core_claim_collaborators", collaborators)
+    args = [
+        "recover",
+        "watch-claim",
+        *common,
+        "--funding-attempt-id",
+        "11" * 32,
+        "--binding-revision",
+        "0",
+        "--rpc-cookie",
+        str(tmp_path / "test-only-cookie"),
+        "--rpc-port",
+        "18443",
+        "--initial-fee-sat",
+        "300",
+        "--max-fee-sat",
+        "400",
+        "--poll-seconds",
+        "0",
+        str(recovery),
+    ]
+    assert cli_main.main(args) == 0
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert (report["outcome"], report["claim_txid"], report["attempts"]) == (
+        "claim_confirmed",
+        prepared.txid,
+        0,
+    )
+    assert sent == []  # observed only: never signed or rebroadcast
+    assert len(polls) == 3
+    assert f"also watching the claim {prepared.txid} prepared by the live swap" in captured.err
+    assert captured.err.count("no unspent confirmed contract output") == 1  # reported once
+    assert package["monotonic_knowledge"]["preimage"] not in captured.err + captured.out

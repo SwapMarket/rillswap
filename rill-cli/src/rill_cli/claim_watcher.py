@@ -14,7 +14,9 @@ refund. One of the 32 attempt slots is reserved for the maximum fee, with enough
 replacement relay headroom. Attempts are kept in memory
 only: after a restart the schedule starts again, and Core refuses a
 replacement below one already in its mempool, which keeps working for us
-meanwhile.
+meanwhile. Claims recorded before this process (``recorded_txids``, such as
+the live swap's prepared claim) are only observed: one that confirms ends the
+watch, but they are never signed, rebroadcast, or used for fee scheduling.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ if TYPE_CHECKING:
 LOG = logging.getLogger(__name__)
 INCREMENTAL_RELAY_SAT_VB = 1  # BIP125 rule 4 at Core's default incremental relay fee
 MAX_ATTEMPTS = 32
+TXID_HEX_LENGTH = 64
 
 type ClaimOutcome = Literal["claim_confirmed", "outpoint_spent_elsewhere", "claim_window_passed"]
 
@@ -93,10 +96,19 @@ class ClaimWatcher:
         effect_allowed: Callable[[], bool] | None = None,
         monotonic_clock: Callable[[], float] | None = None,
         preimage_disclosed: bool = False,
+        recorded_txids: tuple[str, ...] = (),
     ) -> None:
         """``sign(fee, tip)`` returns checked ``(raw, txid, fee, vsize)``."""
         if not 0 < initial_fee_sat <= max_fee_sat:
             raise ClaimWatchError("claim fee bounds unsupported")
+        if type(recorded_txids) is not tuple or not all(
+            type(txid) is str
+            and len(txid) == TXID_HEX_LENGTH
+            and set(txid) <= set("0123456789abcdef")
+            for txid in recorded_txids
+        ):
+            raise ClaimWatchError("recorded claim txids unsupported")
+        self._recorded = recorded_txids
         if deadline is not None and (
             type(deadline) not in (int, float) or not math.isfinite(deadline)
         ):
@@ -172,6 +184,12 @@ class ClaimWatcher:
                 # Malformed callbacks confer no evidence; check older attempts.
                 if type(confirmed) is int and confirmed > 0:
                     return "claim_confirmed", attempt.txid
+            for txid in self._recorded:
+                self._check_authority(deadline)
+                confirmed = self._confirmations(txid)
+                self._check_authority(deadline)
+                if type(confirmed) is int and confirmed > 0:
+                    return "claim_confirmed", txid
             return None if view is None else ("outpoint_spent_elsewhere", None)
         if self._start is None:
             self._start = view.tip_height

@@ -133,3 +133,47 @@ def test_nothing_is_signed_after_the_deadline() -> None:
     watcher.step()  # rebroadcast only
     assert len(watcher.attempts) == 1
     assert chain.sent == [(watcher.attempts[0].txid, 3_300)] * 2
+
+
+def test_a_recorded_claim_is_only_observed_until_it_confirms() -> None:
+    fake = Chain()
+    recorded = "ab" * 32
+    depth: dict[str, object] = {recorded: None}
+    signed: list[int] = []
+
+    def sign(fee: int, tip: int) -> tuple[bytes, str, int, int]:
+        signed.append(fee)
+        return fake.sign(fee, tip)
+
+    watcher = _watcher(
+        fake,
+        chain=lambda: None,
+        confirmations=depth.get,
+        sign=sign,
+        recorded_txids=(recorded,),
+    )
+    # The output is unavailable (spent or unknown): unknown, zero, negative
+    # (conflicted) or malformed depths of the recorded claim prove nothing.
+    for unproven in (None, 0, -1, True, "1"):
+        depth[recorded] = unproven
+        assert watcher.step() is None
+    assert (signed, fake.sent, watcher.attempts) == ([], [], [])
+    depth[recorded] = 1
+    assert watcher.step() == ("claim_confirmed", recorded)
+    assert (signed, fake.sent, watcher.attempts) == ([], [], [])
+
+
+def test_a_definitively_spent_view_still_prefers_a_confirmed_recorded_claim() -> None:
+    fake = Chain()
+    fake.unspent = False
+    recorded = "cd" * 32
+    watcher = _watcher(fake, recorded_txids=(recorded,))
+    assert watcher.step() == ("outpoint_spent_elsewhere", None)
+    fake.mined = recorded
+    assert watcher.step() == ("claim_confirmed", recorded)
+
+
+@pytest.mark.parametrize("recorded", [["ab" * 32], ("AB" * 32,), ("ab" * 31,), (b"ab" * 32,)])
+def test_recorded_claim_txids_must_be_exact_lowercase_txids(recorded: object) -> None:
+    with pytest.raises(ClaimWatchError, match="recorded claim txids unsupported"):
+        _watcher(Chain(), recorded_txids=recorded)
