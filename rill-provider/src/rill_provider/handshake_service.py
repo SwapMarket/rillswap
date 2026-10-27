@@ -75,6 +75,11 @@ LOG = logging.getLogger(__name__)
 REVERSE_PROFILES = ("ln-to-btc/v1", "ln-to-erc20/v1")  # the provider funds after a hold
 NIP59_BACKDATE_SECONDS = 2 * 24 * 60 * 60
 MAX_SEEN_EVENTS = 4096
+# A client sends its first request right after its confirm, with no answer in
+# between; relays may deliver the two in either order. Only the session's own
+# client (seal author, after transport work) can fill its slots.
+MAX_DEFERRED_PER_SESSION = 2
+MAX_DEFERRED_EVENTS = 64
 TIP_LOOKUP_WAIT_SECONDS = 2.0  # waiting bound, not cancellation of Core's worker thread
 _RELAY_CONNECTED = b""  # in-band wake: tick now and re-announce
 
@@ -147,6 +152,9 @@ class _State:
     attempts: dict[str, int] = field(default_factory=dict)
     seen: OrderedDict[str, None] = field(default_factory=OrderedDict)
     tip: int | None = None  # per-tick snapshot; requests never trigger RPC
+    # (session_id, event_id, received_at, event): frames that reached a session
+    # before its confirm, handled once the confirm is admitted.
+    deferred: list[tuple[str, str, int, bytes]] = field(default_factory=list)
 
 
 class HandshakeService:
@@ -513,6 +521,7 @@ class HandshakeService:
             advertise_for=2 * policy.announcement_lifetime - 1,
         )
         self._store.expire_idle(now=now, idle_timeout=policy.handshake_timeout)
+        self._purge_deferred(now)
         await self._refresh_tip()
         if epochs != state.announced_keys or now >= state.announced_at + (
             policy.announcement_refresh
@@ -756,6 +765,36 @@ class HandshakeService:
             seen.popitem(last=False)
         return True
 
+    def _defer(self, session_id: str, event: bytes, now: int) -> None:
+        """Hold one frame that reached its session before the confirm (bounded)."""
+        state = self._state
+        event_id = json.loads(event)["id"]
+        self._purge_deferred(now)
+        # Forget the sighting, so a relay replay can bring back a dropped frame.
+        state.seen.pop(event_id, None)
+        if any(held[1] == event_id for held in state.deferred):
+            return
+        mine = [held for held in state.deferred if held[0] == session_id]
+        if len(mine) >= MAX_DEFERRED_PER_SESSION:
+            state.deferred.remove(mine[0])
+        elif len(state.deferred) >= MAX_DEFERRED_EVENTS:
+            del state.deferred[0]
+        state.deferred.append((session_id, event_id, now, event))
+
+    def _purge_deferred(self, now: int) -> None:
+        timeout = self._policy.handshake_timeout
+        self._state.deferred = [held for held in self._state.deferred if now - held[2] < timeout]
+
+    async def _handle_deferred(self, session_id: object, relays: Sequence[Relay]) -> None:
+        """Handle the frames held for a session whose confirm was just admitted."""
+        state = self._state
+        held = [frame for frame in state.deferred if frame[0] == session_id]
+        if not held:
+            return
+        state.deferred = [frame for frame in state.deferred if frame[0] != session_id]
+        for _, _, _, event in held:
+            LOG.info("deferred relay event: %s", await self.handle(event, relays))
+
     async def handle(self, event: bytes, relays: Sequence[Relay]) -> str:  # noqa: PLR0911, PLR0912, PLR0915 - one disposition per outcome
         """Route one untrusted relay event; return a content-free disposition."""
         if not self._deadline_healthy or self._readiness_closed:
@@ -785,6 +824,7 @@ class HandshakeService:
                         # so reusing an admitted sequence is still a conflict.
                         return await self._answer(document, relays, now)
                     await self._resubscribe(relays)
+                    await self._handle_deferred(json.loads(document).get("session_id"), relays)
                     return "confirm-replay" if admitted.replay else "confirm-admitted"
                 if message_type == "action_result":
                     envelope = json.loads(document)
@@ -838,6 +878,12 @@ class HandshakeService:
                         and payload.get("action") == "cooperative_claim_complete"
                     ):
                         return await self._verify_reverse_completion(document, relays, now)
+                session_id = json.loads(document).get("session_id")
+                if type(session_id) is str and store.session_awaiting_confirm(session_id) is True:
+                    # Relays deliver stored wraps by randomized created_at, so a
+                    # replay can bring the first request before its confirm.
+                    self._defer(session_id, event, now)
+                    return "deferred"
                 return await self._answer(document, relays, now)
             init = store.open_epoch_frame(event, now=now, transport=self._transport)
             if not self._declares_work(init.document):
@@ -850,8 +896,11 @@ class HandshakeService:
                 identity=self._identity,
                 transport_endpoints=self._policy.relay_urls,
             )
-            await self._send_pending(committed.message_id, relays)
+            # Listen on the new mailbox before the accept can reach the client:
+            # each relay then sees our REQ before the accept on this socket, so
+            # the confirm and first request usually arrive live and in order.
             await self._resubscribe(relays)
+            await self._send_pending(committed.message_id, relays)
         except StaleOwnerError:
             raise  # ownership lost: never keep acting on this store
         except SessionBlockedError:

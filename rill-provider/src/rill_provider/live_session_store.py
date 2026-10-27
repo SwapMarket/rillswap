@@ -7964,6 +7964,21 @@ class LiveSessionStore:
             raise LiveSessionStoreError("session mailboxes unavailable") from None
         return tuple(row[0] for row in rows)
 
+    def session_awaiting_confirm(self, session_id: str) -> bool:
+        """Return True only while this unblocked session's accept awaits the client's confirm."""
+        try:
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT 1 FROM sessions WHERE session_id=? "
+                    "AND phase='ACCEPT_COMMITTED' AND blocked=0",
+                    (session_id,),
+                ).fetchone()
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("session state unavailable") from None
+        return row is not None
+
     def observe_outpoint_spent(
         self, session_id: str, tip_height: int | None, block_hash: str | None = None
     ) -> None:
