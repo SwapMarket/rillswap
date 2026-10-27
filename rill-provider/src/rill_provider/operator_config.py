@@ -20,6 +20,7 @@ from rill_core.wire.types import (
     require_v1_destination_script,
 )
 
+from rill_provider._transport_pow import MAX_WORK_BITS
 from rill_provider.evm_quote_policy import EVM_PROFILES, EvmSchedule
 from rill_provider.handshake_service import ServicePolicy
 from rill_provider.handshake_store import HandshakePolicy
@@ -212,6 +213,10 @@ class OperatorConfig(_Strict):
     new_sessions_per_minute: int = Field(default=DEFAULT_NEW_SESSIONS_PER_MINUTE, ge=1)
     # Unreleased firm offers plus accepted swaps; bounds concurrent financial exposure.
     max_active_reservations: int = Field(default=DEFAULT_MAX_ACTIVE_RESERVATIONS, ge=1)
+    # RS-006 transport proof of work (NIP-13 leading zero bits) on every message
+    # of new sessions; 0 is off. Clients that do not support it cannot see an
+    # announcement requiring it, so enable it only once they do.
+    transport_pow_bits: int = Field(default=0, ge=0, le=MAX_WORK_BITS)
 
     @field_validator("provider_destination_script")
     @classmethod
@@ -259,6 +264,7 @@ class OperatorConfig(_Strict):
             profile=self.handshake.profile,  # type: ignore[arg-type]
             provider_destination_script=self.provider_destination_script,
             evm_assets=self.evm.assets() if self.evm is not None else (),
+            transport_pow_bits=self.transport_pow_bits,
         )
 
 

@@ -193,6 +193,17 @@ Admission limits include `max_sessions`, `max_tombstones`,
 `new_sessions_per_minute` and `max_active_reservations`. The last one bounds
 unreleased firm offers and accepted swaps.
 
+`transport_pow_bits` (0 to 20, default 0 = off) requires RS-006 NIP-13 proof
+of work on every message a client sends. The provider drops messages without
+enough work after one hash, before any decryption. Each session keeps the
+work it declared when it started, so you can change the value without
+stranding swaps that are in progress. Clients that predate this setting can't
+use an announcement that requires work, so enable it only after the clients
+you serve support it. Each extra bit doubles the cost: 16 bits is about
+65,000 hashes per message on average. Work makes floods more expensive, but
+it is not rate limiting or Sybil protection, because a native sender can
+still produce messages much faster than a browser.
+
 ### Swap profiles
 
 Select one profile per deployment with `handshake.profile` and advertise it

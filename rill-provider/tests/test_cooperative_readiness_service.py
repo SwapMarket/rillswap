@@ -23,7 +23,7 @@ def _service(store: Mock, clock: list[int]) -> HandshakeService:
         store,
         Mock(),
         Mock(),
-        Mock(relay_urls=()),
+        Mock(relay_urls=(), transport_pow_bits=0),
         clock=lambda: clock[0],
         chain_tip=lambda: 1090,
     )

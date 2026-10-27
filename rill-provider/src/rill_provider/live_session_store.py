@@ -96,6 +96,7 @@ from rill_core.wire.quotes import TermsOfferPayload
 from rill_core.wire.settlement_messages import FundingBindingPayload, TermsAcceptPayload
 from rill_core.wire.types import NetworkIdentity
 
+from rill_provider import _transport_pow as transport_pow
 from rill_provider._nip59_receive import _decode_gift_wrap_candidate
 from rill_provider._nip59_send import _wrap_envelope
 from rill_provider.core_tx_bytes import (
@@ -508,6 +509,32 @@ class EpochInitiation:
 
     document: bytes
     epoch_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class MailboxWork:
+    """One subscribed session mailbox and its RS-006 transport work terms."""
+
+    mailbox_key: str
+    declared_bits: int | None
+    finished: bool
+
+
+# Terminal across every profile (forward, reverse and EVM swaps share them).
+FINISHED_SWAP_STATES = frozenset(EVM_TERMINAL_STATES)
+
+
+def _declared_work(init_bytes: bytes) -> int | None:
+    """Return the transport work an admitted init declared, or None.
+
+    Admission refuses malformed declarations, so an unreadable one can only
+    come from an older store; it is treated as undeclared, which never makes
+    a session require work its client did not promise.
+    """
+    try:
+        return transport_pow.requirement(json.loads(init_bytes)["payload"]["extensions"])
+    except (ValueError, KeyError, TypeError):
+        return None
 
 
 class LiveSessionStoreError(ValueError):
@@ -7894,17 +7921,33 @@ class LiveSessionStore:
 
     def session_mailboxes(self) -> tuple[str, ...]:
         """Return our mailbox keys for sessions that may still send to us."""
+        return tuple(mailbox.mailbox_key for mailbox in self.mailbox_work())
+
+    def mailbox_work(self) -> tuple[MailboxWork, ...]:
+        """Return each mailbox that may still receive from a client, with its work terms.
+
+        ``declared_bits`` is the RS-006 transport proof of work the session's
+        init declared (None for sessions admitted without one). ``finished`` is
+        True only for a swap in a terminal state (every profile keeps its state
+        in ``swaps``); a session without a swap, or in any other state, may
+        still need to reach us.
+        """
         try:
             with self._write() as connection:
                 rows = connection.execute(
-                    "SELECT provider_session_key FROM sessions WHERE blocked=0 "
-                    "AND phase IN ('ACCEPT_COMMITTED', 'CONFIRMED', 'ACCEPTED') ORDER BY revision"
+                    "SELECT s.provider_session_key, s.init_bytes, w.state FROM sessions s "
+                    "LEFT JOIN swaps w ON w.session_id = s.session_id WHERE s.blocked=0 "
+                    "AND s.phase IN ('ACCEPT_COMMITTED', 'CONFIRMED', 'ACCEPTED') "
+                    "ORDER BY s.revision"
                 ).fetchall()
         except LiveSessionStoreError:
             raise
         except Exception:  # noqa: BLE001 - never echo storage details
             raise LiveSessionStoreError("session mailboxes unavailable") from None
-        return tuple(row[0] for row in rows)
+        return tuple(
+            MailboxWork(key, _declared_work(init_bytes), state in FINISHED_SWAP_STATES)
+            for key, init_bytes, state in rows
+        )
 
     def awaiting_confirm_mailboxes(self) -> tuple[str, ...]:
         """Return our session mailbox keys that still expect a client confirm."""

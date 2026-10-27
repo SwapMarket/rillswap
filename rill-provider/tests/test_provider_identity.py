@@ -17,6 +17,7 @@ from rill_core.wire.hashes import tagged_hash
 from rill_core.wire.types import NetworkIdentity
 
 from rill_provider import _nip01_event as nip01
+from rill_provider import _transport_pow as transport_pow
 from rill_provider import provider_identity as identity
 from rill_provider.provider_identity import (
     AnnouncementTerms,
@@ -376,3 +377,19 @@ def test_evm_assets_are_advertised_in_the_rs010_extension() -> None:
         identity._advertisement(  # noqa: SLF001
             "bb" * 32, _terms(manual["advertisement"], evm_assets=(asset.model_dump(),))
         )
+
+
+def test_transport_work_is_advertised_only_when_required() -> None:
+    manual, _event = _vectors()
+    key = transport_pow.TRANSPORT_POW_EXTENSION
+    plain = identity._advertisement("bb" * 32, _terms(manual["advertisement"]))  # noqa: SLF001
+    assert key not in plain["extensions"]  # off: byte-identical to older announcements
+    terms = _terms(manual["advertisement"], transport_pow_bits=16)
+    required = identity._advertisement("bb" * 32, terms)  # noqa: SLF001
+    assert required["extensions"][key] == {"bits": 16}
+    assert transport_pow.requirement(required["extensions"]) == 16
+    for bits in (-1, transport_pow.MAX_WORK_BITS + 1, True):
+        with pytest.raises(ProviderIdentityError):
+            identity._advertisement(  # noqa: SLF001
+                "bb" * 32, _terms(manual["advertisement"], transport_pow_bits=bits)
+            )

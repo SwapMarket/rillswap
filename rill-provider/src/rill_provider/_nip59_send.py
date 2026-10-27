@@ -21,6 +21,7 @@ from rill_core.wire.messages import Envelope
 
 from rill_provider import _nip01_event as nip01
 from rill_provider import _nip44_v2 as nip44
+from rill_provider import _transport_pow as transport_pow
 from rill_provider._nip59_receive import BINDING_TAG, OUTER_KIND, RUMOR_KIND, SEAL_KIND
 
 if TYPE_CHECKING:
@@ -77,8 +78,14 @@ def _wrap_envelope(
     sender_session_secret: bytes,
     recipient_xonly_key: str,
     crypto: Context,
+    work_bits: int = 0,
 ) -> bytes:
-    """Return one freshly randomized kind-1059 event for a canonical envelope."""
+    """Return one freshly randomized kind-1059 event for a canonical envelope.
+
+    ``work_bits`` > 0 mines RS-006 transport proof of work into the outer
+    event, as a provider advertising ``rillswap/transport-pow`` requires.
+    """
+    _require(type(work_bits) is int and 0 <= work_bits <= transport_pow.MAX_WORK_BITS)
     _require(type(envelope_bytes) is bytes and 0 < len(envelope_bytes) <= MAX_JSON_BYTES)
     _require(canonicalize(parse_json_strict(envelope_bytes)) == envelope_bytes)
     envelope = Envelope.model_validate_json(envelope_bytes, strict=True)
@@ -121,15 +128,13 @@ def _wrap_envelope(
     outer_content = nip44._encrypt_payload(  # noqa: SLF001 - internal codec
         seal, sender_secret=wrapper_secret, recipient_public_key=recipient, crypto=crypto
     )
-    outer = _signed(
-        wrapper_secret,
-        wrapper,
-        _past(now),
-        OUTER_KIND,
-        [["p", recipient_xonly_key]],
-        outer_content,
-        crypto,
-    )
+    created_at = _past(now)
+    tags = [["p", recipient_xonly_key]]
+    if work_bits:
+        tags = transport_pow.mine(
+            wrapper, created_at, OUTER_KIND, tags, outer_content, bits=work_bits
+        )
+    outer = _signed(wrapper_secret, wrapper, created_at, OUTER_KIND, tags, outer_content, crypto)
     del wrapper_secret
     result = outer.encode("utf-8")
     _require(len(result) <= nip01.MAX_EVENT_BYTES)

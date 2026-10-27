@@ -15,6 +15,7 @@ from rill_core.wire.types import NetworkIdentity
 
 from rill_provider import _nip59_receive as receive
 from rill_provider import _nip59_send as send
+from rill_provider import _transport_pow as transport_pow
 
 FIXTURE = Path(__file__).parent / "fixtures" / "initial-btc-to-ln-v1.json"
 SENDER = (3).to_bytes(32, "big")  # Fixture-only public scalar of the fixture session key.
@@ -109,3 +110,46 @@ def test_wrap_round_trips_through_receive_with_fresh_randomness() -> None:
                 recipient_xonly_key=crypto.public_key(SENDER)[1:].hex(),
                 crypto=crypto,
             )
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    not os.environ.get("RILL_CRYPTO_LIBRARY"), reason="requires pinned native crypto"
+)
+def test_mined_wrap_proves_work_and_still_decodes() -> None:
+    from rill_crypto import Context  # noqa: PLC0415 - opt-in native test
+
+    document, network = _accept()
+    with Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto:
+        recipient = crypto.public_key(RECIPIENT)[1:].hex()
+        wrap = send._wrap_envelope(  # noqa: SLF001
+            document,
+            sender_session_secret=SENDER,
+            recipient_xonly_key=recipient,
+            crypto=crypto,
+            work_bits=10,
+        )
+        outer = json.loads(wrap)
+        assert outer["tags"][0] == ["p", recipient]
+        assert outer["tags"][1][0::2] == ["nonce", "10"]
+        assert transport_pow.outer_work(wrap) == (recipient, 10)
+        now = int(time.time())
+        assert now - send.TIMESTAMP_JITTER_SECONDS <= outer["created_at"] <= now
+        candidate = receive._decode_gift_wrap_candidate(  # noqa: SLF001
+            wrap,
+            recipient_mailbox_secret=RECIPIENT,
+            expected_recipient_xonly_key=recipient,
+            expected_network=network,
+            expected_profile_id="btc-to-ln/v1",
+            crypto=crypto,
+        )
+        assert candidate.envelope == Envelope.model_validate_json(document)
+        for bits in (-1, transport_pow.MAX_WORK_BITS + 1, True):
+            with pytest.raises(send.Nip59WrapRefusedError):
+                send._wrap_envelope(  # noqa: SLF001
+                    document,
+                    sender_session_secret=SENDER,
+                    recipient_xonly_key=recipient,
+                    crypto=crypto,
+                    work_bits=bits,
+                )

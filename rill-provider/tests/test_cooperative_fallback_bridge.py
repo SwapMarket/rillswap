@@ -131,7 +131,7 @@ def test_signed_echo_enters_waiting_only_via_original_live_service(  # noqa: PLR
             store,
             Mock(),
             crypto,
-            Mock(relay_urls=()),
+            Mock(relay_urls=(), transport_pow_bits=0),
             clock=lambda: window.started_at + 1,
             chain_tip=lambda: 1090,
             settlement=engine,

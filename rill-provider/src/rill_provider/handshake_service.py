@@ -24,6 +24,7 @@ from rill_core.wire.messages import Envelope, InvoiceBinding
 from rill_core.wire.quotes import QuoteError, parse_quote_request
 from rill_core.wire.reverse_quotes import ReverseFirmQuoteRequest
 
+from rill_provider import _transport_pow as transport_pow
 from rill_provider.evm_quote_policy import EVM_PROFILES, ln_to_erc20_hold_msat
 from rill_provider.live_session_store import (
     COOPERATION_BUDGET_SECONDS,
@@ -114,11 +115,15 @@ class ServicePolicy:
     profile: ProfileId = "btc-to-ln/v1"  # the one negotiated profile this service serves
     evm_assets: tuple[EvmAssetIdentity, ...] = ()  # RS-010: announced served assets
     relay_proxy: str | None = None  # checked loopback CONNECT proxy, or direct
+    # RS-006 transport proof of work required on new sessions' messages; 0 = off.
+    transport_pow_bits: int = 0
 
     def __post_init__(self) -> None:
         """Refuse schedules that would leave advertised epochs undecodable."""
         if not (
-            self.relay_urls
+            type(self.transport_pow_bits) is int
+            and 0 <= self.transport_pow_bits <= transport_pow.MAX_WORK_BITS
+            and self.relay_urls
             and 0 < self.announcement_refresh < self.announcement_lifetime
             and self.epoch_period > 0
             and self.outbox_retry > 0
@@ -131,6 +136,7 @@ class ServicePolicy:
 @dataclass(slots=True)
 class _State:
     subscribed: tuple[str, ...] = ()
+    work: dict[str, int] = field(default_factory=dict)  # recipient key -> required bits
     retry_subscription: bool = False
     relay_drops: dict[int, tuple[Relay, int]] = field(default_factory=dict)
     announced_keys: tuple[str, ...] = ()
@@ -436,7 +442,19 @@ class HandshakeService:
         # Every still-decodable epoch, not only advertised ones: clients may
         # hold an older, still-valid announcement.
         epochs = self._store.receiving_epochs(now=self._now())
-        keys = sorted({*epochs, *self._store.session_mailboxes()})
+        mailboxes = self._store.mailbox_work()
+        required = self._policy.transport_pow_bits
+        work = dict.fromkeys(epochs, required)
+        for mailbox in mailboxes:
+            # A session keeps the work it declared even if the requirement
+            # changes. One admitted before any was declared stays exempt until
+            # its swap finishes, so enabling work never strands a live swap.
+            if mailbox.declared_bits is not None:
+                work[mailbox.mailbox_key] = mailbox.declared_bits
+            else:
+                work[mailbox.mailbox_key] = required if mailbox.finished else 0
+        self._state.work = work
+        keys = sorted(work)
         return [
             {
                 "kinds": [1059],
@@ -444,6 +462,38 @@ class HandshakeService:
                 "since": self._now() - NIP59_BACKDATE_SECONDS - self._policy.outbox_retry,
             }
         ]
+
+    def _has_work(self, event: bytes) -> bool:
+        """Whether an inbound gift wrap carries the RS-006 transport work it needs.
+
+        Checked before queueing and again before any decryption. Only hashes:
+        a dropped event costs one parse and one SHA-256. Recipients outside the
+        current table (a just-admitted session) need the current requirement.
+        """
+        work = self._state.work
+        required = self._policy.transport_pow_bits
+        if required == 0 and not any(work.values()):
+            return True  # nothing requires work: unchanged behavior
+        found = transport_pow.outer_work(event)
+        if found is None:
+            return False  # no event the store could accept
+        recipient, proven = found
+        return proven >= work.get(recipient, required)
+
+    def _declares_work(self, init_document: bytes) -> bool:
+        """Whether an init binds its session to at least the required work.
+
+        The declaration fixes the work every later message of the session
+        carries, so a requirement change never strands the session. A
+        malformed declaration is refused even when no work is required.
+        """
+        try:
+            extensions = json.loads(init_document)["payload"]["extensions"]
+            declared = transport_pow.requirement(extensions)
+        except (ValueError, KeyError, TypeError):
+            return False
+        required = self._policy.transport_pow_bits
+        return required == 0 or (declared is not None and declared >= required)
 
     async def subscribe(self, relay: Relay) -> None:
         """Install the current filter on one (re)connected relay."""
@@ -612,6 +662,7 @@ class HandshakeService:
                 expires_at=now + policy.announcement_lifetime,
                 epoch_bound_sessions=self._store.requires_epoch_bound_sessions,
                 evm_assets=policy.evm_assets,
+                transport_pow_bits=policy.transport_pow_bits,
             )
         )
         state.announced_keys, state.announced_at = epochs, now
@@ -709,6 +760,8 @@ class HandshakeService:
         """Route one untrusted relay event; return a content-free disposition."""
         if not self._deadline_healthy or self._readiness_closed:
             return "unavailable"  # do not mark as seen; replay is safe after restart
+        if not self._has_work(event):
+            return "insufficient-work"  # before the seen cache, so junk cannot evict it
         if not self._first_sight(event):
             return "duplicate"
         store = self._store
@@ -787,6 +840,8 @@ class HandshakeService:
                         return await self._verify_reverse_completion(document, relays, now)
                 return await self._answer(document, relays, now)
             init = store.open_epoch_frame(event, now=now, transport=self._transport)
+            if not self._declares_work(init.document):
+                return "refused"
             reserved = store.reserve(init, now=now)
             if reserved.revision != 0:
                 return "init-replay"  # outbox retries own any re-send
@@ -1336,7 +1391,7 @@ class HandshakeService:
 
         return broadcasts, asyncio.create_task(supervise())
 
-    async def run(self, stop: asyncio.Event, *, tick_seconds: float = 15.0) -> None:
+    async def run(self, stop: asyncio.Event, *, tick_seconds: float = 15.0) -> None:  # noqa: PLR0915 - one supervised loop owns every relay and duty
         """Serve until ``stop`` is set, reconnecting relays with backoff."""
         broadcasts, deadline_task = self._start_deadline_supervision(stop)
         connected: dict[str, RelayConnection] = {}
@@ -1352,7 +1407,8 @@ class HandshakeService:
                         await self.subscribe(connection)
                         await inbound.put(_RELAY_CONNECTED)
                         async for event in connection.events():
-                            await inbound.put(event)
+                            if self._has_work(event):  # drop floods before the queue
+                                await inbound.put(event)
                 except RelayError:
                     LOG.warning("relay unavailable: %s", url)
                 except Exception:  # noqa: BLE001 - a hostile relay must not end reconnection

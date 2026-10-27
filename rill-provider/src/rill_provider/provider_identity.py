@@ -33,6 +33,7 @@ from rill_core.wire.messages import HandshakeAccept, ProviderTerms
 from rill_core.wire.types import EvmAssetIdentity, NetworkIdentity
 
 from rill_provider import _nip01_event as nip01
+from rill_provider import _transport_pow as transport_pow
 
 if TYPE_CHECKING:
     from os import PathLike
@@ -70,6 +71,7 @@ class AnnouncementTerms:
     expires_at: int
     epoch_bound_sessions: bool = False
     evm_assets: tuple[EvmAssetIdentity, ...] = ()  # RS-010 served assets
+    transport_pow_bits: int = 0  # RS-006 transport proof of work; 0 = not required
 
 
 EVM_ASSETS_EXTENSION = "rillswap/evm-assets-v1"
@@ -236,6 +238,8 @@ def _advertisement(identity: str, terms: AnnouncementTerms) -> dict[str, Any]:
     bands = terms.amount_bands
     if not (
         type(terms.epoch_bound_sessions) is bool
+        and type(terms.transport_pow_bits) is int
+        and 0 <= terms.transport_pow_bits <= transport_pow.MAX_WORK_BITS
         and type(terms.network) is NetworkIdentity
         and _supported(terms.network)
         and 1 <= len(terms.profiles) <= 8  # noqa: PLR2004
@@ -287,6 +291,11 @@ def _advertisement(identity: str, terms: AnnouncementTerms) -> dict[str, Any]:
             **(
                 {EVM_ASSETS_EXTENSION: [a.model_dump(mode="json") for a in terms.evm_assets]}
                 if terms.evm_assets
+                else {}
+            ),
+            **(
+                {transport_pow.TRANSPORT_POW_EXTENSION: {"bits": terms.transport_pow_bits}}
+                if terms.transport_pow_bits
                 else {}
             ),
         },
