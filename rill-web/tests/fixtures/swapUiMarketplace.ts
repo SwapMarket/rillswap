@@ -7,15 +7,21 @@ declare global {
       reverseEvents?: string[]; reverseFunded?: boolean;
       fundedRecovery?: number[]; fundingPublished?: boolean;
       wallet: typeof BrowserRecoveryWallet; releaseInfo?: () => void; infoPending: boolean };
+    /**
+     * Announced base fee for the directory, 0 by default so every fixture quote is above the
+     * estimate and shows the review step. Set it with `page.addInitScript` before the page loads.
+     */
+    uiFixtureAnnouncedFeeSat?: string;
   }
 }
 window.uiFixture = { requests: [], executed: 0, executedProviders: [], disposed: 0, wallet: BrowserRecoveryWallet, infoPending: false };
 export const MAX_QUOTE_PROVIDERS = 8;
+export const DIRECTORY_PROFILES = ["btc-to-ln/v1", "ln-to-btc/v1", "erc20-to-ln/v1", "ln-to-erc20/v1"];
 export const discoverMarketplace = async () => ({ providers: [{}], warnings: [] });
 export const eligibleProviders = (providers: unknown[]) => providers;
 export const ineligibilityReason = () => "fixture ineligible";
 export const discoverDirectory = async () => ({ warnings: [], entries: [{ identity: "4".repeat(64), slot: "fixture", profiles: ["btc-to-ln/v1", "ln-to-btc/v1"],
-  amountBands: [{ minimum_sat: "1000", maximum_sat: "100000000" }], indicativeFeePolicy: { base_sat: "2000", proportional_millionths: 0 },
+  amountBands: [{ minimum_sat: "1000", maximum_sat: "100000000" }], indicativeFeePolicy: { base_sat: window.uiFixtureAnnouncedFeeSat ?? "0", proportional_millionths: 0 },
   relayUrls: ["ws://127.0.0.1:7777/"], expiresAt: Math.floor(Date.now() / 1000) + 3600 }] });
 export const indicativeFee = (policy: { base_sat: string; proportional_millionths: number }, amount: bigint) =>
   BigInt(policy.base_sat) + (amount * BigInt(policy.proportional_millionths) + 999_999n) / 1_000_000n;

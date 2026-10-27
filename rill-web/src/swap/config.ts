@@ -65,6 +65,17 @@ export function validateMempoolApi(value: string, network: NetworkName): string 
   return url.href.replace(/\/$/, "");
 }
 
+/**
+ * Explorer page for `txid` on the same instance as a mempool/Esplora API:
+ * `https://host[/net]/api` maps to `https://host[/net]/tx/<txid>`.
+ */
+export function explorerTxUrl(api: string, txid: string): string {
+  if (!/^[0-9a-f]{64}$/.test(txid)) throw new Error("Invalid transaction ID");
+  const url = new URL(api);
+  url.pathname = `${url.pathname.replace(/\/+$/, "").replace(/\/api$/, "")}/tx/${txid}`;
+  return url.href;
+}
+
 const MEMPOOL_APIS: Record<NetworkName, string> = {
   mainnet: "https://mempool.space/api",
   signet: "https://mempool.space/signet/api",

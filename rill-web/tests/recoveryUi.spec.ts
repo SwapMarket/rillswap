@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures/swapPage";
 import canonicalize from "canonicalize";
 import { readFileSync } from "node:fs";
 import { encryptCanonicalRecoveryForRecipient } from "../src/recoveryAgeContainer";

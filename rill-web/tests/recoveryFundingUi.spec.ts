@@ -1,4 +1,5 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "./fixtures/swapPage";
+import type { Page } from "@playwright/test";
 import canonicalize from "canonicalize";
 import { readFileSync } from "node:fs";
 import { encryptCanonicalRecoveryForRecipient } from "../src/recoveryAgeContainer";
@@ -337,13 +338,13 @@ test("zero funding history never exposes a funding check or makes a chain connec
   expect(calls).toEqual([]);
 });
 
-test("production CSP blocks unapproved recovery API origins while mainnet funding stays disabled", async ({ page }) => {
+test("production CSP lets recovery checks use the user's own https mempool instance while mainnet funding stays disabled", async ({ page }) => {
   const item = corpus().find((c) => c.name === "existing mainnet refund")!, key = await createRecoveryKey();
   const encrypted = await encryptCanonicalRecoveryForRecipient(new TextEncoder().encode(canonicalize(item.record)!), key.recipient);
   let reached = false;
-  await page.route("https://unapproved.invalid/**", async (route) => { reached = true; await route.abort(); });
+  await page.route("https://mempool.example.invalid/**", async (route) => { reached = true; await route.abort(); });
   await page.goto("http://127.0.0.1:18765/swap.html");
-  await page.locator("#swap-settings-toggle").click(); await page.locator("#swap-chain-api").fill("https://unapproved.invalid/api");
+  await page.locator("#swap-settings-toggle").click(); await page.locator("#swap-chain-api").fill("https://mempool.example.invalid/api");
   await page.locator("#swap-settings-close").click();
   await page.locator("#swap-recovery summary").first().click();
   await page.locator("#swap-recovery-file").setInputFiles(payload(encrypted, "mainnet-test.age"));
@@ -352,7 +353,7 @@ test("production CSP blocks unapproved recovery API origins while mainnet fundin
   await expect(page.locator("#swap-recovery-result h3")).toHaveText("Recovery record verified");
   await page.locator("#swap-recovery-check-funding").click();
   await expect(page.locator("#swap-recovery-funding-result")).toContainText("Funding could not be verified");
-  expect(reached).toBe(false); await expect(page.locator("#swap-start")).toBeDisabled();
+  expect(reached).toBe(true); await expect(page.locator("#swap-start")).toBeDisabled();
 });
 
 test("multiple revisions require an explicit choice and a failed newest revision never falls back automatically", async ({ page }) => {

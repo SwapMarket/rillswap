@@ -15,11 +15,11 @@ import { type FundingRequest, type FundingSource, type SwapRequest } from "./swa
 import { observeDeposit } from "./swap/depositWatch";
 import { qrSvg } from "./qr";
 import { TransactionRefusedError } from "./swap/transaction";
-import { mempoolApiForNetwork, relaysForNetwork, trustedEvmAsset, validateEvmSponsor, validateMempoolApi, validateRelays, type EvmSponsorDefaults, type NetworkName } from "./swap/config";
+import { explorerTxUrl, mempoolApiForNetwork, relaysForNetwork, trustedEvmAsset, validateEvmSponsor, validateMempoolApi, validateRelays, type EvmSponsorDefaults, type NetworkName } from "./swap/config";
 import { GasSponsor, newStagingSecret, stagingAddress } from "./swap/gasSponsor";
 import { readChainTip } from "./swap/chainTip";
 import { BrowserRecoveryWallet } from "./browserRecoveryWallet";
-import { type DirectoryEntry, discoverDirectory, discoverMarketplace, eligibleProviders, indicativeFee, ineligibilityReason, quoteProviders, quoteReverseProviders,
+import { type DirectoryEntry, DIRECTORY_PROFILES, discoverDirectory, discoverMarketplace, eligibleProviders, indicativeFee, ineligibilityReason, quoteProviders, quoteReverseProviders,
   estimateFromDirectory, providerLimits, type LocatedQuote, MAX_QUOTE_PROVIDERS, quoteErc20Providers, quoteLnErc20Providers, selectEvmAsset } from "./swap/marketplace";
 import type { Erc20SwapRequest, PreparedErc20Swap } from "./swap/erc20Swap";
 import { EvmRpc } from "./swap/evmHtlc";
@@ -56,6 +56,13 @@ function field(root: HTMLElement, id: string, label: string, value = "", hint = 
 }
 
 const btc = (sats: bigint): string => `${sats / 100_000_000n}.${(sats % 100_000_000n).toString().padStart(8, "0")}`;
+
+/** Link to a transaction on the user's own mempool instance. */
+function txLink(api: string, txid: string): HTMLAnchorElement {
+  const link = node("a", txid);
+  link.href = explorerTxUrl(api, txid); link.target = "_blank"; link.rel = "noopener noreferrer";
+  return link;
+}
 
 function positive(input: HTMLInputElement, what: string): bigint {
   if (!/^[0-9]{1,16}$/.test(input.value.trim())) throw new Error(`${what} must be a whole number`);
@@ -118,12 +125,11 @@ function mount(root: HTMLElement): void {
   relayLabel.htmlFor = relay.id;
   relay.value = __SWAP_DEFAULTS__.relays.join("\n");
   relay.spellcheck = false;
-  settings.append(relayLabel, relay, node("small",
-    "Up to four relays. Connect only when you request a quote. Each operator sees your IP and transport metadata."));
+  settings.append(relayLabel, relay, node("small", "Up to four relays, used to find providers and talk to them. Each relay sees your IP."));
   const chainApi = field(settings, "swap-chain-api", "Mempool API", __SWAP_DEFAULTS__.mempoolApi,
-    "Trusted height observations, not independent chain verification. Custom origins need a deployment CSP allowance.");
+    "Any mempool or Esplora instance over https, for example https://mempool.example/api. Used for confirmations and transaction links.");
   const broadcastApi = field(settings, "swap-broadcast-api", "Transaction broadcast API", __SWAP_DEFAULTS__.broadcastApi,
-    "Used only after explicit refund or claim approval and a broadcast click. Custom origins need a deployment CSP allowance.");
+    "Where claim and refund transactions are sent. Usually the same as the mempool API.");
   const evmRpc = field(settings, "swap-evm-rpc", "EVM RPC (stablecoin swaps)", __SWAP_DEFAULTS__.evmRpc ?? "",
     "Read-only chain access for stablecoin swaps; your wallet extension signs. This operator sees your IP and the swap's addresses. Custom origins need a deployment CSP allowance.");
   const evmSponsor = field(settings, "swap-evm-sponsor", "Gas sponsor (receive stablecoins without a wallet)", __SWAP_DEFAULTS__.evmSponsor?.url ?? "",
@@ -148,75 +154,88 @@ function mount(root: HTMLElement): void {
   const closeProviders = node("button", "Close", "swap-providers-close");
   closeProviders.type = "button";
   providersHead.append(node("h2", "Providers"), closeProviders);
-  const providersIntro = node("p", "", "swap-providers-intro");
-  const loadProviders = node("button", "Load providers", "swap-providers-load");
-  loadProviders.type = "button";
+  const providersIntro = node("p", "Fees and limits are what each provider announces; the signed quote is final.", "swap-providers-intro");
+  const reloadProviders = node("button", "Refresh", "swap-providers-load");
+  reloadProviders.type = "button";
   const providersStatus = node("p", "", "swap-providers-status");
   providersStatus.setAttribute("role", "status");
   const providersList = node("div", "", "swap-providers-list");
-  providers.append(providersHead, providersIntro, loadProviders, providersStatus, providersList);
-  providersButton.onclick = () => {
-    providersIntro.textContent = `Load connects to your configured relays and lists every provider announced for ${network.value}. ` +
-      "Signatures authenticate announcements, not reputation; limits and fees are indicative until a signed quote.";
-    providers.showModal();
-  };
+  providers.append(providersHead, providersIntro, providersStatus, reloadProviders, providersList);
+  providersButton.onclick = () => providers.showModal();
   closeProviders.onclick = () => providers.close();
   const providerChoice = node("p", "", "swap-provider-choice");
-  const DIRECTION: Record<string, string> = { "btc-to-ln/v1": "Bitcoin to Lightning", "ln-to-btc/v1": "Lightning to Bitcoin" };
+  const PROFILE_TITLE: Record<string, string> = { "btc-to-ln/v1": "Bitcoin → Lightning", "ln-to-btc/v1": "Lightning → Bitcoin",
+    "erc20-to-ln/v1": "Stablecoin → Lightning", "ln-to-erc20/v1": "Lightning → Stablecoin" };
+  const FEE_SAMPLE = 100_000n;
   let directoryEntries: readonly DirectoryEntry[] = [];
   const showProviderChoice = (): void => {
     const pinned = identity.value.trim();
     providerChoice.textContent = pinned ? `Provider: ${pinned.slice(0, 12)}… (chosen by you)` : "Provider: automatic, lowest verified price";
-    for (const option of providersList.querySelectorAll<HTMLInputElement>("input[type=radio]")) option.checked = option.value === pinned;
   };
+  /** One table per swap type; a provider serving several types appears in each of them. */
   const renderDirectory = (): void => {
     const pinned = identity.value.trim();
-    const choice = (value: string, text: string): HTMLLabelElement => {
-      const label = node("label"), option = node("input");
-      option.type = "radio"; option.name = "directory-provider"; option.value = value; option.checked = value === pinned;
-      option.onchange = () => { identity.value = value; showProviderChoice(); };
-      label.append(option, node("strong", text));
-      return label;
+    const choose = (value: string, idle: string): HTMLButtonElement => {
+      const control = node("button", value === pinned ? "Selected" : idle);
+      control.type = "button"; control.dataset.provider = value; control.disabled = value === pinned;
+      control.onclick = () => { identity.value = value; showProviderChoice(); updateEstimate(); renderDirectory(); };
+      return control;
     };
-    const automatic = node("article");
-    automatic.className = "swap-provider";
-    automatic.append(choice("", "Automatic"), node("p", "Compares the eligible providers' signed quotes and picks the lowest verified price."));
+    const automatic = node("div", "", "swap-provider-automatic");
+    automatic.append(node("p", "Automatic: ask every eligible provider and take the lowest signed price."), choose("", "Use automatic"));
     providersList.replaceChildren(automatic);
-    for (const entry of directoryEntries) {
-      const article = node("article");
-      article.className = "swap-provider";
-      const bands = entry.amountBands.map((band) => `${BigInt(band.minimum_sat).toLocaleString()} to ${BigInt(band.maximum_sat).toLocaleString()} sat`).join(", ");
-      const fee = entry.indicativeFeePolicy;
-      const sample = 100_000n;
-      article.append(choice(entry.identity, `${entry.identity.slice(0, 12)}…`),
-        node("p", `Directions: ${entry.profiles.map((profile) => DIRECTION[profile] ?? profile).join(", ")}`),
-        node("p", `Limits: ${bands}`),
-        node("p", `Fee: ${BigInt(fee.base_sat).toLocaleString()} sat + ${(fee.proportional_millionths / 10_000).toFixed(2)}% ` +
-          `(about ${indicativeFee(fee, sample).toLocaleString()} sat on a ${sample.toLocaleString()} sat swap)`),
-        node("small", `Identity: ${entry.identity}. Slot: ${entry.slot}. Relays: ${entry.relayUrls.join(", ")}. ` +
-          `Announcement expires ${new Date(entry.expiresAt * 1000).toLocaleString()}.`));
-      providersList.append(article);
+    for (const profile of DIRECTORY_PROFILES) {
+      const entries = directoryEntries.filter((entry) => entry.profiles.includes(profile));
+      if (entries.length === 0) continue;
+      const group = node("section");
+      group.className = "swap-provider-group"; group.dataset.profile = profile;
+      const stablecoin = profile.includes("erc20");
+      const head = node("tr");
+      for (const title of ["Provider", ...(stablecoin ? ["Assets"] : []), "Limits (sat)", "Fee", `On ${FEE_SAMPLE.toLocaleString()} sat`, "Listed until", ""]) head.append(node("th", title));
+      const body = node("tbody");
+      for (const entry of entries) {
+        const row = node("tr");
+        row.className = "swap-provider"; row.dataset.provider = entry.identity;
+        if (entry.identity === pinned) row.classList.add("selected");
+        const who = node("td", `${entry.identity.slice(0, 12)}…`);
+        who.title = `${entry.identity} · relays: ${entry.relayUrls.join(", ")}`;
+        const fee = entry.indicativeFeePolicy;
+        const cells = [who,
+          ...(stablecoin ? [node("td", [...new Set(entry.evmAssets.map((asset) => asset.token_symbol))].join(", "))] : []),
+          node("td", entry.amountBands.map((band) => `${BigInt(band.minimum_sat).toLocaleString()} – ${BigInt(band.maximum_sat).toLocaleString()}`).join(", ")),
+          node("td", `${BigInt(fee.base_sat).toLocaleString()} sat + ${(fee.proportional_millionths / 10_000).toFixed(2)}%`),
+          node("td", `${indicativeFee(fee, FEE_SAMPLE).toLocaleString()} sat`),
+          node("td", new Date(entry.expiresAt * 1000).toLocaleString())];
+        const action = node("td"); action.append(choose(entry.identity, "Choose"));
+        row.append(...cells, action);
+        body.append(row);
+      }
+      const table = node("table"), thead = node("thead");
+      thead.append(head); table.append(thead, body);
+      group.append(node("h3", PROFILE_TITLE[profile] ?? profile), table);
+      providersList.append(group);
     }
   };
   let directoryLoaded = false;
-  /** Explicit directory load; the estimate line and the Providers dialog share it. */
+  /** Loads on page load and network change; the estimate line and the Providers dialog share it. */
   const loadDirectory = (): void => {
     const name = network.value as NetworkName;
     let urls: readonly string[];
     try { urls = validateRelays(relay.value.trim(), name); } catch (error) { providersStatus.textContent = (error as Error).message; return; }
-    loadProviders.disabled = true;
-    providersStatus.textContent = "Checking signed announcements on your relays...";
+    reloadProviders.disabled = true;
+    providersStatus.textContent = "Loading providers...";
     void discoverDirectory(urls, NETWORKS[name]).then((directory) => {
+      if (network.value !== name) return;
       directoryEntries = directory.entries;
       directoryLoaded = true;
       renderDirectory();
-      providersStatus.textContent = directory.entries.length === 0 ? "No provider announced on these relays." :
-        `${directory.entries.length} announced provider${directory.entries.length === 1 ? "" : "s"}.` +
-        (directory.warnings.length ? ` Some relays were incomplete: ${directory.warnings.join("; ")}.` : "");
-    }, (error: Error) => { providersStatus.textContent = error.message; }).finally(() => { loadProviders.disabled = false; updateEstimate(); });
+      providersStatus.textContent = directory.entries.length === 0 ? "No providers found on your relays." :
+        `${directory.entries.length} provider${directory.entries.length === 1 ? "" : "s"} on ${name}.` +
+        (directory.warnings.length ? ` Some relays did not answer: ${directory.warnings.join("; ")}.` : "");
+    }, (error: Error) => { providersStatus.textContent = error.message; }).finally(() => { reloadProviders.disabled = false; updateEstimate(); });
   };
-  loadProviders.onclick = loadDirectory;
-  identity.oninput = () => { showProviderChoice(); updateEstimate(); };
+  reloadProviders.onclick = loadDirectory;
+  identity.oninput = () => { showProviderChoice(); updateEstimate(); renderDirectory(); };
   renderDirectory();
   showProviderChoice();
   const pair = node("div", "", "swap-pair");
@@ -254,14 +273,9 @@ function mount(root: HTMLElement): void {
   // Live estimate from announced fees, so Swap can proceed without a separate review when the signed quote is no worse.
   const estimate = node("p", "", "swap-estimate");
   estimate.setAttribute("role", "status");
-  const estimateLoad = node("button", "Show fees", "swap-estimate-load");
-  estimateLoad.type = "button";
-  estimateLoad.onclick = () => { estimateLoad.disabled = true; loadDirectory(); };
   let estimatedTotal: bigint | null = null;
   const updateEstimate = (): void => {
     estimatedTotal = null;
-    estimateLoad.hidden = directoryLoaded;
-    estimateLoad.disabled = false;
     const route = routeFor(fromAsset.value, toAsset.value);
     if (route.profile === null || route.unavailable) { estimate.textContent = ""; return; }
     if (route.profile === "ln-to-erc20/v1") {
@@ -273,14 +287,17 @@ function mount(root: HTMLElement): void {
       amount = route.profile === "ln-to-btc/v1"
         ? positive(receiveAmount, "Amount to receive")
         : BigInt(invoiceBinding(invoice.value.trim(), network.value as NetworkName).amount_msat) / 1000n;
-    } catch { estimate.textContent = directoryLoaded ? "Enter an amount to see the fee." : "Load announced fees to see the estimate before you swap."; return; }
+    } catch {
+      estimate.textContent = route.profile === "ln-to-btc/v1" ? "Enter the amount to receive to see the fee." : "Paste a Lightning invoice that includes an amount to see the fee.";
+      return;
+    }
     if (route.profile === "erc20-to-ln/v1") {
       // Token prices are only known from a signed quote; the announced fee policy is denominated in sat.
       estimate.textContent = `You pay the ${amount.toLocaleString()} sat invoice in ${route.from.symbol} at the provider's signed rate, plus its fee. ` +
         "The exact amount is shown before your wallet signs.";
       return;
     }
-    if (!directoryLoaded) { estimate.textContent = "Load announced fees to see the estimate before you swap."; return; }
+    if (!directoryLoaded) { estimate.textContent = "Loading provider fees..."; return; }
     const found = estimateFromDirectory(directoryEntries, route.profile, amount, identity.value.trim());
     if ("reason" in found) { estimate.textContent = found.reason; return; }
     estimatedTotal = amount + found.feeSat;
@@ -289,7 +306,7 @@ function mount(root: HTMLElement): void {
       : `You pay about ${estimatedTotal.toLocaleString()} sat over Lightning (${found.feeSat.toLocaleString()} sat provider fee via ${found.identity.slice(0, 12)}…) to receive ${amount.toLocaleString()} sat.`;
   };
   invoice.oninput = receiveAmount.oninput = updateEstimate;
-  form.append(invoiceBox, receiveBox, estimate, estimateLoad);
+  form.append(invoiceBox, receiveBox, estimate);
   const setup = node("details", "", "swap-wallet-setup");
   const prerequisites = node("p", "", "swap-prerequisites");
   setup.append(node("summary", "Recovery key & advanced overrides"), prerequisites);
@@ -306,24 +323,17 @@ function mount(root: HTMLElement): void {
   const age = field(overrides, "swap-age", "Recovery encryption recipient override (optional, age1...)", "",
     "Leave empty for the browser key. An override requires keeping its corresponding private age key yourself.");
   const privacy = node("details", "", "swap-privacy");
-  const chainDisclosure = node("p", "", "swap-chain-disclosure");
-  const relayDisclosure = node("p", "", "swap-relay-disclosure");
-  privacy.append(node("summary", "Privacy & terms"),
-    node("p", "Requesting a quote or checking recovery funding authorizes the configured connections for that attempt. " +
-      "Nothing connects on page load or when you change settings."),
-    chainDisclosure, relayDisclosure,
-    node("p", "For Bitcoin to Lightning, responding providers receive your Lightning invoice. For Lightning to Bitcoin, " +
-      "only the selected firm provider receives your payout script and payment hash. Encrypted messages do not hide transport metadata. " +
-      "Signatures authenticate offers, not provider reputation."),
-    node("p", "For stablecoin to Lightning, responding providers receive your invoice and wallet address; the configured EVM RPC operator " +
-      "sees your IP, wallet address, and the swap's lock. Your wallet extension signs the approval, lock, and any refund; this page never holds its key."),
-    node("p", "Connecting a Lightning node discloses its scoped credential to this tab and sends the signed hold invoice to that node. " +
-      "Credentials are not saved. Approving the exact route authorizes one payment attempt; signing and broadcasting a reverse claim reveals its preimage."),
-    node("p", "Recovery keys and files are not uploaded. The recovery root is stored unencrypted in this browser, " +
-      "where same-origin scripts can access it. Keep private backups and every encrypted per-swap recovery file. " +
-      "Clearing browser storage can lose access to refunds."),
-    node("p", "Unaudited experimental software, test funds only. New mainnet swaps remain blocked. " +
-      "A quote is not a funding commitment; review it and verify your key backup before continuing."));
+  const chainDisclosure = node("li", "", "swap-chain-disclosure");
+  const relayDisclosure = node("li", "", "swap-relay-disclosure");
+  const privacyList = node("ul");
+  privacyList.append(
+    node("li", "No account. Your keys and swap records stay in this browser and are never uploaded."),
+    relayDisclosure, chainDisclosure,
+    node("li", "A provider only sees what its swap needs: your invoice, or your payout address and payment hash, or your EVM wallet address."),
+    node("li", "Providers are not trusted. On-chain contracts and hold invoices enforce every swap, and you can always claim or refund."),
+    node("li", "The recovery key is stored unencrypted in this browser. Save its 12 words; private windows and Tor Browser forget it on restart."),
+    node("li", "Open source (MIT), provided as is, without warranty."));
+  privacy.append(node("summary", "Privacy & terms"), privacyList);
   const limits = node("details");
   limits.append(node("summary", "Fee & timeout limits"));
   limits.append(node("p", "These are caps, not charges: the swap stops before funding if the " +
@@ -354,12 +364,6 @@ function mount(root: HTMLElement): void {
   start.type = "submit";
   start.className = "primary";
   form.append(setup, notice, start);
-  const safety = node("details", "", "swap-safety");
-  safety.append(node("summary", "Before using this preview"),
-    node("p", "Unaudited and experimental. Use fake-money test networks only. Contract secrets live in this tab; " +
-      "keep it open until the swap finishes."),
-    node("p", "Save your recovery key and each encrypted swap backup before funding or paying. Browser recovery below can check funding, " +
-      "prepare a Bitcoin refund after its lock height, or recover a Lightning-to-Bitcoin claim. Missing evidence stays blocked; never pay again to recover an uncertain attempt.", "swap-refund-intro"));
   // Once a swap starts, the form gives way to this tracking view; its link addresses the swap record.
   const tracking = node("div", "", "swap-tracking");
   tracking.hidden = true;
@@ -386,7 +390,7 @@ function mount(root: HTMLElement): void {
   diagnostics.append(node("summary", "Technical activity"));
   const log = node("pre", "", "swap-log");
   diagnostics.append(log);
-  card.append(cardHead, form, tracking, progress, panel, privacy, safety, diagnostics);
+  card.append(cardHead, form, tracking, progress, panel, privacy, diagnostics);
   const footer = node("footer", "Provider-neutral · No account · Locally verified");
   root.replaceChildren(header, intro, card, footer, settings, providers);
   const setStatus = (text: string, step: number, state = "working"): void => {
@@ -437,7 +441,7 @@ function mount(root: HTMLElement): void {
     selectedEvmRpc: () => validateMempoolApi(evmRpc.value.trim(), network.value as NetworkName),
     selectedEvmSponsor: selectedSponsor,
   });
-  card.insertBefore(recovery.element, safety);
+  card.insertBefore(recovery.element, privacy);
   // Register failure handling immediately so blocked storage never becomes an unhandled rejection.
   void walletPromise.then(async (wallet) => {
     await walletBackupControls(walletActions, wallet, walletStatus);
@@ -447,13 +451,10 @@ function mount(root: HTMLElement): void {
       : "Using your existing browser recovery key.";
   }).catch((error: Error) => { walletStatus.textContent = error.message; });
   const updateDisclosure = (): void => {
-    chainDisclosure.textContent = `Chain API: ${chainApi.value.trim()}. This operator sees your IP when automatic height or recovery funding is checked, ` +
-      "and the selected public transaction ID and output for recovery checks, which can reveal their public addresses and amounts. " +
-      "It receives no keys, recovery files, or invoices. " +
-      "Its observations are trusted, not independent chain verification.";
-    chainDisclosure.textContent += ` Broadcast API: ${broadcastApi.value.trim()}. An explicit broadcast sends the signed transaction, revealing its public addresses and amounts, never recovery secrets. ` +
-      "Signed downloads can be broadcast by anyone who receives them. Approval is required before signing or exporting.";
-    relayDisclosure.textContent = `Nostr relays: ${relay.value.trim().split(/\s+/).join(", ")}. Operators see your IP and transport metadata.`;
+    const chain = chainApi.value.trim(), send = broadcastApi.value.trim();
+    chainDisclosure.textContent = `Mempool API ${chain} sees your IP and your swap's transactions` +
+      (send === chain ? "; claims and refunds are sent there too." : `; claims and refunds are sent to ${send}.`);
+    relayDisclosure.textContent = `Provider listings load from your Nostr relays when the page opens (${relay.value.trim().split(/\s+/).join(", ")}). Relays see your IP.`;
   };
   chainApi.oninput = () => { updateDisclosure(); recovery.clearFundingObservation(); };
   broadcastApi.oninput = () => { updateDisclosure(); recovery.clearFundingObservation(); };
@@ -462,10 +463,9 @@ function mount(root: HTMLElement): void {
   const updateNetwork = (): void => {
     const main = network.value === "mainnet";
     const route = routeFor(fromAsset.value, toAsset.value);
-    badge.textContent = main ? "Mainnet · preview" : `${network.value} · test funds`;
-    notice.textContent = main
-      ? "Mainnet swaps are blocked until release safety checks are complete. Choose a test network in Settings."
-      : "Experimental preview. Test funds only. Review wallet and recovery setup before continuing.";
+    badge.textContent = main ? "Mainnet" : `${network.value} · test funds`;
+    notice.textContent = main ? "Mainnet swaps are not enabled in this build. Choose a test network in Settings." : "";
+    notice.hidden = !main;
     heroTitle.textContent = route.title;
     heroTagline.textContent = route.tagline;
     pairNote.textContent = route.unavailable ?? "";
@@ -516,9 +516,11 @@ function mount(root: HTMLElement): void {
     updateNetwork();
     recovery.clearFundingObservation();
     directoryEntries = []; directoryLoaded = false; renderDirectory(); providersStatus.textContent = "";
+    loadDirectory();
   };
   network.onchange = applyNetwork;
   updateNetwork();
+  loadDirectory();
   // A swap link reopens its encrypted record locally: inspection decrypts and parses, nothing connects.
   const savedRecoveries = node("details", "", "swap-saved-recoveries");
   savedRecoveries.append(node("summary", "Saved funded swaps in this browser"));
@@ -700,7 +702,7 @@ function mount(root: HTMLElement): void {
         }
         const accept = node("button", "Swap with this quote", "swap-quote-accept");
         accept.type = "button";
-        review.append(offers, node("p", "By continuing you accept the selected provider's signed terms and this preview's test-funds-only conditions. " +
+        review.append(offers, node("p", "By continuing you accept the provider's signed terms. " +
           "Your wallet will ask you to approve and lock the tokens; it keeps the refund key.", "swap-quote-consent"), accept, done);
         panel.replaceChildren(review);
         setStatus("Quote ready. Review before continuing", 1);
@@ -795,7 +797,7 @@ function mount(root: HTMLElement): void {
             node("small", `Identity: ${quote.prepared.quote.providerIdentity}; transport: ${quote.relayUrl}`)); choices.append(label);
         }
         const accept = node("button", "Swap with this quote", "swap-quote-accept"); accept.type = "button";
-        review.append(choices, node("p", "By continuing you accept the selected provider's signed terms and test-funds-only conditions. " +
+        review.append(choices, node("p", "By continuing you accept the provider's signed terms. " +
           (sponsor ? `The tokens are sent to ${destination}; the gas sponsor pays the claim. ` : "Connect an EVM wallet to receive the tokens; ") +
           "Pay the invoice from any Lightning wallet. The firm price cannot exceed this estimate."), accept, edit);
         if (result.failures || directory.warnings.length || selection.providers.length > MAX_QUOTE_PROVIDERS) review.append(node("small", "Incomplete provider results; this is not a market-wide best-price guarantee."));
@@ -965,8 +967,7 @@ function mount(root: HTMLElement): void {
           return true;
         };
         continueSwap.onclick = () => { continueWith(); };
-        review.append(providers, chosen, node("p", "By continuing you accept the selected provider's signed terms and this preview's test-funds-only conditions. " +
-          "Your browser recovery key covers this swap; download it from Recovery key & advanced overrides whenever you like.", "swap-reverse-consent"),
+        review.append(providers, chosen, node("p", "By continuing you accept the provider's signed terms.", "swap-reverse-consent"),
           refusal, continueSwap, done);
         // One-step swap: a signed price no worse than the shown estimate, with the address already entered, continues directly.
         if (estimatedTotal !== null && quote.holdInvoiceSat <= estimatedTotal && receiveAddress.value.trim()) {
@@ -991,7 +992,7 @@ function mount(root: HTMLElement): void {
     if (busy) return;
     const name = network.value as NetworkName;
     if (name === "mainnet") {
-      report("refused: Mainnet swaps are blocked until release safety checks are complete.");
+      report("refused: Mainnet swaps are not enabled in this build.");
       return;
     }
     const route = routeFor(fromAsset.value, toAsset.value);
@@ -1149,8 +1150,7 @@ function mount(root: HTMLElement): void {
         }
         const accept = node("button", "Use this quote", "swap-quote-accept");
         accept.type = "button";
-        review.append(offers, node("p", "By continuing you accept the selected provider's signed terms and this preview's test-funds-only conditions. " +
-          "Your browser recovery key covers this swap; download it from Recovery key & advanced overrides whenever you like.", "swap-quote-consent"), accept, cancel);
+        review.append(offers, node("p", "By continuing you accept the provider's signed terms.", "swap-quote-consent"), accept, cancel);
         // One-step swap: a signed price no worse than the shown estimate is accepted without a separate review.
         const direct = estimatedTotal !== null && selected.prepared.quote.contractAmountSat <= estimatedTotal;
         if (direct) report(`signed price ${selected.prepared.quote.contractAmountSat} sat is within the shown estimate ${estimatedTotal} sat; continuing`);
@@ -1246,14 +1246,10 @@ function fundingPrompt(panel: HTMLElement, networkName: NetworkName, request: Fu
     qrSvg(uri, `QR code: ${uri}`, "swap-funding-qr"),
     node("pre", address, "swap-contract-address"),
     open, copy,
-    node("p", `Send it once, in one transaction, from a native segwit wallet (addresses starting with bc1), with a network fee of at most ` +
-      `${request.maxFundingFeeSat.toLocaleString()} sat. The swap continues by itself once the payment has one confirmation. ` +
-      "Keep this page open until then: closing it before the confirmation leaves the deposit unbound to the swap.", "swap-funding-rules"),
+    node("p", `Send it in one transaction from a native segwit wallet, with a network fee of at most ` +
+      `${request.maxFundingFeeSat.toLocaleString()} sat. Keep this page open until it confirms; the swap then continues by itself.`, "swap-funding-rules"),
     node("p", `If the provider does not pay, you can refund after block ${request.refundLockHeight}.`),
-    node("p", "Pay this address once, in this one transaction. A second payment to it is not a new swap: " +
-      "it is never paid over Lightning, the refund tools cover only the bound funding output, and once " +
-      "the provider knows the preimage it can claim any output at this address. It may be lost.",
-    "swap-second-deposit-warning"),
+    node("p", "Pay only once: a second payment to this address is not swapped and may be lost.", "swap-second-deposit-warning"),
     status,
   );
   const advanced = node("details", "", "swap-funding-advanced");
@@ -1280,9 +1276,8 @@ function fundingPrompt(panel: HTMLElement, networkName: NetworkName, request: Fu
             "none was bound to the swap. Each is refundable after the refund block; keep the terms backup.")));
           return;
         }
-        status.textContent = seen.status === "unconfirmed"
-          ? `Payment ${seen.txid} seen, waiting for its first confirmation.`
-          : "Waiting for your payment. This page checks your mempool API every 10 seconds.";
+        if (seen.status === "unconfirmed") status.replaceChildren("Payment ", txLink(chainApi(), seen.txid), " seen, waiting for its first confirmation.");
+        else status.textContent = "Waiting for your payment. This page checks your mempool API every 10 seconds.";
       } catch (error) {
         if (settled) return;
         if (error instanceof TransactionRefusedError) { finish(() => reject(new Error(`Your deposit could not be verified: ${error.message}`))); return; }

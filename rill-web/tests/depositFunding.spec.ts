@@ -1,4 +1,5 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "./fixtures/swapPage";
+import type { Page } from "@playwright/test";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import regtest from "../src/networks/regtest-rillswap-e2e-v1.json" with { type: "json" };
 import { testInvoice } from "../../rill-payments/tests/helpers";
@@ -64,6 +65,8 @@ test("the default funding step shows the address and binds the deposit once it c
   await expect(page.locator("#swap-funding-advanced")).not.toHaveAttribute("open");
   await expect(page.locator("#swap-psbt")).toBeHidden(); // the PSBT path stays behind the disclosure
   await expect(page.locator("#swap-deposit-status")).toHaveText(`Payment ${tx.txid} seen, waiting for its first confirmation.`);
+  // The txid links to the same mempool instance the page watches.
+  await expect(page.locator("#swap-deposit-status a")).toHaveAttribute("href", `http://127.0.0.1:8091/tx/${tx.txid}`);
   await expect(page.locator("#swap-error")).toHaveText("Fixture stopped after funding", { timeout: 20_000 });
   expect(await page.evaluate(() => window.uiFixture.fundingSource)).toEqual({ depositTxid: tx.txid });
   // Both the deposit and its parent were fetched by hash so the fee rests on verified bytes.

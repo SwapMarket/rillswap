@@ -1,26 +1,28 @@
-import { expect, test } from "@playwright/test";
+import { directorySettled, expect, MAINNET_RELAYS, test } from "./fixtures/swapPage";
 
-test("merchant invoice fragments prefill locally without connecting and are removed from the address bar", async ({ page }) => {
-  const requests: string[] = [], sockets: string[] = [];
-  page.on("request", (request) => requests.push(request.url())); page.on("websocket", (socket) => sockets.push(socket.url()));
+test("merchant invoice fragments prefill locally without connecting and are removed from the address bar", async ({ page, relaySockets: sockets }) => {
+  const requests: string[] = [];
+  page.on("request", (request) => requests.push(request.url()));
   await page.goto("http://127.0.0.1:18765/swap.html#invoice=ln-public-test-handoff");
   await expect(page.locator("#swap-invoice")).toHaveValue("ln-public-test-handoff");
-  expect(new URL(page.url()).hash).toBe(""); expect(sockets).toEqual([]);
+  await directorySettled(page);
+  expect(new URL(page.url()).hash).toBe(""); for (const url of sockets) expect(MAINNET_RELAYS).toContain(url);
   for (const request of requests) { expect(request).not.toContain("ln-public-test-handoff"); expect(new URL(request).host).toBe("127.0.0.1:18765"); }
   await page.goto("about:blank");
   await page.goto("http://127.0.0.1:18765/swap.html#invoice=" + "x".repeat(4097));
   await expect(page.locator("#swap-invoice")).toHaveValue(""); expect(new URL(page.url()).hash).toBe("");
 });
 
-test("address and amount fragments prefill a Lightning to Bitcoin swap locally and are removed from the address bar", async ({ page }) => {
-  const requests: string[] = [], sockets: string[] = [];
-  page.on("request", (request) => requests.push(request.url())); page.on("websocket", (socket) => sockets.push(socket.url()));
+test("address and amount fragments prefill a Lightning to Bitcoin swap locally and are removed from the address bar", async ({ page, relaySockets: sockets }) => {
+  const requests: string[] = [];
+  page.on("request", (request) => requests.push(request.url()));
   await page.goto("http://127.0.0.1:18765/swap.html#address=bcrt1qtest-handoff&amount=50000");
   await expect(page.locator("#swap-from")).toHaveValue("ln"); await expect(page.locator("#swap-to")).toHaveValue("btc");
   await expect(page.locator("#swap-receive-address")).toHaveValue("bcrt1qtest-handoff");
   await expect(page.locator("#swap-receive-amount")).toHaveValue("50000");
   await expect(page.locator("#swap-invoice")).toBeHidden();
-  expect(new URL(page.url()).hash).toBe(""); expect(sockets).toEqual([]);
+  await directorySettled(page);
+  expect(new URL(page.url()).hash).toBe(""); for (const url of sockets) expect(MAINNET_RELAYS).toContain(url);
   for (const request of requests) { expect(request).not.toContain("test-handoff"); expect(new URL(request).host).toBe("127.0.0.1:18765"); }
   await page.goto("about:blank");
   await page.goto("http://127.0.0.1:18765/swap.html#amount=12.5&address=" + "x".repeat(129));
@@ -33,14 +35,15 @@ import { scriptAddress } from "../src/swap/address";
 
 const SWAP = "http://127.0.0.1:18765/swap.html";
 
-test("direction flips between Bitcoin and Lightning, and stablecoins pair with Lightning only", async ({ page }) => {
-  const requests: string[] = [], sockets: string[] = [];
+test("direction flips between Bitcoin and Lightning, and stablecoins pair with Lightning only", async ({ page, relaySockets: sockets }) => {
+  const requests: string[] = [];
   page.on("request", (request) => requests.push(request.url()));
-  page.on("websocket", (socket) => sockets.push(socket.url()));
   await page.goto(SWAP);
   await page.locator("#swap-settings-toggle").click();
   await page.locator("#swap-network").selectOption("regtest");
   await page.locator("#swap-settings-close").click();
+  await directorySettled(page);
+  const directorySockets = sockets.length;
   await expect(page.locator("#swap-from")).toHaveValue("btc");
   await expect(page.locator("#swap-to")).toHaveValue("ln");
   await expect(page.locator("#swap-invoice")).toBeVisible();
@@ -101,7 +104,7 @@ test("direction flips between Bitcoin and Lightning, and stablecoins pair with L
   await expect(page.locator("#swap-pair-note")).not.toBeVisible();
   await page.locator("#swap-receive-amount").fill("20"); await page.locator("#swap-start").click();
   await expect(page.locator("#swap-status")).toContainText("Enter the 0x address that should receive USDC");
-  expect(sockets).toEqual([]);
+  expect(sockets).toHaveLength(directorySockets);
   await page.locator("#swap-to").selectOption("btc");
   await expect(page.locator('label[for="swap-receive-address"]')).toHaveText("Bitcoin address to receive");
 
@@ -109,14 +112,12 @@ test("direction flips between Bitcoin and Lightning, and stablecoins pair with L
   await page.locator("#swap-to").selectOption("ln");
   await expect(page.locator("#swap-start")).toBeEnabled();
   for (const url of requests) expect(new URL(url).host).toBe("127.0.0.1:18765");
-  expect(sockets).toEqual([]);
+  expect(sockets).toHaveLength(directorySockets);
 });
 
-test("the swap page defaults to blocked mainnet and connects to nothing before start", async ({ page }) => {
+test("the swap page defaults to blocked mainnet and only loads provider listings when it opens", async ({ page, relaySockets: sockets }) => {
   const requests: string[] = [];
   page.on("request", (request) => requests.push(request.url()));
-  const sockets: string[] = [];
-  page.on("websocket", (socket) => sockets.push(socket.url()));
   await page.goto(SWAP);
   await expect(page.getByRole("heading", { name: "Bitcoin in. Lightning out." })).toBeVisible();
   const options = await page.locator("#swap-network option").allTextContents();
@@ -138,12 +139,15 @@ test("the swap page defaults to blocked mainnet and connects to nothing before s
   await expect(page.locator("#swap-refund")).toHaveValue("");
   await expect(page.locator("#swap-tip")).toHaveValue("");
   await expect(page.locator("#swap-age")).toHaveValue("");
+  await expect(page.locator("#swap-safety")).toHaveCount(0);
   const csp = await page.locator("meta[http-equiv='Content-Security-Policy']").getAttribute("content");
-  expect(csp).toContain("connect-src 'self' wss: ws://127.0.0.1:* ws://localhost:* https://mempool.space https://blockstream.info");
-  expect(csp).not.toMatch(/\shttps:(?:\s|;)/);
+  // Any https mempool instance can be configured; plain http only for local endpoints.
+  expect(csp).toContain("connect-src 'self' wss: ws://127.0.0.1:* ws://localhost:* https: http://127.0.0.1:8091");
+  expect(csp).not.toMatch(/\shttp:(?:\s|;)/);
   expect(csp).toContain("script-src 'self' 'wasm-unsafe-eval';");
+  await directorySettled(page);
   for (const url of requests) expect(new URL(url).host).toBe("127.0.0.1:18765");
-  expect(sockets).toEqual([]);
+  expect([...new Set(sockets)].sort()).toEqual([...MAINNET_RELAYS].sort());
 });
 
 test("the CSP admits the same-origin MuSig2 WASM and the cooperation journal APIs", async ({ page }) => {
@@ -166,14 +170,15 @@ test("the CSP admits the same-origin MuSig2 WASM and the cooperation journal API
   expect(result).toBe("ok yes");
 });
 
-test("invalid input is refused before any relay connection", async ({ page }) => {
-  const sockets: string[] = [];
-  page.on("websocket", (socket) => sockets.push(socket.url()));
+test("invalid input is refused before any relay connection", async ({ page, relaySockets: sockets }) => {
+ 
   await page.goto(SWAP);
   await page.locator("#swap-settings-toggle").click();
   await page.locator("#swap-network").selectOption("signet");
   await page.locator("#swap-relay").fill("wss://relay.invalid");
   await page.locator("#swap-settings-close").click();
+  await directorySettled(page);
+  const directorySockets = sockets.length;
   await page.locator("#swap-wallet-setup summary").click();
   await page.locator("#swap-refund").fill("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4");
   await page.locator("#swap-tip").fill("1000");
@@ -182,21 +187,21 @@ test("invalid input is refused before any relay connection", async ({ page }) =>
   await page.locator("#swap-refund").fill("tb1qw508d6qejxtdg4y5r3zarvary0c5xdrpezj");
   await page.locator("#swap-start").click();
   await expect(page.locator("#swap-log")).toContainText("refused:");
-  expect(sockets).toEqual([]);
+  expect(sockets).toHaveLength(directorySockets);
 });
 
-test("mainnet programmatic submission is refused before opening a relay", async ({ page }) => {
-  const sockets: string[] = [];
-  page.on("websocket", (socket) => sockets.push(socket.url()));
+test("mainnet programmatic submission is refused before opening a relay", async ({ page, relaySockets: sockets }) => {
+ 
   await page.goto(SWAP);
+  await directorySettled(page);
+  const directorySockets = sockets.length;
   await page.locator("#swap-form").evaluate((form) => form.dispatchEvent(new Event("submit", { cancelable: true })));
-  await expect(page.locator("#swap-status")).toContainText("Mainnet swaps are blocked");
-  expect(sockets).toEqual([]);
+  await expect(page.locator("#swap-status")).toContainText("Mainnet swaps are not enabled");
+  expect(sockets).toHaveLength(directorySockets);
 });
 
-test("settings are keyboard accessible and switching networks resets local relays", async ({ page }) => {
-  const sockets: string[] = [];
-  page.on("websocket", (socket) => sockets.push(socket.url()));
+test("settings are keyboard accessible and switching networks resets local relays", async ({ page, relaySockets: sockets }) => {
+ 
   await page.goto(SWAP);
   await page.locator("#swap-settings-toggle").focus();
   await page.keyboard.press("Enter");
@@ -212,7 +217,8 @@ test("settings are keyboard accessible and switching networks resets local relay
   await expect(page.locator("#swap-start")).toBeEnabled();
   await page.locator("#swap-privacy summary").click();
   await expect(page.locator("#swap-chain-disclosure")).toContainText("https://mempool.space/signet/api");
-  expect(sockets).toEqual([]);
+  await directorySettled(page);
+  for (const url of sockets) expect([...MAINNET_RELAYS, "ws://127.0.0.1:7777/"]).toContain(url);
 });
 
 test("the minimal swap card fits a mobile viewport", async ({ page }) => {
@@ -237,6 +243,8 @@ test("automatic discovery uses every configured relay and restores inputs when n
   await page.locator("#swap-network").selectOption("regtest");
   await page.locator("#swap-relay").fill("ws://127.0.0.1:7777\nws://127.0.0.1:7778");
   await page.locator("#swap-settings-close").click();
+  await directorySettled(page);
+  sockets.length = 0; // the regtest provider directory loaded on network change
   const now = Math.floor(Date.now() / 1000);
   await page.locator("#swap-invoice").fill(testInvoice("browser_discovery", "1000000", now, now + 7200));
   await page.locator("#swap-wallet-setup summary").click();
@@ -249,12 +257,13 @@ test("automatic discovery uses every configured relay and restores inputs when n
 });
 
 test("canceling discovery closes its relay and a new search cannot show stale results", async ({ page }) => {
-  let requests = 0, closed = 0;
+  let requests = 0, closed = 0, armed = false;
   await page.routeWebSocket("ws://127.0.0.1:7777/", (socket) => {
-    socket.onClose(() => { closed++; });
+    socket.onClose(() => { if (armed) closed++; });
     socket.onMessage((message) => {
       const frame = JSON.parse(String(message));
       if (frame[0] === "REQ") {
+        if (!armed) { socket.send(JSON.stringify(["EOSE", frame[1]])); return; } // page-load provider directory
         requests++;
         if (requests > 1) socket.send(JSON.stringify(["EOSE", frame[1]]));
       }
@@ -264,6 +273,8 @@ test("canceling discovery closes its relay and a new search cannot show stale re
   await page.locator("#swap-settings-toggle").click();
   await page.locator("#swap-network").selectOption("regtest");
   await page.locator("#swap-settings-close").click();
+  await directorySettled(page);
+  armed = true;
   const now = Math.floor(Date.now() / 1000);
   await page.locator("#swap-invoice").fill(testInvoice("browser_cancel", "1000000", now, now + 7200));
   await page.locator("#swap-wallet-setup summary").click();
@@ -297,7 +308,7 @@ test("the swap page installs no service worker, so no release replaces it mid-sw
   for (const src of scripts) expect(new URL(src).host).toBe("127.0.0.1:18765");
 });
 
-test("the provider directory lists announced limits and fees on explicit load and chooses the pinned provider", async ({ page }) => {
+test("the provider directory loads by itself, groups providers by swap type and chooses the pinned provider", async ({ page }) => {
   const { schnorr } = await import("@noble/curves/secp256k1.js");
   const { sha256 } = await import("@noble/hashes/sha2.js");
   const { default: canonicalize } = await import("canonicalize");
@@ -326,20 +337,30 @@ test("the provider directory lists announced limits and fees on explicit load an
   await page.locator("#swap-network").selectOption("regtest");
   await page.locator("#swap-settings-close").click();
   await expect(page.locator("#swap-provider-choice")).toHaveText("Provider: automatic, lowest verified price");
+  // Switching to regtest loads its directory without opening the dialog.
+  await expect(page.locator("#swap-providers-status")).toHaveText("1 provider on regtest.");
+  expect(requests).toBe(1);
   await page.locator("#swap-providers-toggle").click();
   await expect(page.locator("#swap-providers")).toBeVisible();
-  await expect(page.locator("#swap-providers-intro")).toContainText("regtest");
-  expect(requests).toBe(0); // opening the directory connects nowhere
-  await expect(page.locator(".swap-provider")).toHaveCount(1); // automatic only
+  // One table per swap type the provider serves.
+  await expect(page.locator(".swap-provider-group")).toHaveCount(2);
+  await expect(page.locator(".swap-provider-group h3")).toHaveText(["Bitcoin → Lightning", "Lightning → Bitcoin"]);
+  const group = page.locator('.swap-provider-group[data-profile="ln-to-btc/v1"]');
+  await expect(group.locator("th")).toHaveText(["Provider", "Limits (sat)", "Fee", "On 100,000 sat", "Listed until", ""]);
+  const entry = group.locator("tbody tr");
+  await expect(entry).toHaveCount(1);
+  await expect(entry.locator("td").nth(0)).toHaveText(`${wrapper.advertisement.provider_identity_xonly_key.slice(0, 12)}…`);
+  await expect(entry.locator("td").nth(0)).toHaveAttribute("title", new RegExp(`^${wrapper.advertisement.provider_identity_xonly_key}`));
+  await expect(entry.locator("td").nth(1)).toHaveText("1,000 – 100,000");
+  await expect(entry.locator("td").nth(2)).toHaveText("50 sat + 0.10%");
+  await expect(entry.locator("td").nth(3)).toHaveText("150 sat");
+  await expect(page.locator("#swap-provider-automatic button")).toHaveText("Selected");
+  await entry.getByRole("button", { name: "Choose" }).click();
+  // The choice applies to every table the provider appears in.
+  await expect(page.locator(".swap-provider.selected")).toHaveCount(2);
+  await expect(page.locator("#swap-provider-automatic button")).toHaveText("Use automatic");
   await page.locator("#swap-providers-load").click();
-  await expect(page.locator("#swap-providers-status")).toHaveText("1 announced provider.");
-  expect(requests).toBe(1);
-  const entry = page.locator(".swap-provider").nth(1);
-  await expect(entry).toContainText("Directions: Bitcoin to Lightning, Lightning to Bitcoin");
-  await expect(entry).toContainText("Limits: 1,000 to 100,000 sat");
-  await expect(entry).toContainText("Fee: 50 sat + 0.10% (about 150 sat on a 100,000 sat swap)");
-  await expect(entry).toContainText(`Identity: ${wrapper.advertisement.provider_identity_xonly_key}`);
-  await entry.locator("input[type=radio]").check();
+  await expect.poll(() => requests).toBe(2);
   await page.locator("#swap-providers-close").click();
   await expect(page.locator("#swap-provider-choice")).toHaveText(`Provider: ${wrapper.advertisement.provider_identity_xonly_key.slice(0, 12)}… (chosen by you)`);
   await page.locator("#swap-settings-toggle").click();

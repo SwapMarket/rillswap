@@ -1,4 +1,5 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "./fixtures/swapPage";
+import type { Page } from "@playwright/test";
 import regtest from "../src/networks/regtest-rillswap-e2e-v1.json" with { type: "json" };
 import { scriptAddress } from "../src/swap/address";
 

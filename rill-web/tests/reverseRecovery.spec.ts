@@ -1,4 +1,5 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "./fixtures/swapPage";
+import type { Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import type * as Recovery from "../src/browserReverseRecovery";
 import type * as Keys from "../src/recoveryKeys";

@@ -8,11 +8,12 @@ export default defineConfig(({ mode }) => {
     define: { __SWAP_DEFAULTS__: JSON.stringify(defaults) },
     plugins: [{ name: "swap-chain-csp", transformIndexHtml(html, context) {
       if (!context.filename.endsWith("swap.html")) return html;
-      const origins = new Set(["https://mempool.space", "https://blockstream.info",
-        "http://127.0.0.1:8091", "http://localhost:8091", new URL(defaults.mempoolApi).origin, new URL(defaults.broadcastApi).origin]);
-      if (defaults.nodeApi) origins.add(new URL(defaults.nodeApi).origin);
-      if (defaults.evmRpc) origins.add(new URL(defaults.evmRpc).origin);
-      if (defaults.evmSponsor) origins.add(new URL(defaults.evmSponsor.url).origin);
+      // Any https origin may serve chain data, so users can point Settings at their own mempool
+      // instance. Plain http stays limited to the configured (local) endpoints.
+      const origins = new Set(["https:", "http://127.0.0.1:8091", "http://localhost:8091"]);
+      for (const url of [defaults.mempoolApi, defaults.broadcastApi, defaults.nodeApi, defaults.evmRpc, defaults.evmSponsor?.url]) {
+        if (url && new URL(url).protocol === "http:") origins.add(new URL(url).origin);
+      }
       return html.replace("__CHAIN_API_ORIGINS__", [...origins].join(" "));
     } }],
     build: {

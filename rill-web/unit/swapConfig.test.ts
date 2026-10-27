@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { NETWORK_NAMES, relaysForNetwork, resolveSwapDefaults, trustedEvmAsset, validateRelay, validateRelays } from "../src/swap/config";
+import { explorerTxUrl, NETWORK_NAMES, relaysForNetwork, resolveSwapDefaults, trustedEvmAsset, validateRelay, validateRelays } from "../src/swap/config";
 
 describe("explicit deployment defaults", () => {
   const asset = { family: "evm", chain_id: 31337, name: "anvil-dev", htlc_contract: `0x${"11".repeat(20)}`, htlc_version: 6,
@@ -57,17 +57,20 @@ describe("explicit deployment defaults", () => {
     expect(() => resolveSwapDefaults({ ...env, VITE_RILLSWAP_EVM_SPONSOR_POLICY: "my-policy" })).toThrow("UUID");
     expect(() => resolveSwapDefaults({ VITE_RILLSWAP_NETWORK: "regtest", VITE_RILLSWAP_EVM_SPONSOR_POLICY: policy })).toThrow("needs VITE_RILLSWAP_EVM_SPONSOR");
   });
-  test("public builds admit only an explicitly configured concrete node origin", async () => {
+  test("public builds admit any https origin but plain http only for configured endpoints", async () => {
     for (const configured of [false, true]) {
       const destination = `tmp/node-csp-${configured ? "configured" : "unset"}`;
       const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("VITE_RILLSWAP_")));
       const child = Bun.spawn([process.execPath, "node_modules/vite/bin/vite.js", "build", "--outDir", destination], {
-        env: { ...env, VITE_RILLSWAP_NETWORK: "signet", ...(configured ? { VITE_RILLSWAP_NODE_API: "https://node.example:10443/lnd" } : {}) }, stdout: "pipe", stderr: "pipe",
+        env: { ...env, VITE_RILLSWAP_NETWORK: "regtest", ...(configured ? { VITE_RILLSWAP_NODE_API: "http://127.0.0.1:10443/lnd" } : {}) }, stdout: "pipe", stderr: "pipe",
       });
       const [errors, status] = await Promise.all([new Response(child.stderr).text(), child.exited, new Response(child.stdout).text()]);
       expect(status).toBe(0); expect(errors).not.toContain("error");
       const html = await Bun.file(`${destination}/swap.html`).text(), csp = html.match(/content="([^"]*connect-src[^"]*)"/)![1]!;
-      expect(csp.includes("https://node.example:10443")).toBe(configured); expect(csp).not.toContain("https://*"); expect(csp).not.toContain("http://127.0.0.1:8093");
+      const sources = csp.split(";").find((part) => part.trim().startsWith("connect-src"))!.trim().split(/\s+/);
+      expect(sources).toContain("https:"); expect(sources).not.toContain("http:"); expect(sources).not.toContain("*");
+      expect(sources.includes("http://127.0.0.1:10443")).toBe(configured);
+      for (const source of sources.filter((item) => item.startsWith("http://"))) expect(source).toMatch(/^http:\/\/(127\.0\.0\.1|localhost):[0-9]+$/);
     }
   }, 30000);
   test("returning to the deployment network restores a custom relay port", () => {
@@ -103,5 +106,19 @@ describe("explicit deployment defaults", () => {
     const [errors, status] = await Promise.all([new Response(child.stderr).text(), child.exited]);
     expect(status).not.toBe(0);
     expect(errors).toContain("VITE_RILLSWAP_NETWORK must be");
+  });
+});
+
+describe("explorer links", () => {
+  const txid = "ab".repeat(32);
+  test("map an API base to the same instance's transaction page", () => {
+    expect(explorerTxUrl("https://mempool.space/api", txid)).toBe(`https://mempool.space/tx/${txid}`);
+    expect(explorerTxUrl("https://mempool.space/testnet4/api/", txid)).toBe(`https://mempool.space/testnet4/tx/${txid}`);
+    expect(explorerTxUrl("https://mempool.example/signet/api", txid)).toBe(`https://mempool.example/signet/tx/${txid}`);
+    expect(explorerTxUrl("http://127.0.0.1:8091/api", txid)).toBe(`http://127.0.0.1:8091/tx/${txid}`);
+    expect(explorerTxUrl("https://esplora.example", txid)).toBe(`https://esplora.example/tx/${txid}`);
+  });
+  test("refuse anything but a transaction ID", () => {
+    expect(() => explorerTxUrl("https://mempool.space/api", "../x")).toThrow("Invalid transaction ID");
   });
 });
