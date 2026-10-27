@@ -966,6 +966,52 @@ def test_native_handshake_over_nip59_session_mailboxes(harness: Harness) -> None
             store.open_mailbox_frame(frame[:-5] + b"0000}", transport=crypto)
 
 
+def _forgeries(frame: bytes) -> list[bytes]:
+    """The same gift wrap with a bad signature, and with a claimed ID it does not hash to."""
+    event = json.loads(frame)
+    flipped = ("1" if event["sig"][0] == "0" else "0") + event["sig"][1:]
+    return [
+        json.dumps({**event, "sig": flipped}).encode(),
+        json.dumps({**event, "id": "00" * 32}).encode(),
+    ]
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
+)
+def test_forged_mailbox_frame_is_refused_before_custody_decryption(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rill_crypto import Context  # noqa: PLC0415
+
+    from rill_provider._nip59_send import _wrap_envelope  # noqa: PLC0415
+
+    harness.provision()
+    with (
+        Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
+        harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store,
+    ):
+        reserved = store.reserve(harness.init)
+        store.commit_accept(harness.accept)
+        frame = _wrap_envelope(
+            harness.confirm,
+            sender_session_secret=(2).to_bytes(32, "big"),
+            recipient_xonly_key=reserved.provider_session_key,
+            crypto=crypto,
+        )
+        decrypted: list[object] = []
+        decrypt = pyrage.decrypt
+        monkeypatch.setattr(pyrage, "decrypt", lambda *a: decrypted.append(a) or decrypt(*a))
+        for forged in _forgeries(frame):
+            with pytest.raises(LiveSessionStoreError, match="mailbox frame refused"):
+                store.open_mailbox_frame(forged, transport=crypto)
+        assert decrypted == []  # the session secret was never unsealed
+        assert store.open_mailbox_frame(frame, transport=crypto) == harness.confirm
+        assert decrypted  # the spy observes the authentic path
+
+
 def test_create_accept_refuses_without_reservation_or_foreign_identity(harness: Harness) -> None:
     class Foreign:
         xonly_public_key = "aa" * 32

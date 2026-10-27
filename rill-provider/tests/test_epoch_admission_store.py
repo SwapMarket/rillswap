@@ -10,6 +10,7 @@ import sqlite3
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+import pyrage  # type: ignore[import-untyped]
 import pytest
 from rill_core.wire.canonical import canonicalize
 from rill_core.wire.hashes import (
@@ -19,7 +20,7 @@ from rill_core.wire.hashes import (
     unsigned_envelope_hash,
 )
 from rill_core.wire.messages import Envelope
-from test_live_session_store import POLICY, Harness, PurePublicKeys
+from test_live_session_store import POLICY, Harness, PurePublicKeys, _forgeries
 from test_payment_dispatch_store import _as_v6, _hash, _insert_funded_swap
 
 from rill_provider import live_session_store as live
@@ -382,3 +383,39 @@ def test_native_epoch_ingress_accept_confirm_and_retirement(
         assert store.expire_idle(now=1200, idle_timeout=100) == 1
         with pytest.raises(live.LiveSessionStoreError, match="retired epoch"):
             store.open_epoch_frame(frame, now=1000, transport=crypto)
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
+)
+def test_forged_epoch_frame_is_refused_before_custody_decryption(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rill_crypto import Context  # noqa: PLC0415
+
+    from rill_provider._nip59_send import _wrap_envelope  # noqa: PLC0415
+
+    harness.provision()
+    with (
+        Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
+        harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store,
+    ):
+        epoch = _epoch(store)
+        init = _init(harness, epoch)
+        frame = _wrap_envelope(
+            init.document,
+            sender_session_secret=(2).to_bytes(32, "big"),
+            recipient_xonly_key=epoch,
+            crypto=crypto,
+        )
+        decrypted: list[object] = []
+        decrypt = pyrage.decrypt
+        monkeypatch.setattr(pyrage, "decrypt", lambda *a: decrypted.append(a) or decrypt(*a))
+        for forged in _forgeries(frame):
+            with pytest.raises(live.LiveSessionStoreError, match="epoch frame refused"):
+                store.open_epoch_frame(forged, now=1000, transport=crypto)
+        assert decrypted == []  # the epoch secret was never unsealed
+        assert store.open_epoch_frame(frame, now=1000, transport=crypto) == init
+        assert decrypted  # the spy observes the authentic path

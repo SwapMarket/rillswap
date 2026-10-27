@@ -96,8 +96,9 @@ from rill_core.wire.quotes import TermsOfferPayload
 from rill_core.wire.settlement_messages import FundingBindingPayload, TermsAcceptPayload
 from rill_core.wire.types import NetworkIdentity
 
+from rill_provider import _nip01_event as nip01
 from rill_provider import _transport_pow as transport_pow
-from rill_provider._nip59_receive import _decode_gift_wrap_candidate
+from rill_provider._nip59_receive import OUTER_KIND, _decode_gift_wrap_candidate
 from rill_provider._nip59_send import _wrap_envelope
 from rill_provider.core_tx_bytes import (
     MAX_ESTIMATE_TARGET,
@@ -2512,7 +2513,7 @@ class LiveSessionStore:
         admission method (for example ``admit_confirm``).
         """
         try:
-            recipient = _routing_recipient(outer_event)
+            recipient = _routing_recipient(outer_event, transport)
             with self._write() as connection:
                 row = connection.execute(
                     "SELECT session_id, client_key FROM sessions WHERE provider_session_key=?",
@@ -2901,7 +2902,7 @@ class LiveSessionStore:
         which applies every init rule. Refusals are uniform and redacted.
         """
         try:
-            recipient = _routing_recipient(outer_event)
+            recipient = _routing_recipient(outer_event, transport)
             with self._write() as connection:
                 row = connection.execute(
                     "SELECT secret_age, created_at FROM epochs "
@@ -8830,17 +8831,18 @@ def _new_epoch_scalar() -> bytes:
     return secrets.token_bytes(32)
 
 
-def _routing_recipient(outer_event: bytes) -> str:
-    """Return the single ``p`` tag as a routing hint; the decoder re-verifies it."""
+def _routing_recipient(outer_event: bytes, transport: Context) -> str:
+    """Return the single ``p`` tag of an authenticated gift wrap.
+
+    The outer ID and signature are checked here, before any store lock or
+    custody decryption, so a forged or corrupted event costs one signature
+    check. The decoder still re-verifies everything it relies on.
+    """
     if type(outer_event) is not bytes or len(outer_event) > MAX_OUTER_EVENT_BYTES:
         raise LiveSessionStoreError("frame size unsupported")
-    tags: list[Any] = json.loads(outer_event)["tags"]
-    recipients = [
-        tag[1]
-        for tag in tags
-        if type(tag) is list and len(tag) >= 2 and tag[0] == "p"  # noqa: PLR2004
-    ]
-    if len(recipients) != 1 or type(recipients[0]) is not str:
+    outer = nip01._verify_signed_event(outer_event, verifier=transport)  # noqa: SLF001
+    recipients = [tag[1] for tag in outer.tags if len(tag) >= 2 and tag[0] == "p"]  # noqa: PLR2004
+    if outer.kind != OUTER_KIND or len(recipients) != 1:
         raise LiveSessionStoreError("frame recipient unsupported")
     return recipients[0]
 
