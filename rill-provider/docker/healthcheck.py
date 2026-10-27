@@ -4,10 +4,10 @@
 ``rill-provider-healthcheck provider --config PATH`` checks every backend the
 provider config names through the same loopback ports the provider uses: an
 authenticated Core ``getblockchaininfo`` on the configured chain, a verified
-TLS handshake with LND, the relay proxy listener and, for ERC20 profiles, the
-EVM RPC chain id. ``rill-provider-healthcheck tor`` requires a fully
-bootstrapped Tor client. Failures print one line without credentials and
-exit 1.
+TLS handshake with LND, an HTTP reply from the relay proxy and, for ERC20
+profiles, the EVM RPC chain id. ``rill-provider-healthcheck tor`` requires a
+fully bootstrapped Tor client. Failures print one line without credentials
+and exit 1.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ TIMEOUT_SECONDS = 5
 TOR_CONTROL = ("127.0.0.1", 9051)
 TOR_COOKIE = Path("/var/lib/rill-tor/control_auth_cookie")
 CORE_CHAIN = {"mainnet": "main"}  # Core's chain name when it differs from RillSwap's
+RELAY_PROXY_PROBE = b"CONNECT 127.0.0.1:1 HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n"
 
 
 class UnhealthyError(Exception):
@@ -78,14 +79,25 @@ def check_lnd(lnd: dict[str, Any], base: Path) -> None:
         raise UnhealthyError(f"LND TLS handshake failed: {type(error).__name__}") from None
 
 
-def check_listener(url: str) -> None:
-    """Require a TCP listener at the URL's host and port."""
+def check_relay_proxy(url: str) -> None:
+    """Require an HTTP reply from the relay proxy, not just a local listener.
+
+    The loopback port is a forwarder that accepts even when its target is
+    wrong or down, so the probe asks the far end to tunnel to a private
+    address. Tor refuses that locally ("403 Forbidden (private address)")
+    without building a circuit, so the check needs no outside network.
+    """
     parts = urlsplit(url)
     try:
-        socket.create_connection((parts.hostname, parts.port), TIMEOUT_SECONDS).close()
+        with socket.create_connection((parts.hostname, parts.port), TIMEOUT_SECONDS) as proxy:
+            proxy.settimeout(TIMEOUT_SECONDS)
+            proxy.sendall(RELAY_PROXY_PROBE)
+            status = proxy.recv(64)
     except OSError as error:
-        detail = f"relay proxy {parts.netloc} refused: {type(error).__name__}"
+        detail = f"relay proxy {parts.netloc} failed: {type(error).__name__}"
         raise UnhealthyError(detail) from None
+    if not status.startswith(b"HTTP/1."):
+        raise UnhealthyError(f"relay proxy {parts.netloc} gave no HTTP reply")
 
 
 def check_evm(evm: dict[str, Any]) -> None:
@@ -106,7 +118,7 @@ def check_provider(config_path: Path) -> None:
     if config.get("lnd"):
         check_lnd(config["lnd"], base)
     if config.get("relay_proxy"):
-        check_listener(config["relay_proxy"])
+        check_relay_proxy(config["relay_proxy"])
     if config.get("evm"):
         check_evm(config["evm"])
 
