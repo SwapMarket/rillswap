@@ -3,8 +3,7 @@
 Normative protocol specifications, schemas, test vectors and network
 definitions for RillSwap, plus the design document and release test matrix.
 
-**Status:** experimental and unaudited. No specification here is approved for
-funded mainnet use.
+**Status:** no specification here is approved for funded mainnet use yet.
 
 | Path | Contents |
 |---|---|

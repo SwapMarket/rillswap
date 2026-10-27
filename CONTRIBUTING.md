@@ -9,8 +9,10 @@ normative behavior. Report vulnerabilities privately as described in
 
 - Contributions must be original or identify their source and a compatible
   license. Vendored or generated material records its origin.
-- Never rewrite a published protocol version in place; protocol changes go
-  through `rill-docs/specs/` with updated schemas and vectors.
+- Protocol changes go through `rill-docs/specs/` with updated schemas and
+  vectors. Nothing has been released yet: change the specifications in place
+  and keep the CLI, provider and web app consistent with them, without
+  version negotiation or compatibility shims for unreleased behavior.
 - Add focused tests for every change. Money-path changes also need coverage
   against real nodes in the regtest environment (`dev/devctl up`, see
   [DEVELOPMENT.md](DEVELOPMENT.md)).
@@ -42,8 +44,10 @@ command-line arguments. Preserve machine-readable output and exit codes.
 
 **rill-web.** The TypeScript client is an independent implementation, not
 generated Python logic. Keep runtime validation bounded, render provider text
-as plain text, preserve explicit chain-trust and recovery behavior, and bundle
-all runtime assets locally. `src/vendor/rill-crypto` holds the exact output of
+as plain text and bundle all runtime assets locally. Keep the swap flow
+simple: one step at a time, automatic wherever the protocol is safe
+(provider listings, confirmations, the cooperative claim), short on-page
+text, and details under Advanced. `src/vendor/rill-crypto` holds the exact output of
 `rill-crypto/scripts/test-wasm.sh`: after changing `rill-crypto`, rerun that
 script, copy `tmp/wasm/rill_crypto_wasm.{mjs,wasm}` there and regenerate
 `SHA256SUMS`. CI rebuilds the WASM and requires byte equality.

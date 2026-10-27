@@ -5,7 +5,7 @@ or from Lightning. It is a static site with no backend of its own: it
 discovers providers over Nostr, validates contracts, transactions and
 signatures locally, and keeps encrypted recovery records in the browser.
 
-**Status:** experimental and unaudited. New mainnet funding is disabled.
+**Status:** new mainnet swaps are disabled in this build.
 
 `swap.html` is the swap app and `index.html` a disconnected diagnostic
 preview. In the GitHub Pages build, the swap app is the landing page and the
@@ -39,9 +39,9 @@ For standalone development, from `rill-web/`:
 VITE_RILLSWAP_NETWORK=signet bunx vite --host 127.0.0.1
 ```
 
-Open `/swap.html`, pick a test network in Settings, review the connection
-and fee settings, and back up the recovery wallet before accepting a quote.
-Loading the page or changing settings does not contact a relay.
+Open `/swap.html` and pick a test network in Settings. The page loads
+provider listings from the configured relays when it opens and when you
+switch networks; nothing else connects until you start a swap.
 
 ## Configuration
 
@@ -62,11 +62,13 @@ Deployment defaults are set and validated at build time.
 | `VITE_RILLSWAP_EVM_SPONSOR_POLICY` | Optional sponsor gas policy UUID |
 
 Set the sponsor endpoint, EntryPoint and delegate together, or none of them.
-A build without configuration opens a blocked mainnet preview. The older
+A build without configuration opens mainnet with new swaps disabled. The older
 single-relay `VITE_RILLSWAP_RELAY` still works but cannot be combined with
 `VITE_RILLSWAP_RELAYS`. Plaintext relays are only allowed on loopback for
-regtest. Custom endpoints must be set at build time so the Content Security
-Policy allows their origins; check their CORS support before deploying.
+regtest. The Content Security Policy admits any `https:` origin, so users can
+point Settings at their own mempool or Esplora instance (transaction links
+use the same instance). Plain `http:` is admitted only for the loopback
+endpoints configured at build time. Custom endpoints must allow CORS.
 
 New stablecoin swaps require independently configured asset pins. Each entry
 includes the chain, HTLC and token addresses, decimals, block interval and
@@ -197,7 +199,7 @@ site on every push to `main` or when run manually; pull requests never
 deploy. Set the repository's Pages source to **GitHub Actions**.
 `bun run build:pages` produces `tmp/pages/` with:
 
-- `/`: the mainnet preview, with new funding blocked
+- `/`: the mainnet app, with new swaps disabled
 - `/signet/`: the signet swap app
 - `diagnostic.html` in each: the disconnected preview
 

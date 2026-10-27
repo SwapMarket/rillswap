@@ -10,11 +10,10 @@ client verifies every contract, transaction and signature locally, and every
 swap can be recovered with your own recovery file, without the provider, the
 website or any RillSwap service.
 
-> [!WARNING]
-> RillSwap is experimental and unaudited. Use it only on regtest, signet or
-> testnet4 with funds you can afford to lose. Mainnet funding is disabled in
-> code until the [release gates](rill-docs/ARCHITECTURE.md#23-milestones-and-release-gates)
-> are met.
+> [!NOTE]
+> Mainnet funding is disabled in code until the
+> [release gates](rill-docs/ARCHITECTURE.md#23-milestones-and-release-gates)
+> are met. Use regtest, signet or testnet4.
 
 ## Features
 
@@ -108,8 +107,8 @@ commands.
 | Signet, testnet4 | Experimental |
 | Mainnet | Disabled: new swaps are refused in code |
 
-Before any mainnet release RillSwap still needs independent security review,
-signet trials, recovery drills and reproducible release artifacts. The full
+Before any mainnet release RillSwap still needs signet trials, recovery
+drills and reproducible release artifacts. The full
 list is in the [release gates](rill-docs/ARCHITECTURE.md#23-milestones-and-release-gates)
 and the [acceptance test matrix](rill-docs/compatibility/TEST-MATRIX.md).
 
