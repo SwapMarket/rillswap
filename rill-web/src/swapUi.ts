@@ -5,6 +5,7 @@
  * user's own downloads hold the age-encrypted recovery files.
  */
 import "./swap.css";
+import { hexToBytes } from "@noble/hashes/utils.js";
 import mainnet from "./networks/mainnet.json";
 import regtest from "./networks/regtest-rillswap-e2e-v1.json";
 import signet from "./networks/signet.json";
@@ -18,7 +19,7 @@ import { TransactionRefusedError } from "./swap/transaction";
 import { explorerTxUrl, mempoolApiForNetwork, relaysForNetwork, trustedEvmAsset, validateEvmSponsor, validateMempoolApi, validateRelays, type EvmSponsorDefaults, type NetworkName } from "./swap/config";
 import { GasSponsor, newStagingSecret, stagingAddress } from "./swap/gasSponsor";
 import { readChainTip } from "./swap/chainTip";
-import { BrowserRecoveryWallet } from "./browserRecoveryWallet";
+import { BrowserRecoveryWallet, parseWalletBackup } from "./browserRecoveryWallet";
 import { type DirectoryEntry, DIRECTORY_PROFILES, discoverDirectory, discoverMarketplace, eligibleProviders, indicativeFee, ineligibilityReason, quoteProviders, quoteReverseProviders,
   estimateFromDirectory, providerLimits, type LocatedQuote, MAX_QUOTE_PROVIDERS, quoteErc20Providers, quoteLnErc20Providers, selectEvmAsset } from "./swap/marketplace";
 import type { Erc20SwapRequest, PreparedErc20Swap } from "./swap/erc20Swap";
@@ -32,7 +33,10 @@ import { quoteSelectionLabel, stoppedSwapAdvice } from "./swapUiStatus";
 import { ASSETS, type AssetId, routeFor, STABLECOIN_SYMBOL } from "./swapPairs";
 import { recoveryPanel } from "./recoveryUi";
 import { parseSwapLink, swapLinkFragment } from "./swapLink";
-import { mountReverseExecution } from "./reverseExecutionUi";
+import { mountReverseExecution, mountResumedReverseExecution } from "./reverseExecutionUi";
+import { BrowserReverseJournal } from "./browserReverseJournal";
+import { resumeBrowserReverseExecution } from "./browserReverseRecovery";
+import { decryptRecoveryContainer } from "./recoveryKeys";
 
 const NETWORKS = { mainnet, signet, testnet4, regtest } as const;
 
@@ -307,13 +311,13 @@ function mount(root: HTMLElement): void {
   };
   invoice.oninput = receiveAmount.oninput = updateEstimate;
   form.append(invoiceBox, receiveBox, estimate);
+  const keyRecommendation = node("p", "Save your 12-word recovery key; it is stored in this browser, but Tor Browser and private windows may erase it on restart.", "swap-key-recommendation");
   const setup = node("details", "", "swap-wallet-setup");
   const prerequisites = node("p", "", "swap-prerequisites");
   setup.append(node("summary", "Recovery key & advanced overrides"), prerequisites);
   const walletStatus = node("p", "Preparing your browser recovery key...", "swap-wallet-status");
   const walletActions = node("div", "", "swap-wallet-actions");
-  setup.append(walletStatus, walletActions, node("small", "Stored unencrypted in this browser. Same-origin scripts can read it. " +
-    "Keep both the key backup and each encrypted swap recovery file. Clearing storage can lose access to refunds."));
+  setup.append(walletStatus, walletActions);
   // Overrides apply to Bitcoin to Lightning only; the recovery key serves both directions.
   const overrides = node("div", "", "swap-forward-overrides");
   setup.append(overrides);
@@ -363,7 +367,7 @@ function mount(root: HTMLElement): void {
   const start = node("button", "Swap", "swap-start");
   start.type = "submit";
   start.className = "primary";
-  form.append(setup, notice, start);
+  form.append(keyRecommendation, setup, notice, start);
   // Once a swap starts, the form gives way to this tracking view; its link addresses the swap record.
   const tracking = node("div", "", "swap-tracking");
   tracking.hidden = true;
@@ -375,8 +379,7 @@ function mount(root: HTMLElement): void {
   const linkAnchor = node("a", "Swap link", "swap-link-anchor");
   const copyLink = node("button", "Copy swap link", "swap-link-copy");
   copyLink.type = "button";
-  linkBox.append(node("p", "This page's address now holds your encrypted swap record. Bookmark it or copy it: opening it later " +
-    "shows the swap and its recovery actions. Only your recovery key can read it; the link is never sent anywhere."), linkAnchor, copyLink);
+  linkBox.append(node("p", "This link holds your encrypted swap record; keep it with your recovery key."), linkAnchor, copyLink);
   tracking.append(trackingTitle, another, linkBox);
   const panel = node("div", "", "swap-panel");
   panel.setAttribute("aria-live", "polite");
@@ -447,7 +450,7 @@ function mount(root: HTMLElement): void {
     await walletBackupControls(walletActions, wallet, walletStatus);
     offerDownload(walletActions, (await wallet.recoveryKey()).file, "rillswap-recovery.age-key");
     walletStatus.textContent = wallet.newlyCreated
-      ? "New browser recovery key created. It does not restore earlier swaps. Download and check your backup before funding."
+      ? "New browser recovery key created. Saving it is recommended, not required to swap."
       : "Using your existing browser recovery key.";
   }).catch((error: Error) => { walletStatus.textContent = error.message; });
   const updateDisclosure = (): void => {
@@ -523,14 +526,13 @@ function mount(root: HTMLElement): void {
   loadDirectory();
   // A swap link reopens its encrypted record locally: inspection decrypts and parses, nothing connects.
   const savedRecoveries = node("details", "", "swap-saved-recoveries");
-  savedRecoveries.append(node("summary", "Saved funded swaps in this browser"));
+  savedRecoveries.append(node("summary", "Your swaps"));
   const savedList = node("div", "Loading local recovery checkpoints...", "swap-saved-recoveries-list");
   savedRecoveries.append(savedList); card.insertBefore(savedRecoveries, recovery.element);
   const refreshSavedRecoveries = async (): Promise<void> => {
     try {
       const wallet = await walletPromise, entries = await wallet.listFundedRecoveries();
       savedList.replaceChildren();
-      if (!entries.length) savedList.append(node("p", "No funded checkpoints saved here. This does not prove earlier swaps were unfunded; keep your existing backups."));
       for (const entry of entries) {
         const row = node("div"); savedList.append(row);
         if ("error" in entry) { row.append(node("p", entry.error)); continue; }
@@ -558,6 +560,43 @@ function mount(root: HTMLElement): void {
           row.append(button);
         }
       }
+      const journal = await BrowserReverseJournal.open();
+      try {
+        const reverse = await journal.list();
+        if (!entries.length && !reverse.length) savedList.append(node("p", "No swaps saved in this browser."));
+        for (const record of reverse) {
+          const name = (record.context.networkIdentity as { name: NetworkName }).name;
+          const row = node("div"); row.dataset.reverseSession = record.context.sessionId;
+          row.append(node("p", `${name}: Lightning to Bitcoin · ${record.context.request.nominal_payout_sat} sat · ${record.stage}`));
+          const open = node("button", "Resume"); open.type = "button";
+          row.append(open); savedList.append(row);
+          open.onclick = () => {
+            if (busy) return;
+            busy = true; open.disabled = settingsButton.disabled = providersButton.disabled = true;
+            void (async () => {
+              if (network.value !== name) { network.value = name; applyNetwork(); }
+              const api = validateMempoolApi(chainApi.value.trim(), name), broadcast = validateMempoolApi(broadcastApi.value.trim(), name);
+              const relaySelection = relay.value.trim(), urls = validateRelays(relaySelection, name);
+              const current = (): void => {
+                if (network.value !== name || chainApi.value.trim() !== api || broadcastApi.value.trim() !== broadcast || relay.value.trim() !== relaySelection) throw new Error("Swap settings changed");
+              };
+              const key = await wallet.recoveryKey(); key.file.fill(0); current();
+              const plaintext = await decryptRecoveryContainer(hexToBytes(record.snapshots.at(-1)!.ciphertextHex), key.identity);
+              let execution;
+              try { current(); execution = await resumeBrowserReverseExecution(plaintext, key.identity, { ...NETWORKS[name], name }, urls, current); }
+              finally { plaintext.fill(0); }
+              current(); showTracking("Lightning to Bitcoin swap");
+              steps.replaceChildren(...["Review", "Pay", "Locking", "Claim", "Done"].map((label) => node("li", label)));
+              mountResumedReverseExecution(panel, execution, { network: { ...NETWORKS[name], name }, chainApi: api, broadcastApi: broadcast,
+                assertCurrent: current, status: (message, step) => setStatus(message, step),
+                download: offerDownload, saved: (file) => { publishLink(file, name); void refreshSavedRecoveries(); } });
+            })().catch(() => {
+              row.append(node("p", "Could not resume this saved swap. Keep any backups; no payment was retried."));
+              busy = false; open.disabled = settingsButton.disabled = providersButton.disabled = false;
+            });
+          };
+        }
+      } finally { journal.close(); }
     } catch (error) { savedList.textContent = `Could not read saved recoveries: ${(error as Error).message}`; }
   };
   void refreshSavedRecoveries();
@@ -958,11 +997,12 @@ function mount(root: HTMLElement): void {
             for (const quote of arrivals) if (quote !== selected) quote.dispose();
             arrivals = [selected];
             showTracking("Lightning to Bitcoin swap");
+            steps.replaceChildren(...["Review", "Pay", "Locking", "Claim", "Done"].map((label) => node("li", label)));
             await mountReverseExecution(panel, { prepared: selected.prepared, network: { ...NETWORKS[name], name }, destinationScript,
               ageRecipient: info.recipient, chainApi: chainApi.value.trim(), broadcastApi: broadcastApi.value.trim(), assertCurrent,
               nodeApi: __SWAP_DEFAULTS__.network === name ? __SWAP_DEFAULTS__.nodeApi ?? "" : name === "regtest" ? "http://127.0.0.1:8093" : "",
               status: (message, step) => setStatus(message, step),
-              download: (root, file, fileName) => { offerDownload(root, file, fileName); if (fileName.endsWith(".age")) publishLink(file, name); } });
+              download: offerDownload, saved: (file) => { publishLink(file, name); void refreshSavedRecoveries(); } });
           })().catch(() => { report("stopped: Reverse execution could not continue. Keep backups; no uncertain payment will be retried."); });
           return true;
         };
@@ -1202,6 +1242,21 @@ async function walletBackupControls(
 ): Promise<void> {
   const message = status ?? node("p", "Download your recovery key, then choose the saved file to check it.");
   if (!status) panel.append(message);
+  const show = node("button", "Show 12 words", "swap-wallet-show-words"); show.type = "button";
+  const words = node("pre", "", "swap-wallet-words"); words.hidden = true;
+  panel.append(show, words);
+  show.onclick = () => {
+    if (!words.hidden) { words.textContent = ""; words.hidden = true; show.textContent = "Show 12 words"; return; }
+    show.disabled = true;
+    void (async () => {
+      const backup = await wallet.exportBackup();
+      try {
+        words.textContent = parseWalletBackup(new TextDecoder().decode(backup)).mnemonic;
+        words.hidden = false; show.textContent = "Hide words";
+      } finally { backup.fill(0); }
+    })().catch(() => { message.textContent = "Could not read the recovery key. Keep any existing backup."; })
+      .finally(() => { show.disabled = false; });
+  };
   offerDownload(panel, await wallet.exportBackup(), "rillswap-recovery-key.json");
   const label = node("label", "Check an existing recovery-key backup");
   const upload = node("input");
@@ -1301,8 +1356,14 @@ async function run(
 ): Promise<boolean> {
   let fundsMayBeCommitted = false;
   // Backups stay visible while the stage prompts below them change.
-  const backups = node("section", "", "swap-backups");
-  backups.append(node("p", "Encrypted recovery files for this swap. The funded file is what lets you refund; keep it with your recovery key.", "swap-backups-intro"));
+  const backups = node("details", "", "swap-backups"), latestBackup = node("div");
+  backups.append(node("summary", "Advanced"), latestBackup);
+  const updateBackup = (file: Uint8Array, kind: string): void => {
+    for (const old of latestBackup.querySelectorAll<HTMLAnchorElement>("a")) if (old.href.startsWith("blob:")) URL.revokeObjectURL(old.href);
+    latestBackup.replaceChildren();
+    offerDownload(latestBackup, file, `rillswap-${kind}-recovery.age`);
+    latestBackup.querySelector("a")!.textContent = "Download swap backup";
+  };
   const stage = node("div", "", "swap-stage");
   panel.replaceChildren(backups, stage);
   panel = stage;
@@ -1311,7 +1372,7 @@ async function run(
     const outcome = await quote.prepared.execute({
       report,
       saveRecovery: async (file, kind) => {
-        offerDownload(backups, file, `rillswap-${kind}-recovery-${Math.floor(Date.now() / 1000)}.age`);
+        updateBackup(file, kind);
         publish(file);
         if (kind === "funded") await persistFunded(file);
         report(kind === "terms" ? "recovery file saved to the backups list" : "funded recovery file added to the backups list");
@@ -1343,7 +1404,7 @@ async function run(
         "swap-cooperation"),
       node("p", "Optional: keep the paid recovery file from the backups list as a record of the completed swap."),
     );
-    offerDownload(backups, outcome.paidRecovery, `rillswap-paid-recovery-${Math.floor(Date.now() / 1000)}.age`);
+    updateBackup(outcome.paidRecovery, "paid");
     publish(outcome.paidRecovery);
     return true;
   } catch (error) {

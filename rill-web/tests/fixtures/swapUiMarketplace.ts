@@ -4,7 +4,7 @@ declare global {
   interface Window {
     uiFixture: { requests: unknown[]; executed: number; executedProviders: string[]; disposed: number;
       fundingScript?: string; fundingSource?: { psbt: string } | { depositTxid: string };
-      reverseEvents?: string[]; reverseFunded?: boolean;
+      reverseEvents?: string[]; reverseFunded?: boolean; reverseDepth?: number; reverseClaimConfirmed?: boolean; reverseBroadcastUnknown?: boolean; reverseNodePayment?: boolean;
       fundedRecovery?: number[]; fundingPublished?: boolean;
       wallet: typeof BrowserRecoveryWallet; releaseInfo?: () => void; infoPending: boolean };
     /**
@@ -72,20 +72,37 @@ export const quoteReverseProviders = async (_providers: unknown[], request: unkn
       // A stand-in execution: enough for the execution UI to accept, show the invoice, and receive fixture funding.
       prepareExecution: async () => {
         window.uiFixture.reverseEvents = [];
-        const events = window.uiFixture.reverseEvents, record = { stage: "terms-ready" };
+        const events = window.uiFixture.reverseEvents, record: { stage: string; claim?: { txid: string } } = { stage: "terms-ready" };
         const expiresAt = Math.floor(Date.now() / 1000) + 1800;
         return {
           terms: { economics: { hold_invoice_sat: String(51_000 + Number(id)), nominal_payout_sat: "50000", success_fee_sat: "500", claim_fee_reserve_sat: "500" },
             funding_confirmations: 2, refund_lock_height: 400, max_claim_fee_sat: "800", client_destination_script: "0014" + "11".repeat(20),
             invoice_binding: { expires_at: expiresAt } },
           recoveryFile: new Uint8Array([8, 8, 8]), record,
+          get claimFeeSat() { return record.claim ? "500" : null; },
+          get funding() { return record.stage === "terms-ready" || record.stage === "payment-unknown" ? null : { txid: "b".repeat(64), vout: 0 }; },
+          fundingDepth: async () => { events.push("depth"); return window.uiFixture.reverseDepth ?? 0; },
           accept: async () => { events.push("accept"); },
           exposeInvoice: async () => { events.push("expose"); record.stage = "payment-unknown"; return { bolt11: "lnbcrt510010n1fixture", expiresAt }; },
-          planPayment: async () => { events.push("plan"); throw new Error("fixture has no node"); },
+          planPayment: async () => {
+            events.push("plan"); if (!window.uiFixture.reverseNodePayment) throw new Error("fixture has no node");
+            return { feeMsat: "1000", limits: { maxExpiryHeight: 500 }, paymentHash: "c".repeat(64), invoiceBinding: { amount_msat: "51006000" } };
+          },
+          pay: async () => { events.push("pay"); record.stage = "payment-unknown"; return "IN_FLIGHT"; },
           receiveFunding: async () => {
             events.push("receive");
             if (!window.uiFixture.reverseFunded) { await new Promise((resolve) => setTimeout(resolve, 200)); throw new Error("no funding yet"); }
             record.stage = "funded"; return new Uint8Array([9, 9, 9]);
+          },
+          prepareClaim: async () => {
+            events.push("prepare"); record.stage = "claim-ready"; record.claim = { txid: "a".repeat(64) };
+            return { claim: { txid: record.claim.txid, feeSat: "500", outputValueSat: "50000", vsize: 140 }, recoveryFile: new Uint8Array([10, 10, 10]) };
+          },
+          exposeClaim: async (_api: string, _broadcast: string, action: string) => {
+            events.push(action);
+            if (action === "download") return { outcome: "exported", txid: record.claim!.txid, transactionHex: "00" };
+            record.stage = window.uiFixture.reverseBroadcastUnknown ? "claim-unknown" : "accepted";
+            return { outcome: window.uiFixture.reverseBroadcastUnknown ? "unknown" : "accepted", txid: record.claim!.txid };
           },
           dispose: () => { events.push("dispose"); },
         };

@@ -11,6 +11,7 @@ import type { EvmSponsorDefaults, NetworkName } from "./swap/config";
 import { scriptAddress } from "./swap/address";
 import { prepareBrowserRefund, exportBrowserRefund, broadcastBrowserRefund } from "./browserRefund";
 import type { RefundJournalRecord } from "./browserRefundJournal";
+import { parseWalletBackup, recoveryKeyFromWords, walletRecoveryKey } from "./browserRecoveryWallet";
 
 interface RecoveryUiOptions {
   /** Chosen by the user outside the file, including the complete chain identity. */
@@ -60,15 +61,26 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
   fileLabel.htmlFor = file.id;
   details.append(fileLabel, file);
   const olderKey = element("details");
-  olderKey.append(element("summary", "Use an older recovery key (optional)"), element("p",
-    "For an older or externally encrypted swap, select its original age key file. " +
-    "This does not replace your browser's saved key."));
-  const keyLabel = element("label", "Original age key file (.key or .age-key)");
+  olderKey.append(element("summary", "Use a saved recovery key (optional)"), element("p", "Enter its 12 words or choose a key backup; your browser's saved key is not replaced."));
+  const wordsLabel = element("label", "12-word recovery key"), words = element("input", "", "swap-recovery-words");
+  words.type = "password"; words.autocomplete = "off"; words.spellcheck = false; words.maxLength = 4096; wordsLabel.htmlFor = words.id;
+  olderKey.append(wordsLabel, words);
+  const keyLabel = element("label", "Recovery key backup (.json, .key or .age-key)");
   const keyFile = element("input", "", "swap-recovery-key-file");
   keyFile.type = "file";
-  keyFile.accept = ".key,.age-key,.txt";
+  keyFile.accept = ".json,.key,.age-key,.txt";
   keyLabel.htmlFor = keyFile.id;
   olderKey.append(keyLabel, keyFile);
+  const readIdentity = async (selectedKey: File | undefined, selectedWords: string): Promise<string> => {
+    if (selectedKey && selectedWords.trim()) throw new Error("Choose words or a key file, not both");
+    if (selectedWords.trim()) {
+      const key = await recoveryKeyFromWords(selectedWords); key.file.fill(0); return key.identity;
+    }
+    if (!selectedKey) return options.browserIdentity();
+    const text = await selectedKey.text();
+    if (!text.trimStart().startsWith("{")) return text;
+    const key = await walletRecoveryKey(parseWalletBackup(text)); key.file.fill(0); return key.identity;
+  };
   const inspect = element("button", "Inspect recovery file", "swap-recovery-inspect");
   inspect.type = "button";
   const result = element("section", "", "swap-recovery-result");
@@ -115,6 +127,7 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
     if (!busy) { result.replaceChildren(); fundingResult.replaceChildren(); fundingControls.hidden = true; inspected = undefined; }
   };
   file.onchange = keyFile.onchange = clear;
+  words.oninput = clear;
   const show = (report: RecoveryInspection): void => {
     inspected = report;
     invalidateRefund();
@@ -138,7 +151,7 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
   inspect.onclick = () => {
     if (busy) return;
     // Snapshot file objects and the independent network before the first await.
-    const selectedFile = file.files?.[0], selectedKey = keyFile.files?.[0];
+    const selectedFile = file.files?.[0], selectedKey = keyFile.files?.[0], selectedWords = words.value;
     const selected = options.selectedNetwork();
     const expectedNetwork = structuredClone(selected.identity);
     if (!selectedFile || selectedFile.size === 0 || selectedFile.size > MAX_RECOVERY_CIPHERTEXT_BYTES ||
@@ -149,16 +162,16 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
     busy = true;
     disposeReverse?.(); disposeReverse = undefined;
     inspected = undefined; fundingControls.hidden = true; fundingResult.replaceChildren();
-    file.disabled = keyFile.disabled = inspect.disabled = true;
+    file.disabled = keyFile.disabled = words.disabled = inspect.disabled = true;
     result.replaceChildren(element("p", "Opening and verifying locally..."));
     void (async () => {
       let plaintext: Uint8Array | undefined;
       try {
-        const identity = selectedKey ? await selectedKey.text() : await options.browserIdentity();
+        const identity = await readIdentity(selectedKey, selectedWords);
         plaintext = await decryptRecoveryContainer(new Uint8Array(await selectedFile.arrayBuffer()), identity);
         if (isEvmRecovery(plaintext)) {
           pendingInvalidated = false;
-          const assertCurrent = (): void => { if (pendingInvalidated || options.selectedNetwork().name !== selected.name || file.files?.[0] !== selectedFile || keyFile.files?.[0] !== selectedKey) throw new Error("Recovery selection changed"); };
+          const assertCurrent = (): void => { if (pendingInvalidated || options.selectedNetwork().name !== selected.name || file.files?.[0] !== selectedFile || keyFile.files?.[0] !== selectedKey || words.value !== selectedWords) throw new Error("Recovery selection changed"); };
           assertCurrent();
           disposeReverse = evmRecoveryControls(result, { plaintext, network: expectedNetwork, evmRpc: options.selectedEvmRpc ?? (() => ""),
             ...(options.selectedEvmSponsor ? { sponsor: options.selectedEvmSponsor } : {}), ageRecipient: () => identityToRecipient(identity), assertCurrent });
@@ -166,14 +179,14 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
         }
         if (parseRecoveryPlaintext(plaintext).document.profile_id === "ln-to-btc/v1") {
           pendingInvalidated = false;
-          const assertCurrent = (): void => { if (pendingInvalidated || options.selectedNetwork().name !== selected.name || file.files?.[0] !== selectedFile || keyFile.files?.[0] !== selectedKey) throw new Error("Recovery selection changed"); };
+          const assertCurrent = (): void => { if (pendingInvalidated || options.selectedNetwork().name !== selected.name || file.files?.[0] !== selectedFile || keyFile.files?.[0] !== selectedKey || words.value !== selectedWords) throw new Error("Recovery selection changed"); };
           assertCurrent();
           disposeReverse = reverseRecoveryControls(result, { plaintext, identity, network: expectedNetwork as { name: NetworkName; genesis_hash: string },
             chainApi: options.selectedChainApi, broadcastApi: options.selectedBroadcastApi, relays: options.selectedRelays ?? (() => []), assertCurrent });
           return;
         }
         const report = inspectRecoveryPlaintext(plaintext, expectedNetwork);
-        if (options.selectedNetwork().name !== selected.name || file.files?.[0] !== selectedFile || keyFile.files?.[0] !== selectedKey) throw new Error("Selection changed");
+        if (options.selectedNetwork().name !== selected.name || file.files?.[0] !== selectedFile || keyFile.files?.[0] !== selectedKey || words.value !== selectedWords) throw new Error("Selection changed");
         show(report);
       } catch {
         // No parser/crypto/wallet error, raw input, path, filename, or secret becomes a UI diagnostic.
@@ -183,7 +196,7 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
         // Best-effort byte clearing, not a guarantee for immutable strings or decrypter copies.
         plaintext?.fill(0);
         busy = false;
-        file.disabled = keyFile.disabled = inspect.disabled = false;
+        file.disabled = keyFile.disabled = words.disabled = inspect.disabled = false;
       }
     })();
   };
@@ -196,7 +209,7 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
   fee.oninput = () => { pendingInvalidated = true; invalidateRefund(); updateAmount(); };
   check.onclick = () => {
     if (busy || !inspected) return;
-    const selectedFile = file.files?.[0], selectedKey = keyFile.files?.[0];
+    const selectedFile = file.files?.[0], selectedKey = keyFile.files?.[0], selectedWords = words.value;
     const selected = options.selectedNetwork(), expectedNetwork = structuredClone(selected.identity);
     const selectedRevision = revision.value;
     const binding = inspected.fundingHistory.find((item) => String(item.binding_revision) === selectedRevision);
@@ -207,17 +220,17 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
     catch { fundingResult.replaceChildren(element("p", "Check the chain API in Settings. No connection was made.")); return; }
     busy = true;
     pendingInvalidated = false;
-    file.disabled = keyFile.disabled = inspect.disabled = check.disabled = revision.disabled = true;
+    file.disabled = keyFile.disabled = words.disabled = inspect.disabled = check.disabled = revision.disabled = true;
     fundingResult.replaceChildren(element("p", "Checking funding with your selected API..."));
     void (async () => {
       let plaintext: Uint8Array | undefined;
       try {
-        const identity = selectedKey ? await selectedKey.text() : await options.browserIdentity();
+        const identity = await readIdentity(selectedKey, selectedWords);
         plaintext = await decryptRecoveryContainer(new Uint8Array(await selectedFile.arrayBuffer()), identity);
         const observation = await observeRecoveryFunding(plaintext, expectedNetwork as { name: NetworkName; genesis_hash: string },
           { fundingAttemptId: binding.funding_attempt_id, bindingRevision: binding.binding_revision }, api);
         if (pendingInvalidated || options.selectedNetwork().name !== selected.name || options.selectedChainApi() !== api || revision.value !== selectedRevision ||
-          file.files?.[0] !== selectedFile || keyFile.files?.[0] !== selectedKey) throw new Error("Selection changed");
+          file.files?.[0] !== selectedFile || keyFile.files?.[0] !== selectedKey || words.value !== selectedWords) throw new Error("Selection changed");
         fundingResult.replaceChildren(element("h3", "Funding observed by your API"),
           element("p", `${observation.confirmations} confirmation${observation.confirmations === 1 ? "" : "s"} · observed tip ${observation.tipHeight}.`),
           element("p", observation.refundMatureAtObservedTip ? "The refund lock has passed at this observed tip." :
@@ -228,13 +241,13 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
         fundingResult.replaceChildren(element("p", "Funding could not be verified for the current selection. Check the file, key, network, API, and revision, then try again. Nothing was signed or broadcast."));
       } finally {
         plaintext?.fill(0); busy = false;
-        file.disabled = keyFile.disabled = inspect.disabled = check.disabled = revision.disabled = false;
+        file.disabled = keyFile.disabled = words.disabled = inspect.disabled = check.disabled = revision.disabled = false;
       }
     })();
   };
   const refundAction = (action: "prepare" | "export" | "broadcast"): void => {
     if (busy || !inspected || (action !== "prepare" && !prepared)) return;
-    const selectedFile = file.files?.[0], selectedKey = keyFile.files?.[0], selectedRevision = revision.value, feeText = fee.value;
+    const selectedFile = file.files?.[0], selectedKey = keyFile.files?.[0], selectedWords = words.value, selectedRevision = revision.value, feeText = fee.value;
     const selected = options.selectedNetwork(), network = structuredClone(selected.identity) as { name: NetworkName; genesis_hash: string };
     const binding = inspected.fundingHistory.find((item) => String(item.binding_revision) === selectedRevision);
     if (!selectedFile || !binding || selectedFile.size === 0 || selectedFile.size > MAX_RECOVERY_CIPHERTEXT_BYTES ||
@@ -244,16 +257,16 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
     catch { refundResult.replaceChildren(element("p", "Check your API settings before approving a refund.")); return; }
     const saved = prepared;
     pendingInvalidated = false; busy = true;
-    file.disabled = keyFile.disabled = inspect.disabled = check.disabled = revision.disabled = fee.disabled = prepare.disabled = download.disabled = broadcast.disabled = true;
+    file.disabled = keyFile.disabled = words.disabled = inspect.disabled = check.disabled = revision.disabled = fee.disabled = prepare.disabled = download.disabled = broadcast.disabled = true;
     refundResult.replaceChildren(element("p", action === "prepare" ? "Checking funding and preparing your approved refund..." : "Rechecking the approved refund..."));
     const assertCurrent = (): void => {
-      if (pendingInvalidated || file.files?.[0] !== selectedFile || keyFile.files?.[0] !== selectedKey || revision.value !== selectedRevision || fee.value !== feeText ||
+      if (pendingInvalidated || file.files?.[0] !== selectedFile || keyFile.files?.[0] !== selectedKey || words.value !== selectedWords || revision.value !== selectedRevision || fee.value !== feeText ||
         options.selectedNetwork().name !== selected.name || options.selectedChainApi() !== api || options.selectedBroadcastApi() !== broadcastApi) throw new Error("Approval changed");
     };
     void (async () => {
       let plaintext: Uint8Array | undefined;
       try {
-        const identity = selectedKey ? await selectedKey.text() : await options.browserIdentity();
+        const identity = await readIdentity(selectedKey, selectedWords);
         plaintext = await decryptRecoveryContainer(new Uint8Array(await selectedFile.arrayBuffer()), identity);
         assertCurrent();
         const selection = { fundingAttemptId: binding.funding_attempt_id, bindingRevision: binding.binding_revision };
@@ -286,7 +299,7 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
         refundResult.replaceChildren(element("p", "Refund action could not be completed. No automatic retry or replacement will occur. A saved intent may be prepared, unknown, or accepted; approve and load it again to inspect its state."));
       } finally {
         plaintext?.fill(0); busy = false;
-        file.disabled = keyFile.disabled = inspect.disabled = check.disabled = revision.disabled = fee.disabled = prepare.disabled = download.disabled = broadcast.disabled = false;
+        file.disabled = keyFile.disabled = words.disabled = inspect.disabled = check.disabled = revision.disabled = fee.disabled = prepare.disabled = download.disabled = broadcast.disabled = false;
       }
     })();
   };

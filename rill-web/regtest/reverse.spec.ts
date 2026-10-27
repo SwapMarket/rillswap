@@ -13,13 +13,13 @@ const command = (...args: string[]): string => execFileSync(resolve(root, "dev/d
 async function download(page: Page, selector: string, filename: string): Promise<string> {
   const event = page.waitForEvent("download"); await page.locator(selector).click(); const value = await event, target = resolve(artifacts, filename); await value.saveAs(target); return target;
 }
-function inspectBackup(wallet: string, recovery: string): { paymentHash: string; requiredDepth: number; contractHash: string } {
+function inspectBackup(wallet: string, recovery: string): { paymentHash: string; requiredDepth: number; settlementDepth: number; contractHash: string } {
   const script = `import { parseWalletBackup, walletRecoveryKey } from "./src/browserRecoveryWallet";
     import { decryptRecoveryContainer } from "./src/recoveryKeys";
     const key = await walletRecoveryKey(parseWalletBackup(await Bun.file(process.argv[1]).text()));
     const plaintext = await decryptRecoveryContainer(new Uint8Array(await Bun.file(process.argv[2]).arrayBuffer()), key.identity);
     const doc = JSON.parse(new TextDecoder().decode(plaintext)); plaintext.fill(0); key.file.fill(0);
-    console.log(JSON.stringify({ paymentHash: doc.contract_terms.invoice_binding.payment_hash, requiredDepth: doc.contract_terms.funding_confirmations, contractHash: doc.contract_hash }));`;
+    console.log(JSON.stringify({ paymentHash: doc.contract_terms.invoice_binding.payment_hash, requiredDepth: doc.contract_terms.funding_confirmations, settlementDepth: doc.contract_terms.settlement_confirmations, contractHash: doc.contract_hash }));`;
   return JSON.parse(execFileSync("bun", ["-e", script, wallet, recovery], { cwd: resolve(root, "rill-web"), encoding: "utf8", timeout: 30000 }));
 }
 
@@ -32,6 +32,7 @@ test(`real unilateral browser reverse swap (${nodePayment ? "configured node" : 
   expect(process.env.RILL_DEV_WEB_PORT).not.toBe("5273"); mkdirSync(artifacts, { recursive: true });
   let payer: ReturnType<typeof spawn> | undefined;
   try {
+   command("miner", "pause");
   const address = command("address", "--wallet", "user");
   let payments = 0, broadcasts = 0;
   const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
@@ -46,11 +47,10 @@ test(`real unilateral browser reverse swap (${nodePayment ? "configured node" : 
   const wallet = await download(page, '#swap-wallet-actions a[download="rillswap-recovery-key.json"]', "wallet.json");
   await page.locator("#swap-receive-address").fill(address);
   await page.locator("#swap-reverse-continue").click();
-  await expect(page.locator('#swap-reverse-backups a[download="rillswap-ln-to-btc-terms.age"]')).toBeVisible();
-  const backup = await download(page, '#swap-reverse-backups a[download="rillswap-ln-to-btc-terms.age"]', "terms.age"), signed = inspectBackup(wallet, backup);
+   await page.locator("#swap-reverse-advanced summary").click();
+   const backup = await download(page, '#swap-reverse-backups a', "terms.age"), signed = inspectBackup(wallet, backup);
   if (nodePayment) {
-    await page.locator("#swap-reverse-advanced summary").click();
-    await page.locator("#swap-reverse-connect").click();
+     await page.locator("#swap-reverse-connect").click();
     await expect(page.locator("#swap-reverse-pay")).toBeEnabled();
     await page.locator("#swap-reverse-pay").click();
   } else {
@@ -62,15 +62,14 @@ test(`real unilateral browser reverse swap (${nodePayment ? "configured node" : 
     });
     payer.on("error", () => {}); // exit-code assertion below still refuses a failed payer
   }
-  await expect(page.locator("#swap-reverse-prepare-claim")).toBeVisible({ timeout: 90000 }); // the page listens by itself
-  await download(page, '#swap-reverse-backups a[download="rillswap-ln-to-btc-funded.age"]', "funded.age");
-  command("mine", String(signed.requiredDepth));
-  await page.locator("#swap-reverse-prepare-claim").click();
-  await download(page, '#swap-reverse-backups a[download="rillswap-ln-to-btc-claim.age"]', "claim.age");
-  await page.locator("#swap-reverse-broadcast").click();
-  await expect(page.locator("#swap-status")).toContainText("Claim accepted:");
+   await expect(page.locator("#swap-reverse-steps h2")).toHaveText("Locking Bitcoin", { timeout: 90000 });
+   await expect(page.getByRole("link", { name: "View deposit transaction", exact: true })).toBeVisible({ timeout: 90000 });
+   command("mine", String(signed.requiredDepth));
+   // Confirmations trigger signing and one automatic broadcast, without another approval button.
+   await expect(page.locator("#swap-status")).toContainText("Claim accepted:");
+   await download(page, '#swap-reverse-backups a', "claim.age");
   const text = await page.locator("#swap-status").textContent(), txid = text!.match(/Claim accepted: ([0-9a-f]{64})/)![1]!;
-  command("mine", "1");
+   command("mine", String(signed.settlementDepth));
   await expect.poll(() => JSON.parse(command("lncli", "maker", "lookupinvoice", signed.paymentHash)).state).toBe("SETTLED");
   await expect.poll(() => {
     const all = JSON.parse(command("lncli", "user", "listpayments", "--include_incomplete")); return all.payments.find((value: { payment_hash: string }) => value.payment_hash === signed.paymentHash)?.status;
@@ -82,8 +81,7 @@ test(`real unilateral browser reverse swap (${nodePayment ? "configured node" : 
   expect(raw.vout).toHaveLength(1); expect(Math.round(Number(raw.vout[0].value) * 1e8)).toBeGreaterThanOrEqual(50000); expect(raw.vout[0].scriptPubKey.address).toBe(address);
   expect(raw.vin[0].txinwitness).toHaveLength(4); expect(raw.vin[0].txinwitness[1]).toMatch(/^[0-9a-f]{64}$/);
   expect(payments).toBe(nodePayment ? 1 : 0); expect(broadcasts).toBe(1); expect(errors).toEqual([]);
-  await page.locator("#swap-reverse-settlement").click();
-  await expect(page.locator("#swap-status")).toContainText(nodePayment ? "Swap complete" : "Bitcoin claim confirmed");
+   await expect(page.locator("#swap-status")).toContainText(nodePayment ? "Swap complete" : "Bitcoin claim confirmed");
   if (payer) {
     await new Promise<void>((done) => { if (payer!.exitCode !== null || payer!.signalCode !== null) done(); else payer!.once("exit", () => done()); });
     expect(payer.exitCode).toBe(0);
@@ -106,7 +104,8 @@ test(`real unilateral browser reverse swap (${nodePayment ? "configured node" : 
   } finally {
     // Own the host command group, even if a browser assertion fails after dispatch.
     // Killing it does not establish that LND canceled an already-dispatched payment.
-    if (payer) await stopPaymentProcess(payer);
+   if (payer) await stopPaymentProcess(payer);
+   command("miner", "resume");
   }
 });
 }

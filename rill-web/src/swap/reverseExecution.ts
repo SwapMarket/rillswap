@@ -11,13 +11,11 @@ import { Session, SwapError } from "./session";
 import { checkReverseFirmQuoteRequest, checkReverseTermsOffer, requireShape, type ReverseTermsOffer, type LnToBtcTerms } from "./wire";
 import { recoveryDocument, type RecoveryParts } from "./recovery";
 import { encryptCanonicalRecoveryForRecipient } from "../recoveryAgeContainer";
-import { inspectReverseRecoveryPlaintext, checkSelectedReverseFundingTransaction, constructSelectedReverseClaim, appendReverseClaimFallback,
-  verifySelectedReverseClaim, type RecoveryFundingBinding, type ConstructedReverseClaim } from "../recoveryInspection";
-import { observeReverseRecoveryFunding } from "../recoveryFunding";
+import { inspectReverseRecoveryPlaintext, checkSelectedReverseFundingTransaction, type RecoveryFundingBinding, type ConstructedReverseClaim } from "../recoveryInspection";
 import type { BrowserReverseJournal, ReverseJournalRecord } from "../browserReverseJournal";
 import type { BrowserHoldPayer, BoundedHoldPlan, HoldPaymentStatus } from "./browserHoldPayer";
 import { validateMempoolApi, type NetworkName } from "./config";
-import { readBoundedChainText } from "./chainTip";
+import { observeJournaledReverseFunding, prepareJournaledReverseClaim, exposeJournaledReverseClaim } from "./reverseClaim";
 import type { ReverseSwapRequest } from "./reverseSwap";
 
 const require = (ok: boolean): void => { if (!ok) throw new SwapError("Reverse execution refused. Keep backups; no payment or exposure is retried."); };
@@ -35,6 +33,7 @@ export interface PreparedReverseExecution {
   readonly deadlineAt: number;
   readonly recoveryFile: Uint8Array;
   readonly record: ReverseJournalRecord;
+  readonly claimFeeSat: string | null;
   accept(acknowledgeRecovery: () => void): Promise<void>;
   planPayment(payer: BrowserHoldPayer, endpoint: string, feeLimitSat: bigint, approve: () => void): Promise<BoundedHoldPlan>;
   pay(payer: BrowserHoldPayer, plan: BoundedHoldPlan, endpoint: string, approve: () => void): Promise<HoldPaymentStatus>;
@@ -45,6 +44,10 @@ export interface PreparedReverseExecution {
    */
   exposeInvoice(approve: () => void): Promise<{ readonly bolt11: string; readonly expiresAt: number }>;
   receiveFunding(timeoutMs?: number): Promise<Uint8Array>;
+  /** The provider's signed funding output, once received. */
+  readonly funding: { readonly txid: string; readonly vout: number } | null;
+  /** Confirmations of the signed funding on the trusted chain API. Read-only; throws until it confirms. */
+  fundingDepth(chainApi: string): Promise<number>;
   prepareClaim(chainApi: string, feeSat: bigint, approve: () => void): Promise<{ readonly claim: Omit<ConstructedReverseClaim, "transactionHex">; readonly recoveryFile: Uint8Array }>;
   exposeClaim(chainApi: string, broadcastApi: string, action: "download" | "broadcast", approve: () => void): Promise<{ readonly outcome: "exported" | "accepted" | "unknown"; readonly txid: string; readonly transactionHex?: string }>;
   dispose(): void;
@@ -60,10 +63,10 @@ export async function prepareReverseExecution(session: Session, handshake: Hands
   const seconds = (): number => Math.floor(clock() / 1000);
   const contract = newKeyPair(), authorization = newKeyPair(), preimage = randomBytes(32);
   authorization.secret.fill(0);
-  let disposed = false, document: Uint8Array | undefined, fallback: Uint8Array | undefined;
-  let claim: ConstructedReverseClaim | undefined, fundedRaw: string | undefined, selection: { fundingAttemptId: string; bindingRevision: number } | undefined;
+   let disposed = false, document: Uint8Array | undefined;
+   let selection: { fundingAttemptId: string; bindingRevision: number } | undefined;
   let accepted = false, acceptanceStarted = false, paying = false, claiming = false, exposing = false;
-  const dispose = (): void => { disposed = true; contract.secret.fill(0); preimage.fill(0); session.secret.fill(0); document?.fill(0); fallback?.fill(0); };
+   const dispose = (): void => { disposed = true; contract.secret.fill(0); preimage.fill(0); session.secret.fill(0); document?.fill(0); };
   try {
     current(); require(name !== "mainnet" && init.profile_id === "ln-to-btc/v1" && session.profile === init.profile_id &&
       Number.isSafeInteger(config.tipHeight) && config.tipHeight > 0 && config.tipHeight < 500000000);
@@ -101,20 +104,20 @@ export async function prepareReverseExecution(session: Session, handshake: Hands
       extensions: { "rillswap/browser-reverse-session": { client_session_secret: bytesToHex(session.secret), original_deadline_at: deadlineAt } } };
     document = recoveryDocument(parts); inspectReverseRecoveryPlaintext(document, network);
     const recoveryFile = await encrypt(document); live(); record = await config.journal.saveTerms(record, recoveryFile); live();
-    const selected = (): { fundingAttemptId: string; bindingRevision: number } => { require(selection !== undefined); return { ...selection! }; };
-    const freshFunding = async (api: string) => {
-      current(); const observation = await observeReverseRecoveryFunding(document!, network as { name: NetworkName; genesis_hash: string }, selected(), validateMempoolApi(api, name));
-      current(); require(observation.confirmations >= terms.funding_confirmations && observation.tipHeight + terms.timing_policy.claim_confirmation_blocks < terms.refund_lock_height + 1);
-      require(observation.rawFundingTransactionHex === fundedRaw); return observation;
-    };
-    const reauthorize = (): void => {
-      require(claim !== undefined && fundedRaw !== undefined && document !== undefined);
-      const checked = verifySelectedReverseClaim(document!, network, selected(), hexToBytes(fundedRaw!), hexToBytes(claim!.transactionHex));
-      require(checked.txid === claim!.txid && checked.transactionHex === claim!.transactionHex && record.claim?.signedDigest === bytesToHex(sha256(hexToBytes(claim!.transactionHex))));
-    };
+    const claimContext = (approve: () => void) => ({ plaintext: document!, record, journal: config.journal,
+      network: network as { name: NetworkName; genesis_hash: string }, assertCurrent: () => { current(); approve(); } });
     const freeze = (value: unknown): void => { if (value !== null && typeof value === "object") { for (const child of Object.values(value)) freeze(child); Object.freeze(value); } };
     freeze(terms);
     return Object.freeze({ terms, deadlineAt, get recoveryFile() { return Uint8Array.from(recoveryFile); }, get record() { return record; }, dispose,
+      get claimFeeSat() { return inspectReverseRecoveryPlaintext(document!, network).fallbackFeeSat; },
+      get funding() {
+        const binding = parts.funding[0]?.binding as RecoveryFundingBinding | undefined;
+        return binding && selection ? Object.freeze({ txid: binding.funding_txid, vout: binding.contract_vout }) : null;
+      },
+      async fundingDepth(chainApi: string): Promise<number> {
+        current(); require(document !== undefined && selection !== undefined);
+        return (await observeJournaledReverseFunding(claimContext(current), chainApi)).observation.confirmations;
+      },
       async accept(acknowledgeRecovery: () => void): Promise<void> {
         require(!acceptanceStarted && record.stage === "terms-ready"); live(); acknowledgeRecovery(); live(); acceptanceStarted = true;
         const acceptedEnvelope = session.envelope("terms_accept", { acceptance, client_acceptance_signature: acceptanceSignature }, { inReplyTo: answer.message_id, contract: answer.contract_hash! });
@@ -157,42 +160,24 @@ export async function prepareReverseExecution(session: Session, handshake: Hands
         try {
           checkSelectedReverseFundingTransaction(next, network, chosen, hexToBytes(payload.funding_transaction));
           const file = await encrypt(next); current(); record = await config.journal.saveFunding(record, file); current();
-          document?.fill(0); document = next; parts = nextParts; fundedRaw = payload.funding_transaction; selection = chosen;
+           document?.fill(0); document = next; parts = nextParts; selection = chosen;
           return file;
         } catch (error) { next.fill(0); throw error; }
       },
       async prepareClaim(chainApi: string, feeSat: bigint, approve: () => void) {
         current(); approve(); require(record.stage === "funded" && !claiming && typeof feeSat === "bigint" && feeSat >= 0n &&
           feeSat <= BigInt(terms.max_claim_fee_sat) && feeSat <= BigInt(terms.economics.claim_fee_reserve_sat));
-        const observation = await freshFunding(chainApi); current(); approve();
-        require(!claiming); claiming = true;
         // One signing attempt. Any storage ambiguity blocks this object from re-signing.
-        claim = constructSelectedReverseClaim(document!, network, { ...selected(), rawFundingTransaction: hexToBytes(observation.rawFundingTransactionHex), sampledTipHeight: observation.tipHeight, confirmations: observation.confirmations, feeSat });
-        fallback = appendReverseClaimFallback(document!, network, hexToBytes(claim.transactionHex));
-        const file = await encrypt(fallback); current(); approve();
-        record = await config.journal.prepareClaim(record, { fundingTxid: claim.fundingTxid, fundingVout: claim.fundingVout, txid: claim.txid, signedDigest: bytesToHex(sha256(hexToBytes(claim.transactionHex))) }, file);
-        current(); const { transactionHex: _privateWitness, ...publicClaim } = claim;
-        return Object.freeze({ claim: Object.freeze(publicClaim), recoveryFile: file });
+        claiming = true;
+        const prepared = await prepareJournaledReverseClaim(claimContext(approve), chainApi, feeSat, encrypt);
+        record = prepared.record; document?.fill(0); document = prepared.plaintext;
+        return Object.freeze({ claim: prepared.claim, recoveryFile: prepared.recoveryFile });
       },
       async exposeClaim(chainApi: string, broadcastApi: string, action: "download" | "broadcast", approve: () => void) {
-        current(); approve(); require(claim !== undefined); reauthorize();
-        const api = validateMempoolApi(broadcastApi, name);
-        if (record.stage === "claim-unknown" || record.stage === "accepted") {
-          require(action === "download"); record = await config.journal.reexportIdentical(record); current(); approve(); reauthorize();
-          return Object.freeze({ outcome: "exported" as const, txid: claim!.txid, transactionHex: claim!.transactionHex });
-        }
-        require(record.stage === "claim-ready" && !exposing); await freshFunding(chainApi); current(); approve(); reauthorize();
-        exposing = true; record = await config.journal.beginClaimExposure(record);
-        // Irreversible boundary. A failure from here never renews POST authority.
-        try {
-          current(); approve(); reauthorize();
-          if (action === "download") return Object.freeze({ outcome: "exported" as const, txid: claim!.txid, transactionHex: claim!.transactionHex });
-          const signal = AbortSignal.timeout(15000), response = await fetch(`${api}/tx`, { method: "POST", body: claim!.transactionHex,
-            headers: { "Content-Type": "text/plain" }, credentials: "omit", redirect: "error", cache: "no-store", referrerPolicy: "no-referrer", signal });
-          const txid = await readBoundedChainText(response, signal); require(txid === claim!.txid);
-          record = await config.journal.markAccepted(record, txid);
-          return Object.freeze({ outcome: "accepted" as const, txid });
-        } catch { return Object.freeze({ outcome: "unknown" as const, txid: claim!.txid }); }
+        current(); approve();
+        if (record.stage === "claim-ready") { require(!exposing); exposing = true; }
+        const result = await exposeJournaledReverseClaim(claimContext(approve), chainApi, broadcastApi, action);
+        record = result.record; return Object.freeze(result.exposure);
       },
     });
   } catch (error) { dispose(); throw error; }

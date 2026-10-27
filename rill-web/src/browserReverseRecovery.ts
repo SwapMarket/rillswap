@@ -18,6 +18,8 @@ import { validateRelays, validateMempoolApi, type NetworkName } from "./swap/con
 import { parseTransaction } from "./swap/transaction";
 import { fundingBindingHash } from "./swap/hashes";
 import { readBoundedChainText } from "./swap/chainTip";
+import { observeJournaledReverseFunding, prepareJournaledReverseClaim, exposeJournaledReverseClaim } from "./swap/reverseClaim";
+import type { PreparedReverseExecution } from "./swap/reverseExecution";
 
 type Network = { readonly name: NetworkName; readonly genesis_hash: string };
 const require = (value: boolean): void => { if (!value) throw new Error("Reverse recovery remains blocked. Preserve backups; no payment or claim is automatically retried."); };
@@ -74,6 +76,55 @@ export async function loadBrowserReverseRecovery(original: Uint8Array, identity:
   try { const report = inspectReverseRecoveryPlaintext(loaded.plaintext, network);
     return Object.freeze({ stage: loaded.record.stage, ciphertext: ciphertextOf(loaded.record), claimTxid: report.fallbackTxid, claimFeeSat: report.fallbackFeeSat }); }
   finally { loaded.plaintext.fill(0); loaded.journal.close(); }
+}
+
+/** Explicit Resume of a native browser execution. No acceptance, payment, or new cooperative nonce authority. */
+export async function resumeBrowserReverseExecution(original: Uint8Array, identity: string, network: Network,
+  urls: readonly string[], assertCurrent: () => void): Promise<Pick<PreparedReverseExecution,
+    "terms" | "record" | "recoveryFile" | "claimFeeSat" | "funding" | "fundingDepth" | "receiveFunding" | "prepareClaim" | "exposeClaim" | "dispose">> {
+  network = structuredClone(network); urls = [...urls];
+  const loaded = await load(original, identity, network);
+  let disposed = false, preparing = false, exposing = false;
+  const current = (): void => { require(!disposed); assertCurrent(); };
+  const dispose = (): void => { disposed = true; loaded.plaintext.fill(0); loaded.journal.close(); };
+  try {
+    current(); require(!("kind" in loaded.record));
+    const terms = structuredClone(parseRecoveryPlaintext(loaded.plaintext).document.contract_terms) as unknown as LnToBtcTerms;
+    const context = (approve: () => void) => ({ plaintext: loaded.plaintext, record: loaded.record as ReverseJournalRecord,
+      journal: loaded.journal, network, assertCurrent: () => { current(); approve(); } });
+    return {
+      terms, get record() { return loaded.record as ReverseJournalRecord; }, get recoveryFile() { return ciphertextOf(loaded.record); }, dispose,
+      get claimFeeSat() { return inspectReverseRecoveryPlaintext(loaded.plaintext, network).fallbackFeeSat; },
+      get funding() {
+        const binding = inspectReverseRecoveryPlaintext(loaded.plaintext, network).fundingHistory.at(-1);
+        return binding ? { txid: binding.funding_txid, vout: binding.contract_vout } : null;
+      },
+      async fundingDepth(api) { return (await observeJournaledReverseFunding(context(current), api)).observation.confirmations; },
+      async receiveFunding() {
+        current(); require(loaded.record.stage === "payment-unknown");
+        const file = await recoverBrowserReverseFunding(loaded.plaintext, loaded.identity, network, urls, current); current();
+        const record = await loaded.journal.get(network, (loaded.record as ReverseJournalRecord).context.sessionId); current();
+        require(record?.stage === "funded");
+        const next = await decryptRecoveryContainer(file, loaded.identity); current();
+        loaded.plaintext.fill(0); loaded.plaintext = next; loaded.record = record!;
+        return file;
+      },
+      async prepareClaim(api, feeSat, approve) {
+        current(); approve(); require(!preparing); preparing = true;
+        const recipient = await identityToRecipient(loaded.identity); current(); approve();
+        const result = await prepareJournaledReverseClaim(context(approve), api, feeSat,
+          (plaintext) => encryptCanonicalRecoveryForRecipient(plaintext, recipient));
+        loaded.plaintext.fill(0); loaded.plaintext = result.plaintext; loaded.record = result.record;
+        return { claim: result.claim, recoveryFile: result.recoveryFile };
+      },
+      async exposeClaim(api, broadcastApi, action, approve) {
+        current(); approve();
+        if (loaded.record.stage === "claim-ready") { require(!exposing); exposing = true; }
+        const result = await exposeJournaledReverseClaim(context(approve), api, broadcastApi, action);
+        loaded.record = result.record; return result.exposure;
+      },
+    };
+  } catch (error) { dispose(); throw error; }
 }
 
 /** Recover only retained signed funding for an existing UNKNOWN attempt. No new session or relay publication. */

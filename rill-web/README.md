@@ -89,8 +89,10 @@ Unknown exposure remains blocked from automatic retry.
 
 Funded Bitcoin recovery checkpoints are saved encrypted in browser storage with
 strict commit and exact readback before funding publication. On a URL-less reload,
-open **Saved funded swaps in this browser** beside the recovery panel. Opening is local,
-not a payment or chain check. Keep downloads independently: browser eviction and
+open **Your swaps** beside the recovery panel. Reverse swaps appear at every saved
+stage; **Resume** continues funding checks and claims, never a Lightning payment.
+Funded forward swaps open their refund controls locally. Merely listing swaps does
+not connect, pay, sign, or broadcast. Keep a backup independently: browser eviction and
 the interval before an external deposit is observed remain recovery risks.
 Upgrades preserve existing recovery identities and counters, without retroactive
 checkpoints or automatic network actions. Surviving checkpoints with a missing
@@ -119,16 +121,19 @@ Available providers and their advertised assets decide which pairs can be
 quoted.
 
 **Bitcoin to Lightning.** Paste the Lightning invoice to be paid. After
-accepting the quote and saving the recovery files, send the exact amount to
+accepting the quote, send the exact amount to
 the displayed contract address from any native segwit wallet (a `bitcoin:`
 link and QR code are shown). Advanced users can supply a finalized PSBT. Do
 not send extra or multiple deposits: deposits that break the funding rules
 stop the swap and cannot currently be refunded from the panel.
 
-**Lightning to Bitcoin.** Choose the Bitcoin payout and compare offers,
-approve execution, save the recovery backup, and pay the displayed invoice
-from any Lightning wallet (or a configured LND node). The app checks the
-provider's funding and prepares the Bitcoin claim.
+**Lightning to Bitcoin.** Enter the amount and Bitcoin address, accept the signed
+price, and pay the invoice from any Lightning wallet (or a configured LND node).
+The page checks the provider's funding and confirmations, then saves and broadcasts
+the claim automatically. Keep the page open. The claim uses the signed fee reserve
+while preserving the nominal payout. Advanced holds the fee details, one optional
+latest swap backup, manual checks, and exact fallback export. Notifications are
+optional and request permission only when enabled; no service worker is installed.
 
 **USDC or USDT to Lightning.** Paste the Lightning invoice and connect an
 injected EVM wallet on the provider's chain. Approve the token allowance if
@@ -143,22 +148,27 @@ failed wallet or sponsor request does not prove the preimage stayed private.
 
 ## Recovery
 
-The app creates an origin-local recovery wallet. Its JSON backup holds a
-12-word mnemonic, and you must confirm a matching backup before accepting a
-quote. **The mnemonic alone cannot recover a swap**: also keep every
-encrypted per-swap `.age` file the app asks you to download, including the
-funded record.
+The app creates an origin-local recovery wallet. Saving its 12 words is
+recommended, not required to swap. Tor Browser and private windows may erase
+browser storage on restart. **The words alone cannot recover a swap**: the encrypted
+swap record must also survive, in this browser, a swap link, or the optional latest
+backup under Advanced. The words encrypt records; swap secrets are independently random.
 
 Browser recovery keys are not encrypted at rest; same-origin scripts and
 anyone with access to browser storage can read them. Do not clear browser
 storage while funds are pending. The recovery wallet is not a general
 spending wallet, and cloning it across devices can reuse addresses.
 
-To reopen a swap, use **Recover a swap**, select the original network and
-open the newest file, or open the bookmarked tracking link. The link carries
+Use **Your swaps** to resume a saved reverse swap without any file. Unknown claim
+submissions are watched, never submitted again; exact fallback export remains available.
+Otherwise use **Recover a swap**, select the original network, and open the newest
+backup or the bookmarked tracking link. On another device, enter the 12 words or
+choose the JSON/age key backup. This does not replace the current browser key or
+reset address counters. The link carries
 an encrypted recovery container in its URL fragment (never sent to the
-server); treat it like the file. Opening or reloading never resumes protocol
-sessions or retries payments, claims or refunds by itself.
+server); treat it like the file. Opening or reloading never retries payments,
+claims or refunds by itself. Resume is explicit and never starts a new cooperative
+nonce attempt.
 
 - **Bitcoin to Lightning refunds:** use **Check funding**, wait until the
   refund matures, review the destination and fee, then prepare, download

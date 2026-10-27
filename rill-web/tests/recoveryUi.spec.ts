@@ -3,6 +3,7 @@ import canonicalize from "canonicalize";
 import { readFileSync } from "node:fs";
 import { encryptCanonicalRecoveryForRecipient } from "../src/recoveryAgeContainer";
 import { createRecoveryKey } from "../src/recoveryKeys";
+import type * as Wallet from "../src/browserRecoveryWallet";
 import type { InspectionCase } from "../unit/fixtures/recoveryInspectionCases";
 
 const corpus = (): InspectionCase[] => JSON.parse(readFileSync(new URL("../tmp/preview/test-only/recovery-inspection-cases.json", import.meta.url), "utf8"));
@@ -11,6 +12,61 @@ const payload = (buffer: Uint8Array, name: string) => ({ name, mimeType: "applic
 
 declare global {
   interface Window { recoveryImportPending: boolean; releaseRecoveryImport: () => void }
+}
+
+test("the 12-word key is recommended without blocking swaps and is revealed only on request", async ({ page }) => {
+  await page.goto("http://127.0.0.1:18765/test-only/swap.html");
+  await expect(page.locator("#swap-key-recommendation")).toContainText("Tor Browser and private windows");
+  await expect(page.locator("#swap-start")).toBeEnabled();
+  await expect(page.locator("#swap-wallet-words")).toBeEmpty();
+  await page.locator("#swap-wallet-setup summary").click();
+  await page.locator("#swap-wallet-show-words").click();
+  const words = page.locator("#swap-wallet-words");
+  await expect(words).toBeVisible();
+  const expected = await page.evaluate(async () => {
+    const wallet = await window.uiFixture.wallet.open();
+    try { return JSON.parse(new TextDecoder().decode(await wallet.exportBackup())).mnemonic as string; }
+    finally { wallet.close(); }
+  });
+  expect(expected.split(" ")).toHaveLength(12);
+  await expect(words).toHaveText(expected);
+  await page.locator("#swap-wallet-show-words").click();
+  await expect(words).toBeHidden(); await expect(words).toBeEmpty();
+  await expect(page.locator("#swap-start")).toBeEnabled();
+  await page.reload();
+  await expect(page.locator("#swap-wallet-words")).toBeEmpty();
+});
+
+for (const source of ["words", "JSON backup"]) {
+  test(`a saved ${source} opens a swap locally without replacing the browser key`, async ({ page }) => {
+    const mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    await page.goto("http://127.0.0.1:18765/test-only/swap.html");
+    const key = await page.evaluate(async (mnemonic) => {
+      const url = "/test-only/browserRecoveryWallet.js", module = await import(url) as typeof Wallet;
+      const key = await module.recoveryKeyFromWords(mnemonic); key.file.fill(0);
+      return { recipient: key.recipient, scheme: module.WALLET_SCHEME };
+    }, mnemonic);
+    const encrypted = await encryptCanonicalRecoveryForRecipient(plaintext("signed funding revision zero"), key.recipient);
+    const fingerprint = await page.evaluate(async () => {
+      const wallet = await window.uiFixture.wallet.open();
+      try { return (await wallet.info()).fingerprint; } finally { wallet.close(); }
+    });
+    await page.locator("#swap-recovery summary").first().click();
+    await page.locator("#swap-recovery-file").setInputFiles(payload(encrypted, "swap.age"));
+    if (source === "words") {
+      await page.getByText("Use a saved recovery key (optional)", { exact: true }).click();
+      await page.locator("#swap-recovery-words").fill(mnemonic);
+    } else {
+      const backup = new TextEncoder().encode(JSON.stringify({ format: "rillswap-browser-recovery", version: 1, scheme: key.scheme, mnemonic }));
+      await page.locator("#swap-recovery-key-file").setInputFiles(payload(backup, "key.json"));
+    }
+    await page.locator("#swap-recovery-inspect").click();
+    await expect(page.locator("#swap-recovery-result h3")).toHaveText("Recovery record verified");
+    expect(await page.evaluate(async () => {
+      const wallet = await window.uiFixture.wallet.open();
+      try { return (await wallet.info()).fingerprint; } finally { wallet.close(); }
+    })).toBe(fingerprint);
+  });
 }
 
 test("the recovery panel uses the saved browser key and makes no external connection while opening a local file", async ({ page }) => {

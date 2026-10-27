@@ -105,6 +105,7 @@ for (const failStorage of [false, true]) test(`funded callback ${failStorage ? "
   await expect(page.locator("#swap-error")).toContainText(failStorage ? "Browser recovery storage" : "Fixture stopped after funded checkpoint");
   expect(await page.evaluate(() => !!window.uiFixture.fundingPublished)).toBe(!failStorage);
   const downloading = page.waitForEvent("download");
+  await page.locator("#swap-backups summary").click();
   await page.locator('#swap-backups a[download*="funded-recovery"]').click();
   const path = testInfo.outputPath("funded.age"); await (await downloading).saveAs(path);
   expect(readFileSync(path)).toEqual(Buffer.from(encrypted));

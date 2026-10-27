@@ -27,6 +27,17 @@ test("fresh preparation persists immutable encrypted snapshots without any payme
   expect(Object.keys(saved).sort()).toEqual(["claim", "context", "digest", "id", "payment", "snapshots", "stage"]);
 });
 
+test("listing saved executions includes prepayment stages without granting payment authority", async ({ page }) => {
+  await ready(page);
+  const saved = await prepare(page);
+  const result = await page.evaluate(async () => {
+    const journal = await window.BrowserReverseJournal.open();
+    try { return await journal.list(); } finally { journal.close(); }
+  });
+  expect(result).toEqual([saved]);
+  expect(result[0]!.payment).toBeNull(); expect(result[0]!.claim).toBeNull();
+});
+
 test("two tabs and recreated sessions for the same payer/payment hash elect only one irreversible dispatch", async ({ page, context }) => {
   await ready(page); const first = await prepare(page);
   const secondPage = await context.newPage(); await ready(secondPage);

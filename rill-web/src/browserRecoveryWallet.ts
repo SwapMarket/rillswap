@@ -109,6 +109,13 @@ export async function walletRecoveryKey(backup: WalletBackup): Promise<RecoveryK
   } finally { seed.fill(0); scalar.fill(0); }
 }
 
+/** Offline decryption key only. Does not restore browser state or reset address counters. */
+export function recoveryKeyFromWords(words: string): Promise<RecoveryKey> {
+  if (typeof words !== "string" || words.length > 4096) throw new BrowserWalletError("Invalid recovery words");
+  return walletRecoveryKey({ format: "rillswap-browser-recovery", version: 1, scheme: WALLET_SCHEME,
+    mnemonic: words.normalize("NFKD").trim().replace(/\s+/g, " ") });
+}
+
 /** Distinct test-network accounts. Mainnet is standard BIP84 account zero. */
 export function refundDerivationPath(network: NetworkName, index: number): string {
   if (!NETWORK_NAMES.includes(network) || !Number.isSafeInteger(index) || index < 0 || index >= INDEX_LIMIT) {

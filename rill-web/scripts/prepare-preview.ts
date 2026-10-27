@@ -3,7 +3,7 @@ import { recoveryInspectionCases } from "../unit/fixtures/recoveryInspectionCase
 import { recoveryRefundCases } from "../unit/fixtures/recoveryRefundCases";
 import { constructSelectedRecoveryRefund } from "../src/recoveryInspection";
 import canonicalize from "canonicalize";
-import { hexToBytes } from "@noble/hashes/utils.js";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 
 // Copy identical dist bytes to root and a repository subpath for loopback tests.
 rmSync("tmp/preview", { recursive: true, force: true });
@@ -48,7 +48,7 @@ const ui = await Bun.build({ entrypoints: ["src/swapUi.ts"], outdir: "tmp/previe
 if (!ui.success) throw new AggregateError(ui.logs, "UI test bundle failed");
 writeFileSync("tmp/preview/test-only/swap.html", readFileSync("dist/swap.html", "utf8")
   .replace(/src="\.\/assets\/[^"]+"/, 'src="./swapUi.js"').replaceAll("./assets/", "/assets/")
-  .replace("http://localhost:8091", "http://localhost:8091 http://127.0.0.1:8092 http://localhost:8092"));
+  .replace("http://localhost:8091", "http://localhost:8091 http://127.0.0.1:8092 http://localhost:8092 http://127.0.0.1:8093"));
 
 const recoveryAdmission = await Bun.build({ entrypoints: ["src/recoveryDocument.ts", "src/recoveryInspection.ts"], outdir: "tmp/preview/test-only", target: "browser", format: "esm" });
 if (!recoveryAdmission.success) throw new AggregateError(recoveryAdmission.logs, "recovery admission test bundle failed");
@@ -85,6 +85,20 @@ const { reverseCase } = await import("../unit/fixtures/reverseRecoveryCases");
 const { createRecoveryKey } = await import("../src/recoveryKeys");
 const reverseNativeCase = reverseCase(), reverseRecoveryKey = await createRecoveryKey();
 writeFileSync("tmp/preview/test-only/reverse-recovery.json", JSON.stringify({ ...reverseNativeCase, plaintext: canonicalize(reverseNativeCase.record), identity: reverseRecoveryKey.identity }));
+// Authentic original-session funding archive for file-free browser Resume tests.
+const { clientSessionSecret, providerSessionSecret, signDigest } = await import("../unit/fixtures/recoveryInspectionFixture");
+const { unsignedEnvelopeHash } = await import("../src/swap/hashes");
+const { wrapPrivateRegtestEnvelope } = await import("../src/nip59Transport");
+const resumedRecord = structuredClone(reverseNativeCase.record), resumedContext = resumedRecord.verification_context;
+resumedRecord.extensions["rillswap/browser-reverse-session"] = { client_session_secret: bytesToHex(clientSessionSecret), original_deadline_at: resumedRecord.contract_terms.terms_expiry };
+const archivedBinding = resumedRecord.funding_history[0]!;
+const fundingEnvelope = { protocol: "rillswap", wire_version: "1", profile_id: "ln-to-btc/v1", network_identity: resumedRecord.network_identity,
+  session_id: resumedContext.handshake_init.session_id, message_id: "e1".repeat(32), sender_session_key: resumedContext.provider_session_xonly_key,
+  sequence: 4, in_reply_to: null, contract_hash: resumedRecord.contract_hash, message_type: "funding_binding", required_features: [], extensions: {},
+  payload: { binding: archivedBinding.binding, funding_binding_signature: archivedBinding.funder_session_signature, funding_transaction: reverseNativeCase.fundingTxHex }, signature: "" };
+fundingEnvelope.signature = signDigest(unsignedEnvelopeHash(fundingEnvelope), providerSessionSecret);
+writeFileSync("tmp/preview/test-only/reverse-resume.json", JSON.stringify({ ...reverseNativeCase, record: resumedRecord,
+  archiveEvent: wrapPrivateRegtestEnvelope(canonicalize(fundingEnvelope)!, providerSessionSecret, resumedContext.client_session_xonly_key) }));
 writeFileSync("tmp/preview/test-only/reverse-recovery.html", '<!doctype html><main id="root"></main><script type="module">import * as recovery from "./browserReverseRecovery.js"; import * as keys from "./recoveryKeys.js"; import { reverseRecoveryControls } from "./reverseRecoveryUi.js";' +
   'window.reverseRecovery = recovery; window.reverseKeys = keys; window.mountReverseRecovery = (data) => { window.reverseUi = { api: "http://127.0.0.1:8091/api", broadcast: "http://127.0.0.1:8092/api", current: true };' +
   'return reverseRecoveryControls(document.querySelector("#root"), { plaintext: new TextEncoder().encode(data.plaintext), identity: data.identity, network: data.expectedNetwork,' +

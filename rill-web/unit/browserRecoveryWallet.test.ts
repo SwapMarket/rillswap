@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { HDKey } from "@scure/bip32";
-import { deriveRefundKey, parseWalletBackup, refundDerivationPath, walletRecoveryKey, WALLET_SCHEME } from "../src/browserRecoveryWallet";
+import { deriveRefundKey, parseWalletBackup, recoveryKeyFromWords, refundDerivationPath, walletRecoveryKey, WALLET_SCHEME } from "../src/browserRecoveryWallet";
 import { scriptAddress } from "../src/swap/address";
 
 const backup = { format: "rillswap-browser-recovery", version: 1, scheme: WALLET_SCHEME,
@@ -18,6 +18,13 @@ test("v1 root-to-age derivation is deterministic and uses the frozen domain", as
   const key = await walletRecoveryKey(backup);
   expect(key.recipient).toBe("age17qylr3cu8dakpdtuw0mq8n43uprl8r0pppavg4cttcrj77t29eysju3h89");
   expect((await walletRecoveryKey(backup)).identity).toBe(key.identity);
+});
+
+test("recovery words derive the same decryption key without requiring browser state", async () => {
+  const expected = await walletRecoveryKey(backup);
+  expect((await recoveryKeyFromWords(`  ${backup.mnemonic.replaceAll(" ", "\n")}  `)).identity).toBe(expected.identity);
+  await expect(recoveryKeyFromWords(backup.mnemonic.replace("about", "abandon"))).rejects.toThrow();
+  expect(() => recoveryKeyFromWords("x".repeat(4097))).toThrow();
 });
 
 test("test-network accounts are distinct and address indices never wrap", () => {

@@ -154,7 +154,7 @@ test("accepted recovery broadcast also stays disabled and the saved claim cannot
   await expect(page.locator("#swap-reverse-recovery-message")).toContainText("Claim accepted:"); await expect(page.locator("#swap-reverse-recovery-broadcast")).toBeDisabled(); expect(transport.posts).toBe(1);
 });
 
-for (const change of ["file", "key", "network"]) {
+for (const change of ["file", "key", "words", "network"]) {
   test(`actual recovery panel ${change} control invalidates an in-flight reverse claim exposure`, async ({ page }) => {
     const data = fixture(), key = await createRecoveryKey(), other = await createRecoveryKey();
     const encrypted = await encryptCanonicalRecoveryForRecipient(new TextEncoder().encode(data.plaintext), key.recipient);
@@ -172,6 +172,10 @@ for (const change of ["file", "key", "network"]) {
     await page.locator("#swap-reverse-recovery-broadcast").click(); await pending;
     if (change === "file") await page.locator("#swap-recovery-file").setInputFiles(payload(encrypted, "different.age"));
     else if (change === "key") await page.locator("#swap-recovery-key-file").setInputFiles(payload(other.file, "different.key"));
+    else if (change === "words") {
+      await page.getByText("Use a saved recovery key (optional)", { exact: true }).click();
+      await page.locator("#swap-recovery-words").fill("changed");
+    }
     else { await page.locator("#swap-settings-toggle").click(); await page.locator("#swap-network").selectOption("signet"); await page.locator("#swap-settings-close").click(); }
     release(); await completed;
     // Wait for the immutable encrypted state read after the completed observer,

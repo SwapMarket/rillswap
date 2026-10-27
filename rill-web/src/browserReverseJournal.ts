@@ -197,6 +197,20 @@ export class BrowserReverseJournal {
       tx.oncomplete = () => resolve(result); tx.onabort = tx.onerror = () => reject(new ReverseJournalRefusedError());
     });
   }
+  /** Every native execution saved in this browser (claim-only imports excluded), each checked like `get`. */
+  async list(): Promise<readonly ReverseJournalRecord[]> {
+    return new Promise((resolve, reject) => {
+      const tx = this.database.transaction([...STORES]), request = tx.objectStore("sessions").getAll(); const result: ReverseJournalRecord[] = [];
+      request.onsuccess = () => { try {
+        for (const value of request.result as unknown[]) {
+          if ((value as { kind?: unknown } | null)?.kind === "claim-only") continue;
+          const record = recordSnapshot(value); require(record.id === idFor(record.context.networkIdentity, record.context.sessionId));
+          this.#checkElections(tx, record, () => {}); result.push(record);
+        }
+      } catch { tx.abort(); } };
+      tx.oncomplete = () => resolve(Object.freeze(result)); tx.onabort = tx.onerror = () => reject(new ReverseJournalRefusedError());
+    });
+  }
   async #write(expected: ReverseJournalRecord | null, next: ReverseJournalRecord,
     unique?: { store: "payments" | "claims"; entry: Election; previous: Election["state"] | null }): Promise<ReverseJournalRecord> {
     await new Promise<void>((resolve, reject) => {

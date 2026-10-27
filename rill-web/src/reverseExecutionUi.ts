@@ -1,9 +1,10 @@
-/** Explicit browser-only reverse steps. No connection, payment or resume on mount. */
+/** One reverse swap step at a time, with a shared live/Resume claim driver. */
 import canonicalize from "canonicalize";
 import { BrowserReverseJournal } from "./browserReverseJournal";
 import { BrowserHoldPayer } from "./swap/browserHoldPayer";
-import { validateMempoolApi, type NetworkName } from "./swap/config";
+import { explorerTxUrl, validateMempoolApi, type NetworkName } from "./swap/config";
 import { readBoundedChainText, readChainTip } from "./swap/chainTip";
+import { notifySwap, requestSwapNotifications } from "./swap/notifications";
 import { parseStrictEventJson } from "./strictEventJson";
 import { qrSvg } from "./qr";
 import type { PreparedReverseQuote } from "./swap/reverseSwap";
@@ -16,183 +17,236 @@ function input(root: HTMLElement, label: string, id: string, value = ""): HTMLIn
   const caption = node("label", label), field = node("input", "", id); field.value = value; field.autocomplete = "off"; field.spellcheck = false;
   caption.htmlFor = id; root.append(caption, field); return field;
 }
-/** Continuing is the acceptance; no checkbox gates the next action. */
-function consent(root: HTMLElement, text: string, id: string): void {
-  const note = node("p", text, id); note.className = "swap-consent"; root.append(note);
-}
 function button(root: HTMLElement, text: string, id: string): HTMLButtonElement {
   const control = node("button", text, id); control.type = "button"; root.append(control); return control;
 }
+function txLink(api: string, txid: string, label: string): HTMLAnchorElement {
+  const link = node("a", label); link.href = explorerTxUrl(api, txid); link.target = "_blank"; link.rel = "noopener noreferrer"; return link;
+}
 
-export interface ReverseExecutionUiOptions {
-  readonly prepared: PreparedReverseQuote;
+interface ReverseProgressOptions {
   readonly network: { readonly name: NetworkName; readonly genesis_hash: string };
-  readonly destinationScript: string;
   readonly chainApi: string;
   readonly broadcastApi: string;
-  readonly ageRecipient: string;
-  readonly nodeApi: string;
   readonly assertCurrent: () => void;
   readonly status: (message: string, step: number) => void;
   readonly download: (root: HTMLElement, file: Uint8Array, name: string) => void;
+  readonly saved?: (file: Uint8Array) => void;
+}
+export interface ReverseExecutionUiOptions extends ReverseProgressOptions {
+  readonly prepared: PreparedReverseQuote;
+  readonly destinationScript: string;
+  readonly ageRecipient: string;
+  readonly nodeApi: string;
+}
+type ClaimExecution = Pick<PreparedReverseExecution, "terms" | "record" | "recoveryFile" | "claimFeeSat" | "funding" | "fundingDepth" | "receiveFunding" | "prepareClaim" | "exposeClaim" | "dispose">;
+
+function view(root: HTMLElement, e: ClaimExecution, options: ReverseProgressOptions) {
+  const screen = node("section", "", "swap-reverse-steps"), advanced = node("details", "", "swap-reverse-advanced");
+  const message = node("p", "", "swap-reverse-message"), backups = node("div", "", "swap-reverse-backups");
+  advanced.append(node("summary", "Advanced"));
+  const maximum = BigInt(e.terms.economics.claim_fee_reserve_sat) < BigInt(e.terms.max_claim_fee_sat)
+    ? e.terms.economics.claim_fee_reserve_sat : e.terms.max_claim_fee_sat;
+  const fee = input(advanced, "Claim network fee (sat)", "swap-reverse-claim-fee", e.claimFeeSat ?? maximum);
+  // Spend the signed reserve by default. An arbitrary low manual fee can strand a one-shot claim.
+  fee.readOnly = true;
+  advanced.append(backups);
+  const backup = (file: Uint8Array): void => {
+    for (const old of backups.querySelectorAll<HTMLAnchorElement>("a")) if (old.href.startsWith("blob:")) URL.revokeObjectURL(old.href);
+    backups.replaceChildren(); options.download(backups, file, "rillswap-ln-to-btc-backup.age");
+    const link = backups.querySelector("a"); if (link) link.textContent = "Download swap backup";
+    options.saved?.(file);
+  };
+  const notifications = button(advanced, "Enable notifications", "swap-reverse-notifications");
+  notifications.hidden = typeof Notification === "undefined";
+  notifications.onclick = () => {
+    notifications.disabled = true;
+    void requestSwapNotifications().then((granted) => {
+      notifications.textContent = granted ? "Notifications enabled" : "Notifications unavailable";
+    });
+  };
+  root.replaceChildren(screen, advanced, message);
+  return { screen, advanced, message, fee, backup };
 }
 
-/** Called on the selected provider's explicit Continue action, after matching key-backup verification. */
+async function claimConfirmed(api: string, txid: string, network: ReverseProgressOptions["network"], signal: AbortSignal): Promise<boolean> {
+  const timeout = AbortSignal.any([signal, AbortSignal.timeout(15000)]), tip = await readChainTip(api, network, { signal: timeout });
+  const get = async (path: string, limit: number) => readBoundedChainText(await fetch(`${api}/${path}`, { signal: timeout,
+    credentials: "omit", redirect: "error", cache: "no-store", referrerPolicy: "no-referrer" }), timeout, limit);
+  const inclusion = parseStrictEventJson(await get(`tx/${txid}/status`, 4096), 4096) as Record<string, unknown>;
+  if (inclusion.confirmed !== true || typeof inclusion.block_height !== "number" || !Number.isSafeInteger(inclusion.block_height) ||
+    inclusion.block_height < 1 || inclusion.block_height > tip.height || typeof inclusion.block_hash !== "string" || !/^[0-9a-f]{64}$/.test(inclusion.block_hash)) return false;
+  return await get(`block-height/${inclusion.block_height}`, 64) === inclusion.block_hash;
+}
+
+/** Only this driver advances a paid live or explicitly resumed swap. UNKNOWN stages are read-only. */
+function drive(v: ReturnType<typeof view>, e: ClaimExecution, options: ReverseProgressOptions, signal: AbortSignal,
+  settlement?: () => Promise<string | null>): void {
+  const api = validateMempoolApi(options.chainApi, options.network.name), broadcastApi = validateMempoolApi(options.broadcastApi, options.network.name);
+  const current = (): void => { signal.throwIfAborted(); options.assertCurrent(); };
+  let busy = false, terminal = false, notifiedConfirmation = false;
+  const check = button(v.advanced, "Check now", "swap-reverse-funding");
+  const exported = button(v.advanced, "Download exact signed fallback", "swap-reverse-export"); exported.hidden = true;
+  const showClaim = (txid: string): void => {
+    v.screen.replaceChildren(node("h2", "Confirming your claim"), node("p", e.record.stage === "claim-unknown"
+      ? "Not confirmed yet. You can download the signed fallback below and broadcast it manually." : "Your Bitcoin is on its way."),
+      txLink(api, txid, "View claim transaction"));
+    exported.hidden = false;
+  };
+  const advance = async (): Promise<void> => {
+    if (busy || terminal || signal.aborted) return;
+    busy = true; check.disabled = true;
+    try {
+      current();
+      if (e.record.stage === "payment-unknown") {
+        try { const file = await e.receiveFunding(10000); current(); v.backup(file); v.message.textContent = ""; notifySwap("Bitcoin is locked. Waiting for confirmations."); }
+        catch { current(); v.message.textContent = "Waiting for the provider to lock the Bitcoin. Do not pay again."; return; }
+      }
+      if (e.record.stage === "funded") {
+        v.screen.replaceChildren(node("h2", "Locking Bitcoin"), node("p", "Checking confirmations...", "swap-reverse-funding-status"));
+        if (e.funding) v.screen.append(txLink(api, e.funding.txid, "View deposit transaction"));
+        options.status("Waiting for Bitcoin confirmations", 2);
+        let depth: number;
+        try { depth = await e.fundingDepth(api); current(); }
+        catch { current(); v.message.textContent = "Waiting for confirmation data from your mempool API."; return; }
+        v.screen.querySelector("p")!.textContent = `${depth} of ${e.terms.funding_confirmations} confirmations`;
+        if (depth < e.terms.funding_confirmations) return;
+        const fee = v.fee.value.trim();
+        if (!/^(0|[1-9][0-9]{0,15})$/.test(fee)) throw new Error("Invalid fee");
+        v.fee.disabled = true;
+        v.screen.replaceChildren(node("h2", "Claiming your Bitcoin")); options.status("Claiming your Bitcoin", 3);
+        const prepared = await e.prepareClaim(api, BigInt(fee), current); current(); v.backup(prepared.recoveryFile);
+      }
+      if (e.record.stage === "claim-ready") {
+        v.fee.disabled = true;
+        v.screen.replaceChildren(node("h2", "Claiming your Bitcoin")); options.status("Claiming your Bitcoin", 3);
+        const result = await e.exposeClaim(api, broadcastApi, "broadcast", current); current();
+        showClaim(result.txid);
+        options.status(`Claim ${result.outcome}: ${result.txid}`, 3);
+        notifySwap(result.outcome === "accepted" ? "Your Bitcoin claim was submitted." : "Your Bitcoin claim needs a manual check.");
+        if (result.outcome === "unknown") v.message.textContent = "Submission is uncertain. Checking the chain without sending again.";
+      }
+      if (e.record.stage === "claim-unknown" || e.record.stage === "accepted") {
+        const txid = e.record.claim!.txid; showClaim(txid);
+        let confirmed = false;
+        try { confirmed = await claimConfirmed(api, txid, options.network, signal); current(); } catch { current(); }
+        if (!confirmed) return;
+        let payment: string | null = null;
+        try { if (settlement) payment = await settlement(); current(); } catch { current(); }
+        v.screen.replaceChildren(node("h2", "Bitcoin received"), txLink(api, txid, "View claim transaction"));
+        const awaitingNode = settlement !== undefined && payment !== "SUCCEEDED";
+        options.status(payment === "SUCCEEDED" ? "Swap complete. Bitcoin received and Lightning payment settled" :
+          awaitingNode ? "Bitcoin received. Waiting for Lightning settlement" : "Bitcoin claim confirmed", awaitingNode ? 3 : 4);
+        v.message.textContent = payment === "SUCCEEDED" ? "Swap complete." : awaitingNode
+          ? "Checking your node's original payment. It will not be paid again." : "Your wallet reports the Lightning payment's settlement.";
+        if (!notifiedConfirmation) { notifySwap("Your Bitcoin claim is confirmed."); notifiedConfirmation = true; }
+        terminal = !awaitingNode;
+      } else if (e.record.stage === "terms-ready" || e.record.stage === "secrets-ready") {
+        v.screen.replaceChildren(node("h2", "No payment was started here"), node("p", "This saved record cannot start or repeat a payment.")); terminal = true;
+      }
+    } catch {
+      if (!signal.aborted) { v.message.textContent = "Swap paused. Open it from Your swaps to inspect the saved state; uncertain payments and claims are never retried.";
+        notifySwap("Your swap needs attention."); terminal = true; }
+    } finally { busy = false; check.disabled = signal.aborted; }
+  };
+  check.onclick = () => { void advance(); };
+  exported.onclick = () => {
+    if (busy || signal.aborted) return;
+    busy = true; exported.disabled = true;
+    void e.exposeClaim(api, broadcastApi, "download", current).then((result) => {
+      current(); if (result.transactionHex) options.download(v.advanced, new TextEncoder().encode(result.transactionHex), "rillswap-signed-claim.hex");
+    }).catch(() => { if (!signal.aborted) v.message.textContent = "Could not export the saved claim. Keep the swap backup."; })
+      .finally(() => { busy = false; exported.disabled = false; });
+  };
+  void (async () => {
+    while (!signal.aborted && !terminal) {
+      await advance();
+      if (signal.aborted || terminal) break;
+      await new Promise<void>((resolve) => {
+        const finish = (): void => { clearTimeout(timer); signal.removeEventListener("abort", finish); resolve(); };
+        const timer = setTimeout(finish, 5000); signal.addEventListener("abort", finish, { once: true });
+      });
+    }
+  })();
+}
+
+/** Resume must be explicitly chosen; merely listing or opening saved records has no claim side effects. */
+export function mountResumedReverseExecution(root: HTMLElement, execution: ClaimExecution, options: ReverseProgressOptions): () => void {
+  const cancellation = new AbortController(), v = view(root, execution, options); v.backup(execution.recoveryFile);
+  const stopped = (): void => { cancellation.abort(); execution.dispose(); window.removeEventListener("pagehide", stopped); };
+  window.addEventListener("pagehide", stopped, { once: true });
+  drive(v, execution, options, cancellation.signal); return stopped;
+}
+
+/** The signed price review authorizes the bounded automatic claim, not any new Lightning payment. */
 export async function mountReverseExecution(root: HTMLElement, options: ReverseExecutionUiOptions): Promise<() => void> {
   options = { ...options, network: structuredClone(options.network) };
-  let disposed = false;
-  const current = (): void => { if (disposed) throw new Error("Execution tab closed"); options.assertCurrent(); }; current();
-  const api = validateMempoolApi(options.chainApi, options.network.name), broadcastApi = validateMempoolApi(options.broadcastApi, options.network.name);
-  const journal = await BrowserReverseJournal.open(); current();
-  let execution: PreparedReverseExecution | undefined;
-  const backups = node("section", "", "swap-reverse-backups"), steps = node("section", "", "swap-reverse-steps"), message = node("p", "", "swap-reverse-message");
-  root.replaceChildren(backups, steps, message);
-  const error = (): void => { message.textContent = "Action stopped. Keep the encrypted backups. An uncertain payment or claim is never retried. Use browser recovery to inspect the saved state."; };
-  const act = (control: HTMLButtonElement, work: () => Promise<void>): void => {
-    control.onclick = () => { control.disabled = true; message.textContent = ""; void work().catch(error); };
-  };
-  const download = (file: Uint8Array, stage: string): void => { options.download(backups, file, `rillswap-ln-to-btc-${stage}.age`); };
-  const stopped = (): void => { disposed = true; execution?.dispose(); journal.close(); window.removeEventListener("pagehide", stopped); };
+  const cancellation = new AbortController(); let execution: PreparedReverseExecution | undefined;
+  const current = (): void => { cancellation.signal.throwIfAborted(); options.assertCurrent(); };
+  const journal = await BrowserReverseJournal.open();
+  const stopped = (): void => { cancellation.abort(); execution?.dispose(); journal.close(); window.removeEventListener("pagehide", stopped); };
   window.addEventListener("pagehide", stopped, { once: true });
   try {
-    options.status("Checking signed final terms", 1);
-    const tip = await readChainTip(api, options.network); current();
-    execution = await options.prepared.prepareExecution({ destinationScript: options.destinationScript, tipHeight: tip.height, ageRecipient: options.ageRecipient, journal, assertCurrent: current }); current();
-    const e = execution, terms = e.terms;
-    download(e.recoveryFile, "terms");
-    steps.append(node("h2", "Final signed price"), node("p", `Pay ${terms.economics.hold_invoice_sat} sat over Lightning, plus the routing fee, to receive at least ${terms.economics.nominal_payout_sat} sat on-chain.`),
-      node("small", `Provider fee: ${terms.economics.success_fee_sat} sat. Claim reserve: ${terms.economics.claim_fee_reserve_sat} sat. Funding requires ${terms.funding_confirmations} confirmation(s). Provider refund height: ${terms.refund_lock_height}.`));
-    consent(steps, "By accepting you agree to these signed terms. The encrypted swap backup above and your browser recovery key are what let you recover; keep them.", "swap-reverse-consent-terms");
-    const acknowledge = (): void => { current(); };
-    /** From here the steps are the same whichever way the invoice was paid; `settlement` reports the payer's view, if any. */
-    const afterPayment = (settlement: () => Promise<string | null>): void => {
-      steps.append(node("p", "The payment is durably UNKNOWN to this page until the provider's signed funding arrives. Never pay another invoice to recover it. Funding checks and claims are separate explicit actions.", "swap-reverse-payment-note"));
-      const waiting = node("p", "Waiting for the provider to lock the Bitcoin (it does so once it holds your payment). This page keeps listening.", "swap-reverse-funding-status");
-      waiting.setAttribute("role", "status"); steps.append(waiting);
-      const funding = button(steps, "Check provider funding", "swap-reverse-funding");
-      const inspectFunding = async (): Promise<boolean> => {
-        try {
-          const file = await e.receiveFunding(30000); current(); download(file, "funded"); funding.disabled = true; waiting.remove();
-          options.status("Funding authenticated. Wait for confirmations, then approve your claim", 3);
-          const feeMax = [BigInt(terms.economics.claim_fee_reserve_sat), BigInt(terms.max_claim_fee_sat)].reduce((a, b) => a < b ? a : b);
-          const fee = input(steps, "Claim network fee (sat, maximum " + feeMax + ")", "swap-reverse-claim-fee", String(feeMax)); fee.inputMode = "numeric";
-          consent(steps, `Preparing the claim approves a payment to the signed payout script ${terms.client_destination_script} at the fee above. Signing uses your private preimage.`, "swap-reverse-consent-claim");
-          const prepare = button(steps, "Check confirmations and prepare claim", "swap-reverse-prepare-claim");
-          let value = "";
-          const claimApproval = (): void => { current(); if (fee.value.trim() !== value) throw new Error("Claim approval changed"); };
-          act(prepare, async () => {
-            value = fee.value.trim(); if (!/^(0|[1-9][0-9]{0,15})$/.test(value)) throw new Error("Invalid fee"); claimApproval();
-            try {
-              const prepared = await e.prepareClaim(api, BigInt(value), claimApproval); current(); download(prepared.recoveryFile, "claim"); fee.disabled = true;
-              steps.append(node("p", `Prepared claim ${prepared.claim.txid}: ${prepared.claim.outputValueSat} sat to your payout, ${prepared.claim.feeSat} sat network fee (${prepared.claim.vsize} vbytes).`));
-              consent(steps, "Broadcasting or downloading reveals the preimage in this exact signed transaction. Broadcast sends it to the configured API; downloads can be broadcast by anyone. The claim backup above records it.", "swap-reverse-consent-exposure");
-              const approveExposure = (): void => { claimApproval(); };
-              const broadcast = button(steps, "Broadcast claim once", "swap-reverse-broadcast"), exportClaim = button(steps, "Download exact signed claim", "swap-reverse-export");
-              let confirmation: HTMLButtonElement | undefined;
-              const exposeAction = async (action: "download" | "broadcast"): Promise<void> => {
-                approveExposure(); const result = await e.exposeClaim(api, broadcastApi, action, approveExposure); current();
-                broadcast.disabled = true;
-                if (result.transactionHex) options.download(backups, new TextEncoder().encode(result.transactionHex), "rillswap-signed-claim.hex");
-                // Only identical manual re-export stays available after exposure.
-                exportClaim.disabled = false;
-                options.status(`Claim ${result.outcome}: ${result.txid}`, result.outcome === "accepted" ? 4 : 3);
-                message.textContent = result.outcome === "accepted" ? "Claim broadcast accepted. Chain confirmation and Lightning settlement still need verification." : "Claim exposure outcome is unknown or exported. The app will not submit it again. Preserve these exact bytes.";
-                if (!confirmation) {
-                  confirmation = button(steps, "Check claim confirmation and Lightning settlement", "swap-reverse-settlement");
-                  const check = confirmation;
-                  act(check, async () => {
-                    try {
-                      current(); const signal = AbortSignal.timeout(15000), tip = await readChainTip(api, options.network, { signal }); current();
-                      const response = await fetch(`${api}/tx/${result.txid}/status`, { signal, credentials: "omit", redirect: "error", cache: "no-store", referrerPolicy: "no-referrer" });
-                      const inclusion = parseStrictEventJson(await readBoundedChainText(response, signal, 4096), 4096) as Record<string, unknown>; current();
-                      if (inclusion.confirmed !== true || typeof inclusion.block_height !== "number" || !Number.isSafeInteger(inclusion.block_height) || inclusion.block_height < 1 ||
-                        inclusion.block_height > tip.height || typeof inclusion.block_hash !== "string" || !/^[0-9a-f]{64}$/.test(inclusion.block_hash)) throw new Error("Claim not confirmed");
-                      const blockResponse = await fetch(`${api}/block-height/${inclusion.block_height}`, { signal, credentials: "omit", redirect: "error", cache: "no-store", referrerPolicy: "no-referrer" });
-                      if (await readBoundedChainText(blockResponse, signal, 64) !== inclusion.block_hash) throw new Error("Claim chain mismatch");
-                      const payment = await settlement(); current();
-                      const confirmations = `Trusted API observed ${tip.height - inclusion.block_height + 1} claim confirmation(s).`;
-                      if (payment === null) {
-                        // An external wallet reports its own settlement; the claim's confirmation is what this page can verify.
-                        options.status("Bitcoin claim confirmed. Your wallet shows the Lightning payment as settled once the provider learns the preimage", 4);
-                        message.textContent = `${confirmations} The provider settles your Lightning payment with the preimage revealed by this claim; your wallet reports that. Keep all recovery backups.`;
-                      } else if (payment === "SUCCEEDED") {
-                        options.status("Swap complete. Bitcoin claim confirmed and Lightning payment settled", 4);
-                        message.textContent = `${confirmations} Your pinned Lightning node reports payment succeeded. Keep all recovery backups.`;
-                      } else message.textContent = `Claim confirmed according to the trusted API. Lightning payment: ${payment.toLowerCase()}. No payment will be retried.`;
-                    } catch { message.textContent = "Confirmation or settlement evidence is not available yet. Check again without resubmitting the payment or claim."; }
-                    finally { check.disabled = false; }
-                  });
-                }
-              };
-              act(broadcast, () => exposeAction("broadcast")); act(exportClaim, () => exposeAction("download"));
-            } catch { error(); if (e.record.stage === "funded") prepare.disabled = false; }
-          });
-          return true;
-        } catch { funding.disabled = false; message.textContent = "No usable signed funding evidence yet. Check again without making another payment."; return false; }
-      };
-      act(funding, async () => { await inspectFunding(); });
-      // Receive-only waiting follows payment; it cannot pay, sign or broadcast. The page keeps
-      // listening by itself; the button remains for a manual check after the invoice expiry.
-      void (async () => {
-        const until = terms.invoice_binding.expires_at + 600;
-        while (!disposed && e.record.stage === "payment-unknown" && Math.floor(Date.now() / 1000) < until) {
-          funding.disabled = true; message.textContent = "";
-          if (await inspectFunding()) return;
-        }
-        if (!disposed && e.record.stage === "payment-unknown") waiting.textContent = "The invoice has expired. If your wallet paid it, the provider may still fund; check again. If the payment failed or was never sent, nothing was lost.";
-      })();
+    current(); options.status("Checking signed final terms", 0);
+    const api = validateMempoolApi(options.chainApi, options.network.name), tip = await readChainTip(api, options.network); current();
+    execution = await options.prepared.prepareExecution({ destinationScript: options.destinationScript, tipHeight: tip.height,
+      ageRecipient: options.ageRecipient, journal, assertCurrent: current }); current();
+    const e = execution, terms = e.terms, v = view(root, e, options); v.backup(e.recoveryFile);
+    v.screen.append(node("h2", `Pay ${BigInt(terms.economics.hold_invoice_sat).toLocaleString()} sat`),
+      node("p", `Receive at least ${BigInt(terms.economics.nominal_payout_sat).toLocaleString()} sat in Bitcoin. Your wallet's routing fee is extra.`),
+      node("p", "After payment, this page checks confirmations and claims your Bitcoin automatically."));
+    const accept = button(v.screen, "Accept and show the invoice", "swap-reverse-accept");
+    const nodeControls = node("section"); v.advanced.append(nodeControls);
+    const afterPayment = (settlement?: () => Promise<string | null>): void => {
+      nodeControls.remove(); v.message.textContent = "Waiting for the provider to lock the Bitcoin.";
+      drive(v, e, options, cancellation.signal, settlement);
     };
-    // Default: show the invoice for any Lightning wallet. Advanced: dispatch one exact route from the user's own LND node.
-    consent(steps, "Accepting shows the invoice; from then on your wallet owns the routing fee and how long its payment may stay pending. The provider locks Bitcoin only while it holds your payment.", "swap-reverse-consent-wallet");
-    const accept = button(steps, "Accept and show the invoice", "swap-reverse-accept");
-    let acceptedOnce = false;
-    act(accept, async () => {
-      await e.accept(acknowledge); current();
-      const exposure = await e.exposeInvoice(acknowledge); current(); advanced.remove();
-      options.status("Signed terms accepted. Pay the invoice from your Lightning wallet", 2);
-      const open = node("a", "Open in your wallet", "swap-reverse-invoice-uri"); open.href = `lightning:${exposure.bolt11}`;
-      const copy = node("button", "Copy invoice", "swap-reverse-invoice-copy"); copy.type = "button";
-      copy.onclick = () => { void navigator.clipboard?.writeText(exposure.bolt11).then(() => { copy.textContent = "Copied"; }, () => {}); };
-      steps.append(node("h3", `Pay ${terms.economics.hold_invoice_sat} sat from any Lightning wallet`),
-        qrSvg(`lightning:${exposure.bolt11}`, "QR code of the Lightning invoice", "swap-reverse-invoice-qr"),
-        node("pre", exposure.bolt11, "swap-reverse-invoice"), open, copy,
-        node("p", `Pay it once, before ${new Date(exposure.expiresAt * 1000).toLocaleString()}. Your wallet may show the payment as pending until the provider locks the Bitcoin and this page claims it; that is expected.`, "swap-reverse-invoice-notes"));
-      afterPayment(async () => null);
-    });
-    const advanced = node("details", "", "swap-reverse-advanced");
-    advanced.append(node("summary", "Advanced: pay from your own LND node instead"));
-    const endpoint = input(advanced, "LND REST endpoint (direct browser access)", "swap-reverse-node-api", options.nodeApi);
-    const identity = input(advanced, "Pinned node compressed public key", "swap-reverse-node-identity"), credential = input(advanced, "Scoped macaroon (hex, this tab only)", "swap-reverse-macaroon"); credential.type = "password";
-    const routingFee = input(advanced, "Maximum routing fee (sat)", "swap-reverse-routing-fee", "1000"); routingFee.inputMode = "numeric";
-    advanced.append(node("p", options.network.name === "regtest" ? "Connect authorizes the disposable regtest node adapter to disclose its scoped credential to this tab. It can spend test Lightning funds. Nothing is paid until you approve the exact route." :
-      "Use an LND node with browser-trusted TLS, explicit CORS, and scoped permissions. The credential stays in this tab. No public remote node is supplied."));
-    const connect = button(advanced, options.network.name === "regtest" ? "Accept and connect regtest test node" : "Accept and connect configured Lightning node", "swap-reverse-connect");
-    steps.append(advanced);
-    act(connect, async () => {
-      acknowledge(); const nodeApi = validateMempoolApi(endpoint.value.trim(), options.network.name);
-      const feeValue = routingFee.value.trim(); if (!/^(0|[1-9][0-9]{0,15})$/.test(feeValue)) throw new Error("Invalid routing fee");
-      let macaroon = credential.value.trim(), key = identity.value.trim();
-      if (options.network.name === "regtest" && !macaroon && !key) {
-        const signal = AbortSignal.timeout(10000), response = await fetch(nodeApi + "/configuration", { signal, method: "GET", credentials: "omit", redirect: "error", cache: "no-store", referrerPolicy: "no-referrer" });
-        const data = parseStrictEventJson(await readBoundedChainText(response, signal, 16384), 16384) as Record<string, unknown>;
-        acknowledge(); if (Object.keys(data).sort().join() !== "macaroon,network_identity,node_identity" || canonicalize(data.network_identity) !== canonicalize(options.network) ||
-          typeof data.macaroon !== "string" || typeof data.node_identity !== "string") throw new Error("Node configuration mismatch");
-        macaroon = data.macaroon; key = data.node_identity;
-      }
-      acknowledge(); const payer = new BrowserHoldPayer({ endpoint: nodeApi, macaroon, nodeIdentity: key, network: options.network }); credential.value = "";
-      endpoint.disabled = identity.disabled = credential.disabled = routingFee.disabled = true; accept.disabled = true;
-      if (e.record.stage === "terms-ready" && !acceptedOnce) { await e.accept(acknowledge); current(); acceptedOnce = true; }
-      options.status("Signed terms accepted. Approve the exact route from your node", 2);
-      const approval = (): void => { acknowledge(); if (endpoint.value.trim() !== nodeApi || routingFee.value.trim() !== feeValue) throw new Error("Node selection changed"); };
-      const plan = await e.planPayment(payer, nodeApi, BigInt(feeValue), approval); approval();
-      steps.append(node("p", `Exact route: ${terms.economics.hold_invoice_sat} sat plus ${(BigInt(plan.feeMsat) / 1000n).toString()} sat (${plan.feeMsat} msat) routing fee. Maximum absolute HTLC expiry: block ${plan.limits.maxExpiryHeight}.`));
-      const pay = button(steps, "Pay this exact Lightning route once", "swap-reverse-pay");
-      act(pay, async () => {
-        const result = await e.pay(payer, plan, nodeApi, approval); current();
-        options.status(`Payment ${result.toLowerCase().replaceAll("_", " ")}. Checking signed funding evidence`, 3);
-        afterPayment(() => payer.status(plan.paymentHash, plan.invoiceBinding.amount_msat));
-      });
-    });
+    accept.onclick = () => {
+      accept.disabled = true;
+      void (async () => {
+        await e.accept(current); current(); const invoice = await e.exposeInvoice(current); current(); nodeControls.remove();
+        options.status("Pay the invoice from your Lightning wallet", 1);
+        const open = node("a", "Open in your wallet", "swap-reverse-invoice-uri"); open.href = `lightning:${invoice.bolt11}`;
+        v.screen.replaceChildren(node("h2", `Pay ${terms.economics.hold_invoice_sat} sat`),
+          qrSvg(`lightning:${invoice.bolt11}`, "QR code of the Lightning invoice", "swap-reverse-invoice-qr"),
+          node("pre", invoice.bolt11, "swap-reverse-invoice"), open,
+          node("p", "Pay it once; your wallet shows it as pending until Bitcoin is locked and claimed, because only your browser holds the secret needed to settle it.", "swap-reverse-invoice-notes"));
+        const copy = button(v.screen, "Copy invoice", "swap-reverse-invoice-copy");
+        copy.onclick = () => { void navigator.clipboard?.writeText(invoice.bolt11).then(() => { copy.textContent = "Copied"; }, () => {}); };
+        afterPayment();
+      })().catch(() => { if (!cancellation.signal.aborted) v.message.textContent = "Could not continue. Keep the saved swap; no payment will be retried."; });
+    };
+    const endpoint = input(nodeControls, "LND REST endpoint (optional)", "swap-reverse-node-api", options.nodeApi);
+    const identity = input(nodeControls, "Pinned node compressed public key", "swap-reverse-node-identity");
+    const credential = input(nodeControls, "Scoped macaroon (this tab only)", "swap-reverse-macaroon"); credential.type = "password";
+    const routingFee = input(nodeControls, "Maximum routing fee (sat)", "swap-reverse-routing-fee", "1000");
+    const connect = button(nodeControls, "Accept and connect configured Lightning node", "swap-reverse-connect");
+    connect.onclick = () => {
+      accept.disabled = connect.disabled = true;
+      void (async () => {
+        current(); const nodeApi = validateMempoolApi(endpoint.value.trim(), options.network.name), feeValue = routingFee.value.trim();
+        if (!/^(0|[1-9][0-9]{0,15})$/.test(feeValue)) throw new Error("Invalid routing fee");
+        let macaroon = credential.value.trim(), key = identity.value.trim();
+        if (options.network.name === "regtest" && !macaroon && !key) {
+          const signal = AbortSignal.timeout(10000), response = await fetch(nodeApi + "/configuration", { signal, credentials: "omit", redirect: "error", cache: "no-store", referrerPolicy: "no-referrer" });
+          const data = parseStrictEventJson(await readBoundedChainText(response, signal, 16384), 16384) as Record<string, unknown>;
+          current(); if (Object.keys(data).sort().join() !== "macaroon,network_identity,node_identity" || canonicalize(data.network_identity) !== canonicalize(options.network) ||
+            typeof data.macaroon !== "string" || typeof data.node_identity !== "string") throw new Error("Node configuration mismatch");
+          macaroon = data.macaroon; key = data.node_identity;
+        }
+        current(); const payer = new BrowserHoldPayer({ endpoint: nodeApi, macaroon, nodeIdentity: key, network: options.network }); credential.value = "";
+        endpoint.disabled = identity.disabled = credential.disabled = routingFee.disabled = true;
+        await e.accept(current); current();
+        const approval = (): void => { current(); if (endpoint.value.trim() !== nodeApi || routingFee.value.trim() !== feeValue) throw new Error("Node selection changed"); };
+        const plan = await e.planPayment(payer, nodeApi, BigInt(feeValue), approval); approval();
+        v.screen.replaceChildren(node("h2", "Approve your Lightning payment"), node("p", `${terms.economics.hold_invoice_sat} sat plus ${plan.feeMsat} msat routing fee.`));
+        const pay = button(v.screen, "Pay this exact Lightning route once", "swap-reverse-pay");
+        pay.onclick = () => { pay.disabled = true; void (async () => {
+          await e.pay(payer, plan, nodeApi, approval); current(); v.screen.replaceChildren(node("h2", "Locking Bitcoin"));
+          afterPayment(() => payer.status(plan.paymentHash, plan.invoiceBinding.amount_msat));
+        })().catch(() => { v.message.textContent = "Payment outcome is uncertain. Resume the saved swap without paying again."; }); };
+      })().catch(() => { if (!cancellation.signal.aborted) v.message.textContent = "Could not connect or prepare the payment. No payment will be retried."; });
+    };
     return stopped;
-  } catch { stopped(); error(); return stopped; }
+  } catch { stopped(); root.replaceChildren(node("p", "Could not prepare this swap. No payment was started.")); return stopped; }
 }
