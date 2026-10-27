@@ -94,18 +94,18 @@ test("the recovery panel uses the saved browser key and makes no external connec
   expect(consoleOutput.join("\n")).not.toContain("AGE-SECRET-KEY");
 });
 
-test("existing mainnet files can be inspected with their original age key while new mainnet swaps remain blocked", async ({ page }) => {
+test("existing mainnet files can be inspected with their original age key while new mainnet swaps are enabled", async ({ page }) => {
   const key = await createRecoveryKey();
   const file = await encryptCanonicalRecoveryForRecipient(plaintext("expired mainnet legacy, no binding"), key.recipient);
   await page.goto("http://127.0.0.1:18765/swap.html");
-  await expect(page.locator("#swap-start")).toBeDisabled();
+  await expect(page.locator("#swap-start")).toBeEnabled();
   await page.locator("#swap-recovery summary").first().click();
   await page.locator("#swap-recovery-file").setInputFiles(payload(file, "older-mainnet-swap.age"));
   await page.locator("#swap-recovery-key-file").setInputFiles(payload(key.file, "older-key.age-key"));
   await page.locator("#swap-recovery-inspect").click();
   await expect(page.locator("#swap-recovery-result h3")).toHaveText("Recovery record verified");
   await expect(page.locator("#swap-recovery-result")).toContainText("mainnet · BTC to Lightning · 0 recorded funding revisions.");
-  await expect(page.locator("#swap-start")).toBeDisabled();
+  await expect(page.locator("#swap-start")).toBeEnabled();
 });
 
 test("wrong key, wrong network, and damaged signed data are refused without exposing input or replacing the browser identity", async ({ page }) => {

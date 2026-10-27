@@ -72,7 +72,7 @@ export async function prepareReverseExecution(session: Session, handshake: Hands
   let accepted = false, acceptanceStarted = false, paying = false, claiming = false, exposing = false;
    const dispose = (): void => { disposed = true; contract.secret.fill(0); preimage.fill(0); session.secret.fill(0); document?.fill(0); };
   try {
-    current(); require(name !== "mainnet" && init.profile_id === "ln-to-btc/v1" && session.profile === init.profile_id &&
+    current(); require(init.profile_id === "ln-to-btc/v1" && session.profile === init.profile_id &&
       Number.isSafeInteger(config.tipHeight) && config.tipHeight > 0 && config.tipHeight < 500000000);
     const limits = request.limits;
     const firm = checkReverseFirmQuoteRequest({ kind: "ln-to-btc", mode: "firm", nominal_payout_sat: request.payoutSat.toString(),

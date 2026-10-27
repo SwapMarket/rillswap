@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import type { BrowserReverseJournal, ReverseIntentContext, ReverseClaimIntent, ReverseJournalRecord } from "../src/browserReverseJournal";
 import type { BoundedHoldPlan } from "../src/swap/browserHoldPayer";
+import mainnet from "../src/networks/mainnet.json" with { type: "json" };
 
 declare global { interface Window { BrowserReverseJournal: typeof BrowserReverseJournal; reverseJournalReady: boolean } }
 const draft = (): { context: ReverseIntentContext; plan: BoundedHoldPlan; claim: ReverseClaimIntent } =>
@@ -36,6 +37,22 @@ test("listing saved executions includes prepayment stages without granting payme
   });
   expect(result).toEqual([saved]);
   expect(result[0]!.payment).toBeNull(); expect(result[0]!.claim).toBeNull();
+});
+
+test("mainnet intent storage requires the pinned identity and grants no payment or claim authority", async ({ page }) => {
+  await ready(page);
+  const context = { ...draft().context, networkIdentity: mainnet };
+  const record = await prepare(page, context);
+  expect(record.context.networkIdentity).toEqual(mainnet);
+  expect(record.payment).toBeNull(); expect(record.claim).toBeNull();
+  const refused = await page.evaluate(async (context) => {
+    const journal = await window.BrowserReverseJournal.open();
+    try {
+      await journal.createFresh({ ...context, networkIdentity: { ...context.networkIdentity, genesis_hash: "00".repeat(32) } }, new Uint8Array(100));
+      return false;
+    } catch { return true; } finally { journal.close(); }
+  }, context);
+  expect(refused).toBe(true);
 });
 
 test("two tabs and recreated sessions for the same payer/payment hash elect only one irreversible dispatch", async ({ page, context }) => {

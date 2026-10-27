@@ -97,7 +97,6 @@ export function checkReverseQuoteOffer(payload: unknown, request: Omit<ReverseSw
 }
 
 function checkReverseRequest(request: Omit<ReverseSwapRequest, "identity">): void {
-  if (request.network.name === "mainnet") throw new SwapError("mainnet is not release-accepted; the web client refuses it");
   if (request.payoutSat <= 0n || request.payoutSat > MAX_SATS) throw new SwapError("payout invalid");
   const { minRefundDelayBlocks: refund, maxIncomingHtlcDelayBlocks: incoming } = request.limits;
   if (!Number.isSafeInteger(refund) || refund <= 0 || !Number.isSafeInteger(incoming) || incoming <= refund) {

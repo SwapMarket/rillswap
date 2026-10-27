@@ -339,7 +339,7 @@ test("zero funding history never exposes a funding check or makes a chain connec
   expect(calls).toEqual([]);
 });
 
-test("production CSP lets recovery checks use the user's own https mempool instance while mainnet funding stays disabled", async ({ page }) => {
+test("production CSP lets mainnet recovery checks use the user's own https mempool instance", async ({ page }) => {
   const item = corpus().find((c) => c.name === "existing mainnet refund")!, key = await createRecoveryKey();
   const encrypted = await encryptCanonicalRecoveryForRecipient(new TextEncoder().encode(canonicalize(item.record)!), key.recipient);
   let reached = false;
@@ -354,7 +354,7 @@ test("production CSP lets recovery checks use the user's own https mempool insta
   await expect(page.locator("#swap-recovery-result h3")).toHaveText("Recovery record verified");
   await page.locator("#swap-recovery-check-funding").click();
   await expect(page.locator("#swap-recovery-funding-result")).toContainText("Funding could not be verified");
-  expect(reached).toBe(true); await expect(page.locator("#swap-start")).toBeDisabled();
+  expect(reached).toBe(true); await expect(page.locator("#swap-start")).toBeEnabled();
 });
 
 test("multiple revisions require an explicit choice and a failed newest revision never falls back automatically", async ({ page }) => {

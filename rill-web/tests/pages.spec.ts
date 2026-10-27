@@ -8,7 +8,7 @@ for (const prefix of ["", "repository/"]) {
     const base = `http://127.0.0.1:18866/${prefix}`;
     await page.goto(base);
     await directorySettled(page);
-    await expect(page.locator("#swap-start")).toBeDisabled();
+    await expect(page.locator("#swap-start")).toBeEnabled();
     await page.locator("#swap-settings-toggle").click();
     await expect(page.locator("#swap-network")).toHaveValue("mainnet");
     await expect(page.locator("#swap-chain-api")).toHaveValue("https://mempool.space/api");
@@ -25,7 +25,7 @@ for (const prefix of ["", "repository/"]) {
     await page.getByRole("navigation", { name: "Deployment network" }).getByRole("link", { name: "Mainnet", exact: true }).click();
     await expect(page).toHaveURL(base);
     await directorySettled(page);
-    await expect(page.locator("#swap-start")).toBeDisabled();
+    await expect(page.locator("#swap-start")).toBeEnabled();
     expect(errors).toEqual([]); expect([...new Set(sockets)].sort()).toEqual([...MAINNET_RELAYS].sort());
     expect(requests.some((url) => url.includes(`${prefix}signet/assets/`))).toBe(true);
     for (const url of requests) expect(new URL(url).host).toBe("127.0.0.1:18866");

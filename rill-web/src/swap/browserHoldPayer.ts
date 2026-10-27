@@ -105,7 +105,7 @@ export class BrowserHoldPayer {
   /** Construction validates only. No connection or credential persistence. */
   constructor(configuration: { readonly endpoint: string; readonly macaroon: string; readonly nodeIdentity: string;
     readonly network: { readonly name: NetworkName; readonly genesis_hash: string }; readonly fetch?: ChainFetch; readonly clock?: () => number }) {
-    require(configuration.network.name !== "mainnet" && isSupportedRecoveryNetwork(configuration.network));
+    require(isSupportedRecoveryNetwork(configuration.network));
     require(KEY.test(configuration.nodeIdentity) && /^(?:[0-9a-f]{2}){1,4096}$/.test(configuration.macaroon));
     this.#network = freeze(structuredClone(configuration.network)); this.#identity = configuration.nodeIdentity;
     this.#endpoint = validateMempoolApi(configuration.endpoint, this.#network.name);

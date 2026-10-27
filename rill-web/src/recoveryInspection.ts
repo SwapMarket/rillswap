@@ -387,7 +387,7 @@ export class RecoveryRefundRefusedError extends Error {
   }
 }
 
-/** Core's supported execution identities, NOT the new-mainnet-funding release gate. */
+/** Core's exact supported execution identities. */
 export function isSupportedRecoveryNetwork(value: unknown): boolean {
   try {
     if (!validateNetwork(value)) return false;

@@ -467,8 +467,7 @@ function mount(root: HTMLElement): void {
     const main = network.value === "mainnet";
     const route = routeFor(fromAsset.value, toAsset.value);
     badge.textContent = main ? "Mainnet" : `${network.value} · test funds`;
-    notice.textContent = main ? "Mainnet swaps are not enabled in this build. Choose a test network in Settings." : "";
-    notice.hidden = !main;
+    notice.hidden = true;
     heroTitle.textContent = route.title;
     heroTagline.textContent = route.tagline;
     pairNote.textContent = route.unavailable ?? "";
@@ -491,8 +490,8 @@ function mount(root: HTMLElement): void {
       route.profile === "ln-to-erc20/v1" ? `EVM address to receive ${route.to.symbol}` : "Bitcoin address to receive";
     receiveBox.querySelector<HTMLLabelElement>('label[for="swap-receive-amount"]')!.textContent = `Amount to receive (${route.profile === "ln-to-erc20/v1" ? route.to.symbol : "sat"})`;
     receiveAmount.inputMode = route.profile === "ln-to-erc20/v1" ? "decimal" : "numeric";
-    start.disabled = main || route.unavailable !== null;
-    start.textContent = main ? "Mainnet swaps unavailable" : route.unavailable ? "Pair unavailable" : "Swap";
+    start.disabled = route.unavailable !== null;
+    start.textContent = route.unavailable ? "Pair unavailable" : "Swap";
     updateEstimate();
   };
   const changePair = (changed: HTMLSelectElement, other: HTMLSelectElement, previous: string): void => {
@@ -1031,10 +1030,6 @@ function mount(root: HTMLElement): void {
     event.preventDefault();
     if (busy) return;
     const name = network.value as NetworkName;
-    if (name === "mainnet") {
-      report("refused: Mainnet swaps are not enabled in this build.");
-      return;
-    }
     const route = routeFor(fromAsset.value, toAsset.value);
     if (route.unavailable || route.profile === null) {
       report(`refused: ${route.unavailable ?? "This pair cannot be quoted yet."}`);

@@ -144,7 +144,6 @@ export interface PreparedLnErc20Quote {
 }
 
 function checkRequest(request: LnErc20Request): void {
-  if (request.network.name === "mainnet") throw new SwapError("mainnet is not release-accepted; the web client refuses it");
   if (request.payoutTokenBase <= 0n || request.payoutTokenBase >= 10n ** 39n || request.asset.htlc_version !== 6 ||
       request.limits.maxSuccessFeeSat < 0n || request.limits.maxSuccessFeeSat > MAX_SATS ||
       !Number.isSafeInteger(request.limits.minTimelockDelayBlocks) || request.limits.minTimelockDelayBlocks < 1 ||

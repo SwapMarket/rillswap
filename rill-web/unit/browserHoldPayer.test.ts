@@ -4,6 +4,7 @@ import { testInvoice, receiver } from "../../rill-payments/tests/helpers";
 import { BrowserHoldPayer, BrowserHoldPaymentRefusedError } from "../src/swap/browserHoldPayer";
 import { decodeBolt11, invoiceBinding } from "../src/swap/bolt11";
 import regtest from "../src/networks/regtest-rillswap-e2e-v1.json";
+import mainnet from "../src/networks/mainnet.json";
 
 const invoice = testInvoice("bounded-browser-hold");
 const binding = invoiceBinding(invoice, "regtest"), decoded = decodeBolt11(invoice);
@@ -15,13 +16,13 @@ const route = { total_time_lock: 121, total_fees_msat: "1000", total_amt_msat: "
   { chan_id: "18446744073709551615", pub_key: receiver, expiry: 121, amt_to_forward_msat: "1000000", fee_msat: "0", tlv_payload: false },
 ] };
 const limits = { feeLimitSat: 2n, minFinalExpiryHeight: 120, maxExpiryHeight: 150, deadlineAt: 1900 };
-function fixture() {
+function fixture(network: "regtest" | "mainnet" = "regtest") {
   const calls: { path: string; init?: RequestInit }[] = [];
-  const info = { identity_pubkey: receiver, chains: [{ chain: "bitcoin", network: "regtest" }], synced_to_chain: true, block_height: 100 };
+  const info = { identity_pubkey: receiver, chains: [{ chain: "bitcoin", network: network as string }], synced_to_chain: true, block_height: 100 };
   let invoiceResponse: unknown = structuredClone(remote), routes: unknown = [structuredClone(route)], streamStatus = "IN_FLIGHT", now = 1000000, unknownPolling = false;
   const trackingTimes: number[] = [];
-  const payer = new BrowserHoldPayer({ endpoint: "http://127.0.0.1:8093", macaroon: "00aa", nodeIdentity: receiver,
-    network: { ...regtest, name: "regtest" }, clock: () => now, fetch: async (url, init) => {
+  const payer = new BrowserHoldPayer({ endpoint: network === "mainnet" ? "https://lnd.example.invalid" : "http://127.0.0.1:8093", macaroon: "00aa", nodeIdentity: receiver,
+    network: { ...(network === "mainnet" ? mainnet : regtest), name: network }, clock: () => now, fetch: async (url, init) => {
       const path = new URL(String(url)).pathname; calls.push({ path, ...(init ? { init } : {}) });
       expect(init?.credentials).toBe("omit"); expect(init?.redirect).toBe("error");
       if (path === "/v1/getinfo") return Response.json(info);
@@ -38,6 +39,15 @@ function fixture() {
     setStatus(value: string) { streamStatus = value; }, setNow(value: number) { now = value; }, trackingTimes,
     setUnknownPolling() { unknownPolling = true; streamStatus = "UNKNOWN"; } };
 }
+
+test("mainnet node access is explicit and retains the exact node/network attestation", async () => {
+  const f = fixture("mainnet");
+  expect(f.calls).toEqual([]);
+  f.setStatus("SUCCEEDED");
+  expect(await f.payer.status(binding.payment_hash, binding.amount_msat)).toBe("SUCCEEDED");
+  f.info.chains[0]!.network = "regtest";
+  expect(await f.payer.status(binding.payment_hash, binding.amount_msat)).toBe("UNKNOWN");
+});
 
 test("construction is disconnected; a full-amount route is bounded and adds only the final MPP secret", async () => {
   const f = fixture(); expect(f.calls).toEqual([]);

@@ -115,14 +115,14 @@ test("direction flips between Bitcoin and Lightning, and stablecoins pair with L
   expect(sockets).toHaveLength(directorySockets);
 });
 
-test("the swap page defaults to blocked mainnet and only loads provider listings when it opens", async ({ page, relaySockets: sockets }) => {
+test("the swap page enables mainnet and only loads provider listings when it opens", async ({ page, relaySockets: sockets }) => {
   const requests: string[] = [];
   page.on("request", (request) => requests.push(request.url()));
   await page.goto(SWAP);
   await expect(page.getByRole("heading", { name: "Bitcoin in. Lightning out." })).toBeVisible();
   const options = await page.locator("#swap-network option").allTextContents();
   expect(options).toEqual(["mainnet", "signet", "testnet4", "regtest"]);
-  await expect(page.locator("#swap-start")).toBeDisabled();
+  await expect(page.locator("#swap-start")).toBeEnabled();
   await expect(page.locator("#swap-network-badge")).toContainText("Mainnet");
   await expect(page.locator("#swap-success-fee")).not.toBeVisible();
   await expect(page.locator("#swap-provider")).not.toBeVisible();
@@ -190,14 +190,35 @@ test("invalid input is refused before any relay connection", async ({ page, rela
   expect(sockets).toHaveLength(directorySockets);
 });
 
-test("mainnet programmatic submission is refused before opening a relay", async ({ page, relaySockets: sockets }) => {
+test("invalid mainnet programmatic submission is refused before opening a swap relay", async ({ page, relaySockets: sockets }) => {
  
   await page.goto(SWAP);
   await directorySettled(page);
   const directorySockets = sockets.length;
   await page.locator("#swap-form").evaluate((form) => form.dispatchEvent(new Event("submit", { cancelable: true })));
-  await expect(page.locator("#swap-status")).toContainText("Mainnet swaps are not enabled");
+  await expect(page.locator("#swap-status")).toContainText("refused:");
   expect(sockets).toHaveLength(directorySockets);
+});
+
+test("mainnet admission still pins invoice currency and opens no chain connection before an explicit swap", async ({ page, relaySockets: sockets }) => {
+  const external: string[] = [];
+  page.on("request", (request) => { if (new URL(request.url()).protocol === "https:") external.push(request.url()); });
+  await page.route("https://**/*", (route) => route.abort());
+  await page.goto(SWAP); await directorySettled(page);
+  expect(external).toEqual([]);
+  const directorySockets = sockets.length, now = Math.floor(Date.now() / 1000);
+  await page.locator("#swap-invoice").fill(testInvoice("wrong-mainnet-currency", "1000000", now, now + 7200, "tbs"));
+  await page.locator("#swap-start").click();
+  await expect(page.locator("#swap-status")).toContainText("refused:");
+  expect(sockets).toHaveLength(directorySockets); expect(external).toEqual([]);
+  await expect(page.locator("#swap-refund")).toBeVisible(); // Validation opens the advanced overrides.
+  await page.locator("#swap-refund").fill("bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu");
+  await page.locator("#swap-tip").fill("900000");
+  await page.locator("#swap-invoice").fill(testInvoice("mainnet-admission", "1000000", now, now + 7200, "bc"));
+  await page.locator("#swap-start").click();
+  await expect.poll(() => sockets.length).toBeGreaterThan(directorySockets);
+  expect(external).toEqual([]); // The explicit height override avoids any real chain request.
+  await page.goto("about:blank");
 });
 
 test("settings are keyboard accessible and switching networks resets local relays", async ({ page, relaySockets: sockets }) => {
@@ -293,7 +314,7 @@ test("canceling discovery closes its relay and a new search cannot show stale re
 
 test("the preview page links to the swap page", async ({ page }) => {
   await page.goto("http://127.0.0.1:18765/");
-  await page.getByRole("link", { name: /Experimental BTC to Lightning swap client/ }).click();
+  await page.getByRole("link", { name: "Open swap app", exact: true }).click();
   await expect(page).toHaveURL(SWAP);
 });
 

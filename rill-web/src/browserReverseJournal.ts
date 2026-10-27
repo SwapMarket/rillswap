@@ -88,7 +88,6 @@ function digest(value: unknown): string { const text = canonicalize(value); requ
 function contextSnapshot(value: unknown): ReverseIntentContext {
   const c = object(structuredClone(value), ["networkIdentity", "sessionId", "clientSessionKey", "providerSessionKey", "providerIdentity", "request", "deadlineAt"]);
   require(isSupportedRecoveryNetwork(c.networkIdentity));
-  require((c.networkIdentity as { name: string }).name !== "mainnet");
   for (const key of [c.sessionId, c.clientSessionKey, c.providerSessionKey, c.providerIdentity]) require(typeof key === "string" && HEX.test(key));
   require(new Set([c.clientSessionKey, c.providerSessionKey, c.providerIdentity]).size === 3);
   checkReverseFirmQuoteRequest(c.request as ReverseFirmQuoteRequest);

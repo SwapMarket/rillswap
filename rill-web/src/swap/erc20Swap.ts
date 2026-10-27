@@ -333,7 +333,6 @@ interface PreparationOptions {
 const sign = (digest: Uint8Array, secret: Uint8Array): string => bytesToHex(schnorr.sign(digest, secret, randomBytes(32)));
 
 function checkRequest(request: Erc20SwapRequest, now: number): InvoiceBinding {
-  if (request.network.name === "mainnet") throw new SwapError("mainnet is not release-accepted; the web client refuses it");
   const invoice = invoiceBinding(request.invoice, request.network.name);
   if (invoice.expires_at < now + MIN_INVOICE_REMAINING_SECONDS) throw new SwapError("invoice expires too soon; ask the recipient for a fresh one");
   if (BigInt(invoice.amount_msat) % 1000n !== 0n) throw new SwapError("invoice amount must be whole satoshis");

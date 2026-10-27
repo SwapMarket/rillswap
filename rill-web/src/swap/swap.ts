@@ -110,9 +110,6 @@ export interface SwapTimeouts {
 const sign = (digest: Uint8Array, secret: Uint8Array): string => bytesToHex(schnorr.sign(digest, secret, randomBytes(32)));
 
 function checkRequest(request: SwapRequest, now: number): ReturnType<typeof invoiceBinding> {
-  if (request.network.name === "mainnet") {
-    throw new SwapError("mainnet is not release-accepted; the web client refuses it");
-  }
   if (!Number.isSafeInteger(request.tipHeight) || request.tipHeight <= 0) throw new SwapError("tip height invalid");
   if (!Number.isSafeInteger(request.limits.maxRefundDelayBlocks) || request.limits.maxRefundDelayBlocks <= 0) {
     throw new SwapError("maximum refund delay invalid");
