@@ -2,13 +2,20 @@ import { directorySettled, expect, MAINNET_RELAYS, test } from "./fixtures/swapP
 
 for (const prefix of ["", "repository/"]) {
   test(`assembled mainnet and signet have independent defaults and relative navigation under /${prefix}`, async ({ page, relaySockets: sockets }) => {
-    const requests: string[] = [], errors: string[] = [];
+    const requests: string[] = [], errors: string[] = [], violations: string[] = [];
     page.on("request", (request) => requests.push(request.url()));
     page.on("pageerror", (error) => errors.push(error.message));
+    // The page's CSP silently drops what it blocks; surface every violation.
+    await page.exposeFunction("reportCspViolation", (entry: string) => violations.push(entry));
+    await page.addInitScript(() => document.addEventListener("securitypolicyviolation", (event) =>
+      (window as unknown as { reportCspViolation: (entry: string) => void }).reportCspViolation(`${event.violatedDirective} ${event.blockedURI}`)));
     const base = `http://127.0.0.1:18866/${prefix}`;
     await page.goto(base);
     await directorySettled(page);
     await expect(page.locator("#swap-start")).toBeEnabled();
+    const deployments = page.getByRole("navigation", { name: "Deployment network" });
+    await expect(deployments).toHaveCSS("text-align", "center");
+    await expect(deployments).toHaveCSS("padding-top", "16px");
     await page.locator("#swap-settings-toggle").click();
     await expect(page.locator("#swap-network")).toHaveValue("mainnet");
     await expect(page.locator("#swap-chain-api")).toHaveValue("https://mempool.space/api");
@@ -26,7 +33,8 @@ for (const prefix of ["", "repository/"]) {
     await expect(page).toHaveURL(base);
     await directorySettled(page);
     await expect(page.locator("#swap-start")).toBeEnabled();
-    expect(errors).toEqual([]); expect([...new Set(sockets)].sort()).toEqual([...MAINNET_RELAYS].sort());
+    expect(errors).toEqual([]); expect(violations).toEqual([]);
+    expect([...new Set(sockets)].sort()).toEqual([...MAINNET_RELAYS].sort());
     expect(requests.some((url) => url.includes(`${prefix}signet/assets/`))).toBe(true);
     for (const url of requests) expect(new URL(url).host).toBe("127.0.0.1:18866");
   });

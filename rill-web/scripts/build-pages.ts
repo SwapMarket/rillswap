@@ -17,7 +17,8 @@ for (const network of ["mainnet", "signet"] as const) {
   const target = network === "mainnet" ? "tmp/pages" : "tmp/pages/signet";
   cpSync(output, target, { recursive: true });
   writeFileSync(`${target}/diagnostic.html`, readFileSync(`${target}/index.html`));
-  const navigation = `<nav aria-label="Deployment network" style="text-align:center;padding:1rem;font:inherit"><a href="${network === "mainnet" ? "./" : "../"}">Mainnet</a> · <a href="${network === "mainnet" ? "./signet/" : "./"}">Signet</a></nav>`;
+  // Styled from swap.css: the page CSP (style-src 'self') blocks inline style attributes.
+  const navigation = `<nav aria-label="Deployment network" class="deployment-network"><a href="${network === "mainnet" ? "./" : "../"}">Mainnet</a> · <a href="${network === "mainnet" ? "./signet/" : "./"}">Signet</a></nav>`;
   const swap = readFileSync(`${target}/swap.html`, "utf8").replace("</body>", `${navigation}</body>`);
   writeFileSync(`${target}/index.html`, swap);
   writeFileSync(`${target}/swap.html`, swap);
