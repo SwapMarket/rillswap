@@ -85,6 +85,9 @@ const { reverseCase } = await import("../unit/fixtures/reverseRecoveryCases");
 const { createRecoveryKey } = await import("../src/recoveryKeys");
 const reverseNativeCase = reverseCase(), reverseRecoveryKey = await createRecoveryKey();
 writeFileSync("tmp/preview/test-only/reverse-recovery.json", JSON.stringify({ ...reverseNativeCase, plaintext: canonicalize(reverseNativeCase.record), identity: reverseRecoveryKey.identity }));
+const { reverseDisclosureFixture } = await import("../unit/fixtures/reverseDisclosureCases");
+const reverseDisclosure = reverseDisclosureFixture();
+writeFileSync("tmp/preview/test-only/reverse-disclosure.json", JSON.stringify({ ...reverseDisclosure, plaintext: canonicalize(reverseDisclosure.record), identity: reverseRecoveryKey.identity }));
 // Authentic original-session funding archive for file-free browser Resume tests.
 const { clientSessionSecret, providerSessionSecret, signDigest } = await import("../unit/fixtures/recoveryInspectionFixture");
 const { unsignedEnvelopeHash } = await import("../src/swap/hashes");

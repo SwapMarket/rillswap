@@ -198,20 +198,17 @@ interface Reservation {
   };
 }
 
-function checkReservation(record: RecoveryRecord): void {
-  if (!Object.hasOwn(record.extensions, COOPERATIVE_RESERVATION_EXTENSION)) return;
-  // The recovery schema checked the closed marker and embedded envelope.
-  const reservation = record.extensions[COOPERATIVE_RESERVATION_EXTENSION] as Reservation;
-  const proposal = reservation.proposal;
+/** Historical proposal authentication is shared; callers select the original claimant role and binding. */
+function checkHistoricalProposal(record: RecoveryRecord, proposal: Reservation["proposal"], signer: string): Record<string, unknown> {
   const context = record.verification_context;
   require(record.funding_history.length > 0 && record.monotonic_knowledge.preimage_known);
   features(proposal.required_features, [COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE]);
   require(record.contract_terms.required_features.includes(COOPERATIVE_CLAIM_FEATURE) && proposal.required_features.includes(COOPERATIVE_CLAIM_FEATURE));
   require(proposal.session_id === context.handshake_init.session_id && proposal.profile_id === record.profile_id);
-  require(same(proposal.network_identity, record.network_identity) && proposal.sender_session_key === context.provider_session_xonly_key);
+  require(same(proposal.network_identity, record.network_identity) && proposal.sender_session_key === signer);
   require(proposal.message_type === "action_request" && proposal.contract_hash === record.contract_hash && proposal.in_reply_to === null);
   require(proposal.signature !== null);
-  verifySchnorr(context.provider_session_xonly_key, unsignedEnvelopeHash(proposal), proposal.signature!, "reservation");
+  verifySchnorr(signer, unsignedEnvelopeHash(proposal), proposal.signature!, "reservation");
   const payload = proposal.payload;
   const fields = ["action", "cooperation_id", "payment_preimage", "public_nonce", "unsigned_transaction", "deadline_at", "deadline_height"];
   require(Object.keys(payload).length === fields.length && fields.every((field) => Object.hasOwn(payload, field)));
@@ -223,6 +220,13 @@ function checkReservation(record: RecoveryRecord): void {
   require(typeof payload.deadline_height === "number" && Number.isSafeInteger(payload.deadline_height) && payload.deadline_height > 0 &&
     payload.deadline_height <= record.contract_terms.refund_lock_height - record.contract_terms.timing_policy.claim_confirmation_blocks);
   require(payload.payment_preimage === record.monotonic_knowledge.preimage);
+  return payload;
+}
+
+function checkReservation(record: RecoveryRecord): void {
+  if (!Object.hasOwn(record.extensions, COOPERATIVE_RESERVATION_EXTENSION)) return;
+  const reservation = record.extensions[COOPERATIVE_RESERVATION_EXTENSION] as Reservation;
+  const payload = checkHistoricalProposal(record, reservation.proposal, record.verification_context.provider_session_xonly_key);
   let matches = 0;
   for (const { binding } of record.funding_history) {
     let digest: string;
@@ -233,6 +237,27 @@ function checkReservation(record: RecoveryRecord): void {
     matches++;
   }
   require(matches === 1);
+}
+
+function checkReverseCooperation(record: RecoveryRecord): void {
+  const hasBurn = Object.hasOwn(record.extensions, REVERSE_COOPERATIVE_RESERVATION_EXTENSION);
+  const hasDisclosure = Object.hasOwn(record.extensions, REVERSE_DISCLOSURE_EXTENSION);
+  if (!hasBurn && !hasDisclosure) return;
+  // The fallback is independently authenticated before any historical marker.
+  require(Object.hasOwn(record.extensions, REVERSE_FALLBACK_EXTENSION));
+  const fallback = record.extensions[REVERSE_FALLBACK_EXTENSION] as { funding_binding_hash: string };
+  const burn = record.extensions[REVERSE_COOPERATIVE_RESERVATION_EXTENSION] as { funding_binding_hash: string; cooperation_id: string };
+  if (hasBurn) require(burn.funding_binding_hash === fallback.funding_binding_hash && burn.cooperation_id !== "00".repeat(32));
+  if (!hasDisclosure) return;
+  const disclosure = record.extensions[REVERSE_DISCLOSURE_EXTENSION] as { funding_binding_hash: string; proposal: Reservation["proposal"] };
+  require(disclosure.funding_binding_hash === fallback.funding_binding_hash);
+  const payload = checkHistoricalProposal(record, disclosure.proposal, record.verification_context.client_session_xonly_key);
+  if (hasBurn) require(payload.cooperation_id === burn.cooperation_id);
+  const matches = record.funding_history.filter(({ binding }) => bytesToHex(fundingBindingHash(binding)) === disclosure.funding_binding_hash);
+  require(matches.length === 1);
+  verifyCooperativeClaimProposal(hexToBytes(payload.unsigned_transaction as string), record.contract_terms as LnToBtcTerms, matches[0]!.binding);
+  // Expiry, the latest binding, and publication order are live/successor gates,
+  // not historical facts inferred from an imported record. No nonce is restored.
 }
 
 /** Private secret-bearing state. Every public operation authenticates its own input snapshot. */
@@ -276,11 +301,12 @@ function authenticateRecovery(plaintext: Uint8Array, independentlySelectedNetwor
     require((Object.keys(reconstructed) as (keyof TaprootContract)[]).every((field) => record.taproot_contract[field] === reconstructed[field]));
     checkHistory(record);
     if (profile === "btc-to-ln/v1") {
-      require(!Object.hasOwn(record.extensions, "rillswap/reverse-claim-fallback") && !Object.hasOwn(record.extensions, "rillswap/reverse-preimage-disclosure"));
+      require(![REVERSE_FALLBACK_EXTENSION, REVERSE_DISCLOSURE_EXTENSION, REVERSE_COOPERATIVE_RESERVATION_EXTENSION].some((key) => Object.hasOwn(record.extensions, key)));
       checkReservation(record);
     } else {
-      require(!Object.hasOwn(record.extensions, COOPERATIVE_RESERVATION_EXTENSION) && !Object.hasOwn(record.extensions, "rillswap/reverse-preimage-disclosure"));
+      require(!Object.hasOwn(record.extensions, COOPERATIVE_RESERVATION_EXTENSION));
       if (Object.hasOwn(record.extensions, REVERSE_FALLBACK_EXTENSION)) checkReverseFallback(record);
+      checkReverseCooperation(record);
     }
     return record;
   } catch { /* Do not attach errors from parsers, crypto, or secret-bearing documents. */ }
@@ -509,6 +535,8 @@ export function constructSelectedRecoveryRefund(
 }
 
 export const REVERSE_FALLBACK_EXTENSION = "rillswap/reverse-claim-fallback";
+export const REVERSE_DISCLOSURE_EXTENSION = "rillswap/reverse-preimage-disclosure";
+export const REVERSE_COOPERATIVE_RESERVATION_EXTENSION = "rillswap/reverse-cooperative-reservation";
 export interface ReverseRecoveryInspection {
   readonly verification: "historical-static";
   readonly networkName: string;

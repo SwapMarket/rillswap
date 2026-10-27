@@ -1,10 +1,11 @@
 /** Test-only quote orchestration. Real wallet, invoice validation, and tip client remain in use. */
 import { BrowserRecoveryWallet } from "../../src/browserRecoveryWallet";
+import { RecoveryFundingUnavailableError } from "../../src/recoveryFunding";
 declare global {
   interface Window {
     uiFixture: { requests: unknown[]; executed: number; executedProviders: string[]; disposed: number;
       fundingScript?: string; fundingSource?: { psbt: string } | { depositTxid: string };
-      reverseEvents?: string[]; reverseFunded?: boolean; reverseDepth?: number; reverseClaimConfirmed?: boolean; reverseBroadcastUnknown?: boolean; reverseNodePayment?: boolean;
+      reverseEvents?: string[]; reverseFunded?: boolean; reverseDepth?: number; reverseClaimConfirmed?: boolean; reverseBroadcastUnknown?: boolean; reverseNodePayment?: boolean; reverseTransientClaimRead?: boolean;
       fundedRecovery?: number[]; fundingPublished?: boolean;
       wallet: typeof BrowserRecoveryWallet; releaseInfo?: () => void; infoPending: boolean };
     /**
@@ -99,6 +100,9 @@ export const quoteReverseProviders = async (_providers: unknown[], request: unkn
             return { claim: { txid: record.claim.txid, feeSat: "500", outputValueSat: "50000", vsize: 140 }, recoveryFile: new Uint8Array([10, 10, 10]) };
           },
           exposeClaim: async (_api: string, _broadcast: string, action: string) => {
+            if (action === "broadcast" && window.uiFixture.reverseTransientClaimRead) {
+              window.uiFixture.reverseTransientClaimRead = false; events.push("transient-read"); throw new RecoveryFundingUnavailableError();
+            }
             events.push(action);
             if (action === "download") return { outcome: "exported", txid: record.claim!.txid, transactionHex: "00" };
             record.stage = window.uiFixture.reverseBroadcastUnknown ? "claim-unknown" : "accepted";

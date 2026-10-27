@@ -8,7 +8,7 @@ import { decryptRecoveryContainer, parseRecoveryIdentity } from "./recoveryKeys"
 import { parseRecoveryPlaintext } from "./recoveryDocument";
 import { encryptCanonicalRecoveryForRecipient } from "./recoveryAgeContainer";
 import { inspectReverseRecoveryPlaintext, constructSelectedReverseClaim, appendReverseClaimFallback, checkSelectedReverseFundingTransaction,
-  REVERSE_FALLBACK_EXTENSION, type RecoveryFundingBinding } from "./recoveryInspection";
+  REVERSE_FALLBACK_EXTENSION, REVERSE_DISCLOSURE_EXTENSION, REVERSE_COOPERATIVE_RESERVATION_EXTENSION, type RecoveryFundingBinding } from "./recoveryInspection";
 import { observeReverseRecoveryFunding } from "./recoveryFunding";
 import { restoreReverseFundingReader, type Envelope } from "./swap/session";
 import { recoverReverseFundingEnvelopes } from "./swap/reverseFundingArchive";
@@ -27,8 +27,12 @@ const bytes = (value: unknown): Uint8Array => new TextEncoder().encode(canonical
 type ClaimOwner = ReverseJournalRecord | ImportedClaimRecord;
 interface Loaded { record: ClaimOwner; plaintext: Uint8Array; journal: BrowserReverseJournal; identity: string }
 const ciphertextOf = (record: ClaimOwner): Uint8Array => hexToBytes("kind" in record ? (record.fallback ?? record.funded).ciphertextHex : record.snapshots.at(-1)!.ciphertextHex);
-function withoutFallback(plaintext: Uint8Array): Uint8Array {
-  const doc = parseRecoveryPlaintext(plaintext).document, extensions = { ...doc.extensions as Record<string, unknown> }; delete extensions[REVERSE_FALLBACK_EXTENSION];
+function withoutClaimEvidence(plaintext: Uint8Array): Uint8Array {
+  const doc = parseRecoveryPlaintext(plaintext).document, extensions = { ...doc.extensions as Record<string, unknown> };
+  // Private contention identity, NOT evidence of nondisclosure. Authenticate the
+  // complete original first and retain it verbatim as the UNKNOWN fallback.
+  // These historical markers cannot authenticate without their signed fallback.
+  for (const key of [REVERSE_FALLBACK_EXTENSION, REVERSE_DISCLOSURE_EXTENSION, REVERSE_COOPERATIVE_RESERVATION_EXTENSION]) delete extensions[key];
   return bytes({ ...doc, extensions });
 }
 
@@ -51,7 +55,7 @@ async function load(original: Uint8Array, identity: string, network: Network): P
     const report = inspectReverseRecoveryPlaintext(plaintext, network), doc = parseRecoveryPlaintext(plaintext).document;
     require(report.contractHash === imported.contractHash);
     if ("kind" in record!) {
-      const owner = record as ImportedClaimRecord, funded = withoutFallback(plaintext);
+      const owner = record as ImportedClaimRecord, funded = withoutClaimEvidence(plaintext);
       try { require(bytesToHex(sha256(funded)) === owner.draft.fundedPlaintextDigest && canonicalize(owner.draft.networkIdentity) === canonicalize(network)); } finally { funded.fill(0); }
       const predecessor = await decryptRecoveryContainer(hexToBytes(owner.funded.ciphertextHex), identity);
       try { inspectReverseRecoveryPlaintext(predecessor, network); require(bytesToHex(sha256(predecessor)) === owner.draft.fundedPlaintextDigest); } finally { predecessor.fill(0); }
@@ -110,17 +114,19 @@ export async function resumeBrowserReverseExecution(original: Uint8Array, identi
         return file;
       },
       async prepareClaim(api, feeSat, approve) {
-        current(); approve(); require(!preparing); preparing = true;
+        current(); approve(); require(!preparing);
         const recipient = await identityToRecipient(loaded.identity); current(); approve();
         const result = await prepareJournaledReverseClaim(context(approve), api, feeSat,
-          (plaintext) => encryptCanonicalRecoveryForRecipient(plaintext, recipient));
+          (plaintext) => encryptCanonicalRecoveryForRecipient(plaintext, recipient),
+          () => { require(!preparing); preparing = true; });
         loaded.plaintext.fill(0); loaded.plaintext = result.plaintext; loaded.record = result.record;
         return { claim: result.claim, recoveryFile: result.recoveryFile };
       },
       async exposeClaim(api, broadcastApi, action, approve) {
         current(); approve();
-        if (loaded.record.stage === "claim-ready") { require(!exposing); exposing = true; }
-        const result = await exposeJournaledReverseClaim(context(approve), api, broadcastApi, action);
+        if (loaded.record.stage === "claim-ready") require(!exposing);
+        const result = await exposeJournaledReverseClaim(context(approve), api, broadcastApi, action,
+          () => { require(!exposing); exposing = true; });
         loaded.record = result.record; return result.exposure;
       },
     };
@@ -165,7 +171,7 @@ export async function prepareRecoveredReverseClaim(original: Uint8Array, identit
   // Explicit claim-only import is also available after device loss. It never creates a session/payment attempt.
   network = structuredClone(network); identity = await parseRecoveryIdentity(identity); approve();
   const report = inspectReverseRecoveryPlaintext(original, network), binding = report.fundingHistory.at(-1); require(binding !== undefined);
-  const funded = withoutFallback(original), journal = await BrowserReverseJournal.open(); let fallback: Uint8Array | undefined, retainedFunded: Uint8Array | undefined;
+  const funded = withoutClaimEvidence(original), journal = await BrowserReverseJournal.open(); let fallback: Uint8Array | undefined, retainedFunded: Uint8Array | undefined;
   try {
     approve(); require(typeof feeSat === "bigint" && feeSat >= 0n && feeSat <= BigInt(report.maxClaimFeeSat) && feeSat <= BigInt(report.claimFeeReserveSat));
     const elected = await journal.claimOwner(network, binding!.funding_txid, binding!.contract_vout); approve();

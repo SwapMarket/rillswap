@@ -23,8 +23,8 @@ function inspectBackup(wallet: string, recovery: string): { paymentHash: string;
   return JSON.parse(execFileSync("bun", ["-e", script, wallet, recovery], { cwd: resolve(root, "rill-web"), encoding: "utf8", timeout: 30000 }));
 }
 
-for (const nodePayment of [false, true]) {
-test(`real unilateral browser reverse swap (${nodePayment ? "configured node" : "external wallet"}) pays once, claims nominal payout and settles its held invoice`, async ({ page }) => {
+for (const { nodePayment, refusal } of [{ nodePayment: false, refusal: false }, { nodePayment: true, refusal: false }, { nodePayment: false, refusal: true }]) {
+test(`real browser reverse swap (${nodePayment ? "configured node" : "external wallet"}, ${refusal ? "cooperation unavailable" : "cooperative key path"}) pays once and settles`, async ({ page }) => {
   test.skip(!enabled && !composeEnabled, "Explicit disposable-regtest opt-in required");
   assertDisposableStack();
   expect(project).toMatch(/^rill-reverse-browser-[a-z0-9-]+$/); // refuse the existing/default development project
@@ -64,11 +64,14 @@ test(`real unilateral browser reverse swap (${nodePayment ? "configured node" : 
   }
    await expect(page.locator("#swap-reverse-steps h2")).toHaveText("Locking Bitcoin", { timeout: 90000 });
    await expect(page.getByRole("link", { name: "View deposit transaction", exact: true })).toBeVisible({ timeout: 90000 });
+   // A funded client retains unilateral recovery even if the cooperative peer disappears.
+   if (refusal) execFileSync("docker", ["compose", "stop", "maker-ln-to-btc"], { cwd: root, env: process.env, timeout: 30000, stdio: "ignore" });
    command("mine", String(signed.requiredDepth));
    // Confirmations trigger signing and one automatic broadcast, without another approval button.
-   await expect(page.locator("#swap-status")).toContainText("Claim accepted:");
+   await expect(page.locator("#swap-status")).toContainText("Claim accepted:", { timeout: 60000 });
    await download(page, '#swap-reverse-backups a', "claim.age");
-  const text = await page.locator("#swap-status").textContent(), txid = text!.match(/Claim accepted: ([0-9a-f]{64})/)![1]!;
+   const text = await page.locator("#swap-status").textContent(), txid = text!.match(/Claim accepted: ([0-9a-f]{64})/)![1]!;
+   if (refusal) execFileSync("docker", ["compose", "start", "maker-ln-to-btc"], { cwd: root, env: process.env, timeout: 30000, stdio: "ignore" });
    command("mine", String(signed.settlementDepth));
   await expect.poll(() => JSON.parse(command("lncli", "maker", "lookupinvoice", signed.paymentHash)).state).toBe("SETTLED");
   await expect.poll(() => {
@@ -79,7 +82,9 @@ test(`real unilateral browser reverse swap (${nodePayment ? "configured node" : 
     { encoding: "utf8", timeout: 10000 }).trim()).toBe("SETTLED");
   const raw = JSON.parse(command("bitcoin-cli", "getrawtransaction", txid, "true")); expect(raw.confirmations).toBeGreaterThanOrEqual(1);
   expect(raw.vout).toHaveLength(1); expect(Math.round(Number(raw.vout[0].value) * 1e8)).toBeGreaterThanOrEqual(50000); expect(raw.vout[0].scriptPubKey.address).toBe(address);
-  expect(raw.vin[0].txinwitness).toHaveLength(4); expect(raw.vin[0].txinwitness[1]).toMatch(/^[0-9a-f]{64}$/);
+   expect(raw.vin[0].txinwitness).toHaveLength(refusal ? 4 : 1);
+   if (refusal) expect(raw.vin[0].txinwitness[1]).toMatch(/^[0-9a-f]{64}$/);
+   else expect(raw.vin[0].txinwitness[0]).toMatch(/^[0-9a-f]{128}$/);
   expect(payments).toBe(nodePayment ? 1 : 0); expect(broadcasts).toBe(1); expect(errors).toEqual([]);
    await expect(page.locator("#swap-status")).toContainText(nodePayment ? "Swap complete" : "Bitcoin claim confirmed");
   if (payer) {
@@ -99,12 +104,17 @@ test(`real unilateral browser reverse swap (${nodePayment ? "configured node" : 
   await page.locator("#swap-reverse-recovery-export").click();
   const savedClaim = page.locator('a[download="rillswap-recovered-claim.hex"]'); await expect(savedClaim).toBeVisible();
   const exportedPath = await download(page, 'a[download="rillswap-recovered-claim.hex"]', "recovered-claim.hex");
-  expect(readFileSync(exportedPath, "utf8")).toBe(raw.hex);
+   const exported = readFileSync(exportedPath, "utf8"), decodedFallback = JSON.parse(command("bitcoin-cli", "decoderawtransaction", exported));
+   expect(decodedFallback.txid).toBe(txid); expect(decodedFallback.vin[0].txinwitness).toHaveLength(4);
+   // The durable fallback is byte-identical when broadcast unilaterally, or has the
+   // same txid and a different witness after the privacy-preserving key-path claim.
+   if (refusal) expect(exported).toBe(raw.hex); else expect(exported).not.toBe(raw.hex);
   expect(payments).toBe(nodePayment ? 1 : 0); expect(broadcasts).toBe(1); expect(errors).toEqual([]);
   } finally {
     // Own the host command group, even if a browser assertion fails after dispatch.
     // Killing it does not establish that LND canceled an already-dispatched payment.
    if (payer) await stopPaymentProcess(payer);
+   if (refusal) execFileSync("docker", ["compose", "start", "maker-ln-to-btc"], { cwd: root, env: process.env, timeout: 30000, stdio: "ignore" });
    command("miner", "resume");
   }
 });

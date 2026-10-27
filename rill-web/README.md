@@ -131,7 +131,12 @@ stop the swap and cannot currently be refunded from the panel.
 price, and pay the invoice from any Lightning wallet (or a configured LND node).
 The page checks the provider's funding and confirmations, then saves and broadcasts
 the claim automatically. Keep the page open. The claim uses the signed fee reserve
-while preserving the nominal payout. Advanced holds the fee details, one optional
+while preserving the nominal payout. Live swaps first attempt a cooperative
+key-path claim, keeping the script and preimage off chain. The signed unilateral
+fallback is saved before disclosure and used if cooperation fails. Transient
+chain-read failures retry before the one-shot broadcast election, never after an
+unknown submission. Cooperation cannot outlive the original payment window;
+longer funding confirmations select the unilateral fallback. Advanced holds the fee details, one optional
 latest swap backup, manual checks, and exact fallback export. Notifications are
 optional and request permission only when enabled; no service worker is installed.
 
@@ -169,6 +174,9 @@ an encrypted recovery container in its URL fragment (never sent to the
 server); treat it like the file. Opening or reloading never retries payments,
 claims or refunds by itself. Resume is explicit and never starts a new cooperative
 nonce attempt.
+CLI recovery files containing a reverse burn or preimage-disclosure record can
+also be opened. They are authenticated as historical evidence, not signing
+authority; a preexisting signed fallback remains UNKNOWN and export-only.
 
 - **Bitcoin to Lightning refunds:** use **Check funding**, wait until the
   refund matures, review the destination and fee, then prepare, download

@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import type * as Recovery from "../src/browserReverseRecovery";
 import type * as Keys from "../src/recoveryKeys";
 import type { NetworkName } from "../src/swap/config";
-import { createRecoveryKey } from "../src/recoveryKeys";
+import { createRecoveryKey, decryptRecoveryContainer } from "../src/recoveryKeys";
 import { encryptCanonicalRecoveryForRecipient } from "../src/recoveryAgeContainer";
 declare global { interface Window { reverseRecovery: typeof Recovery; reverseKeys: typeof Keys; reverseRecoveryReady: boolean;
   mountReverseRecovery: (data: Fixture) => () => void; reverseUi: { api: string; broadcast: string; current: boolean } } }
@@ -12,8 +12,8 @@ const BASE = "http://127.0.0.1:8091/api", BROADCAST = "http://127.0.0.1:8092/api
 interface Fixture { plaintext: string; identity: string; fundingTxHex: string; expectedNetwork: { name: NetworkName; genesis_hash: string }; record: { funding_history: { binding: { funding_txid: string; contract_vout: number } }[] } }
 const fixture = (): Fixture => JSON.parse(readFileSync(new URL("../tmp/preview/test-only/reverse-recovery.json", import.meta.url), "utf8"));
 async function ready(page: Page) { await page.goto("http://127.0.0.1:18765/test-only/reverse-recovery.html"); await page.waitForFunction(() => window.reverseRecoveryReady); }
-async function api(page: Page) {
-  const data = fixture(), txid = data.record.funding_history[0]!.binding.funding_txid; let posts = 0, acceptedTxid = "";
+async function api(page: Page, data = fixture()) {
+  const txid = data.record.funding_history[0]!.binding.funding_txid; let posts = 0, acceptedTxid = "";
   await page.route(BASE + "/**", async (route) => {
     const values: Record<string, string> = { "block-height/0": data.expectedNetwork.genesis_hash, "blocks/tip/height": "200", "blocks/tip/hash": "a".repeat(64), "block-height/190": "d".repeat(64),
       [`tx/${txid}/hex`]: data.fundingTxHex, [`tx/${txid}/status`]: JSON.stringify({ confirmed: true, block_height: 190, block_hash: "d".repeat(64) }), [`tx/${txid}/outspend/0`]: '{"spent":false}' };
@@ -42,6 +42,36 @@ test("missing browser history alone neither connects nor signs, explicit funded 
     db.close(); return { stage: result.stage, payments };
   }, fixture()); expect(state).toEqual({ stage: "claim-ready", payments: 0 });
   expect(transport.posts).toBe(0);
+});
+
+test("CLI-style disclosure recovery preserves the exact fallback without another nonce, payment or broadcast", async ({ page }, testInfo) => {
+  const data: Fixture = JSON.parse(readFileSync(new URL("../tmp/preview/test-only/reverse-disclosure.json", import.meta.url), "utf8"));
+  const recipient = await (await import("age-encryption")).identityToRecipient(data.identity);
+  const encrypted = await encryptCanonicalRecoveryForRecipient(new TextEncoder().encode(data.plaintext), recipient);
+  await page.goto("http://127.0.0.1:18765/test-only/swap.html");
+  const transport = await api(page, data);
+  await page.locator("#swap-recovery summary").first().click();
+  await page.locator("#swap-recovery-file").setInputFiles({ name: "cli-reverse-disclosed.age", mimeType: "application/octet-stream", buffer: Buffer.from(encrypted) });
+  await page.locator("#swap-recovery-key-file").setInputFiles({ name: "cli.key", mimeType: "text/plain", buffer: Buffer.from(data.identity) });
+  await page.locator("#swap-recovery-inspect").click();
+  await expect(page.getByRole("heading", { name: "Lightning to Bitcoin recovery verified" })).toBeVisible();
+  expect(transport.posts).toBe(0);
+  await page.locator("#swap-reverse-recovery-prepare").click();
+  await expect(page.locator("#swap-reverse-recovery-claim-status")).toContainText("backup for claim");
+  const saving = page.waitForEvent("download");
+  await page.locator('a[download="rillswap-reverse-claim.age"]').click();
+  const backupPath = testInfo.outputPath("retained.age"); await (await saving).saveAs(backupPath);
+  expect(new TextDecoder().decode(await decryptRecoveryContainer(readFileSync(backupPath), data.identity))).toBe(data.plaintext);
+  await expect(page.locator("#swap-reverse-recovery-broadcast")).toBeDisabled();
+  await page.locator("#swap-reverse-recovery-export").click();
+  await expect(page.locator("#swap-reverse-recovery-message")).toContainText("Claim exported:");
+  const link = page.locator('a[download="rillswap-recovered-claim.hex"]');
+  const exporting = page.waitForEvent("download"); await link.click();
+  const claimPath = testInfo.outputPath("fallback.hex"); await (await exporting).saveAs(claimPath);
+  const exported = readFileSync(claimPath, "utf8");
+  const expected = JSON.parse(data.plaintext).extensions["rillswap/reverse-claim-fallback"].transaction;
+  expect(exported).toBe(expected); expect(transport.posts).toBe(0);
+  await expect(page.locator("#swap-reverse-recovery-broadcast")).toBeDisabled();
 });
 
 test("restored immutable fallback exports exactly once and later remains identical without another POST", async ({ page }) => {

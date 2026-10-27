@@ -126,3 +126,19 @@ test("Bitcoin confirmation keeps watching a pending node payment until settlemen
   expect(events.filter((event) => event === "pay")).toHaveLength(1);
   expect(events.filter((event) => event === "broadcast")).toHaveLength(1);
 });
+
+test("a transient pre-broadcast chain read keeps auto-claim alive without a second payment", async ({ page }) => {
+  await mountedExecution(page);
+  await page.evaluate(() => {
+    window.uiFixture.reverseFunded = true; window.uiFixture.reverseDepth = 2; window.uiFixture.reverseTransientClaimRead = true;
+  });
+  await page.locator("#swap-reverse-accept").click();
+  await expect(page.locator("#swap-reverse-message")).toContainText("Waiting for fresh Bitcoin funding data");
+  await page.locator("#swap-reverse-advanced summary").click();
+  await page.locator("#swap-reverse-funding").click();
+  await expect(page.locator("#swap-status")).toContainText("Claim accepted:");
+  const events = await page.evaluate(() => window.uiFixture.reverseEvents!);
+  expect(events.filter((event) => event === "expose")).toHaveLength(1);
+  expect(events.filter((event) => event === "prepare")).toHaveLength(1);
+  expect(events.filter((event) => event === "broadcast")).toHaveLength(1);
+});

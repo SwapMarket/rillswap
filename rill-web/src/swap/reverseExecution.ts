@@ -16,6 +16,9 @@ import type { BrowserReverseJournal, ReverseJournalRecord } from "../browserReve
 import type { BrowserHoldPayer, BoundedHoldPlan, HoldPaymentStatus } from "./browserHoldPayer";
 import { validateMempoolApi, type NetworkName } from "./config";
 import { observeJournaledReverseFunding, prepareJournaledReverseClaim, exposeJournaledReverseClaim } from "./reverseClaim";
+import { reverseCooperativeClaim } from "./reverseCooperativeClaim";
+import type { Cosigner } from "./cooperative";
+import { COOPERATIVE_CLAIM_FEATURE } from "./wire";
 import type { ReverseSwapRequest } from "./reverseSwap";
 
 const require = (ok: boolean): void => { if (!ok) throw new SwapError("Reverse execution refused. Keep backups; no payment or exposure is retried."); };
@@ -25,6 +28,7 @@ export interface ReverseExecutionConfiguration {
   readonly tipHeight: number;
   readonly ageRecipient: string;
   readonly journal: BrowserReverseJournal;
+  readonly cooperation?: Cosigner;
   /** Recheck original UI selection, wallet identity, cancellation and network after awaits. */
   readonly assertCurrent: () => void;
 }
@@ -168,15 +172,21 @@ export async function prepareReverseExecution(session: Session, handshake: Hands
         current(); approve(); require(record.stage === "funded" && !claiming && typeof feeSat === "bigint" && feeSat >= 0n &&
           feeSat <= BigInt(terms.max_claim_fee_sat) && feeSat <= BigInt(terms.economics.claim_fee_reserve_sat));
         // One signing attempt. Any storage ambiguity blocks this object from re-signing.
-        claiming = true;
-        const prepared = await prepareJournaledReverseClaim(claimContext(approve), chainApi, feeSat, encrypt);
+        const prepared = await prepareJournaledReverseClaim(claimContext(approve), chainApi, feeSat, encrypt,
+          () => { require(!claiming); claiming = true; });
         record = prepared.record; document?.fill(0); document = prepared.plaintext;
         return Object.freeze({ claim: prepared.claim, recoveryFile: prepared.recoveryFile });
       },
       async exposeClaim(chainApi: string, broadcastApi: string, action: "download" | "broadcast", approve: () => void) {
         current(); approve();
-        if (record.stage === "claim-ready") { require(!exposing); exposing = true; }
-        const result = await exposeJournaledReverseClaim(claimContext(approve), chainApi, broadcastApi, action);
+        if (record.stage === "claim-ready") require(!exposing);
+        const cooperative = config.cooperation && terms.required_features.includes(COOPERATIVE_CLAIM_FEATURE) ? (tipHeight: number) => reverseCooperativeClaim({
+          session, init, accept, terms, binding: parts.funding.at(-1)!.binding as RecoveryFundingBinding, contractSecret: contract.secret, preimage,
+          feeSat: BigInt(inspectReverseRecoveryPlaintext(document!, network).fallbackFeeSat!), expectedTxid: record.claim!.txid,
+          tipHeight, originalDeadlineAt: deadlineAt, capabilities: config.cooperation!, assertCurrent: () => { current(); approve(); },
+        }) : undefined;
+        const result = await exposeJournaledReverseClaim(claimContext(approve), chainApi, broadcastApi, action,
+          () => { require(!exposing); exposing = true; }, cooperative);
         record = result.record; return Object.freeze(result.exposure);
       },
     });

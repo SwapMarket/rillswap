@@ -25,7 +25,7 @@ import type { Musig, MusigTranscript } from "./musig";
 import { type Envelope, type Session, SwapError } from "./session";
 import { reconstructTaprootContract } from "./taproot";
 import { serializeTransaction } from "./transaction";
-import { type BtcToLnTerms, COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE, requireShape } from "./wire";
+import { type BtcToLnTerms, type LnToBtcTerms, COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE, requireShape } from "./wire";
 
 export const COOPERATIVE_RESERVATION_EXTENSION = "rillswap/cooperative-claim-reservation";
 const INPUT_SEQUENCE = 0xfffffffd;
@@ -99,6 +99,7 @@ interface Authorization {
   readonly fundingScript: Uint8Array;
   readonly destination: Uint8Array;
   readonly feeCapSat: bigint;
+  readonly minimumOutputSat: bigint;
 }
 
 // Historical reservations may reference any signed revision. These four fields
@@ -106,7 +107,7 @@ interface Authorization {
 type ClaimFundingInput = Pick<FundingBinding, "funding_txid" | "contract_vout" | "contract_value_sat" | "contract_script_pubkey">;
 
 /** Bind signed terms to the funded output, like UnilateralAuthorization.from_terms(path="claim"). */
-function claimAuthorization(terms: BtcToLnTerms, binding: ClaimFundingInput): Authorization {
+function claimAuthorization(terms: BtcToLnTerms | LnToBtcTerms, binding: ClaimFundingInput): Authorization {
   const contract = reconstructTaprootContract(terms);
   const valueSat = BigInt(binding.contract_value_sat);
   if (valueSat !== BigInt(terms.economics.contract_amount_sat)) {
@@ -115,15 +116,19 @@ function claimAuthorization(terms: BtcToLnTerms, binding: ClaimFundingInput): Au
   if (binding.contract_script_pubkey !== contract.script_pubkey) {
     throw new CooperationRefused("funding script does not match the Taproot contract");
   }
-  const destination = hexToBytes(terms.provider_destination_script); // the provider claims btc-to-ln
+  const reverse = terms.profile_id === "ln-to-btc/v1";
+  if (terms.claimant !== (reverse ? "client" : "provider")) throw new CooperationRefused("claimant role differs from the profile");
+  const destination = hexToBytes(reverse ? terms.client_destination_script : terms.provider_destination_script);
   dustThreshold(destination);
+  const maximum = BigInt(terms.max_claim_fee_sat);
   return {
     txid: binding.funding_txid,
     vout: binding.contract_vout,
     valueSat,
     fundingScript: hexToBytes(binding.contract_script_pubkey),
     destination,
-    feeCapSat: BigInt(terms.max_claim_fee_sat),
+    feeCapSat: reverse && BigInt(terms.economics.claim_fee_reserve_sat) < maximum ? BigInt(terms.economics.claim_fee_reserve_sat) : maximum,
+    minimumOutputSat: reverse ? BigInt(terms.economics.nominal_payout_sat) : 0n,
   };
 }
 
@@ -163,6 +168,7 @@ function buildCooperativeClaim(auth: Authorization, feeSat: bigint): ClaimPlan {
   if (outputValueSat <= 0n || outputValueSat < dustThreshold(auth.destination)) {
     throw new CooperationRefused("claim output is dust");
   }
+  if (outputValueSat < auth.minimumOutputSat) throw new CooperationRefused("claim output is below the signed payout");
   return {
     baseTransaction: claimTransaction(auth, outputValueSat, []),
     signatureHash: keyPathSighash(auth, outputValueSat),
@@ -172,12 +178,12 @@ function buildCooperativeClaim(auth: Authorization, feeSat: bigint): ClaimPlan {
 }
 
 /** The authorized key-path claim paying `feeSat` (what a provider proposes). */
-export function buildCooperativeClaimPlan(terms: BtcToLnTerms, binding: ClaimFundingInput, feeSat: bigint): ClaimPlan {
+export function buildCooperativeClaimPlan(terms: BtcToLnTerms | LnToBtcTerms, binding: ClaimFundingInput, feeSat: bigint): ClaimPlan {
   return buildCooperativeClaim(claimAuthorization(terms, binding), feeSat);
 }
 
 /** Reconstruct the exact one-input key-path claim the provider proposed, or refuse. */
-export function verifyCooperativeClaimProposal(raw: Uint8Array, terms: BtcToLnTerms, binding: ClaimFundingInput): ClaimPlan {
+export function verifyCooperativeClaimProposal(raw: Uint8Array, terms: BtcToLnTerms | LnToBtcTerms, binding: ClaimFundingInput): ClaimPlan {
   const auth = claimAuthorization(terms, binding);
   // version(4) count(1) outpoint(36) scriptSig(1) sequence(4) count(1): the output
   // value is bytes 47..54; exact reconstruction below checks every other byte.
@@ -195,8 +201,8 @@ export function verifyCooperativeClaimProposal(raw: Uint8Array, terms: BtcToLnTe
 export function finalizeCooperativeClaim(
   plan: ClaimPlan,
   signature: Uint8Array,
-  terms: BtcToLnTerms,
-  binding: FundingBinding,
+  terms: BtcToLnTerms | LnToBtcTerms,
+  binding: ClaimFundingInput,
 ): { raw: string; txid: string } {
   const auth = claimAuthorization(terms, binding);
   if (signature.length !== 64) throw new CooperationRefused("signature must be 64 bytes");

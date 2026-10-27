@@ -446,7 +446,6 @@ export function checkReverseTermsOffer(payload: unknown, context: ReverseOfferCo
   const cooperation = init.required_features.includes(COOPERATIVE_CLAIM_FEATURE);
   if (cooperation !== accept.required_features.includes(COOPERATIVE_CLAIM_FEATURE) ||
     cooperation !== terms.required_features.includes(COOPERATIVE_CLAIM_FEATURE)) throw new ProtocolError("reverse cooperation commitment mismatch");
-  if (cooperation) throw new ProtocolError("browser reverse execution requires unilateral terms");
   let binding: InvoiceBinding;
   try {
     binding = context.decodeInvoice(offer.hold_invoice);

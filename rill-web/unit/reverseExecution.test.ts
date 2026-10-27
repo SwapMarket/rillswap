@@ -2,6 +2,8 @@ import { expect, spyOn, test } from "bun:test";
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { executionFixture } from "./fixtures/reverseExecutionFixture";
 import { inspectReverseRecoveryPlaintext } from "../src/recoveryInspection";
+import { parseTransaction } from "../src/swap/transaction";
+import { hexToBytes } from "@noble/hashes/utils.js";
 
 const API = "http://127.0.0.1:8091/api", BROADCAST = "http://127.0.0.1:8092/api", NODE = "http://127.0.0.1:8093";
 async function paidFixture() {
@@ -115,5 +117,41 @@ test("claim election committed then rejected readback never renews exposure or s
     f.rejectReadback = ""; await expect(e.exposeClaim(API, BROADCAST, "broadcast", f.assertCurrent)).rejects.toThrow();
     const sign = spyOn(schnorr, "sign"); try { await expect(e.prepareClaim(API, 100n, f.assertCurrent)).rejects.toThrow(); expect(sign).not.toHaveBeenCalled(); } finally { sign.mockRestore(); }
     expect(f.posts).toBe(0);
+  } finally { transport.mockRestore(); e.dispose(); }
+});
+
+for (const cooperation of ["signed", "declined", "bad partial"] as const) {
+  test(`reverse ${cooperation} cooperation preserves the fallback and elects one claim broadcast`, async () => {
+    const f = await executionFixture(cooperation), e = await f.prepare(), transport = spyOn(globalThis, "fetch").mockImplementation(f.fetch);
+    try {
+      await e.accept(f.assertCurrent); await e.exposeInvoice(f.assertCurrent); await e.receiveFunding();
+      const prepared = await e.prepareClaim(API, 100n, f.assertCurrent);
+      const result = await e.exposeClaim(API, BROADCAST, "broadcast", f.assertCurrent);
+      expect(result.outcome).toBe("accepted"); expect(result.txid).toBe(prepared.claim.txid); expect(f.posts).toBe(1);
+      expect(parseTransaction(hexToBytes(f.postedTransactions[0]!)).inputs[0]!.witness).toHaveLength(cooperation === "signed" ? 1 : 4);
+      expect(f.events.indexOf("claim-ready")).toBeLessThan(f.events.indexOf("cooperation-burn"));
+      expect(f.events.indexOf("cooperation-burn")).toBeLessThan(f.events.indexOf("cooperation-nonce"));
+      if (cooperation === "signed") expect(f.events).toContain("action:cooperative_claim_complete");
+      else expect(f.events).not.toContain("action:cooperative_claim_complete");
+      // Recovery exports the durable script-path witness even after a key-path POST with the same txid.
+      const fallback = await e.exposeClaim(API, BROADCAST, "download", f.assertCurrent);
+      expect(fallback.txid).toBe(result.txid); expect(parseTransaction(hexToBytes(fallback.transactionHex!)).inputs[0]!.witness).toHaveLength(4);
+      await expect(e.exposeClaim(API, BROADCAST, "broadcast", f.assertCurrent)).rejects.toThrow(); expect(f.posts).toBe(1);
+    } finally { transport.mockRestore(); e.dispose(); }
+  });
+}
+
+test("a transient post-cooperation read retries the fallback without another proposal or POST authority", async () => {
+  const f = await executionFixture("signed"), e = await f.prepare(), transport = spyOn(globalThis, "fetch").mockImplementation(f.fetch);
+  try {
+    await e.accept(f.assertCurrent); await e.exposeInvoice(f.assertCurrent); await e.receiveFunding();
+    await e.prepareClaim(API, 100n, f.assertCurrent); f.failFreshAfterCooperation = true;
+    await expect(e.exposeClaim(API, BROADCAST, "broadcast", f.assertCurrent)).rejects.toThrow();
+    expect(e.record.stage).toBe("claim-ready"); expect(f.posts).toBe(0);
+    expect((await e.exposeClaim(API, BROADCAST, "broadcast", f.assertCurrent)).outcome).toBe("accepted");
+    expect(parseTransaction(hexToBytes(f.postedTransactions[0]!)).inputs[0]!.witness).toHaveLength(4);
+    expect(f.events.filter((event) => event === "action:cooperative_claim_propose")).toHaveLength(1);
+    expect(f.events.filter((event) => event === "cooperation-nonce")).toHaveLength(1);
+    expect(f.posts).toBe(1);
   } finally { transport.mockRestore(); e.dispose(); }
 });

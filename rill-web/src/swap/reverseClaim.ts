@@ -8,6 +8,9 @@ import { inspectReverseRecoveryPlaintext, constructSelectedReverseClaim, appendR
 import { observeReverseRecoveryFunding } from "../recoveryFunding";
 import { validateMempoolApi, type NetworkName } from "./config";
 import { readBoundedChainText } from "./chainTip";
+import { buildCooperativeClaimPlan, finalizeCooperativeClaim } from "./cooperative";
+import { parseTransaction } from "./transaction";
+import type { LnToBtcTerms } from "./wire";
 
 interface ClaimContext {
   readonly plaintext: Uint8Array;
@@ -29,11 +32,12 @@ export async function observeJournaledReverseFunding(context: ClaimContext, api:
 }
 
 export async function prepareJournaledReverseClaim(context: ClaimContext, api: string, feeSat: bigint,
-  encrypt: (plaintext: Uint8Array) => Promise<Uint8Array>) {
+  encrypt: (plaintext: Uint8Array) => Promise<Uint8Array>, beforeSign: () => void) {
   context.assertCurrent(); require(context.record.stage === "funded");
   const { report, binding, observation } = await observeJournaledReverseFunding(context, api);
   require(observation.confirmations >= report.minFundingDepth && observation.tipHeight + report.claimConfirmationBlocks < report.refundLockHeight + 1);
   context.assertCurrent();
+  beforeSign();
   const claim = constructSelectedReverseClaim(context.plaintext, context.network, {
     fundingAttemptId: binding.funding_attempt_id, bindingRevision: binding.binding_revision,
     rawFundingTransaction: hexToBytes(observation.rawFundingTransactionHex), sampledTipHeight: observation.tipHeight,
@@ -58,7 +62,8 @@ export interface ReverseClaimExposure {
 
 /** The durable digest always binds the unilateral fallback, even if a live cooperative witness is used later. */
 export async function exposeJournaledReverseClaim(context: ClaimContext, api: string, broadcastApi: string,
-  action: "download" | "broadcast"): Promise<{ readonly record: ReverseJournalRecord; readonly exposure: ReverseClaimExposure }> {
+  action: "download" | "broadcast", beforeExposure: () => void,
+  cooperate?: (tipHeight: number) => Promise<{ readonly raw: string; readonly txid: string } | null>): Promise<{ readonly record: ReverseJournalRecord; readonly exposure: ReverseClaimExposure }> {
   context.assertCurrent();
   const report = inspectReverseRecoveryPlaintext(context.plaintext, context.network), doc = parseRecoveryPlaintext(context.plaintext).document;
   const fallback = (doc.extensions as Record<string, unknown>)[REVERSE_FALLBACK_EXTENSION] as { transaction: string };
@@ -75,12 +80,28 @@ export async function exposeJournaledReverseClaim(context: ClaimContext, api: st
   require(observation.confirmations >= report.minFundingDepth && observation.tipHeight + report.claimConfirmationBlocks < report.refundLockHeight + 1);
   verifySelectedReverseClaim(context.plaintext, context.network, { fundingAttemptId: binding.funding_attempt_id, bindingRevision: binding.binding_revision },
     hexToBytes(observation.rawFundingTransactionHex), hexToBytes(fallback.transaction));
-  context.assertCurrent(); record = await context.journal.beginClaimExposure(record);
+  let transaction = fallback.transaction;
+  if (action === "broadcast" && cooperate) {
+    try {
+      const candidate = await cooperate(observation.tipHeight); context.assertCurrent();
+      if (candidate) {
+        const parsed = parseTransaction(hexToBytes(candidate.raw));
+        const terms = doc.contract_terms as unknown as LnToBtcTerms;
+        const plan = buildCooperativeClaimPlan(terms, binding, BigInt(report.fallbackFeeSat!));
+        const checked = finalizeCooperativeClaim(plan, parsed.inputs[0]?.witness[0] ?? new Uint8Array(), terms, binding);
+        require(candidate.txid === txid && checked.txid === txid && checked.raw === candidate.raw);
+        transaction = candidate.raw;
+      }
+    } catch { context.assertCurrent(); /* Invalid/refused cooperation uses the already-durable fallback. */ }
+    const fresh = (await observeJournaledReverseFunding(context, api)).observation;
+    require(fresh.confirmations >= report.minFundingDepth && fresh.tipHeight + report.claimConfirmationBlocks < report.refundLockHeight + 1);
+  }
+  context.assertCurrent(); beforeExposure(); record = await context.journal.beginClaimExposure(record);
   // A committed election (including a rejected readback) never renews POST authority.
   try {
     context.assertCurrent();
     if (action === "download") return { record, exposure: { outcome: "exported", txid, transactionHex: fallback.transaction } };
-    const signal = AbortSignal.timeout(15000), response = await fetch(`${broadcast}/tx`, { signal, method: "POST", body: fallback.transaction,
+    const signal = AbortSignal.timeout(15000), response = await fetch(`${broadcast}/tx`, { signal, method: "POST", body: transaction,
       headers: { "Content-Type": "text/plain" }, credentials: "omit", redirect: "error", cache: "no-store", referrerPolicy: "no-referrer" });
     require(await readBoundedChainText(response, signal) === txid);
     record = await context.journal.markAccepted(record, txid);

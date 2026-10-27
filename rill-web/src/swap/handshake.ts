@@ -36,10 +36,9 @@ export async function handshake(session: Session, provider: AnnouncementCandidat
     expected_provider_identity_xonly_key: identity,
     requested_encryption_suites: ENCRYPTION_SUITES,
     requested_capabilities: CAPABILITIES,
-    // Reverse browser execution chooses the unilateral claim path explicitly.
-    // Forward cooperation and independently required epoch binding remain intact.
+    // Both Bitcoin profiles negotiate cooperation, with unilateral recovery always available.
     required_features: [
-      ...(session.profile === "btc-to-ln/v1" ? [COOPERATIVE_CLAIM_FEATURE] : []),
+      ...(["btc-to-ln/v1", "ln-to-btc/v1"].includes(session.profile) ? [COOPERATIVE_CLAIM_FEATURE] : []),
       ...(provider.requiresEpochBinding ? [EPOCH_SESSION_FEATURE] : []),
     ],
     extensions: provider.requiresEpochBinding ? { [EPOCH_SESSION_EXTENSION]: { epoch_inbox_xonly_key: epoch } } : {},

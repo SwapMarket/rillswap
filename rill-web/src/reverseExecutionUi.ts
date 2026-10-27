@@ -2,11 +2,13 @@
 import canonicalize from "canonicalize";
 import { BrowserReverseJournal } from "./browserReverseJournal";
 import { BrowserHoldPayer } from "./swap/browserHoldPayer";
+import { browserCosigner } from "./swap/browserCosigner";
 import { explorerTxUrl, validateMempoolApi, type NetworkName } from "./swap/config";
 import { readBoundedChainText, readChainTip } from "./swap/chainTip";
 import { notifySwap, requestSwapNotifications } from "./swap/notifications";
 import { parseStrictEventJson } from "./strictEventJson";
 import { qrSvg } from "./qr";
+import { RecoveryFundingUnavailableError } from "./recoveryFunding";
 import type { PreparedReverseQuote } from "./swap/reverseSwap";
 import type { PreparedReverseExecution } from "./swap/reverseExecution";
 
@@ -144,8 +146,10 @@ function drive(v: ReturnType<typeof view>, e: ClaimExecution, options: ReversePr
       } else if (e.record.stage === "terms-ready" || e.record.stage === "secrets-ready") {
         v.screen.replaceChildren(node("h2", "No payment was started here"), node("p", "This saved record cannot start or repeat a payment.")); terminal = true;
       }
-    } catch {
-      if (!signal.aborted) { v.message.textContent = "Swap paused. Open it from Your swaps to inspect the saved state; uncertain payments and claims are never retried.";
+    } catch (error) {
+      if (!signal.aborted && error instanceof RecoveryFundingUnavailableError && (e.record.stage === "funded" || e.record.stage === "claim-ready")) {
+        v.message.textContent = "Waiting for fresh Bitcoin funding data. Your saved fallback is kept.";
+      } else if (!signal.aborted) { v.message.textContent = "Swap paused. Open it from Your swaps to inspect the saved state; uncertain payments and claims are never retried.";
         notifySwap("Your swap needs attention."); terminal = true; }
     } finally { busy = false; check.disabled = signal.aborted; }
   };
@@ -190,7 +194,7 @@ export async function mountReverseExecution(root: HTMLElement, options: ReverseE
     current(); options.status("Checking signed final terms", 0);
     const api = validateMempoolApi(options.chainApi, options.network.name), tip = await readChainTip(api, options.network); current();
     execution = await options.prepared.prepareExecution({ destinationScript: options.destinationScript, tipHeight: tip.height,
-      ageRecipient: options.ageRecipient, journal, assertCurrent: current }); current();
+      ageRecipient: options.ageRecipient, journal, cooperation: browserCosigner, assertCurrent: current }); current();
     const e = execution, terms = e.terms, v = view(root, e, options); v.backup(e.recoveryFile);
     v.screen.append(node("h2", `Pay ${BigInt(terms.economics.hold_invoice_sat).toLocaleString()} sat`),
       node("p", `Receive at least ${BigInt(terms.economics.nominal_payout_sat).toLocaleString()} sat in Bitcoin. Your wallet's routing fee is extra.`),
