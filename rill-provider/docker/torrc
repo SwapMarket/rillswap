@@ -1,0 +1,10 @@
+# Tor client for the provider's Nostr relay connections. It offers only an
+# HTTP CONNECT tunnel (the provider's relay_proxy) to the private Compose
+# network, never a SOCKS port, and keeps its state on a tmpfs.
+SocksPort 0
+HTTPTunnelPort 0.0.0.0:9080
+ControlPort 127.0.0.1:9051
+CookieAuthentication 1
+DataDirectory /var/lib/rill-tor
+AvoidDiskWrites 1
+Log notice stdout

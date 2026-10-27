@@ -205,8 +205,8 @@ jobs:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
           PYTHONPATH: src:../rill-core/packages/core/src:../rill-crypto/python/src
         run: |
-          tmp/ci-venv/bin/ruff check src tests
-          tmp/ci-venv/bin/mypy src
+          tmp/ci-venv/bin/ruff check src tests docker
+          tmp/ci-venv/bin/mypy src docker
           tmp/ci-venv/bin/python -m pytest -q \
             -m 'not native_crypto and not bitcoin_core and not lnd and not web_nip59_interop' \
             --basetemp=tmp/pytest-ci

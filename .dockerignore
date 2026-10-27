@@ -9,3 +9,6 @@
 **/.ruff_cache
 **/test-results
 **/playwright-report
+rill-provider/docker/makers
+rill-provider/docker/stores
+rill-provider/docker/credentials
