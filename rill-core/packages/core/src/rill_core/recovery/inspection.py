@@ -360,6 +360,36 @@ def _selected_funding_context(
     return SelectedRecoveryFundingContext(record.contract_terms, selected)
 
 
+def inspect_recovery_recorded_claim_txid(
+    document: bytes,
+    expected_network: NetworkIdentity,
+    *,
+    funding_attempt_id: str,
+    binding_revision: int,
+    crypto: RecoveryCrypto,
+) -> str | None:
+    """Return the txid of the prepared LN to BTC claim for one selected binding.
+
+    ``None`` when the fully validated snapshot prepared no claim for exactly
+    that binding. The claim may have been broadcast, so a watcher can look for
+    it; this is an observation hint, never proof of broadcast or authority. The
+    txid excludes the witness and so reveals no preimage or signature.
+    """
+    try:
+        record, _ = _validated_record(document, expected_network, crypto)
+        selected = _select_record_binding(record, funding_attempt_id, binding_revision)
+        fallback = _inspect_reverse_fallback(record, crypto)
+    except Exception:  # noqa: BLE001, S110 - secret-bearing adapter errors stay private
+        pass
+    else:
+        if fallback is None or fallback[0].funding_binding_hash != (
+            funding_binding_hash(selected).hex()
+        ):
+            return None
+        return fallback[1]
+    raise ValidationError("invalid or unavailable recovery funding context")
+
+
 def _select_record_binding(
     record: _RecoveryPlaintext,
     funding_attempt_id: str,
@@ -798,7 +828,8 @@ def _inspect(
     ):
         _require(stored == reconstructed_value, "Taproot artifact")
     _check_static_history(record, crypto)
-    prepared = _inspect_reverse_fallback(record, crypto)
+    fallback = _inspect_reverse_fallback(record, crypto)
+    prepared = None if fallback is None else fallback[0]
     _inspect_reverse_cooperative_reservation(record, prepared)
     _inspect_reverse_disclosure(record, prepared, crypto)
     _inspect_cooperative_reservation(record, crypto)
@@ -835,8 +866,11 @@ def _check_static_history(record: _RecoveryPlaintext, crypto: RecoveryCrypto) ->
 
 def _inspect_reverse_fallback(
     record: _RecoveryPlaintext, crypto: RecoveryCrypto
-) -> _ReverseClaimFallback | None:
-    """Validate private historical claim bytes without any live authority inference."""
+) -> tuple[_ReverseClaimFallback, str] | None:
+    """Validate private historical claim bytes without any live authority inference.
+
+    Returns the fallback and its txid (witness excluded, so no preimage).
+    """
     if REVERSE_FALLBACK_EXTENSION not in record.extensions:
         return None
     fallback = _ReverseClaimFallback.model_validate_json(
@@ -859,8 +893,10 @@ def _inspect_reverse_fallback(
     authorization = UnilateralAuthorization.from_terms(
         record.contract_terms, funding, "claim", keys=crypto
     )
-    validate_unilateral_spend(bytes.fromhex(fallback.transaction), authorization, verifier=crypto)
-    return fallback
+    checked = validate_unilateral_spend(
+        bytes.fromhex(fallback.transaction), authorization, verifier=crypto
+    )
+    return fallback, checked.txid
 
 
 def _inspect_reverse_cooperative_reservation(

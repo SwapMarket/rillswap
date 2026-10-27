@@ -14,6 +14,7 @@ from rill_core.errors import ValidationError
 from rill_core.recovery import (
     construct_selected_recovery_claim,
     inspect_recovery_plaintext,
+    inspect_recovery_recorded_claim_txid,
     inspect_recovery_successor,
 )
 from rill_core.recovery.inspection import REVERSE_FALLBACK_EXTENSION
@@ -327,3 +328,38 @@ def test_duplicate_keys_in_fallback_are_not_accepted(fallback: PreparedFallback)
     assert raw != canonical
     with pytest.raises(ValidationError, match="invalid or unsupported recovery plaintext"):
         inspect_recovery_plaintext(raw, fallback.network, crypto=fallback.crypto)
+
+
+def test_recorded_claim_txid_is_named_only_for_its_own_binding(
+    fallback: PreparedFallback,
+) -> None:
+    def recorded(document: dict, revision: int) -> str | None:
+        return inspect_recovery_recorded_claim_txid(
+            canonicalize(document),
+            fallback.network,
+            funding_attempt_id="cc" * 32,
+            binding_revision=revision,
+            crypto=fallback.crypto,
+        )
+
+    expected = validate_unilateral_spend(
+        fallback.raw, fallback.authorization, verifier=fallback.crypto
+    ).txid
+    assert recorded(fallback.next, 0) == expected
+    assert recorded(fallback.prior, 0) is None  # nothing prepared
+    later = fallback.binding.model_copy(
+        update={
+            "binding_revision": 1,
+            "funding_txid": "bb" * 32,
+            "replaces_txid": fallback.binding.funding_txid,
+            "created_at": fallback.binding.created_at + 1,
+        }
+    )
+    fallback.append(fallback.next, later)
+    assert recorded(fallback.next, 1) is None  # prepared for another binding
+    assert recorded(fallback.next, 0) == expected
+    with pytest.raises(
+        ValidationError, match="invalid or unavailable recovery funding context"
+    ) as error:
+        recorded(fallback.next, 2)  # no such binding
+    assert error.value.__context__ is None
