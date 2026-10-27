@@ -22,6 +22,5 @@
     "network": "regtest", "maxBuyerExtraMsat": "0", "maxBuyerExtraBps": 0
   },
   "routingProfiles": [{ "id": "native-lightning/1", "routeClass": "native" }],
-  "approvedAdapters": [{ "id": "native-lightning", "version": "native-lightning/1" }],
-  "productionEnabled": false
+  "approvedAdapters": [{ "id": "native-lightning", "version": "native-lightning/1" }]
 }

@@ -3,8 +3,10 @@ import { isAbsolute } from "node:path";
 import { MerchantLedger } from "./merchant";
 import { LndInvoiceBackend, lndRestTransport } from "./lnd";
 import { createMerchantService } from "./server";
+import { NETWORKS, type Network } from "./contract";
 
 interface Config {
+  network: Network;
   origin: string; receiver: string; endpoint: string; ledgerPath: string; certificatePath: string;
   macaroonPath: string; issuanceKeyPath: string; statusKeyPath: string; eventKeyPath: string; adminTokenPath: string;
 }
@@ -16,12 +18,12 @@ function privateBytes(path: string): Buffer {
 }
 export async function merchantCommand(command: string, configPath: string): Promise<void> {
   const config = JSON.parse(privateBytes(configPath).toString("utf8")) as Config;
-  const keys = ["origin", "receiver", "endpoint", "ledgerPath", "certificatePath", "macaroonPath", "issuanceKeyPath", "statusKeyPath", "eventKeyPath", "adminTokenPath"];
-  if (!config || Object.keys(config).sort().join(",") !== keys.sort().join(",") || keys.some((key) => typeof config[key as keyof Config] !== "string") || !isAbsolute(config.ledgerPath) || !isAbsolute(config.certificatePath)) throw new Error("Invalid merchant configuration");
+  const keys = ["network", "origin", "receiver", "endpoint", "ledgerPath", "certificatePath", "macaroonPath", "issuanceKeyPath", "statusKeyPath", "eventKeyPath", "adminTokenPath"];
+  if (!config || Object.keys(config).sort().join(",") !== keys.sort().join(",") || keys.some((key) => typeof config[key as keyof Config] !== "string") || !NETWORKS.includes(config.network) || !isAbsolute(config.ledgerPath) || !isAbsolute(config.certificatePath)) throw new Error("Invalid merchant configuration");
   const backend = new LndInvoiceBackend(lndRestTransport(config.endpoint, readFileSync(config.certificatePath), privateBytes(config.macaroonPath)),
-    { origin: config.origin, receiver: config.receiver, network: "regtest" }, privateBytes(config.issuanceKeyPath));
+    { origin: config.origin, receiver: config.receiver, network: config.network }, privateBytes(config.issuanceKeyPath));
   const identity = await backend.identity();
-  if (command === "provision") { MerchantLedger.provision(config.ledgerPath, identity).close(); console.log("Merchant ledger explicitly provisioned (regtest only)."); return; }
+  if (command === "provision") { MerchantLedger.provision(config.ledgerPath, identity).close(); console.log(`Merchant ledger explicitly provisioned (${identity.network}).`); return; }
   if (command !== "serve") throw new Error("Expected provision or serve");
   const ledger = MerchantLedger.open(config.ledgerPath, identity);
   const service = createMerchantService({ ledger, issuer: backend, observer: backend, statusKey: privateBytes(config.statusKeyPath),
@@ -36,7 +38,7 @@ export async function merchantCommand(command: string, configPath: string): Prom
   const stop = async (): Promise<void> => { clearInterval(timer); await server.stop(false);
     while (active) await Bun.sleep(25); ledger.close(); process.exit(0); };
   process.once("SIGINT", () => { void stop(); }); process.once("SIGTERM", () => { void stop(); });
-  console.log("Regtest merchant API listening on 127.0.0.1:8787; configure an HTTPS reverse proxy.");
+  console.log(`Merchant API (${identity.network}) listening on 127.0.0.1:8787; configure an HTTPS reverse proxy.`);
 }
 if (import.meta.main) {
   merchantCommand(process.argv[2] ?? "", process.argv[3] ?? "").catch(() => { console.error("Merchant command refused; verify configuration, credentials and existing ledger."); process.exitCode = 1; });

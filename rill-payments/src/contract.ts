@@ -1,6 +1,7 @@
 import validate from "./generated/native-lightning.js";
 
-export type Network = "regtest" | "signet" | "mainnet";
+export const NETWORKS = ["regtest", "signet", "mainnet"] as const;
+export type Network = typeof NETWORKS[number];
 export interface NativeLightningTerms {
   readonly version: "checkout/0.1";
   readonly policyVersion: "native-lightning/1";

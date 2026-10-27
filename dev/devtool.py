@@ -651,6 +651,7 @@ def provision_merchant(lnd: Lnd) -> None:
         private_write(home / "invoice.macaroon", bytes.fromhex(baked["macaroon"]))
     if not (home / "config.json").exists():
         config = {
+            "network": "regtest",
             "origin": MERCHANT_ORIGIN,
             "receiver": lnd.pubkey(),
             "endpoint": "https://127.0.0.1:8080/",

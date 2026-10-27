@@ -6,7 +6,7 @@ merchant server manages a durable ledger, Lightning invoices and signed
 payment acceptance. The dialog alone never pays, creates orders or
 establishes payment acceptance.
 
-Merchant checkout supports regtest, signet, and testnet4. The
+Merchant checkout supports mainnet, signet, and regtest. The
 [demo shop](examples/demo-shop) uses disposable development payment rails,
 not production integrations.
 
@@ -106,7 +106,7 @@ SQLite ledgers run in Bun.
 | `/sdk` | Lightning checkout coordination and IndexedDB checkpoints |
 | `/tracking` | Render Lightning checkout progress |
 | `/merchant` | Durable Lightning merchant ledger |
-| `/lnd` | Regtest LND invoice issuance and receipt observation |
+| `/lnd` | Network-pinned LND invoice issuance and receipt observation |
 | `/server` | Merchant HTTP service and acceptance signing and verification |
 | `/acceptance-consumer` | Persist order bindings and verified Lightning acceptance |
 | `/woocommerce` | Read authoritative order prices and opt-in test-store fulfillment |
@@ -131,12 +131,13 @@ SQLite ledgers run in Bun.
 
 ## Merchant server
 
-The CLI supports only `provision` and `serve`, with a regtest LND backend.
+The CLI supports `provision` and `serve`, with a network-pinned LND backend.
 Checkout and API must share the configured HTTPS merchant origin. The
 configuration contains exactly these string fields:
 
 ```json
 {
+  "network": "mainnet",
   "origin": "https://merchant.example",
   "receiver": "<LND compressed node public key>",
   "endpoint": "https://127.0.0.1:8080",
@@ -154,6 +155,11 @@ Use a mode 0700 ledger directory and mode 0600 config, macaroon and secret
 files. Create three independent random 32-byte binary keys and a separate
 32 to 128 character base64url or hex admin token, and back them up with the
 database and LND state. Startup never generates replacements.
+
+Set `network` explicitly to `mainnet`, `signet`, or `regtest`; LND must attest
+that same network and the configured receiver. Configurations without `network`
+are refused before backend access. Existing ledgers keep their recorded identity
+and need no migration; reopening one under another network is refused.
 
 LND REST must be on numeric loopback HTTPS with a trusted TLS certificate.
 The macaroon needs `info:read`, `invoices:read` and `invoices:write`, not

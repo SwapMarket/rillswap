@@ -19,7 +19,7 @@ FIXTURE = json.loads(
 def test_manifest_fixture_and_schema_are_compatible() -> None:
     jsonschema.Draft202012Validator.check_schema(SCHEMA)
     jsonschema.Draft202012Validator(SCHEMA).validate(FIXTURE)
-    assert FIXTURE["productionEnabled"] is False
+    assert "productionEnabled" not in FIXTURE
     assert FIXTURE["allowedPayerAssets"] == FIXTURE["acceptedReceiptAssets"]
 
 

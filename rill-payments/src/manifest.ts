@@ -1,9 +1,10 @@
 import validate from "./generated/native-lightning-manifest.js";
+import { NETWORKS, type Network } from "./contract";
 
 interface NativeLightningAsset {
-  readonly id: "LN_BTC_REGTEST";
+  readonly id: `LN_BTC_${Uppercase<Network>}`;
   readonly rail: "lightning";
-  readonly network: "regtest";
+  readonly network: Network;
   readonly amountUnit: "msat";
   /** BTC-relative decimal places; this checkout only accepts whole satoshis. */
   readonly decimals: 11;
@@ -17,10 +18,9 @@ export interface NativeLightningMerchantManifest {
   readonly receiptVerification: Readonly<{ version: "checkout-event/1"; algorithm: "Ed25519"; publicKey: string; eventPathTemplate: "/v1/intents/{id}/events" }>;
   readonly allowedPayerAssets: readonly NativeLightningAsset[];
   readonly acceptedReceiptAssets: readonly NativeLightningAsset[];
-  readonly publicPolicy: Readonly<{ version: "native-lightning/1"; receiver: string; network: "regtest"; maxBuyerExtraMsat: "0"; maxBuyerExtraBps: 0 }>;
+  readonly publicPolicy: Readonly<{ version: "native-lightning/1"; receiver: string; network: Network; maxBuyerExtraMsat: "0"; maxBuyerExtraBps: 0 }>;
   readonly routingProfiles: readonly Readonly<{ id: "native-lightning/1"; routeClass: "native" }>[];
   readonly approvedAdapters: readonly Readonly<{ id: "native-lightning"; version: "native-lightning/1" }>[];
-  readonly productionEnabled: false;
 }
 function pinnedOrigin(origin: string): void {
   if (typeof origin !== "string" || origin.length > 255) throw new Error("Invalid manifest origin");
@@ -64,15 +64,17 @@ export function parseNativeLightningMerchantManifest(input: unknown, expectedOri
     if (!validate(captured)) throw new Error("Invalid manifest structure");
     const manifest = captured as NativeLightningMerchantManifest;
     if (manifest.merchantOrigin !== expectedOrigin || manifest.receiptVerification.publicKey !== expectedPublicKey || manifest.intentApi !== expectedOrigin + "/v1/intents") throw new Error("Manifest pins differ");
+    if ([...manifest.allowedPayerAssets, ...manifest.acceptedReceiptAssets].some((asset) => asset.network !== manifest.publicPolicy.network || asset.id !== `LN_BTC_${manifest.publicPolicy.network.toUpperCase()}`)) throw new Error("Manifest network differs");
     return manifest;
   } catch { throw new Error("Native Lightning merchant manifest refused"); }
 }
 
-export function createNativeLightningMerchantManifest(origin: string, receiver: string, publicKey: string): Readonly<NativeLightningMerchantManifest> {
-  const asset = { id: "LN_BTC_REGTEST", rail: "lightning", network: "regtest", amountUnit: "msat", decimals: 11, quantum: "1000", tokenBehavior: "not_applicable" };
+export function createNativeLightningMerchantManifest(origin: string, receiver: string, publicKey: string, network: Network): Readonly<NativeLightningMerchantManifest> {
+  if (!NETWORKS.includes(network)) throw new Error("Unsupported manifest network");
+  const asset = { id: `LN_BTC_${network.toUpperCase()}`, rail: "lightning", network, amountUnit: "msat", decimals: 11, quantum: "1000", tokenBehavior: "not_applicable" };
   return parseNativeLightningMerchantManifest({ version: "merchant-manifest/native-lightning/1", merchantOrigin: origin, intentApi: origin + "/v1/intents",
     receiptVerification: { version: "checkout-event/1", algorithm: "Ed25519", publicKey, eventPathTemplate: "/v1/intents/{id}/events" },
     allowedPayerAssets: [asset], acceptedReceiptAssets: [asset],
-    publicPolicy: { version: "native-lightning/1", receiver, network: "regtest", maxBuyerExtraMsat: "0", maxBuyerExtraBps: 0 },
-    routingProfiles: [{ id: "native-lightning/1", routeClass: "native" }], approvedAdapters: [{ id: "native-lightning", version: "native-lightning/1" }], productionEnabled: false }, origin, publicKey);
+    publicPolicy: { version: "native-lightning/1", receiver, network, maxBuyerExtraMsat: "0", maxBuyerExtraBps: 0 },
+    routingProfiles: [{ id: "native-lightning/1", routeClass: "native" }], approvedAdapters: [{ id: "native-lightning", version: "native-lightning/1" }] }, origin, publicKey);
 }

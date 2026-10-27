@@ -1,15 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://spec.rillswap.invalid/schemas/checkout/native-lightning-manifest.schema.json",
-  "title": "Advisory native Lightning regtest merchant manifest (not execution authority)",
+  "title": "Advisory network-bound native Lightning merchant manifest (not execution authority)",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "merchantOrigin", "intentApi", "receiptVerification", "allowedPayerAssets", "acceptedReceiptAssets", "publicPolicy", "routingProfiles", "approvedAdapters", "productionEnabled"],
+  "required": ["version", "merchantOrigin", "intentApi", "receiptVerification", "allowedPayerAssets", "acceptedReceiptAssets", "publicPolicy", "routingProfiles", "approvedAdapters"],
   "properties": {
     "version": { "const": "merchant-manifest/native-lightning/1" },
     "merchantOrigin": { "type": "string", "minLength": 1, "maxLength": 255 },
     "intentApi": { "type": "string", "minLength": 1, "maxLength": 266 },
-    "productionEnabled": { "const": false },
     "receiptVerification": {
       "type": "object", "additionalProperties": false,
       "required": ["version", "algorithm", "publicKey", "eventPathTemplate"],
@@ -28,7 +27,7 @@
       "properties": {
         "version": { "const": "native-lightning/1" },
         "receiver": { "type": "string", "pattern": "^(02|03)[0-9a-f]{64}$" },
-        "network": { "const": "regtest" },
+        "network": { "enum": ["regtest", "signet", "mainnet"] },
         "maxBuyerExtraMsat": { "const": "0" },
         "maxBuyerExtraBps": { "const": 0 }
       }
@@ -53,9 +52,9 @@
       "type": "object", "additionalProperties": false,
       "required": ["id", "rail", "network", "amountUnit", "decimals", "quantum", "tokenBehavior"],
       "properties": {
-        "id": { "const": "LN_BTC_REGTEST" },
+        "id": { "enum": ["LN_BTC_REGTEST", "LN_BTC_SIGNET", "LN_BTC_MAINNET"] },
         "rail": { "const": "lightning" },
-        "network": { "const": "regtest" },
+        "network": { "enum": ["regtest", "signet", "mainnet"] },
         "amountUnit": { "const": "msat" },
         "decimals": { "const": 11 },
         "quantum": { "const": "1000" },

@@ -97,7 +97,7 @@ export class MerchantLedger {
     parseTerms({ version: "checkout/0.1", policyVersion: "native-lightning/1", merchantOrigin: identity.origin,
       receiver: identity.receiver, network: identity.network, intentId: "provision_check_1", attemptId: "provision_check_2",
       amountMsat: "1000", buyerExtraMsat: "0", paymentHash: "0".repeat(64), expiresAt: 1 });
-    if (identity.network === "mainnet" || !/^[A-Za-z0-9_-]{1,128}$/.test(identity.issuerId)) throw new Error("Unsupported merchant identity");
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(identity.issuerId)) throw new Error("Unsupported merchant identity");
     const fd = openSync(path, "wx", 0o600);
     closeSync(fd);
     privateFile(path);
@@ -119,7 +119,6 @@ export class MerchantLedger {
       const meta = db.query("SELECT key,value FROM metadata").all() as { key: string; value: string }[];
       if (meta.length !== 2 || meta.find((x) => x.key === "version")?.value !== "1" ||
           !sameIdentity(JSON.parse(meta.find((x) => x.key === "identity")?.value ?? "null"), identity)) throw new Error("Merchant store version or identity mismatch");
-      if (identity.network === "mainnet") throw new Error("Mainnet remains disabled");
       db.exec("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
       const schema = db.query("SELECT type,name,sql FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'").all() as { type: string; name: string; sql: string }[];
       if (schema.length !== Object.keys(TABLES).length || schema.some((entry) => entry.type !== "table" ||

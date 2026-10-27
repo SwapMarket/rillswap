@@ -350,7 +350,7 @@ test("HTTPS manifest profile publishes only fixed advisory data through independ
     const published = await http(f.config.origin + "/v1/manifest", readFileSync(f.listener.cert));
     expect(published.status).toBe(200); expect(published.headers["cache-control"]).toBe("no-store");
     const raw = JSON.parse(published.body), manifest = parseNativeLightningMerchantManifest(raw, f.config.origin!, expectedKey);
-    expect(manifest.publicPolicy.receiver).toBe(receiver); expect(manifest.productionEnabled).toBe(false); expect(serving.ready.publicKey).toBe(expectedKey);
+    expect(manifest.publicPolicy.receiver).toBe(receiver); expect(manifest.publicPolicy.network).toBe("regtest"); expect(serving.ready.publicKey).toBe(expectedKey);
     expect(f.identities()).toBe(before); expect(f.forbidden()).toBe(0); expect(history(f.config.ledgerPath!)).toEqual(original);
     expect(published.body).not.toContain(admin); expect(published.body).not.toContain(f.directory);
     expect((await http(f.config.origin + "/v1/manifest", readFileSync(f.listener.cert), { method: "POST" })).status).toBe(405);
@@ -401,7 +401,7 @@ test("manifest publication cannot downgrade configured missing consumer state or
     await expect(http(f.config.origin + "/v1/manifest", readFileSync(f.listener.cert))).rejects.toThrow();
     expect((await f.command("provision-acceptance-https"))[2]).toBe(0); const before = consumerHistory(path);
     const serving = await f.start(); const published = await http(f.config.origin + "/v1/manifest", readFileSync(f.listener.cert));
-    expect(parseNativeLightningMerchantManifest(JSON.parse(published.body), f.config.origin!, consumerIdentity(f).merchantPublicKey).productionEnabled).toBe(false);
+    expect(parseNativeLightningMerchantManifest(JSON.parse(published.body), f.config.origin!, consumerIdentity(f).merchantPublicKey).publicPolicy.network).toBe("regtest");
     const status = await http(f.config.origin + "/v1/intents/" + intentId!, readFileSync(f.listener.cert), { headers: { Authorization: `Bearer ${admin}` } });
     expect(status.status).toBe(200); expect(JSON.parse(status.body).attempt).toBeNull();
     const eventsUrl = f.config.origin + "/v1/intents/" + intentId! + "/events";

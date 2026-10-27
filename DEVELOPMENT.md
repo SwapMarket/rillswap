@@ -284,6 +284,11 @@ docker compose -f dev/compose.yaml up -d --force-recreate bitcoind chain
 An older Core container without that permission returns unavailable for address
 queries. Existing volumes are retained by the recreation command.
 
+The merchant CLI configuration now requires an explicit `network`. If an older
+development volume has `/state/merchant/config.json` without it, add
+`"network": "regtest"` to that file before restarting the merchant. Missing
+network configuration is refused; existing merchant ledgers are not migrated.
+
 ## Paying in the demo shop
 
 Open http://127.0.0.1:8090/, pick a product, pick a payment method and place

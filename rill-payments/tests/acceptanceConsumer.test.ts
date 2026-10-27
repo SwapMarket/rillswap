@@ -23,6 +23,19 @@ function fixture() {
   const path = join(root(), "consumer.sqlite"), consumer = LightningAcceptanceConsumer.provision(path, identity); handles.push(consumer);
   return { path, consumer };
 }
+
+test("mainnet consumer retains network-bound order authority across reopen", () => {
+  const path = join(root(), "mainnet.sqlite"), mainnet = { ...identity, network: "mainnet" as const };
+  const consumer = LightningAcceptanceConsumer.provision(path, mainnet); handles.push(consumer);
+  expect(() => consumer.getOrder("order-1")).toThrow("Unknown");
+  expect(() => consumer.bindOrder("order-1", terms.amountMsat, terms)).toThrow("identity");
+  consumer.bindOrder("order-1", terms.amountMsat, { ...terms, network: "mainnet" });
+  consumer.close();
+  const reopened = LightningAcceptanceConsumer.open(path, mainnet); handles.push(reopened);
+  expect(reopened.getOrder("order-1").state).toBe("waiting");
+  expect(() => LightningAcceptanceConsumer.open(path, identity)).toThrow("identity");
+  expect(reopened.consume(signAcceptance(event, key), 1200).state).toBe("accepted");
+});
 function alter(path: string, sql: string, ...bindings: (string | number)[]) {
   const db = new Database(path, { readwrite: true, create: false }); try { db.query(sql).run(...bindings); } finally { db.close(); }
 }

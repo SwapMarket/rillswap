@@ -117,14 +117,13 @@ export function createMerchantService(options: MerchantServiceOptions | KeylessM
   const publication = options.publishManifest;
   if (publication !== undefined && typeof publication !== "boolean") throw new Error("Invalid manifest publication option");
   const publishing = publication === true;
-  if (publishing && ledger.identity.network !== "regtest") throw new Error("Manifest publication is regtest only");
   // Opt-in pins the event key as well as binding identity. Default key behavior
   // remains unchanged; caller mutation cannot rotate an opted-in signing key.
   const eventSigningKey = rawKey === undefined ? undefined : consumer || publishing ? new Uint8Array(rawKey) : rawKey;
   const pinnedPublicKey = signerPublicKey ?? (consumer || publishing ? bytesToHex(ed25519.getPublicKey(eventSigningKey!)) : undefined);
   if (consumer && (consumer.identity.merchantOrigin !== ledger.identity.origin || consumer.identity.receiver !== ledger.identity.receiver ||
       consumer.identity.network !== ledger.identity.network || consumer.identity.merchantPublicKey !== pinnedPublicKey)) throw new Error("Acceptance consumer identity mismatch");
-  const manifest = publishing ? createNativeLightningMerchantManifest(ledger.identity.origin, ledger.identity.receiver, pinnedPublicKey!) : null;
+  const manifest = publishing ? createNativeLightningMerchantManifest(ledger.identity.origin, ledger.identity.receiver, pinnedPublicKey!, ledger.identity.network) : null;
   const signedEvent = async (event: AcceptanceEvent): Promise<SignedAcceptance> => {
     // Legacy raw mode deliberately retains the original mutable-key behavior.
     if (!customSign) return signAcceptance(event, eventSigningKey!);

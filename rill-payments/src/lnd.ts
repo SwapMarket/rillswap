@@ -1,6 +1,7 @@
 import { createHash, createHmac } from "node:crypto";
 import { request } from "node:https";
 import { invoiceBinding } from "./bolt11";
+import { NETWORKS } from "./contract";
 import type { InvoiceIssuer, IssueOperation, MerchantIdentity, ReceiptObserver, ReceiptObservation } from "./merchant";
 
 type Json = Record<string, unknown>;
@@ -46,7 +47,7 @@ export class LndInvoiceBackend implements InvoiceIssuer, ReceiptObserver {
   readonly configuredIdentity: MerchantIdentity;
   private readonly issuanceKey: Buffer;
   constructor(private readonly transport: LndTransport, identity: Omit<MerchantIdentity, "issuerId">, issuanceKey: Uint8Array, private readonly now = () => Math.floor(Date.now() / 1000)) {
-    if (identity.network !== "regtest" || issuanceKey.length !== 32) throw new Error("LND checkout backend is regtest-only and requires a persistent 32-byte issuance key");
+    if (!NETWORKS.includes(identity.network) || issuanceKey.length !== 32) throw new Error("LND checkout backend requires a supported network and persistent 32-byte issuance key");
     this.issuanceKey = Buffer.from(issuanceKey);
     this.configuredIdentity = Object.freeze({ ...identity, issuerId: "lnd_" + hash(issuanceKey) });
   }

@@ -36,7 +36,14 @@ describe("merchant ledger authority and restart", () => {
     store.close(); const db = new Database(good);
     for (const version of ["0", "2"]) { db.query("UPDATE metadata SET value=? WHERE key='version'").run(version); expect(() => MerchantLedger.open(good, identity)).toThrow(); }
     db.close();
-    expect(() => MerchantLedger.provision(location(), { ...identity, network: "mainnet" })).toThrow();
+  });
+  test("mainnet provisioning and reopen preserve identity without starting work", () => {
+    const path = location(), mainnet = { ...identity, network: "mainnet" as const };
+    const store = MerchantLedger.provision(path, mainnet); store.close();
+    const reopened = MerchantLedger.open(path, mainnet); stores.push(reopened);
+    expect(reopened.identity).toEqual(mainnet);
+    expect(reopened.pendingAttempts()).toEqual([]); expect(reopened.pendingEvents()).toEqual([]);
+    expect(() => MerchantLedger.open(path, identity)).toThrow("identity mismatch");
   });
   test("idempotency and one payable attempt across separate clients", () => {
     const { store, path } = provision(); const second = MerchantLedger.open(path, identity); stores.push(second);
