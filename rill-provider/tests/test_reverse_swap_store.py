@@ -17,6 +17,7 @@ from test_live_session_store import Harness
 from test_payment_reconciliation import Signer
 
 from rill_provider import live_session_store as live
+from rill_provider.core_tx_bytes import ReverseSpendCheckpoint
 
 
 @pytest.fixture
@@ -118,6 +119,8 @@ def _row(store: live.LiveSessionStore, session: str) -> dict[str, Any]:
 
 
 def _advance(store: live.LiveSessionStore, harness: Harness, session: str, **kw: Any) -> None:  # noqa: ANN401
+    if kw.get("to_state") == "FUNDED":
+        kw.setdefault("scan_checkpoint", ReverseSpendCheckpoint(999, "ab" * 32, 999, "ab" * 32))
     store.advance_reverse_swap(session, signer=Signer(harness), now=2000, **kw)
 
 

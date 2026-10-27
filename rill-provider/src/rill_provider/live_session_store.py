@@ -102,6 +102,7 @@ from rill_provider.core_tx_bytes import (
     SATS_PER_BTC,
     CooperativeClaimOutpoint,
     CooperativeFeePolicy,
+    ReverseSpendCheckpoint,
 )
 from rill_provider.handshake_store import HandshakePolicy, _expected, _features, _require_policy
 from rill_provider.issuance_reservation import _policy_bytes
@@ -123,7 +124,7 @@ if TYPE_CHECKING:
     from rill_provider.reverse_operations import ReverseOperation, ReverseOperations
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
-SCHEMA_VERSION = 16  # v8-v15 upgrade on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
+SCHEMA_VERSION = 17  # v8-v16 upgrade on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
 CONTRACT_KEY_RECORD_KIND = "rillswap-provider-contract-key"
 OPEN_PHASES = ("CONFIRMED", "ACCEPTED")  # sessions that may still send requests
 SWAP_TRANSITIONS = frozenset(
@@ -450,7 +451,20 @@ EVM_SWAP_SCHEMA = (
     "CHECK ((provider_tx_hash IS NULL) = (provider_tx IS NULL)), "
     "CHECK ((refund_tx_hash IS NULL) = (refund_tx IS NULL)))"
 )
-SCHEMA = (*SCHEMA_V14, EVM_SWAP_SCHEMA)
+SCHEMA_V16 = (*SCHEMA_V14, EVM_SWAP_SCHEMA)
+REVERSE_SPEND_SCAN_SCHEMA = (
+    "CREATE TABLE reverse_spend_scans (session_id TEXT PRIMARY KEY NOT NULL "
+    "REFERENCES swaps(session_id), "
+    "floor_height INTEGER NOT NULL CHECK (typeof(floor_height)='integer' AND floor_height>=0), "
+    "floor_block TEXT NOT NULL CHECK (length(floor_block)=64 "
+    "AND floor_block NOT GLOB '*[^0-9a-f]*'), "
+    "cursor_height INTEGER NOT NULL CHECK (typeof(cursor_height)='integer' "
+    "AND cursor_height>=floor_height), "
+    "cursor_block TEXT NOT NULL CHECK (length(cursor_block)=64 "
+    "AND cursor_block NOT GLOB '*[^0-9a-f]*'), "
+    "CHECK (cursor_height!=floor_height OR cursor_block=floor_block))"
+)
+SCHEMA = (*SCHEMA_V16, REVERSE_SPEND_SCAN_SCHEMA)
 # Exact deployed variants, not permissive column-count recognition. Non-NULL
 # evidence that cannot be represented losslessly remains an acquisition refusal.
 SWAPS_HEIGHT_ONLY_V10_SCHEMA = (
@@ -1188,6 +1202,8 @@ class LiveSessionStore:
                 _upgrade_v13(connection)
             if version in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14):
                 _upgrade_v14(connection)
+            if version != SCHEMA_VERSION:
+                connection.execute(REVERSE_SPEND_SCAN_SCHEMA)
             if version != SCHEMA_VERSION:
                 connection.execute("UPDATE meta SET schema_version=?", (SCHEMA_VERSION,))
                 connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -5925,6 +5941,89 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - no secret or storage details escape
             raise LiveSessionStoreError("reverse settlement intent refused") from None
 
+    def reverse_spend_checkpoint(
+        self, session_id: str, *, operation: ReverseOperation
+    ) -> ReverseSpendCheckpoint | None:
+        """Read reverse-only progress; malformed state is never treated as absence."""
+        self.reverse_operations.check(operation)
+        with self._write() as connection:
+            row = connection.execute(
+                "SELECT floor_height,floor_block,cursor_height,cursor_block "
+                "FROM reverse_spend_scans WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            return None if row is None else ReverseSpendCheckpoint(*row)
+
+    def update_reverse_spend_checkpoint(
+        self,
+        session_id: str,
+        *,
+        expected: ReverseSpendCheckpoint | None,
+        checkpoint: ReverseSpendCheckpoint,
+        operation: ReverseOperation,
+        rewind: bool = False,
+    ) -> None:
+        """Compare-and-swap scan progress under the current reverse operation.
+
+        Only an affirmative canonical mismatch permits an explicit rewind to
+        the immutable floor. Legacy initialization accepts prior coverage,
+        never authorizes a historical replay.
+        """
+        self.reverse_operations.check(operation)
+        if expected is not None and (
+            (checkpoint.floor_height, checkpoint.floor_block)
+            != (expected.floor_height, expected.floor_block)
+            or (rewind and checkpoint.height != checkpoint.floor_height)
+            or (not rewind and checkpoint.height < expected.height)
+            or (
+                not rewind
+                and checkpoint.height == expected.height
+                and checkpoint.block != expected.block
+            )
+        ):
+            raise LiveSessionStoreError("reverse scan update unsupported")
+        if expected is None and (rewind or checkpoint.height != checkpoint.floor_height):
+            raise LiveSessionStoreError("reverse scan initialization unsupported")
+        with self._write() as connection:
+            row = connection.execute(
+                "SELECT state,terms_offer FROM swaps WHERE session_id=?", (session_id,)
+            ).fetchone()
+            if (
+                row is None
+                or row[0] not in {"FUNDED", "REFUNDING"}
+                or _offer_terms(row[1]).profile_id != "ln-to-btc/v1"
+            ):
+                raise StaleSwapError("reverse scan swap unavailable")
+            if expected is None:
+                connection.execute(
+                    "INSERT INTO reverse_spend_scans VALUES (?,?,?,?,?)",
+                    (
+                        session_id,
+                        checkpoint.floor_height,
+                        checkpoint.floor_block,
+                        checkpoint.height,
+                        checkpoint.block,
+                    ),
+                )
+            elif (
+                connection.execute(
+                    "UPDATE reverse_spend_scans SET cursor_height=?,cursor_block=? "
+                    "WHERE session_id=? "
+                    "AND floor_height=? AND floor_block=? AND cursor_height=? AND cursor_block=?",
+                    (
+                        checkpoint.height,
+                        checkpoint.block,
+                        session_id,
+                        expected.floor_height,
+                        expected.floor_block,
+                        expected.height,
+                        expected.block,
+                    ),
+                ).rowcount
+                != 1
+            ):
+                raise StaleSwapError("reverse scan cursor changed")
+
     def reverse_funding_is_ungranted(self, session_id: str, *, operation: ReverseOperation) -> bool:
         """Certify absent funding authority under the same live settlement owner.
 
@@ -5971,7 +6070,7 @@ class LiveSessionStore:
             raise LiveSessionStoreError("reverse funding refusal evidence unavailable") from None
         return ungranted
 
-    def advance_reverse_swap(  # noqa: PLR0912, PLR0913 - one atomic transition's explicit parts
+    def advance_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one atomic transition's parts
         self,
         session_id: str,
         *,
@@ -5984,6 +6083,7 @@ class LiveSessionStore:
         preimage: str | None = None,
         refund_confirmations: int | None = None,
         observation: dict[str, Any] | None = None,
+        scan_checkpoint: ReverseSpendCheckpoint | None = None,
     ) -> None:
         """Move one LN to BTC swap forward (RS-004) in one transaction.
 
@@ -5999,6 +6099,10 @@ class LiveSessionStore:
         ``(txid, raw)``; ``REFUNDED`` releases on the refund's depth;
         ``ABORTED`` releases an undispatched reservation (nothing was funded).
         """
+        if (to_state == "FUNDED") != (scan_checkpoint is not None):
+            raise LiveSessionStoreError("funded transition requires its initial scan checkpoint")
+        if scan_checkpoint is not None and scan_checkpoint.height != scan_checkpoint.floor_height:
+            raise LiveSessionStoreError("funded transition scan must start at its floor")
         _check_reverse_transition(
             (from_state, to_state),
             funding=funding,
@@ -6018,6 +6122,17 @@ class LiveSessionStore:
                 payment_hash = terms.invoice_binding.payment_hash
                 if terms.profile_id != "ln-to-btc/v1":
                     raise LiveSessionStoreError("not an LN to BTC swap")  # noqa: TRY301
+                if scan_checkpoint is not None:
+                    connection.execute(
+                        "INSERT INTO reverse_spend_scans VALUES (?,?,?,?,?)",
+                        (
+                            session_id,
+                            scan_checkpoint.floor_height,
+                            scan_checkpoint.floor_block,
+                            scan_checkpoint.height,
+                            scan_checkpoint.block,
+                        ),
+                    )
                 if retained_preimage is not None and to_state in {"REFUNDING", "REFUNDED"}:
                     raise LiveSessionStoreError(  # noqa: TRY301 - durable debt fences refund transitions
                         "reverse settlement obligation forbids refund progression"
@@ -7834,9 +7949,9 @@ def _check_schema(
     if connection.execute("PRAGMA application_id").fetchone() != (
         APPLICATION_ID,
     ) or version not in (
-        (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, SCHEMA_VERSION)
+        (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, SCHEMA_VERSION)
         if allow_v5
-        else (8, 9, 10, 11, 12, 13, 14, 15, SCHEMA_VERSION)
+        else (8, 9, 10, 11, 12, 13, 14, 15, 16, SCHEMA_VERSION)
     ):
         raise LiveSessionStoreError("live session store version unsupported")
     objects = {
@@ -7856,7 +7971,8 @@ def _check_schema(
         12: SCHEMA_V12,
         13: SCHEMA_V13,
         14: SCHEMA_V14,
-        15: SCHEMA,
+        15: SCHEMA_V16,
+        16: SCHEMA_V16,
         SCHEMA_VERSION: SCHEMA,
     }[version]
     indexes = {
@@ -7869,6 +7985,7 @@ def _check_schema(
         13: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
         14: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
         15: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
+        16: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
         SCHEMA_VERSION: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
     }
     expected = {("table", statement.split()[2]): statement for statement in schema}

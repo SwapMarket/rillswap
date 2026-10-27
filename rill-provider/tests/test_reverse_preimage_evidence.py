@@ -78,8 +78,8 @@ def test_supported_upgrade_chains_add_empty_knowledge_without_authority(
     harness.provision()
     _historical(harness, version)
     with harness.acquire() as store:
-        assert store._connection.execute("PRAGMA user_version").fetchone() == (16,)
-        assert store._connection.execute("SELECT schema_version FROM meta").fetchone() == (16,)
+        assert store._connection.execute("PRAGMA user_version").fetchone() == (17,)
+        assert store._connection.execute("SELECT schema_version FROM meta").fetchone() == (17,)
         assert store._connection.execute(
             "SELECT count(*) FROM reverse_preimage_evidence"
         ).fetchone() == (0,)
@@ -243,6 +243,8 @@ def test_populated_v13_preserves_finances_and_only_existing_restart_reconciliati
         attempts = store._connection.execute(
             "SELECT * FROM cooperation_attempts ORDER BY cooperation_id"
         ).fetchall()
+        # Reconstruct a pre-v17 fixture: these checkpoints did not exist in v13.
+        store._connection.execute("DELETE FROM reverse_spend_scans")
         without_v14_preimage_evidence(store._connection)
         store._connection.execute("UPDATE meta SET schema_version=13")
         store._connection.execute("PRAGMA user_version=13")
@@ -251,9 +253,9 @@ def test_populated_v13_preserves_finances_and_only_existing_restart_reconciliati
     abandoned[6] = "ABANDONED"
     for _ in range(2):
         with harness.acquire() as upgraded:
-            assert upgraded._connection.execute("PRAGMA user_version").fetchone() == (16,)
+            assert upgraded._connection.execute("PRAGMA user_version").fetchone() == (17,)
             assert upgraded._connection.execute("SELECT schema_version FROM meta").fetchone() == (
-                16,
+                17,
             )
             for table in tables:
                 assert (

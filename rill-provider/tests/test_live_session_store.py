@@ -205,8 +205,18 @@ def without_v13_arbitration(connection: sqlite3.Connection) -> None:
 
 def without_v15_evm_swaps(connection: sqlite3.Connection) -> None:
     """Restore exact v14 (or earlier), only if no EVM swap exists."""
+    without_v17_spend_scans(connection)
     assert connection.execute("SELECT count(*) FROM evm_swaps").fetchone() == (0,)
     connection.execute("DROP TABLE evm_swaps")
+
+
+def without_v17_spend_scans(connection: sqlite3.Connection) -> None:
+    """Restore pre-anchor fixtures without discarding any retained cursor."""
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE name='reverse_spend_scans'"
+    ).fetchone():
+        assert connection.execute("SELECT count(*) FROM reverse_spend_scans").fetchone() == (0,)
+        connection.execute("DROP TABLE reverse_spend_scans")
 
 
 def without_v14_preimage_evidence(connection: sqlite3.Connection) -> None:

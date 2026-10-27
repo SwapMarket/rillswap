@@ -33,10 +33,14 @@ def test_two_reverse_engines_share_refund_cancellation_and_reload_after_terminal
 ) -> None:
     with harness.acquire() as store:
         session = _funded(store, harness, "REFUNDING")
+        store._connection.execute(  # noqa: SLF001 - already scanned contiguous history
+            "UPDATE reverse_spend_scans SET cursor_height=1099 WHERE session_id=?", (session,)
+        )
         stale = store.settlement_work(session_id=session)[0]
         chain, hold = Mock(), Mock()
         chain.tip_height.return_value = 1102
-        chain.find_spender.return_value = SpendScan(None, 1102)
+        chain.block_hash.return_value = "ab" * 32
+        chain.find_spender.return_value = SpendScan(None, 1102, "ab" * 32)
         chain.confirmations.return_value = 10
         entered, release = threading.Event(), threading.Event()
 
@@ -115,6 +119,9 @@ def test_canceled_reverse_rpc_retains_owner_until_actual_completion_and_no_termi
 ) -> None:
     with harness.acquire() as store:
         session = _funded(store, harness, "REFUNDING" if rpc == "cancel" else "FUNDED")
+        store._connection.execute(  # noqa: SLF001 - already scanned contiguous history
+            "UPDATE reverse_spend_scans SET cursor_height=1099 WHERE session_id=?", (session,)
+        )
         if rpc == "settle":
             store.record_reverse_settlement_preimage(
                 session,
@@ -125,7 +132,8 @@ def test_canceled_reverse_rpc_retains_owner_until_actual_completion_and_no_termi
         item = store.settlement_work(session_id=session)[0]
         chain, hold = Mock(), Mock()
         chain.tip_height.return_value = 1102
-        chain.find_spender.return_value = SpendScan(None, 1102)
+        chain.block_hash.return_value = "ab" * 32
+        chain.find_spender.return_value = SpendScan(None, 1102, "ab" * 32)
         chain.confirmations.return_value = 10
         entered, release, finished = threading.Event(), threading.Event(), threading.Event()
 

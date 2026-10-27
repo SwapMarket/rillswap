@@ -41,8 +41,8 @@ def test_v12_upgrade_preserves_existing_sessions_and_grants_no_waiting_window(
     _as_v12(harness.path)
     with harness.acquire() as store:
         connection = store._connection  # noqa: SLF001 - exact upgrade evidence
-        assert connection.execute("PRAGMA user_version").fetchone() == (16,)
-        assert connection.execute("SELECT schema_version FROM meta").fetchone() == (16,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (17,)
+        assert connection.execute("SELECT schema_version FROM meta").fetchone() == (17,)
         assert connection.execute("SELECT * FROM claim_arbitration").fetchall() == []
         assert connection.execute("SELECT * FROM cooperation_attempts").fetchall() == []
         assert (
@@ -144,8 +144,8 @@ def test_failure_after_both_version_markers_rolls_back_v13_ddl(
     _as_v12(harness.path)
 
     def interrupt(connection: sqlite3.Connection) -> int:
-        assert connection.execute("PRAGMA user_version").fetchone() == (16,)
-        assert connection.execute("SELECT schema_version FROM meta").fetchone() == (16,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (17,)
+        assert connection.execute("SELECT schema_version FROM meta").fetchone() == (17,)
         assert connection.execute(
             "SELECT name FROM sqlite_master WHERE name='claim_arbitration'"
         ).fetchone() == ("claim_arbitration",)

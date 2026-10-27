@@ -137,7 +137,18 @@ class ChainBackend(Protocol):
     def release_funding_inputs(self, inputs: tuple[tuple[str, int], ...]) -> None:
         """Release identified, affirmatively ungranted funding inputs only."""
 
-    def find_spender(self, txid: str, vout: int, *, from_height: int, to_height: int) -> SpendScan:
+    def funding_scan_boundary(self, txid: str, required_depth: int) -> tuple[int, str]:
+        """Canonical parent of the confirmed funding block."""
+
+    def find_spender(
+        self,
+        txid: str,
+        vout: int,
+        *,
+        from_height: int,
+        to_height: int,
+        anchor_block: str | None = None,
+    ) -> SpendScan:
         """Look for the transaction spending the outpoint (RS-004)."""
 
     def fee_rate_sat_vb(self, target_blocks: int) -> float | None:

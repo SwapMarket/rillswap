@@ -20,6 +20,7 @@ from test_reverse_proposal_debt import (
 from test_reverse_proposal_reservation import NativeSigner
 from test_reverse_proposal_reservation import reserved as reserved  # noqa: PLC0414 - fixture
 
+from rill_provider.core_tx_bytes import ReverseSpendCheckpoint
 from rill_provider.live_session_store import LiveSessionStoreError, StaleOwnerError
 from rill_provider.lnd_payment_observation import LndProtocolError
 from rill_provider.reverse_operations import ReverseOperation
@@ -39,6 +40,7 @@ def _funded(reserved: ReservationCase) -> None:
         reserved.origin.session_id,
         from_state="FUNDING_SENT",
         to_state="FUNDED",
+        scan_checkpoint=ReverseSpendCheckpoint(999, "ab" * 32, 999, "ab" * 32),
         signer=NativeSigner(reserved.origin),
         now=1_700_000_000,
     )

@@ -9,7 +9,12 @@ from typing import TYPE_CHECKING
 import pytest
 from pyrage import x25519
 from test_claim_escalation import _claiming
-from test_live_session_store import Harness, without_v12_cooperation, without_v15_evm_swaps
+from test_live_session_store import (
+    Harness,
+    without_v12_cooperation,
+    without_v15_evm_swaps,
+    without_v17_spend_scans,
+)
 
 from rill_provider import live_session_store as live
 
@@ -49,7 +54,10 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
 
 def _historical(path: Path, variant: str) -> None:
     with sqlite3.connect(path) as connection:
+        without_v17_spend_scans(connection)
         version = 15
+        if variant == "v16":
+            version = 16
         if variant == "v14":
             without_v15_evm_swaps(connection)
             version = 14
@@ -80,7 +88,7 @@ def _snapshot(path: Path) -> tuple[str, ...]:
         return (f"PRAGMA user_version={version}", *connection.iterdump())
 
 
-@pytest.mark.parametrize("variant", ["v14", "v15", "hash-only", "height-only"])
+@pytest.mark.parametrize("variant", ["v14", "v15", "v16", "hash-only", "height-only"])
 def test_populated_historical_store_preserves_claim_and_reservation_across_restarts(
     harness: Harness, variant: str
 ) -> None:
@@ -97,8 +105,8 @@ def test_populated_historical_store_preserves_claim_and_reservation_across_resta
     for _ in range(2):
         with harness.acquire() as store:
             connection = store._connection  # noqa: SLF001 - durable acquisition acceptance
-            assert connection.execute("PRAGMA user_version").fetchone() == (16,)
-            assert connection.execute("SELECT schema_version FROM meta").fetchone() == (16,)
+            assert connection.execute("PRAGMA user_version").fetchone() == (17,)
+            assert connection.execute("SELECT schema_version FROM meta").fetchone() == (17,)
             assert (
                 connection.execute(
                     f"SELECT {HISTORICAL_SWAP_COLUMNS} FROM swaps WHERE session_id=?",  # noqa: S608
@@ -110,6 +118,7 @@ def test_populated_historical_store_preserves_claim_and_reservation_across_resta
                 connection.execute("SELECT * FROM economic_reservations").fetchall() == reservations
             )
             assert connection.execute("SELECT * FROM outbox").fetchall() == outbox
+            assert connection.execute("SELECT * FROM reverse_spend_scans").fetchall() == []
             assert not store.commit_payment_dispatch(
                 session,
                 harness.source["contract_terms"]["invoice_binding"]["payment_hash"],
@@ -137,8 +146,8 @@ def test_interrupted_normalization_rolls_back_schema_rows_and_both_markers(
         raise OSError("injected interruption")
 
     def interrupt_after_markers(connection: sqlite3.Connection) -> int:
-        assert connection.execute("PRAGMA user_version").fetchone() == (16,)
-        assert connection.execute("SELECT schema_version FROM meta").fetchone() == (16,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (17,)
+        assert connection.execute("SELECT schema_version FROM meta").fetchone() == (17,)
         raise OSError("interrupted after version markers")
 
     with monkeypatch.context() as patch:

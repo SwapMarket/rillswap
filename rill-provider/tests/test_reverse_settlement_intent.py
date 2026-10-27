@@ -105,6 +105,7 @@ def test_restart_settles_recorded_debt_without_core_or_a_retained_witness(
     state: str,
 ) -> None:
     chain, hold = Mock(), Mock()
+    chain.block_hash.return_value = "ab" * 32
     chain.tip_height.return_value = 1020
     chain.find_spender.return_value = SpendScan(
         SpendObservation(
@@ -172,6 +173,7 @@ def test_intent_publication_failure_prevents_the_settlement_rpc(
     harness: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     chain, hold = Mock(), Mock()
+    chain.block_hash.return_value = "ab" * 32
     chain.tip_height.return_value = 1020
     chain.find_spender.return_value = SpendScan(
         SpendObservation("61" * 32, (bytes.fromhex(PREIMAGE),), None), 1009

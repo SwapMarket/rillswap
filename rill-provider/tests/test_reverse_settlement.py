@@ -14,7 +14,12 @@ import pytest
 from rill_core.wire.messages import ContractTerms
 
 from rill_provider import reverse_settlement as reverse
-from rill_provider.core_tx_bytes import FundedOutput, SpendObservation, SpendScan
+from rill_provider.core_tx_bytes import (
+    FundedOutput,
+    ReverseSpendCheckpoint,
+    SpendObservation,
+    SpendScan,
+)
 from rill_provider.live_session_store import SettlementItem
 from rill_provider.lnd_hold_invoice import HeldHtlc, HoldInvoiceStatus
 from rill_provider.lnd_payment_observation import LndProtocolError
@@ -62,7 +67,12 @@ def backends(monkeypatch: pytest.MonkeyPatch) -> tuple[reverse.ReverseSettlement
     store.owner_is_open = True
     store.retain_owner.side_effect = nullcontext
     store.reverse_operations = ReverseOperations(store)
+    store.reverse_spend_checkpoint.return_value = ReverseSpendCheckpoint(
+        999, "ab" * 32, 1009, "ab" * 32
+    )
     chain.tip_height.return_value = 1000
+    chain.block_hash.return_value = "ab" * 32
+    chain.funding_scan_boundary.return_value = (1009, "ab" * 32)
     chain.fund_output.return_value = FUNDED
     chain.find_spender.return_value = SpendScan(None, 1000)
     hold.lookup.return_value = HELD
@@ -194,7 +204,9 @@ def test_funding_sent_rebroadcasts_and_confirms_at_depth(backends: Any) -> None:
     chain.confirmations.return_value = 2
     chain.tip_height.return_value = 1011
     assert _run(engine, item) == "FUNDED"
-    store.record_spend_scan.assert_called_once_with("11" * 32, 1009)  # inclusion block 1010
+    assert _moved(store, "FUNDED")["scan_checkpoint"] == ReverseSpendCheckpoint(
+        1009, "ab" * 32, 1009, "ab" * 32
+    )  # inclusion block 1010
 
 
 def _funded_item(state: str = "FUNDED", **changes: Any) -> SettlementItem:  # noqa: ANN401
@@ -214,7 +226,9 @@ def test_funded_settles_the_hold_with_the_claim_witness_preimage(backends: Any) 
     witness = (b"\x77" * 64, bytes.fromhex(PREIMAGE), b"\x51", b"\xc0" + b"\x00" * 32)
     chain.find_spender.return_value = SpendScan(SpendObservation("61" * 32, witness, None), 1009)
     assert _run(engine, _funded_item()) == "SETTLED"
-    chain.find_spender.assert_called_once_with("51" * 32, 0, from_height=1010, to_height=1020)
+    chain.find_spender.assert_called_once_with(
+        "51" * 32, 0, from_height=1010, to_height=1020, anchor_block="ab" * 32
+    )
     hold.settle.assert_called_once_with(PREIMAGE)
     moved = _moved(store, "SETTLED")
     assert (moved["preimage"], moved["observation"]) == (PREIMAGE, {"kind": "hold_settled"})
@@ -238,14 +252,14 @@ def test_funded_tolerates_an_already_settled_hold_but_not_other_failures(backend
 def test_funded_advances_the_scan_cursor_and_waits_for_the_lock(backends: Any) -> None:  # noqa: ANN401
     engine, store, chain, _hold = backends
     chain.tip_height.return_value = 1099
-    chain.find_spender.return_value = SpendScan(None, 1021)
+    chain.find_spender.return_value = SpendScan(None, 1021, "ab" * 32)
     assert _run(engine, _funded_item()) == "FUNDED"
-    store.record_spend_scan.assert_called_once_with("11" * 32, 1021)
+    assert store.update_reverse_spend_checkpoint.call_args.kwargs["checkpoint"].height == 1021
     store.advance_reverse_swap.assert_not_called()
     chain.find_spender.return_value = SpendScan(None, 1005)  # a stale, shorter scan
-    store.record_spend_scan.reset_mock()
+    store.update_reverse_spend_checkpoint.reset_mock()
     assert _run(engine, _funded_item()) == "FUNDED"
-    store.record_spend_scan.assert_not_called()
+    store.update_reverse_spend_checkpoint.assert_not_called()
 
 
 def test_funded_refunds_once_the_lock_is_reached_recording_before_broadcast(
@@ -254,6 +268,10 @@ def test_funded_refunds_once_the_lock_is_reached_recording_before_broadcast(
 ) -> None:
     engine, store, chain, _hold = backends
     chain.tip_height.return_value = 1100
+    store.reverse_spend_checkpoint.return_value = ReverseSpendCheckpoint(
+        999, "ab" * 32, 1099, "ab" * 32
+    )
+    chain.find_spender.return_value = SpendScan(None, 1100, "ab" * 32)
     spend = Mock(txid="71" * 32, raw_transaction=b"refund-raw")
 
     async def refund(_item: SettlementItem, _terms: ContractTerms) -> Mock:
@@ -273,6 +291,10 @@ def test_funded_refunds_once_the_lock_is_reached_recording_before_broadcast(
 def test_refunding_cancels_the_hold_only_at_the_signed_depth(backends: Any) -> None:  # noqa: ANN401
     engine, store, chain, hold = backends
     chain.tip_height.return_value = 1105
+    store.reverse_spend_checkpoint.return_value = ReverseSpendCheckpoint(
+        999, "ab" * 32, 1104, "ab" * 32
+    )
+    chain.find_spender.return_value = SpendScan(None, 1105, "ab" * 32)
     item = _funded_item("REFUNDING", refund_txid="71" * 32, refund_tx=b"refund-raw")
     chain.confirmations.return_value = 3
     assert _run(engine, item) == "REFUNDING"
@@ -301,8 +323,11 @@ def test_refunding_still_settles_when_the_claim_wins_the_race(backends: Any) -> 
 def test_our_own_refund_spend_is_not_mistaken_for_a_claim(backends: Any) -> None:  # noqa: ANN401
     engine, store, chain, hold = backends
     chain.tip_height.return_value = 1105
+    store.reverse_spend_checkpoint.return_value = ReverseSpendCheckpoint(
+        999, "ab" * 32, 1100, "ab" * 32
+    )
     chain.find_spender.return_value = SpendScan(
-        SpendObservation("71" * 32, (b"\x77" * 64, b"\x51", b"\xc0"), 1101), 1101
+        SpendObservation("71" * 32, (b"\x77" * 64, b"\x51", b"\xc0"), 1101), 1101, "ab" * 32
     )
     chain.confirmations.return_value = 1
     item = _funded_item("REFUNDING", refund_txid="71" * 32, refund_tx=b"refund-raw")

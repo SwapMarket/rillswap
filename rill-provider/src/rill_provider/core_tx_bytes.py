@@ -14,6 +14,7 @@ import os
 import re
 import stat
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from decimal import Context as DecimalContext
 from decimal import Decimal, InvalidOperation, localcontext
@@ -86,6 +87,28 @@ class SpendScan:
 
     spender: SpendObservation | None
     scanned_to: int  # last block height searched (resume from the next one)
+    scanned_block: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReverseSpendCheckpoint:
+    """Immutable replay floor and a hash-anchored exclusive scan boundary."""
+
+    floor_height: int
+    floor_block: str
+    height: int
+    block: str
+
+    def __post_init__(self) -> None:
+        if not (
+            type(self.floor_height) is int
+            and type(self.height) is int
+            and 0 <= self.floor_height <= self.height
+            and _hash(self.floor_block)
+            and _hash(self.block)
+            and (self.height != self.floor_height or self.block == self.floor_block)
+        ):
+            raise ValueError("reverse spend checkpoint unsupported")
 
 
 @dataclass(frozen=True, slots=True)
@@ -995,7 +1018,44 @@ class CoreTransactionReader:
         if released is not True:
             raise CoreProtocolError("Core did not release the selected funding inputs")
 
-    def find_spender(self, txid: str, vout: int, *, from_height: int, to_height: int) -> SpendScan:
+    def funding_scan_boundary(self, txid: str, required_depth: int) -> tuple[int, str]:
+        """Canonical parent of a confirmed funding block, not a sampled tip minus depth."""
+        if not _hash(txid) or type(required_depth) is not int or required_depth < 1:
+            raise ValueError("funding scan boundary request unsupported")
+        try:
+            with self._client() as client:
+                tx = self._rpc(client, "getrawtransaction", [txid, True], 1)
+                block = tx.get("blockhash") if isinstance(tx, dict) else None
+                if not _hash(block) or not isinstance(tx, dict) or tx.get("txid") != txid:
+                    raise CoreProtocolError("funding inclusion unavailable")
+                header = self._rpc(client, "getblockheader", [block, True], 2)
+                height = header.get("height") if isinstance(header, dict) else None
+                if (
+                    type(height) is not int
+                    or height < 1
+                    or not isinstance(header, dict)
+                    or header.get("hash") != block
+                    or type(header.get("confirmations")) is not int
+                    or header["confirmations"] < required_depth
+                    or not _hash(header.get("previousblockhash"))
+                    or self._rpc(client, "getblockhash", [height], 3) != block
+                ):
+                    raise CoreProtocolError(
+                        "funding inclusion is not canonical at settlement depth"
+                    )
+                return height - 1, header["previousblockhash"]
+        except httpx.HTTPError:
+            raise CoreUnavailableError("Core funding inclusion unavailable") from None
+
+    def find_spender(  # noqa: PLR0912 - bounded scan and branch authentication stay together
+        self,
+        txid: str,
+        vout: int,
+        *,
+        from_height: int,
+        to_height: int,
+        anchor_block: str | None = None,
+    ) -> SpendScan:
         """Look for the transaction spending ``txid:vout``: mempool first, then blocks.
 
         Blocks ``from_height`` through ``to_height`` are decoded oldest first,
@@ -1012,6 +1072,9 @@ class CoreTransactionReader:
             and from_height > 0
         ):
             raise ValueError("spend scan bounds unsupported")
+        if anchor_block is not None and not _hash(anchor_block):
+            raise ValueError("scan anchor unsupported")
+        scanned_block = anchor_block
         try:
             with self._client() as client:
                 (entry,) = _list(
@@ -1023,12 +1086,22 @@ class CoreTransactionReader:
                     decoded = self._rpc(client, "getrawtransaction", [spender, True], 2)
                     witness = _spending_witness(decoded, txid, vout)
                     if witness is not None:
-                        return SpendScan(SpendObservation(spender, witness, None), from_height - 1)
+                        return SpendScan(
+                            SpendObservation(spender, witness, None), from_height - 1, anchor_block
+                        )
                 scanned_to = from_height - 1
                 last = min(to_height, from_height + MAX_SPEND_SCAN_BLOCKS - 1)
                 for height in range(from_height, last + 1):
                     block_hash = self._rpc(client, "getblockhash", [height], 3)
                     block = self._rpc(client, "getblock", [block_hash, 2], 4)
+                    continuous = anchor_block is None or not (
+                        not isinstance(block, dict)
+                        or not _hash(block_hash)
+                        or block.get("hash") != block_hash
+                        or type(block.get("height")) is not int
+                        or block.get("height") != height
+                        or block.get("previousblockhash") != scanned_block
+                    )
                     transactions = block.get("tx") if isinstance(block, dict) else None
                     for transaction in _list(transactions):
                         witness = _spending_witness(transaction, txid, vout)
@@ -1036,11 +1109,38 @@ class CoreTransactionReader:
                             spender = transaction.get("txid")
                             if type(spender) is not str or len(spender) != HASH_HEX_LENGTH:
                                 raise CoreProtocolError("Core reported a malformed spender")
-                            return SpendScan(SpendObservation(spender, witness, height), height)
+                            observation = SpendObservation(spender, witness, height)
+                            if anchor_block is not None:
+                                # Reorganizations cannot retract knowledge of a valid
+                                # preimage. Preserve the witness without progress
+                                # authority if its branch cannot be authenticated.
+                                canonical = False
+                                if continuous:
+                                    with suppress(CoreReadError):
+                                        canonical = (
+                                            self._rpc(client, "getblockhash", [height], 5)
+                                            == block_hash
+                                        )
+                                if not canonical:
+                                    return SpendScan(observation, from_height - 1, None)
+                            return SpendScan(
+                                observation,
+                                height,
+                                block_hash if anchor_block is not None else None,
+                            )
+                    if not continuous:
+                        raise CoreProtocolError("spend scan chain continuity unavailable")
                     scanned_to = height
+                    if anchor_block is not None:
+                        scanned_block = block_hash
+                if (
+                    anchor_block is not None
+                    and self._rpc(client, "getblockhash", [scanned_to], 5) != scanned_block
+                ):
+                    raise CoreProtocolError("spend scan branch changed")
         except httpx.HTTPError:
             raise CoreUnavailableError("Core RPC transport unavailable") from None
-        return SpendScan(None, scanned_to)
+        return SpendScan(None, scanned_to, scanned_block)
 
     def outpoint_unspent(self, txid: str, vout: int) -> bool:
         """Whether ``txid:vout`` is unspent on the confirmed chain (mempool ignored).
@@ -1234,6 +1334,7 @@ class CoreTransactionReader:
             "decoderawtransaction",
             "gettxspendingprevout",
             "getblock",
+            "getblockheader",
         ):
             raise CoreProtocolError("unsupported Core RPC method")
         path = self._wallet_path if method.startswith("wallet") or method == "lockunspent" else "/"

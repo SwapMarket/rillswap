@@ -25,7 +25,7 @@ from test_reverse_proposal_reservation import NativeSigner
 from test_reverse_proposal_reservation import reserved as reserved  # noqa: PLC0414 - pytest fixture
 
 from rill_provider import live_session_store as live
-from rill_provider.core_tx_bytes import CooperativeClaimOutpoint
+from rill_provider.core_tx_bytes import CooperativeClaimOutpoint, ReverseSpendCheckpoint
 from rill_provider.lnd_hold_invoice import BoundHoldInvoiceObservation, HeldHtlc, HoldInvoiceStatus
 from rill_provider.reverse_operations import ReverseOperations
 from rill_provider.reverse_settlement import ReverseSettlement
@@ -111,6 +111,7 @@ def _prepare(
             reserved.origin.session_id,
             from_state="FUNDING_SENT",
             to_state="FUNDED",
+            scan_checkpoint=ReverseSpendCheckpoint(999, "ab" * 32, 999, "ab" * 32),
             signer=NativeSigner(reserved.origin),
             now=1_700_000_000,
         )

@@ -173,7 +173,7 @@ relays. Regtest allows direct connections.
 
 ## Persistent state and backups
 
-Store format 16 automatically upgrades exact recognized v8 to v15 schemas after
+Store format 17 automatically upgrades exact recognized v8 to v16 schemas after
 custody and authoritative-file verification. Earlier v5 to v7 stores still need
 the explicit migration command. A deployed hash-only v15 EVM table is converted
 only when all transaction hashes are NULL; a height-only v10 table is converted
@@ -182,6 +182,19 @@ remain unchanged and require operator recovery. NULL permits lossless storage
 conversion, not a payment retry or a conclusion that no funds were committed.
 Both version markers advance atomically. No RPC, rescan, or new dispatch is
 performed by this compatibility upgrade; older binaries must not reopen it.
+
+Reverse spent-output scans retain a block-hash anchor and an immutable replay
+floor, checking parent continuity in batches of at most 12 blocks. Above-floor
+reorgs durably rewind and resume across restarts. A reorg crossing the floor
+pauses automatic refund resolution for operator recovery, which can leave funds
+and the held payment pending. Scan backlog also blocks refund-based cancellation.
+An already recorded preimage still settles without chain access.
+
+Upgrading adds empty scan storage only. Legacy swaps without anchors accept
+history through their old cursor (or the current tip if no cursor exists), without
+automatically replaying it. This does not recover claims missed before anchoring;
+those need explicit operator investigation. Missing metadata is not permission
+for a full historical scan, a new funding attempt, or a payment retry.
 
 The live store is the authoritative swap state, not a cache. Its database and
 owner-lock file belong to one host and one service.

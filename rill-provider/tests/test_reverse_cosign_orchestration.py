@@ -22,6 +22,7 @@ from test_reverse_proposal_reservation import NativeSigner
 from test_reverse_proposal_reservation import reserved as reserved  # noqa: PLC0414 - fixture
 
 from rill_provider import reverse_settlement
+from rill_provider.core_tx_bytes import ReverseSpendCheckpoint
 from rill_provider.handshake_service import HandshakeService, ServicePolicy
 from rill_provider.live_session_store import LiveSessionStoreError, StaleOwnerError
 from rill_provider.lnd_hold_invoice import HoldInvoiceStatus
@@ -40,6 +41,7 @@ def _funded_engine(reserved: ReservationCase) -> tuple[ReverseSettlement, Mock, 
         reserved.origin.session_id,
         from_state="FUNDING_SENT",
         to_state="FUNDED",
+        scan_checkpoint=ReverseSpendCheckpoint(999, "ab" * 32, 999, "ab" * 32),
         signer=NativeSigner(reserved.origin),
         now=1_700_000_000,
     )
@@ -73,6 +75,7 @@ def test_proposal_first_runs_the_providers_own_funding_depth_step(
         hold.observe_bound_invoice.return_value = invoice
         depth = terms.funding_confirmations - (0 if confirmed else 1)
         chain.confirmations.return_value = depth
+        chain.funding_scan_boundary.return_value = (core.inclusion_height - 1, "ab" * 32)
         chain.tip_height.return_value = core.tip_height
         store = reserved.store
         engine = ReverseSettlement(store, chain, hold, reserved.origin.crypto.crypto)

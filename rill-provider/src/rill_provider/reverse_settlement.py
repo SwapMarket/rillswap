@@ -34,8 +34,10 @@ from rill_core.wire.messages import Envelope, FundingBinding
 
 from rill_provider.core_tx_bytes import (
     MAX_SATS,
+    MAX_SPEND_SCAN_BLOCKS,
     CooperativeClaimOutpoint,
     CooperativeFeePolicy,
+    ReverseSpendCheckpoint,
 )
 from rill_provider.live_session_store import (
     LiveSessionStoreError,
@@ -172,7 +174,21 @@ class ReverseChainBackend(Protocol):
     def confirmations(self, txid: str) -> int:
         """Return the confirmed depth, 0 in the mempool."""
 
-    def find_spender(self, txid: str, vout: int, *, from_height: int, to_height: int) -> SpendScan:
+    def block_hash(self, height: int) -> str:
+        """Canonical block hash at an exact height."""
+
+    def funding_scan_boundary(self, txid: str, required_depth: int) -> tuple[int, str]:
+        """Canonical parent of the confirmed funding block."""
+
+    def find_spender(
+        self,
+        txid: str,
+        vout: int,
+        *,
+        from_height: int,
+        to_height: int,
+        anchor_block: str | None = None,
+    ) -> SpendScan:
         """Look for the transaction spending the outpoint."""
 
     def fee_rate_sat_vb(self, target_blocks: int) -> float | None:
@@ -771,13 +787,19 @@ class ReverseSettlement:
         depth = await self._worker(self._chain.confirmations, txid)
         if depth < terms.funding_confirmations:
             return item.state
-        tip = await self._worker(self._chain.tip_height)
-        state = self._move(item, "FUNDED", now)
-        # Scan for a claim from the inclusion block on.
-        self._store.record_spend_scan(item.session_id, max(1, tip - depth))
-        return state
+        floor, block = await self._worker(
+            self._chain.funding_scan_boundary, txid, terms.funding_confirmations
+        )
+        return self._move(
+            item,
+            "FUNDED",
+            now,
+            scan_checkpoint=ReverseSpendCheckpoint(floor, block, floor, block),
+        )
 
-    async def _funded(self, item: SettlementItem, terms: ContractTerms, now: int) -> str:
+    async def _funded(  # noqa: PLR0911, PLR0912 - explicit conservative evidence outcomes
+        self, item: SettlementItem, terms: ContractTerms, now: int
+    ) -> str:
         """Settle on a claim revealing the preimage; otherwise refund after the lock."""
         if item.preimage is not None:
             # Affirmatively recorded intent survives vanished witnesses and
@@ -786,9 +808,49 @@ class ReverseSettlement:
         txid, _raw = _funding(item)
         vout = int(item.funding_vout or 0)
         tip = await self._worker(self._chain.tip_height)
-        start = (item.spend_scan_height or max(1, tip - 1)) + 1
+        operation = self._check_operation()
+        checkpoint = self._store.reverse_spend_checkpoint(item.session_id, operation=operation)
+        if checkpoint is None:
+            # No anchor proves no branch history. Accept prior coverage without
+            # replay; never turn missing metadata into an automatic full rescan.
+            height = tip if item.spend_scan_height is None else item.spend_scan_height
+            block = await self._worker(self._chain.block_hash, height)
+            self._store.update_reverse_spend_checkpoint(
+                item.session_id,
+                expected=None,
+                checkpoint=ReverseSpendCheckpoint(height, block, height, block),
+                operation=operation,
+            )
+            return item.state
+        floor_block = await self._worker(self._chain.block_hash, checkpoint.floor_height)
+        if floor_block != checkpoint.floor_block:
+            raise LiveSessionStoreError(
+                "reverse scan replay floor reorganized; operator recovery required before refund"
+            )
+        if (
+            checkpoint.height > tip
+            or await self._worker(self._chain.block_hash, checkpoint.height) != checkpoint.block
+        ):
+            self._store.update_reverse_spend_checkpoint(
+                item.session_id,
+                expected=checkpoint,
+                checkpoint=ReverseSpendCheckpoint(
+                    checkpoint.floor_height,
+                    checkpoint.floor_block,
+                    checkpoint.floor_height,
+                    checkpoint.floor_block,
+                ),
+                operation=operation,
+                rewind=True,
+            )
+            return item.state  # The reset is durable before the next bounded batch.
         scan = await self._worker(
-            self._chain.find_spender, txid, vout, from_height=start, to_height=tip
+            self._chain.find_spender,
+            txid,
+            vout,
+            from_height=checkpoint.height + 1,
+            to_height=tip,
+            anchor_block=checkpoint.block,
         )
         payment_hash = terms.invoice_binding.payment_hash
         if scan.spender is not None:
@@ -799,8 +861,20 @@ class ReverseSettlement:
             if scan.spender.txid != item.refund_txid:
                 LOG.warning("contract spent by an unexpected transaction; not settling")
                 return item.state
-        if scan.scanned_to > (item.spend_scan_height or 0):
-            self._store.record_spend_scan(item.session_id, scan.scanned_to)
+        if scan.scanned_to < checkpoint.height:
+            return item.state
+        if scan.scanned_to > min(tip, checkpoint.height + MAX_SPEND_SCAN_BLOCKS):
+            raise LiveSessionStoreError("reverse scan exceeded its bounded interval")
+        if scan.scanned_block is None:
+            raise LiveSessionStoreError("reverse scan canonical progress unavailable")
+        progress = ReverseSpendCheckpoint(
+            checkpoint.floor_height, checkpoint.floor_block, scan.scanned_to, scan.scanned_block
+        )
+        self._store.update_reverse_spend_checkpoint(
+            item.session_id, expected=checkpoint, checkpoint=progress, operation=operation
+        )
+        if scan.scanned_to < tip:
+            return item.state  # Backlog blocks refund initiation AND refund-based cancellation.
         if item.state == "REFUNDING":
             return await self._refunding(item, terms, now)
         if tip < terms.refund_lock_height:
