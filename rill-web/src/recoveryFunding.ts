@@ -41,6 +41,24 @@ function jsonObject(text: string): Record<string, unknown> {
 }
 
 /**
+ * One output's spend status. Esplora serves `outspend/:vout`; a self-hosted
+ * mempool backend serves only the per-transaction `outspends` list. The list
+ * is read only when the single lookup is unavailable, never to override an
+ * answer the single lookup gave.
+ */
+async function readOutspend(get: (path: string, limit?: number) => Promise<string>, txid: string, vout: number): Promise<Record<string, unknown>> {
+  let single: string;
+  try { single = await get(`tx/${txid}/outspend/${vout}`); } catch {
+    const list = parseStrictEventJson(await get(`tx/${txid}/outspends`, MAX_TRANSACTION_BYTES * 2), MAX_TRANSACTION_BYTES * 2);
+    require(Array.isArray(list) && vout < list.length);
+    const entry = (list as unknown[])[vout];
+    require(entry !== null && typeof entry === "object" && !Array.isArray(entry));
+    return entry as Record<string, unknown>;
+  }
+  return jsonObject(single);
+}
+
+/**
  * Matching/repeated responses are consistency checks on ONE explicitly trusted
  * API, not cryptographic inclusion or a global mempool view. This report grants
  * no signing or broadcast authority. Authenticate before revealing any outpoint.
@@ -108,7 +126,7 @@ async function observeFunding(plaintext: Uint8Array,
       require(await get(`block-height/${height}`, 128) === hash);
       if (inclusion) require(inclusion.height === height && inclusion.hash === hash);
       inclusion = { height, hash };
-      const outspend = jsonObject(await get(`tx/${binding.funding_txid}/outspend/${binding.contract_vout}`));
+      const outspend = await readOutspend(get, binding.funding_txid, binding.contract_vout);
       require(outspend.spent === false);
     }
     const after = await readChainTip(api, network, { signal, fetch: transport });

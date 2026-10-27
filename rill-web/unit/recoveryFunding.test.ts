@@ -217,3 +217,24 @@ test("the explicitly selected older revision is observed, never silently replace
   expect(result.fundingTxid).toBe(mock.item.record.funding_history[0]!.binding.funding_txid);
   expect(mock.calls.every((c) => !c.path.includes(mock.item.record.funding_history[1]!.binding.funding_txid))).toBe(true);
 });
+
+test("a mempool backend without the single outspend lookup is read from its outspends list", async () => {
+  const run = (list: string, single: Response | undefined) => {
+    const mock = api(); const txid = mock.item.record.funding_history[0]!.binding.funding_txid;
+    mock.responses.delete(`tx/${txid}/outspend/0`); mock.responses.set(`tx/${txid}/outspends`, list);
+    const transport: ChainFetch = (url, init) => String(url).endsWith(`/outspend/0`)
+      ? (mock.calls.push({ path: String(url).slice(BASE.length + 1), init: init! }), Promise.resolve(single ?? new Response("Cannot GET", { status: 404 })))
+      : mock.transport(url, init);
+    return { mock, txid, result: mock.run(transport) };
+  };
+  const { mock, txid, result } = run('[{"spent":false},{"spent":true,"txid":"' + "e".repeat(64) + '","vin":0}]', undefined);
+  expect((await result).fundingVout).toBe(0);
+  expect(mock.calls.filter((c) => c.path === `tx/${txid}/outspends`)).toHaveLength(2);
+  for (const list of ['[{"spent":true}]', "[]", '{"spent":false}', "[null]", '[{"spent":"false"}]', '[{"spent":false,"spent":false}]']) {
+    await expect(run(list, undefined).result).rejects.toBeInstanceOf(RecoveryFundingUnavailableError);
+  }
+  // An answer from the single lookup is final: the list never overrides it.
+  const answered = run('[{"spent":false}]', new Response('{"spent":true}'));
+  await expect(answered.result).rejects.toBeInstanceOf(RecoveryFundingUnavailableError);
+  expect(answered.mock.calls.some((c) => c.path.endsWith("/outspends"))).toBe(false);
+});
