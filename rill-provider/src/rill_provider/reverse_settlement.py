@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     from rill_provider.core_tx_bytes import FundedOutput, SpendScan
     from rill_provider.live_session_store import (
         LiveSessionStore,
+        RequestAnswer,
         ReverseProposalAdmission,
         SettlementItem,
     )
@@ -317,6 +318,17 @@ class ReverseSettlement:
             )
             return self._store._commit_reverse_signed_reply(  # noqa: SLF001 - same operation
                 document, operation=operation, evidence=evidence, crypto=crypto, now=now
+            )
+
+    async def verify_cooperative_completion(self, document: bytes, now: int) -> RequestAnswer:
+        """Archive a public-transcript receipt, without RPC, nonce, or settlement effects."""
+        from rill_crypto import Context  # noqa: PLC0415 - native verification is opt-in
+
+        if not isinstance(self._crypto, Context):
+            raise LiveSessionStoreError("reverse cooperative verifier unavailable")
+        async with self._store.reverse_operations.operation() as operation:
+            return self._store._admit_reverse_cooperative_completion(  # noqa: SLF001 - store-owned admission
+                document, operation=operation, crypto=self._crypto, now=now
             )
 
     async def _catch_up_funding(self, document: bytes, now: int) -> None:

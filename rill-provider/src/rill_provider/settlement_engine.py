@@ -81,7 +81,12 @@ if TYPE_CHECKING:
     from rill_core.wire.messages import ContractTerms, FundingBinding, InvoiceBinding
 
     from rill_provider.core_tx_bytes import CandidateFundingOutpoint, FundedOutput, SpendScan
-    from rill_provider.live_session_store import ClaimAttempt, LiveSessionStore, SettlementItem
+    from rill_provider.live_session_store import (
+        ClaimAttempt,
+        LiveSessionStore,
+        RequestAnswer,
+        SettlementItem,
+    )
     from rill_provider.lnd_payment_send import PaymentOutcome, PreparedPayment
     from rill_provider.payment_dispatch_record import PaymentAuthority
 
@@ -492,6 +497,12 @@ class SettlementEngine:
         if self._reverse is None:
             raise LiveSessionStoreError("reverse cooperative signer unavailable")
         return await self._reverse.cosign_cooperative_proposal(document, now)
+
+    async def verify_reverse_completion(self, document: bytes, *, now: int) -> RequestAnswer:
+        """Verify a claimant's retained public contribution; never restart cooperation."""
+        if self._reverse is None:
+            raise LiveSessionStoreError("reverse cooperative verifier unavailable")
+        return await self._reverse.verify_cooperative_completion(document, now)
 
     async def complete_cooperative_claim(  # noqa: PLR0911 - preconsumption refusals, then one commit boundary
         self,

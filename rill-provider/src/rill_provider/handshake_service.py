@@ -780,6 +780,11 @@ class HandshakeService:
                         and payload.get("action") == "cooperative_claim_propose"
                     ):
                         return await self._cosign_reverse_proposal(document, relays)
+                    if (
+                        isinstance(payload, dict)
+                        and payload.get("action") == "cooperative_claim_complete"
+                    ):
+                        return await self._verify_reverse_completion(document, relays, now)
                 return await self._answer(document, relays, now)
             init = store.open_epoch_frame(event, now=now, transport=self._transport)
             reserved = store.reserve(init, now=now)
@@ -1107,6 +1112,22 @@ class HandshakeService:
         response = Envelope.model_validate_json(reply, strict=True)
         await self._send_pending(response.message_id, relays)
         return "proposal-signed"
+
+    async def _verify_reverse_completion(
+        self, document: bytes, relays: Sequence[Relay], now: int
+    ) -> str:
+        """Deliver an archived verification receipt, not new cooperative authority."""
+        if self._settlement is None:
+            return "refused"
+        try:
+            answer = await self._settlement.verify_reverse_completion(document, now=now)
+        except StaleOwnerError:
+            raise
+        except Exception:  # noqa: BLE001 - no transcript or signature oracle
+            LOG.warning("reverse cooperative completion refused")
+            return "refused"
+        await self._send_pending(answer.response_message_id, relays)
+        return "completion-replay" if answer.replay else "completion-verified"
 
     async def _answer(self, document: bytes, relays: Sequence[Relay], now: int) -> str:
         policy = self._policy

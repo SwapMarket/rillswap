@@ -314,6 +314,51 @@ def test_forward_profile_never_routes_proposal_requests_to_reverse_cosigner() ->
     settlement.cosign_reverse_proposal.assert_not_called()
 
 
+@pytest.mark.parametrize("outcome", ["verified", "replay", "refused", "stale"])
+def test_service_routes_reverse_completion_to_public_verification(
+    outcome: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def exercise() -> None:
+        settlement = Mock(verify_reverse_completion=AsyncMock())
+        settlement.verify_reverse_completion.return_value = Mock(
+            response_message_id="44" * 32, replay=outcome == "replay"
+        )
+        if outcome == "refused":
+            settlement.verify_reverse_completion.side_effect = LiveSessionStoreError(
+                "private transcript detail"
+            )
+        elif outcome == "stale":
+            settlement.verify_reverse_completion.side_effect = StaleOwnerError("owner lost")
+        service, store, proposal = _service(settlement)
+        routed = json.loads(proposal)
+        routed["payload"]["action"] = "cooperative_claim_complete"
+        document = json.dumps(routed).encode()
+        store.open_mailbox_frame.return_value = document
+        sent = AsyncMock()
+        service._send_pending = sent  # type: ignore[method-assign]
+        if outcome == "stale":
+            with pytest.raises(StaleOwnerError):
+                await service.handle(_event(), [])
+            return
+        assert (
+            await service.handle(_event(), [])
+            == {
+                "verified": "completion-verified",
+                "replay": "completion-replay",
+                "refused": "refused",
+            }[outcome]
+        )
+        settlement.verify_reverse_completion.assert_awaited_once_with(document, now=123)
+        store.answer_request.assert_not_called()
+        if outcome == "refused":
+            sent.assert_not_called()
+        else:
+            sent.assert_awaited_once_with("44" * 32, [])
+
+    asyncio.run(exercise())
+    assert "private transcript detail" not in caplog.text
+
+
 def test_closed_readiness_refuses_new_reverse_signing_exposure() -> None:
     settlement = Mock(cosign_reverse_proposal=AsyncMock())
     service, _, _ = _service(settlement)

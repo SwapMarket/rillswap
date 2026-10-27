@@ -34,7 +34,7 @@ import stat
 import time
 import uuid
 from collections.abc import Callable
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, cast
@@ -58,11 +58,13 @@ from rill_core.settlement.unilateral import validate_unilateral_spend
 from rill_core.wire import verify_static_handshake_accept, verify_static_handshake_transcript
 from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_model_json
 from rill_core.wire.cooperative_messages import (
+    CooperativeClaimComplete,
     CooperativeClaimDeclined,
     CooperativeClaimPropose,
     CooperativeClaimReady,
     CooperativeClaimReadyRequest,
     CooperativeClaimSigned,
+    CooperativeClaimVerified,
     check_cooperative_action_context,
     parse_cooperative_payload,
 )
@@ -3989,7 +3991,11 @@ class LiveSessionStore:
         raise LiveSessionStoreError("reverse paid proposal preflight refused")
 
     def _reverse_signed_reply_replay(
-        self, document: bytes, *, operation: ReverseOperation
+        self,
+        document: bytes,
+        *,
+        operation: ReverseOperation,
+        transaction: sqlite3.Connection | None = None,
     ) -> bytes | None:
         """Return exact authenticated archived bytes, never delivery or signing authority.
 
@@ -4001,7 +4007,7 @@ class LiveSessionStore:
         """
         self.reverse_operations.check(operation)
         try:
-            with self._write() as connection:
+            with self._write() if transaction is None else nullcontext(transaction) as connection:
                 outer, proposal, terms = self._authenticated_reverse_preimage(connection, document)
                 digest = unsigned_envelope_hash(outer).hex()
                 admitted = connection.execute(
@@ -4161,6 +4167,243 @@ class LiveSessionStore:
         if refused:
             raise LiveSessionStoreError("reverse archived contribution replay refused")
         return result
+
+    def _admit_reverse_cooperative_completion(  # noqa: PLR0912, PLR0915 - atomic signed transcript receipt
+        self,
+        document: bytes,
+        *,
+        operation: ReverseOperation,
+        crypto: Context,
+        now: int,
+    ) -> RequestAnswer:
+        """Verify public archived contributions, never renew signing or economic authority.
+
+        The completed contribution can predate this process or its signing window.
+        Only the existing inbox/outbox change; COMPLETE remains provider participation,
+        not a claim broadcast, chain confirmation, or new settlement obligation.
+        """
+        self.reverse_operations.check(operation)
+        if type(now) is not int or now < 0:
+            raise LiveSessionStoreError("reverse completion audit time refused")
+        conflict = False
+        try:
+            outer = _canonical_envelope(document)
+            with self._write() as connection:
+                row = connection.execute(
+                    "SELECT client_key,provider_session_key,phase,blocked,revision,"
+                    "next_client_seq,next_provider_seq FROM sessions WHERE session_id=?",
+                    (outer.session_id,),
+                ).fetchone()
+                if row is None or row[2] != "ACCEPTED" or self._policy.profile != "ln-to-btc/v1":
+                    raise ValueError("no accepted reverse session")  # noqa: TRY301
+                client, provider, _, blocked, revision, client_seq, provider_seq = row
+                if blocked:
+                    raise SessionBlockedError("session blocked by conflict evidence")  # noqa: TRY301
+                digest = verify_static_signed_envelope(
+                    document,
+                    expected_session_id=outer.session_id,
+                    expected_profile=self._policy.profile,
+                    expected_network=self._network,
+                    expected_sender_key=client,
+                    supported_features=self._policy.features,
+                    crypto=self._crypto,
+                ).hex()
+                payload = parse_cooperative_payload("action_request", canonicalize(outer.payload))
+                if outer.message_type != "action_request" or not isinstance(
+                    payload, CooperativeClaimComplete
+                ):
+                    raise ValueError("not a reverse completion")  # noqa: TRY301
+                seen = connection.execute(
+                    "SELECT message_id,seq,unsigned_digest FROM inbox WHERE session_id=? "
+                    "AND sender_key=? AND (message_id=? OR seq=?)",
+                    (outer.session_id, client, outer.message_id, outer.sequence),
+                ).fetchall()
+                if seen:
+                    if seen == [(outer.message_id, outer.sequence, digest)]:
+                        replies = connection.execute(
+                            "SELECT message_id,seq,canonical_bytes FROM outbox "
+                            "WHERE session_id=? AND in_reply_to=?",
+                            (outer.session_id, outer.message_id),
+                        ).fetchall()
+                        if len(replies) != 1:
+                            raise ValueError("completion receipt absent or ambiguous")  # noqa: TRY301
+                        receipt = _canonical_envelope(replies[0][2])
+                        verify_static_signed_envelope(
+                            replies[0][2],
+                            expected_session_id=outer.session_id,
+                            expected_profile=self._policy.profile,
+                            expected_network=self._network,
+                            expected_sender_key=provider,
+                            supported_features=self._policy.features,
+                            crypto=self._crypto,
+                        )
+                        verified = parse_cooperative_payload(
+                            "action_result", canonicalize(receipt.payload)
+                        )
+                        if (
+                            receipt.message_type != "action_result"
+                            or receipt.message_id != replies[0][0]
+                            or receipt.sequence != replies[0][1]
+                            or receipt.in_reply_to != outer.message_id
+                            or receipt.contract_hash != outer.contract_hash
+                            or receipt.required_features != (COOPERATIVE_CLAIM_FEATURE,)
+                            or not isinstance(verified, CooperativeClaimVerified)
+                            or verified.cooperation_id != payload.cooperation_id
+                        ):
+                            raise ValueError("completion receipt differs")  # noqa: TRY301
+                        return RequestAnswer(
+                            outer.session_id, outer.message_id, replies[0][0], replay=True
+                        )
+                    _record_conflict(connection, outer.session_id, "request", document)
+                    connection.execute(
+                        "UPDATE cooperation_attempts SET state='ABANDONED' WHERE session_id=? "
+                        "AND state IN ('BURNED','NONCE_READY','SIGNING')",
+                        (outer.session_id,),
+                    )
+                    conflict = True
+                else:
+                    if (
+                        outer.sequence != client_seq
+                        or client_seq - FIRST_REQUEST_SEQUENCE >= MAX_REQUESTS_PER_SESSION
+                    ):
+                        raise ValueError("completion sequence refused")  # noqa: TRY301
+                    attempt = connection.execute(
+                        "SELECT binding,local_nonce,peer_nonce,state FROM cooperation_attempts "
+                        "WHERE cooperation_id=? AND session_id=?",
+                        (bytes.fromhex(payload.cooperation_id), outer.session_id),
+                    ).fetchone()
+                    if attempt is None or attempt[3] != "COMPLETE":
+                        raise ValueError("no completed provider contribution")  # noqa: TRY301
+                    bound = parse_json_strict(attempt[0])
+                    if not isinstance(bound, dict):
+                        raise ValueError("completion transcript absent")  # noqa: TRY301
+                    prior = connection.execute(
+                        "SELECT canonical_bytes FROM inbox WHERE session_id=? AND message_id=?",
+                        (outer.session_id, bound.get("proposal_message_id")),
+                    ).fetchone()
+                    if prior is None:
+                        raise ValueError("completion transcript unavailable")  # noqa: TRY301
+                    archived = self._reverse_signed_reply_replay(
+                        prior[0], operation=operation, transaction=connection
+                    )
+                    if archived is None:
+                        raise ValueError("completion transcript unavailable")  # noqa: TRY301
+                    proposal, _, terms = self._authenticated_reverse_preimage(connection, prior[0])
+                    agreement = connection.execute(
+                        "SELECT s.client_key,s.provider_session_key,s.phase,s.init_bytes,"
+                        "s.accept_bytes,s.transcript_digest,w.contract_hash,w.terms_offer,"
+                        "w.terms_accept FROM sessions s "
+                        "JOIN swaps w ON w.session_id=s.session_id WHERE s.session_id=?",
+                        (outer.session_id,),
+                    ).fetchone()
+                    if agreement is None:
+                        raise ValueError("completion agreement unavailable")  # noqa: TRY301
+                    initiation, acceptance, _ = self._authenticated_reverse_agreement(
+                        agreement, outer.session_id
+                    )
+                    check_cooperative_action_context(
+                        outer, terms, initiation, acceptance, prior_request=proposal
+                    )
+                    for (stored,) in connection.execute(
+                        "SELECT canonical_bytes FROM inbox WHERE session_id=? AND sender_key=?",
+                        (outer.session_id, client),
+                    ):
+                        previous = _canonical_envelope(stored)
+                        if (
+                            previous.message_type == "action_request"
+                            and previous.payload.get("action") == "cooperative_claim_complete"
+                            and previous.payload.get("cooperation_id") == payload.cooperation_id
+                        ):
+                            raise ValueError("completion already admitted")  # noqa: TRY301
+                    transcript = {
+                        "user_public_key": bytes.fromhex(terms.client_contract_compressed_key),
+                        "provider_public_key": bytes.fromhex(
+                            terms.provider_contract_compressed_key
+                        ),
+                        "tap_tweak": bytes.fromhex(cast("str", bound["tap_tweak"])),
+                        "message": bytes.fromhex(cast("str", bound["signature_hash"])),
+                        "user_public_nonce": attempt[2],
+                        "provider_public_nonce": attempt[1],
+                    }
+                    # Recheck both public partials so corruption of derived binding data
+                    # cannot make the receipt attest to a different aggregate transcript.
+                    signed_reply = CooperativeClaimSigned.model_validate_json(
+                        canonicalize(_canonical_envelope(archived).payload), strict=True
+                    )
+                    crypto.musig_partial_verify(
+                        **transcript,
+                        signer_index=1,
+                        partial_signature=bytes.fromhex(signed_reply.partial_signature),
+                    )
+                    crypto.musig_partial_verify(
+                        **transcript,
+                        signer_index=0,
+                        partial_signature=bytes.fromhex(payload.partial_signature),
+                    )
+                    verified = CooperativeClaimVerified(
+                        action="cooperative_claim_complete",
+                        cooperation_id=payload.cooperation_id,
+                        status="verified",
+                    )
+                    scalar, key = self._unseal(connection, outer.session_id)
+                    try:
+                        response = self._signed_envelope(
+                            outer,
+                            key,
+                            provider_seq,
+                            Answer(
+                                "action_result",
+                                verified.model_dump(mode="json"),
+                                contract_hash=outer.contract_hash,
+                            ),
+                            scalar,
+                            crypto,
+                            outer.message_id,
+                            required_features=(COOPERATIVE_CLAIM_FEATURE,),
+                        )
+                    finally:
+                        del scalar
+                    encoded = canonicalize(response.model_dump(mode="json"))
+                    _canonical_envelope(encoded)
+                    connection.execute(
+                        "INSERT INTO inbox VALUES (?,?,?,?,?,?,?)",
+                        (
+                            outer.session_id,
+                            client,
+                            outer.message_id,
+                            outer.sequence,
+                            digest,
+                            document,
+                            revision + 1,
+                        ),
+                    )
+                    connection.execute(
+                        "INSERT INTO outbox VALUES (?,?,?,?,?,?,'PENDING')",
+                        (
+                            response.message_id,
+                            outer.session_id,
+                            provider_seq,
+                            outer.message_id,
+                            encoded,
+                            revision + 1,
+                        ),
+                    )
+                    connection.execute(
+                        "UPDATE sessions SET revision=?,next_client_seq=?,next_provider_seq=?,"
+                        "active_at=? WHERE session_id=?",
+                        (revision + 1, client_seq + 1, provider_seq + 1, now, outer.session_id),
+                    )
+                    self.reverse_operations.check(operation)
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - no signature, proposal, or private context oracle
+            raise LiveSessionStoreError("reverse completion refused") from None
+        if conflict:
+            pending = self._reverse_proposals.get(outer.session_id)
+            if pending is not None and pending.window is not None:
+                pending.window.abandon()
+            raise SessionBlockedError("conflicting signed request is durable")
+        return RequestAnswer(outer.session_id, outer.message_id, response.message_id, replay=False)
 
     def _commit_reverse_signed_reply(  # noqa: PLR0912, PLR0915 - one custody/consumption/response boundary
         self,

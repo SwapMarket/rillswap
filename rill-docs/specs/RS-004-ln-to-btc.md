@@ -37,9 +37,9 @@ the hold. No cooperative proposal, nonce or partial signature is needed, and
 missing local metadata MUST NOT select this mode or renew payment authority.
 
 If cooperation is negotiated, the user reveals the preimage through the
-bounded cooperative flow. The provider verifies it and may settle the hold.
-The provider MUST NOT issue a usable cooperative partial
-signature before it possesses the valid preimage and has a safely settleable
+bounded cooperative flow. The provider verifies it and settles the hold.
+The provider MUST NOT issue a usable cooperative partial signature until it
+possesses the valid preimage and positively reconciles settlement of the exact
 accepted payment. If cooperation fails, the user broadcasts and fee-bumps the
 unilateral claim.
 

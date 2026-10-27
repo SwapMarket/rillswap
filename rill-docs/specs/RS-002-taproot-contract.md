@@ -192,6 +192,10 @@ receipt `action_result` has the same action and ID
 and `status` = `verified`. Results refer to their request via the enclosing
 envelope's `in_reply_to`. The claimant need not wait for the receipt to finish
 or broadcast; a missing receipt never authorizes nonce reuse.
+The cosigner MAY verify the archived public transcript and return this receipt
+after the signing window expires or after restart. This creates no new signing,
+settlement, or broadcast authority. A second distinct completion for the same
+attempt is refused; an exact admitted completion replays its archived receipt.
 
 The local attempt has at most 30 seconds and ends before the existing
 unilateral broadcast/escalation cutoff (both constraints apply). The first
@@ -201,7 +205,7 @@ revealing a partial, and fall back without extending the budget on refusal,
 invalid data, restart, or timeout. For LN to BTC the client first durably
 saves a signed unilateral claim; proposal preimage disclosure can settle the
 hold, so the provider does not return a partial until it positively reconciles
-that settlement. No runtime currently enables these payloads for new swaps.
+that settlement.
 
 For reverse cooperation, the client anchors its single local 30-second window
 immediately before the first native proposal preparation or nonce allocation,
