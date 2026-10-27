@@ -56,6 +56,30 @@ HASH_HEX_LENGTH = 64
 MAX_ESTIMATE_TARGET = 1008  # Core's estimatesmartfee bound
 SATS_PER_BTC = Decimal(100_000_000)
 MAX_SATS = 21_000_000 * 100_000_000
+# Every Core RPC method the provider may call. Operators can restrict the
+# provider's Core credential to exactly this list with -rpcwhitelist.
+CORE_RPC_METHODS = (
+    "getblockchaininfo",
+    "estimatesmartfee",
+    "getmempoolinfo",
+    "getblockhash",
+    "getindexinfo",
+    "getrawtransaction",
+    "gettxout",
+    "sendrawtransaction",
+    # LN to BTC (RS-004): the provider funds contracts from its Core
+    # wallet and looks for the client's claim spending them.
+    "decodescript",
+    "walletcreatefundedpsbt",
+    "decodepsbt",
+    "lockunspent",
+    "walletprocesspsbt",
+    "finalizepsbt",
+    "decoderawtransaction",
+    "gettxspendingprevout",
+    "getblock",
+    "getblockheader",
+)
 MAX_VOUT = 0xFFFFFFFF
 
 
@@ -1314,28 +1338,7 @@ class CoreTransactionReader:
         *,
         deadline: float | None = None,
     ) -> Any:  # noqa: ANN401
-        if method not in (
-            "getblockchaininfo",
-            "estimatesmartfee",
-            "getmempoolinfo",
-            "getblockhash",
-            "getindexinfo",
-            "getrawtransaction",
-            "gettxout",
-            "sendrawtransaction",
-            # LN to BTC (RS-004): the provider funds contracts from its Core
-            # wallet and looks for the client's claim spending them.
-            "decodescript",
-            "walletcreatefundedpsbt",
-            "decodepsbt",
-            "lockunspent",
-            "walletprocesspsbt",
-            "finalizepsbt",
-            "decoderawtransaction",
-            "gettxspendingprevout",
-            "getblock",
-            "getblockheader",
-        ):
+        if method not in CORE_RPC_METHODS:
             raise CoreProtocolError("unsupported Core RPC method")
         path = self._wallet_path if method.startswith("wallet") or method == "lockunspent" else "/"
         max_bytes = MAX_BLOCK_RESPONSE_BYTES if method == "getblock" else MAX_RESPONSE_BYTES
