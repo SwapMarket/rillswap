@@ -82,6 +82,7 @@ from rill_core.wire.quotes import (
 )
 from rill_core.wire.settlement_messages import PaymentSettled, parse_observation
 from rill_provider import _nip01_event as nip01
+from rill_provider import _transport_pow as transport_pow
 from rill_provider._nip59_receive import _decode_gift_wrap_candidate
 from rill_provider._nip59_send import _wrap_envelope
 from rill_provider.core_tx_bytes import CooperativeClaimOutpoint, CooperativeFeePolicy
@@ -234,21 +235,36 @@ def verify_announcement(  # noqa: PLR0913 - explicit trust inputs
     ):
         raise SwapError("announcement does not offer this swap now")
     _requires_epoch_binding(advertisement)
+    _transport_work(advertisement)
     return dict(advertisement)
+
+
+def _extensions(advertisement: dict[str, Any]) -> dict[str, Any]:
+    """Return signed extensions holding only requirements this client understands."""
+    extensions = advertisement.get("extensions", {})
+    if not isinstance(extensions, dict):
+        raise SwapError("announcement extensions unsupported")
+    if not set(extensions) <= {HANDSHAKE_FEATURES_EXTENSION, transport_pow.TRANSPORT_POW_EXTENSION}:
+        raise SwapError("announcement handshake requirements unsupported")
+    return extensions
 
 
 def _requires_epoch_binding(advertisement: dict[str, Any]) -> bool:
     """Interpret only an explicit, signed requirement; malformed is not legacy."""
-    extensions = advertisement.get("extensions", {})
-    if not isinstance(extensions, dict):
-        raise SwapError("announcement extensions unsupported")
-    if not extensions:
+    extensions = _extensions(advertisement)
+    if HANDSHAKE_FEATURES_EXTENSION not in extensions:
         return False
-    if set(extensions) != {HANDSHAKE_FEATURES_EXTENSION} or extensions[
-        HANDSHAKE_FEATURES_EXTENSION
-    ] != [EPOCH_SESSION_FEATURE]:
+    if extensions[HANDSHAKE_FEATURES_EXTENSION] != [EPOCH_SESSION_FEATURE]:
         raise SwapError("announcement handshake requirements unsupported")
     return True
+
+
+def _transport_work(advertisement: dict[str, Any]) -> int:
+    """Return the RS-006 transport proof of work the provider requires (0: none)."""
+    try:
+        return transport_pow.requirement(_extensions(advertisement)) or 0
+    except transport_pow.TransportWorkError:
+        raise SwapError("announcement transport work unsupported") from None
 
 
 async def discover(  # noqa: PLR0913 - explicit trust inputs
@@ -321,6 +337,7 @@ class _Session:
         self.session_id = secrets.token_hex(32)
         self.sequence = 0
         self.provider_key: str | None = None
+        self.work_bits = 0  # RS-006 transport work declared at initiation, on every send
         self._expected_accept: tuple[Envelope, HandshakeInit, str] | None = None
         self.seen: set[str] = set()
         self.inbox: list[Envelope] = []
@@ -390,6 +407,7 @@ class _Session:
             sender_session_secret=self.secret,
             recipient_xonly_key=recipient,
             crypto=self.crypto,
+            work_bits=self.work_bits,
         )
         for _ in range(3):
             if await self.connection.publish(event):
@@ -1321,6 +1339,13 @@ async def _handshake(
         session.session_id = epoch_bound_session_id(
             session.network, identity, epoch, session.key
         ).hex()
+    extensions: dict[str, Any] = (
+        {EPOCH_SESSION_EXTENSION: {"epoch_inbox_xonly_key": epoch}} if epoch_bound else {}
+    )
+    # The declaration binds every message of this session to the advertised work.
+    session.work_bits = _transport_work(advertisement)
+    if session.work_bits:
+        extensions[transport_pow.TRANSPORT_POW_EXTENSION] = {"bits": session.work_bits}
     init = HandshakeInit(
         protocol="rillswap",
         wire_version="1",
@@ -1339,9 +1364,7 @@ async def _handshake(
             if epoch_bound
             else (COOPERATIVE_CLAIM_FEATURE,)
         ),
-        extensions={EPOCH_SESSION_EXTENSION: {"epoch_inbox_xonly_key": epoch}}
-        if epoch_bound
-        else {},
+        extensions=extensions,
     )
     request = session.envelope("handshake_init", init.model_dump(mode="json"), signed=False)
     session.expect_accept(request, init, identity)
