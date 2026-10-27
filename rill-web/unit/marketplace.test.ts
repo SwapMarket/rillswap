@@ -3,7 +3,8 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import canonicalize from "canonicalize";
 import { finalizeEvent, getPublicKey } from "nostr-tools";
-import { directoryFromObservations, eligibleProviders, estimateFromDirectory, indicativeFee, ineligibilityReason, providerLimits, rankQuotes, scanAnnouncements, type LocatedQuote, type RelayObservation } from "../src/swap/marketplace";
+import { MAX_DISCOVERY_EVENTS } from "../src/swap/discovery";
+import { directoryFromObservations, eligibleProviders, estimateFromDirectory, indicativeFee, ineligibilityReason, MAX_IDENTITY_EVENTS, providerLimits, rankQuotes, scanAnnouncements, type LocatedQuote, type RelayObservation } from "../src/swap/marketplace";
 import application from "./fixtures/manual-advertisement-regtest-v1.json";
 import vector from "./fixtures/nostr-announcement-regtest-v1.json";
 import network from "../src/networks/regtest-rillswap-e2e-v1.json";
@@ -40,9 +41,15 @@ test("same announcement on multiple relays preserves provenance without duplicat
   expect(directory.warnings).toEqual([]);
 });
 
-test("a lower-revision conflict cannot be hidden behind a newer announcement", () => {
-  expect(() => scanAnnouncements([observed([announcement(3), announcement(1, "10"), announcement(1, "11")])], network))
-    .toThrow("conflicting data");
+test("a lower-revision conflict cannot be hidden behind a newer announcement, and excludes only that provider", () => {
+  const conflicting = [announcement(3), announcement(1, "10"), announcement(1, "11")];
+  const identity = JSON.parse(conflicting[0]!).pubkey as string;
+  const other = announcement(1, "20", 3);
+  const directory = scanAnnouncements([observed([...conflicting, other])], network);
+  expect(directory.providers.map((provider) => provider.rawAnnouncement)).toEqual([other]);
+  expect(directory.warnings).toEqual([`${identity.slice(0, 12)}…: conflicting announcements, provider excluded`]);
+  // A pinned provider was the user's choice, so its equivocation stops discovery.
+  expect(() => scanAnnouncements([observed(conflicting)], network, identity)).toThrow("conflicting data");
 });
 
 test("provider identities are discovered automatically but a manual pin is never broadened", () => {
@@ -56,13 +63,33 @@ test("full network mismatch is refused even when events have plausible tags", ()
   expect(scanAnnouncements([observed([announcement()])], { ...network, deployment_namespace: "other" }).providers).toEqual([]);
 });
 
-test("partial responses are disclosed but overflow never selects a prefix", () => {
-  const partial = observed([announcement()]);
+test("partial and truncated responses are disclosed, and floods degrade discovery instead of aborting it", () => {
+  const valid = announcement();
+  const partial = observed([valid]);
   const directory = scanAnnouncements([{ ...partial, result: { ...partial.result, completion: "timeout" } }], network);
   expect(directory.providers).toHaveLength(1);
   expect(directory.warnings[0]).toContain("incomplete discovery (timeout)");
-  expect(() => scanAnnouncements([{ ...partial, result: { ...partial.result, truncated: true } }], network)).toThrow("event limit");
-  expect(() => scanAnnouncements([observed(Array.from({ length: 257 }, (_, i) => `invalid-${i}`))], network)).toThrow("event limit");
+  const truncated = scanAnnouncements([{ ...partial, result: { ...partial.result, truncated: true, completion: "limit" } }], network);
+  expect(truncated.providers).toHaveLength(1);
+  expect(truncated.warnings).toEqual([`wss://a.test/: more than ${MAX_DISCOVERY_EVENTS} events, discovery incomplete`]);
+  // Invalid events never count against valid ones, on one relay or across relays.
+  const junk = (prefix: string) => Array.from({ length: MAX_DISCOVERY_EVENTS }, (_, i) => `${prefix}-${i}`);
+  const flooded = scanAnnouncements([observed([...junk("a"), valid]), observed(junk("b"), "wss://b.test/")], network);
+  expect(flooded.providers.map((provider) => provider.rawAnnouncement)).toEqual([valid]);
+  expect(flooded.warnings).toEqual([]);
+});
+
+test("an identity's verification budget is per relay, so one relay's forgeries cannot hide it elsewhere", () => {
+  const revisions = Array.from({ length: MAX_IDENTITY_EVENTS + 1 }, (_, i) => announcement(i + 1));
+  const identity = JSON.parse(revisions[0]!).pubkey as string;
+  const capped = scanAnnouncements([observed(revisions)], network);
+  expect(capped.providers[0]!.announcement.revision).toBe(MAX_IDENTITY_EVENTS);
+  expect(capped.warnings).toEqual([`${identity.slice(0, 12)}…: more than ${MAX_IDENTITY_EVENTS} announcements, some ignored`]);
+  const genuine = announcement(1);
+  const forged = Array.from({ length: MAX_IDENTITY_EVENTS }, (_, i) => JSON.stringify({ ...JSON.parse(genuine), created_at: i }));
+  const directory = scanAnnouncements([observed([...forged, genuine], "wss://evil.test/"), observed([genuine], "wss://b.test/")], network);
+  expect(directory.providers.map((provider) => provider.rawAnnouncement)).toEqual([genuine]);
+  expect(directory.providers[0]!.relayUrls).toEqual(["wss://b.test/"]);
 });
 
 test("highest revision replaces older transport provenance and amount bands filter offers", () => {

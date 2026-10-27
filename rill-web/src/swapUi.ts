@@ -235,7 +235,7 @@ function mount(root: HTMLElement): void {
       renderDirectory();
       providersStatus.textContent = directory.entries.length === 0 ? "No providers found on your relays." :
         `${directory.entries.length} provider${directory.entries.length === 1 ? "" : "s"} on ${name}.` +
-        (directory.warnings.length ? ` Some relays did not answer: ${directory.warnings.join("; ")}.` : "");
+        (directory.warnings.length ? ` Discovery was incomplete: ${directory.warnings.join("; ")}.` : "");
     }, (error: Error) => { providersStatus.textContent = error.message; }).finally(() => { reloadProviders.disabled = false; updateEstimate(); });
   };
   reloadProviders.onclick = loadDirectory;

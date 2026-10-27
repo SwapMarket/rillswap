@@ -32,6 +32,27 @@ export interface ProviderDirectory {
   readonly warnings: readonly string[];
 }
 
+/** Unique events one identity may spend verification on per relay (RS-005 per-identity receive bound). */
+export const MAX_IDENTITY_EVENTS = 32;
+
+function authorOf(raw: string): string | null {
+  try {
+    const event = parseStrictEventJson(raw) as { pubkey?: unknown } | null;
+    const author = event?.pubkey;
+    return typeof author === "string" && /^[0-9a-f]{64}$/.test(author) ? author : null;
+  } catch { return null; }
+}
+
+/**
+ * Verified provider slots across relays. Receive work is bounded globally by
+ * the relay count times the per-relay event limit, and per identity and relay
+ * by MAX_IDENTITY_EVENTS. Anyone can publish announcements, so floods and
+ * misbehaving providers degrade discovery with warnings rather than abort it:
+ * invalid events cost nothing beyond their own verification, a truncated relay
+ * is reported as incomplete, and an identity that signs conflicting data at
+ * one revision (even an older one) is excluded. A pinned identity that
+ * equivocates still stops discovery, because the user chose it.
+ */
 export function scanAnnouncements(
   observations: readonly RelayObservation[],
   network: SwapRequest["network"],
@@ -39,28 +60,37 @@ export function scanAnnouncements(
   profile: AnnouncementProfile = "btc-to-ln/v1",
 ): ProviderDirectory {
   const warnings: string[] = [];
-  const uniqueRaw = new Set<string>();
+  const verified = new Map<string, AnnouncementCandidate | null>();
+  const overBudget = new Set<string>();
+  const equivocating = new Set<string>();
   const revisions = new Map<string, string>();
   const slots = new Map<string, { announcement: AnnouncementCandidate; rawAnnouncement: string; relays: Set<string> }>();
   for (const { url, result } of observations) {
-    if (result.truncated) throw new SwapError("Relay discovery exceeded its event limit; narrow your relay set or pin a provider");
-    if (result.completion !== "eose") warnings.push(`${url}: incomplete discovery (${result.completion})`);
+    if (result.truncated) warnings.push(`${url}: more than ${MAX_DISCOVERY_EVENTS} events, discovery incomplete`);
+    else if (result.completion !== "eose") warnings.push(`${url}: incomplete discovery (${result.completion})`);
+    // Budgets are per relay: the author is read before any signature check,
+    // so one relay's forged events must not exhaust an identity elsewhere.
+    const spent = new Map<string, number>();
     for (const raw of result.events) {
-      uniqueRaw.add(raw);
-      if (uniqueRaw.size > MAX_DISCOVERY_EVENTS) {
-        throw new SwapError("Combined relay discovery exceeded its event limit; no quote was selected");
+      let candidate = verified.get(raw);
+      if (candidate === undefined) {
+        const author = authorOf(raw);
+        if (author === null || (identity !== undefined && author !== identity)) continue;
+        const count = (spent.get(author) ?? 0) + 1;
+        spent.set(author, count);
+        if (count > MAX_IDENTITY_EVENTS) { overBudget.add(author); continue; }
+        candidate = null;
+        try { candidate = verifyNostrProviderAnnouncement(raw, author, network, profile); } catch { /* ignored */ }
+        verified.set(raw, candidate);
       }
-      let candidate: AnnouncementCandidate;
-      try {
-        const event = parseStrictEventJson(raw) as { pubkey?: unknown } | null;
-        const author = identity ?? event?.pubkey;
-        if (typeof author !== "string" || !/^[0-9a-f]{64}$/.test(author)) continue;
-        candidate = verifyNostrProviderAnnouncement(raw, author, network, profile);
-      } catch { continue; }
+      if (candidate === null) continue;
       const slot = `${candidate.identityXOnlyKey}:${candidate.slot}`;
       const revision = `${slot}:${candidate.revision}`;
       if (revisions.has(revision) && revisions.get(revision) !== candidate.advertisementJcs) {
-        throw new SwapError("Provider announced conflicting data at the same revision; no quote was selected");
+        if (identity !== undefined) {
+          throw new SwapError("Provider announced conflicting data at the same revision; no quote was selected");
+        }
+        equivocating.add(candidate.identityXOnlyKey);
       }
       revisions.set(revision, candidate.advertisementJcs);
       const previous = slots.get(slot);
@@ -71,10 +101,14 @@ export function scanAnnouncements(
       }
     }
   }
+  for (const author of overBudget) warnings.push(`${author.slice(0, 12)}…: more than ${MAX_IDENTITY_EVENTS} announcements, some ignored`);
+  for (const author of equivocating) warnings.push(`${author.slice(0, 12)}…: conflicting announcements, provider excluded`);
   return {
-    providers: [...slots.values()].map(({ announcement, rawAnnouncement, relays }) => ({
-      announcement, rawAnnouncement, relayUrls: Object.freeze([...relays]),
-    })),
+    providers: [...slots.values()]
+      .filter(({ announcement }) => !equivocating.has(announcement.identityXOnlyKey))
+      .map(({ announcement, rawAnnouncement, relays }) => ({
+        announcement, rawAnnouncement, relayUrls: Object.freeze([...relays]),
+      })),
     warnings,
   };
 }
