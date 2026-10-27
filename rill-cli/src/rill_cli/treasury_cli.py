@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 
 from pydantic import AfterValidator, Field
 from pyrage import x25519
-from rill_core.networks import REGTEST_CONSENSUS_PROFILE, require_funding_release
+from rill_core.networks import REGTEST_CONSENSUS_PROFILE, require_supported_network
 from rill_core.wire.canonical import parse_json_strict, parse_model_json
 from rill_core.wire.types import Hex32, StrictModel
 from rill_crypto import Context
@@ -138,7 +138,7 @@ def _run(args: argparse.Namespace) -> str:
     authority = parse_model_json(
         SourceAuthority, _read_private(Path(args.authority), MAX_AUTHORITY_BYTES)
     )
-    require_funding_release(authority.network)
+    require_supported_network(authority.network)
     if (
         authority.network.name != "regtest"
         or authority.network.consensus_profile != REGTEST_CONSENSUS_PROFILE

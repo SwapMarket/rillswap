@@ -1,9 +1,8 @@
-"""Explicit supported Bitcoin identities, independent of permission to move funds.
+"""Explicit supported Bitcoin identities for execution and serialization.
 
-These are consensus/serialization capabilities, not release authorization.
 Network labels, matching address prefixes, and a shared genesis alone are not
 sufficient, notably for custom signets. Live adapters must attest their actual
-backends and apply their own release gates before any financial effect.
+backends before any financial effect.
 """
 
 from __future__ import annotations
@@ -51,11 +50,6 @@ def require_supported_network(network: NetworkIdentity) -> None:
         raise ValidationError("unsupported Bitcoin network identity")
 
 
-# Mainnet funding is a release decision, not configuration. It stays disabled
-# until explicit security and release acceptance changes this constant in code.
-MAINNET_FUNDING_ENABLED = False
-
-
 @dataclass(frozen=True, slots=True)
 class BackendNames:
     """How local backends name one supported identity (never proof of it)."""
@@ -98,10 +92,3 @@ def invoice_matches_network(bolt11: str, network: NetworkIdentity) -> bool:
         and len(bolt11) > len(prefix)
         and bolt11[len(prefix)] in "123456789"
     )
-
-
-def require_funding_release(network: NetworkIdentity) -> None:
-    """Refuse any financial effect on a network that is not release-accepted."""
-    require_supported_network(network)
-    if network.name == "mainnet" and not MAINNET_FUNDING_ENABLED:
-        raise ValidationError("mainnet funding is not release-accepted")

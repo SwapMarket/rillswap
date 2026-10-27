@@ -135,18 +135,25 @@ def test_invoice_prefix_is_bound_before_any_lnd_call(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("name", LABELS)
-def test_serving_requires_release_acceptance(name: str) -> None:
+def test_serving_admits_each_pinned_network_before_loading_operator_state(name: str) -> None:
+    import asyncio  # noqa: PLC0415
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from rill_provider import cli  # noqa: PLC0415
+
+    config: Any = SimpleNamespace(network=_network(name), identity_file=None)
+    with pytest.raises(AttributeError, match="lnd"):
+        asyncio.run(cli._serve(config, None, ""))  # type: ignore[arg-type]  # noqa: SLF001
+
+
+def test_serving_refuses_unpinned_mainnet_before_loading_operator_state() -> None:
     import asyncio  # noqa: PLC0415
     from types import SimpleNamespace  # noqa: PLC0415
 
     from rill_provider import cli  # noqa: PLC0415
     from rill_provider.operator_config import OperatorConfigError  # noqa: PLC0415
 
-    config: Any = SimpleNamespace(network=_network(name), identity_file=None)
-    if name == "mainnet":
-        with pytest.raises(OperatorConfigError, match="release-accepted"):
-            asyncio.run(cli._serve(config, None, ""))  # type: ignore[arg-type]  # noqa: SLF001
-    else:  # the gate passes; the next step fails on the placeholder config
-        with pytest.raises(Exception) as caught:  # noqa: PT011
-            asyncio.run(cli._serve(config, None, ""))  # type: ignore[arg-type]  # noqa: SLF001
-        assert "release-accepted" not in str(caught.value)
+    network = _network("mainnet").model_copy(update={"genesis_hash": "00" * 32})
+    config: Any = SimpleNamespace(network=network)
+    with pytest.raises(OperatorConfigError, match="not supported"):
+        asyncio.run(cli._serve(config, None, ""))  # type: ignore[arg-type]  # noqa: SLF001

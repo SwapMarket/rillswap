@@ -1,4 +1,4 @@
-"""Client adapters use each network's labels; funding keeps the mainnet gate."""
+"""Client adapters admit pinned identities and attest each network's backend labels."""
 
 from __future__ import annotations
 
@@ -24,11 +24,9 @@ def _network(name: str) -> NetworkIdentity:
 
 
 @pytest.mark.parametrize("name", CHAINS)
-def test_wallet_funding_is_gated_only_on_mainnet(tmp_path: Path, name: str) -> None:
-    if name == "mainnet":
-        with pytest.raises(ValueError, match="release-accepted"):
-            WalletRpc(port=1, cookie_path=tmp_path, wallet="w", network=_network(name))
-        return
+def test_wallet_configuration_admits_each_pinned_network_without_io(
+    tmp_path: Path, name: str
+) -> None:
     wallet = WalletRpc(port=1, cookie_path=tmp_path, wallet="w", network=_network(name))
     assert wallet._chain == CHAINS[name]  # noqa: SLF001 - Core's label, not our name
 
@@ -48,8 +46,14 @@ def test_unsupported_identities_are_refused(tmp_path: Path) -> None:
     legacy = _network("signet").model_copy(update={"name": "testnet3"})
     with pytest.raises(ValueError, match="supported"):
         observation.RecoveryCoreReader(port=1, cookie_path=tmp_path, network=legacy)
-    with pytest.raises(ValueError, match="release-accepted"):
+    with pytest.raises(ValueError, match="supported"):
         WalletRpc(port=1, cookie_path=tmp_path, wallet="w", network=legacy)
+
+
+def test_mainnet_wallet_refuses_an_unpinned_genesis(tmp_path: Path) -> None:
+    network = _network("mainnet").model_copy(update={"genesis_hash": "00" * 32})
+    with pytest.raises(ValueError, match="supported network"):
+        WalletRpc(port=1, cookie_path=tmp_path, wallet="w", network=network)
 
 
 def _swap_argv(tmp_path: Path, network: str, *extra: str) -> list[str]:

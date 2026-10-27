@@ -118,14 +118,11 @@ def test_invoice_prefix_never_confuses_overlapping_networks() -> None:
         assert not invoice_matches_network(bad, mainnet)  # type: ignore[arg-type]
 
 
-def test_mainnet_funding_is_gated_in_code() -> None:
+def test_execution_admits_each_pinned_identity_and_refuses_unknown_networks() -> None:
     from rill_core import networks  # noqa: PLC0415
 
-    assert networks.MAINNET_FUNDING_ENABLED is False
-    with pytest.raises(ValidationError, match="release-accepted"):
-        networks.require_funding_release(_network("mainnet"))
-    for name in ("signet", "testnet4", "regtest-rillswap-e2e-v1"):
-        networks.require_funding_release(_network(name))
+    for name in ("mainnet", "signet", "testnet4", "regtest-rillswap-e2e-v1"):
+        networks.require_supported_network(_network(name))
     legacy = _network("signet").model_copy(update={"name": "testnet3"})
     with pytest.raises(ValidationError):
-        networks.require_funding_release(legacy)
+        networks.require_supported_network(legacy)

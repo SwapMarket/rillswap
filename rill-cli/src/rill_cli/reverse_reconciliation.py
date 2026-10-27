@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
 from pydantic import Field, StringConstraints, field_validator
-from rill_core.networks import REGTEST_CONSENSUS_PROFILE, require_funding_release
+from rill_core.networks import REGTEST_CONSENSUS_PROFILE, require_supported_network
 from rill_core.recovery.inspection import (
     inspect_recovery_selected_funding_context,
     inspect_recovery_successor,
@@ -292,7 +292,7 @@ def _collect(  # noqa: PLR0912, PLR0913, PLR0915 - cohesive evidence join, no ef
     query = journal.begin_capacity_query()
     job, authority = journal.status(operation_id), journal.authority
     prepared, request = job.prepared, job.request
-    require_funding_release(authority.network)
+    require_supported_network(authority.network)
     if (
         authority.network.name != "regtest"
         or authority.network.consensus_profile != REGTEST_CONSENSUS_PROFILE

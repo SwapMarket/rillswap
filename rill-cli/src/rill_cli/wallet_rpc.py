@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 from rill_core.errors import ValidationError
-from rill_core.networks import backend_names, require_funding_release
+from rill_core.networks import backend_names, require_supported_network
 from rill_core.settlement import FundingPrevout, PlannedFundingOutput, inspect_transaction_outputs
 from rill_provider.core_tx_bytes import (
     CooperativeClaimOutpoint,
@@ -160,11 +160,10 @@ class WalletRpc:
         if not wallet or "/" in wallet:
             raise ValueError("Core wallet name unsupported")
         try:
-            # Funding moves money: mainnet needs release acceptance in code.
-            require_funding_release(network)
+            require_supported_network(network)
             self._chain = backend_names(network).core_chain
         except ValidationError:
-            raise ValueError("live wallet funding requires a release-accepted network") from None
+            raise ValueError("live wallet funding requires a supported network") from None
         self._url = f"http://127.0.0.1:{port}"
         self._cookie_path = Path(cookie_path)
         self._wallet = wallet

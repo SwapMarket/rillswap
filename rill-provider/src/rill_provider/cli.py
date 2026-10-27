@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rill_core.errors import ValidationError
-from rill_core.networks import require_funding_release
+from rill_core.networks import require_supported_network
 
 from rill_provider.core_tx_bytes import CoreTransactionReader
 from rill_provider.evm_htlc import EvmBackendError, EvmHtlcClient
@@ -285,10 +285,9 @@ def _invoice_decoder(config: OperatorConfig) -> Callable[[str], InvoiceBinding] 
 
 async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
     try:
-        # Serving firm offers invites funding; mainnet needs release acceptance.
-        require_funding_release(config.network)
+        require_supported_network(config.network)
     except ValidationError:
-        raise OperatorConfigError("network is not release-accepted for serving") from None
+        raise OperatorConfigError("network is not supported for serving") from None
     lnd = config.lnd
     if (
         config.network.name != "regtest"
