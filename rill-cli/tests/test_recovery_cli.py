@@ -1164,7 +1164,7 @@ def test_watch_claim_signs_from_the_recovery_file_until_the_claim_confirms(
         )
 
     monkeypatch.setattr(cli_main, "RecoveryCoreReader", lambda **_kwargs: object())
-    monkeypatch.setattr(refund_watcher, "core_collaborators", collaborators)
+    monkeypatch.setattr(refund_watcher, "core_claim_collaborators", collaborators)
     args = [
         "recover",
         "watch-claim",

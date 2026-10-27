@@ -360,7 +360,7 @@ def test_native_sdk_explicit_terminal_mode_uses_original_claim_and_lifetime(  # 
         older = claim_path == "older-unilateral"
         if older:
             sdk.wallet.tip_height.side_effect = lambda: (
-                sdk.terms.refund_lock_height - sdk.terms.timing_policy.claim_confirmation_blocks - 1
+                sdk.terms.refund_lock_height - sdk.terms.timing_policy.claim_confirmation_blocks
                 if sdk.broadcasts
                 else 1000
             )
