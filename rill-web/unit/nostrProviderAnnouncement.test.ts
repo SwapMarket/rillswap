@@ -273,3 +273,27 @@ describe("public-network announcements", () => {
     });
   }
 });
+
+describe("RS-006 transport work requirement", () => {
+  function withWork(value: unknown, epochBound = false): string {
+    const wrapper = structuredClone(application);
+    const extensions = wrapper.advertisement.extensions as Record<string, unknown>;
+    extensions["rillswap/transport-pow"] = value;
+    if (epochBound) extensions["rillswap/handshake-required-features"] = ["epoch-bound-session/v1"];
+    reSignApplication(wrapper);
+    return JSON.stringify(reSign({ ...fixtureEvent(), content: jcs(wrapper) }));
+  }
+
+  test("is exposed when signed, and absent means none", () => {
+    expect(accept(JSON.stringify(fixtureEvent())).transportWorkBits).toBe(0);
+    expect(accept(withWork({ bits: 16 })).transportWorkBits).toBe(16);
+    const both = accept(withWork({ bits: 20 }, true));
+    expect([both.transportWorkBits, both.requiresEpochBinding]).toEqual([20, true]);
+  });
+
+  test.each([[{ bits: 0 }], [{ bits: 21 }], [{ bits: "16" }], [{ bits: 16, extra: 1 }], [16], [null]])(
+    "refuses a malformed or excessive signed requirement %j", (value) => {
+      expect(() => accept(withWork(value))).toThrow(AnnouncementRefusedError);
+    },
+  );
+});

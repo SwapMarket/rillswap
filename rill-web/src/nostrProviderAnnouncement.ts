@@ -6,6 +6,7 @@ import { verifyEvent, type NostrEvent } from "nostr-tools";
 
 import { EVM_ASSETS_EXTENSION, verifyManualProviderAdvertisement, type ManualProviderCandidate } from "./manualProviderAdvertisement";
 import { parseStrictEventJson } from "./strictEventJson";
+import { TRANSPORT_POW_EXTENSION, transportWorkRequirement } from "./transportPow";
 import type { ProfileId } from "./swapPairs";
 
 const HEX32 = /^[0-9a-f]{64}$/;
@@ -14,15 +15,16 @@ const encoder = new TextEncoder();
 const HANDSHAKE_REQUIREMENTS = "rillswap/handshake-required-features";
 
 /**
- * Only the epoch-binding requirement and the RS-010 asset list are understood;
- * any other extension key refuses the announcement. The asset list's contents
- * are validated by the manual advertisement verifier.
+ * Only the epoch-binding requirement, the RS-010 asset list and the RS-006
+ * transport work requirement are understood; any other extension key refuses
+ * the announcement. The asset list's contents are validated by the manual
+ * advertisement verifier, the work requirement by transportWorkRequirement.
  */
 function supportedExtensions(value: unknown): boolean {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const extensions = value as Record<string, unknown>;
   for (const key of Object.keys(extensions)) {
-    if (key === EVM_ASSETS_EXTENSION) continue;
+    if (key === EVM_ASSETS_EXTENSION || key === TRANSPORT_POW_EXTENSION) continue;
     const required = extensions[HANDSHAKE_REQUIREMENTS];
     if (key !== HANDSHAKE_REQUIREMENTS ||
         !Array.isArray(required) || required.length !== 1 || required[0] !== "epoch-bound-session/v1") {
@@ -38,6 +40,8 @@ export interface AnnouncementCandidate extends Omit<ManualProviderCandidate, "so
   readonly addressD: string;
   /** The signed advertisement requires an epoch-bound session handshake. */
   readonly requiresEpochBinding: boolean;
+  /** RS-006 transport proof of work every message to this provider needs (0: none). */
+  readonly transportWorkBits: number;
 }
 
 export class AnnouncementRefusedError extends Error {
@@ -139,6 +143,8 @@ export function verifyNostrProviderAnnouncement(
       addressD: addressTag[1],
       // supportedExtensions admits only the exact epoch-binding requirement.
       requiresEpochBinding: Object.hasOwn(advertisement.extensions as object, HANDSHAKE_REQUIREMENTS),
+      // Malformed or excessive work refuses the announcement rather than downgrading.
+      transportWorkBits: transportWorkRequirement(advertisement.extensions as Record<string, unknown>),
     });
   } catch {
     throw new AnnouncementRefusedError();

@@ -8,7 +8,7 @@ import { bytesToHex, hexToBytes, randomBytes } from "@noble/hashes/utils.js";
 import canonicalize from "canonicalize";
 import { getEventHash, getPublicKey, nip44, type NostrEvent, verifyEvent } from "nostr-tools";
 
-import { wrapPrivateRegtestEnvelope } from "../nip59Transport";
+import { wrapWithTransportWork } from "../nip59Transport";
 import { validateNetwork } from "../generated/manualAdvertisementValidators.js";
 import { jcs, unsignedEnvelopeHash } from "./hashes";
 import { requireShape } from "./wire";
@@ -179,6 +179,8 @@ export class Session {
   readonly key = getPublicKey(this.secret);
   sessionId = bytesToHex(randomBytes(32));
   providerKey: string | null = null;
+  /** RS-006 transport work declared at initiation, mined into every send. */
+  workBits = 0;
   private sequence = 0;
   private readonly seen = new Set<string>();
   private readonly inbox: Envelope[] = [];
@@ -221,7 +223,7 @@ export class Session {
   }
 
   async send(envelope: Envelope, recipient: string, beforePublish?: () => void): Promise<void> {
-    const event = wrapPrivateRegtestEnvelope(new TextDecoder().decode(jcs(envelope)), this.secret, recipient);
+    const event = await wrapWithTransportWork(new TextDecoder().decode(jcs(envelope)), this.secret, recipient, this.workBits);
     for (let attempt = 0; attempt < 3; attempt += 1) {
       beforePublish?.();
       if (await this.relay.publish(event)) return;

@@ -3,6 +3,7 @@ import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { bytesToHex, randomBytes } from "@noble/hashes/utils.js";
 
 import type { AnnouncementCandidate } from "../nostrProviderAnnouncement";
+import { TRANSPORT_POW_EXTENSION } from "../transportPow";
 import { epochBoundSessionId, handshakeHash } from "./hashes";
 import type { Session } from "./session";
 import {
@@ -41,8 +42,13 @@ export async function handshake(session: Session, provider: AnnouncementCandidat
       ...(["btc-to-ln/v1", "ln-to-btc/v1"].includes(session.profile) ? [COOPERATIVE_CLAIM_FEATURE] : []),
       ...(provider.requiresEpochBinding ? [EPOCH_SESSION_FEATURE] : []),
     ],
-    extensions: provider.requiresEpochBinding ? { [EPOCH_SESSION_EXTENSION]: { epoch_inbox_xonly_key: epoch } } : {},
+    extensions: {
+      ...(provider.requiresEpochBinding ? { [EPOCH_SESSION_EXTENSION]: { epoch_inbox_xonly_key: epoch } } : {}),
+      // RS-006: the declaration binds every message of this session to the advertised work.
+      ...(provider.transportWorkBits > 0 ? { [TRANSPORT_POW_EXTENSION]: { bits: provider.transportWorkBits } } : {}),
+    },
   };
+  session.workBits = provider.transportWorkBits;
   const request = session.envelope("handshake_init", init as unknown as Record<string, unknown>, { signed: false });
   await session.listen();
   await session.send(request, epoch);
