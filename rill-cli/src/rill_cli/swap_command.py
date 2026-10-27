@@ -16,6 +16,7 @@ from rill_core.recovery import (
 )
 from rill_core.wire.canonical import parse_json_strict
 from rill_crypto import Context
+from rill_provider.core_tx_bytes import MAX_FEE_ESTIMATE_CEILING_SAT_VB
 from rill_provider.lnd_invoice_decode import LndInvoiceDecoder
 from rill_provider.relay_client import RelayConnection, require_relay_route
 
@@ -54,6 +55,12 @@ def add_parser(categories: argparse._SubParsersAction[argparse.ArgumentParser]) 
         type=int,
         default=1,
         help="minimum absolute cooperative claim fee in satoshis (own-node floor may be higher)",
+    )
+    forward.add_argument(
+        "--max-fee-estimate-sat-vb",
+        type=int,
+        help="cap your Core's fee estimate when checking the cooperative claim fee "
+        "(for skewed estimators such as signet's; relay and mempool floors still apply)",
     )
     forward.add_argument("--wallet", required=True, help="Core wallet that funds the swap")
     forward.add_argument("--lnd-macaroon", required=True, help="invoice-decoding macaroon")
@@ -258,6 +265,9 @@ def run(args: argparse.Namespace, network: NetworkIdentity, identity: str) -> st
             claim_fee_floor_sat=args.claim_fee_floor_sat,
         )
         limits.validate_cooperative_fee_floor()
+        ceiling = args.max_fee_estimate_sat_vb
+        if ceiling is not None and not 1 <= ceiling <= MAX_FEE_ESTIMATE_CEILING_SAT_VB:
+            raise SwapError("fee estimate ceiling out of range")
     credentials = X25519Credentials(args.recipient, identity)
     # Refuse an unsafe relay route before the native library, files, or wallet.
     proxy = require_relay_route(network, args.relay_proxy, allow_direct=args.allow_direct_relay)
@@ -278,7 +288,12 @@ def run(args: argparse.Namespace, network: NetworkIdentity, identity: str) -> st
             network=network,
         )
         wallet = WalletRpc(
-            port=args.core_port, cookie_path=args.core_cookie, wallet=args.wallet, network=network
+            port=args.core_port,
+            cookie_path=args.core_cookie,
+            wallet=args.wallet,
+            network=network,
+            # Only btc-to-ln samples cooperative fee evidence from its own Core.
+            max_fee_estimate_sat_vb=getattr(args, "max_fee_estimate_sat_vb", None),
         )
         if args.command == "ln-to-btc":
             return asyncio.run(_reverse(args, network, crypto, decoder, wallet, write_recovery))

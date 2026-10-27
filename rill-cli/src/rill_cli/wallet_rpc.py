@@ -152,9 +152,19 @@ class WalletRpc:
     """One named Core wallet on a loopback node of the configured network (cookie auth)."""
 
     def __init__(
-        self, *, port: int, cookie_path: str | Path, wallet: str, network: NetworkIdentity
+        self,
+        *,
+        port: int,
+        cookie_path: str | Path,
+        wallet: str,
+        network: NetworkIdentity,
+        max_fee_estimate_sat_vb: int | None = None,
     ) -> None:
-        """Configure only; no network or file access."""
+        """Configure only; no network or file access.
+
+        ``max_fee_estimate_sat_vb`` caps only Core's estimate in cooperative
+        fee evidence, for chains with a skewed estimator; ``None`` keeps it.
+        """
         if type(port) is not int or not 1 <= port <= MAX_PORT:
             raise ValueError("Core RPC port unsupported")
         if not wallet or "/" in wallet:
@@ -168,9 +178,17 @@ class WalletRpc:
         self._cookie_path = Path(cookie_path)
         self._wallet = wallet
         self._network = network
-        self._transactions = CoreTransactionReader(
-            port=port, cookie_path=cookie_path, network=network
-        )
+        if max_fee_estimate_sat_vb is None:
+            self._transactions = CoreTransactionReader(
+                port=port, cookie_path=cookie_path, network=network
+            )
+        else:
+            self._transactions = CoreTransactionReader(
+                port=port,
+                cookie_path=cookie_path,
+                network=network,
+                max_fee_estimate_sat_vb=max_fee_estimate_sat_vb,
+            )
 
     def observe_cooperative_claim_evidence(
         self,
