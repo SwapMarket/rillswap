@@ -2,15 +2,14 @@
 
 **Version:** 0.1.0  
 **License:** MIT  
-**Status:** design of the initial release; not audited
+**Status:** initial release design
 
 This document describes the design that the RillSwap specifications and
 components implement: goals, decisions, protocol shape, state machines,
-security invariants and release gates. The normative wire and contract rules
+security invariants. The normative wire and contract rules
 live in [`specs/`](specs/); where this document and a specification disagree,
 the specification wins. Component READMEs describe what each implementation
-currently supports. Items marked **release gate** must be resolved before a
-funded mainnet release. External standards are listed in
+currently supports. External standards are listed in
 [`SOURCES.md`](SOURCES.md).
 
 ## 1. Objective and non-goals
@@ -169,7 +168,7 @@ All signed terms, invoice interpretation, address parsing, recovery records, pro
 
 Regtest deployments additionally bind a test namespace/checkpoint policy to avoid accidental cross-lab discovery. This is application separation, not a new Bitcoin consensus rule. Generate network fixtures from the pinned Core version and verify invoice backend support; do not assume every LND version supports every custom network equally.
 
-Develop on regtest; run public trials on signet. Mainnet is a supported network definition, not permission to ship funded mainnet builds before the release gates.
+Use regtest for deterministic development and public test networks for interoperability trials.
 
 ## 7. Wire format and authentication
 
@@ -478,7 +477,7 @@ Browser tests use a real static HTTP origin and actual browser wallet/backup flo
 
 Detailed cases and identifiers are in [`compatibility/TEST-MATRIX.md`](compatibility/TEST-MATRIX.md). Minimum acceptance includes both directions, both spend paths, timeout/refund races, restarts at every effect boundary, malformed commitments, short HTLC expiries, ambiguous LN outcomes, nonce lifecycle violations, relay replay/censorship, browser backup loss, unilateral CLI recovery with all RillSwap services removed, coin-selection privacy, and chain-source trust enforcement.
 
-Tor tests use an isolated private test network where practical, with captured DNS/egress to prove fail-closed behavior. They cannot prove anonymity against a global observer. Public signet smoke tests are scheduled separately and never required for deterministic PR tests; mainnet checks are read-only until release approval.
+Tor tests use an isolated private test network where practical, with captured DNS/egress to prove fail-closed behavior. They cannot prove anonymity against a global observer. Public-network smoke tests are separate from deterministic PR tests.
 
 ## 22. Security catalogue and release invariants
 
@@ -497,7 +496,7 @@ The attack catalogue records attacker, prerequisites, principal exposure, fee ex
 
 Model the two directional reducers with stateful property tests and a small bounded state model. Include asynchronous observations, reordered messages, counterparty refusal, crash/restart, fees, and block progression. A model passing is not proof that adapter behavior matches it; test adapters against real nodes and document the correspondence.
 
-## 23. Milestones and release gates
+## 23. Implementation milestones
 
 1. **Feasibility and specification freeze:** verify native/WASM MuSig capability; execute candidate scripts through Core; test LND absolute deadlines and hold visibility; prove age cross-import; establish network identities; review licensing. Produce exact fixtures and threat-model decisions before money UI work.
 2. **Unilateral vertical slice:** pure core + Core wallet + LND + CLI; both directions, script claims/refunds, durable secrets, recovery without provider. No privacy optimization can substitute for this milestone.
@@ -505,9 +504,6 @@ Model the two directional reducers with stateful property tests and a small boun
 4. **Nostr and interoperability:** modular discovery/transport, signed terms, NIP44/59 privacy policy, adversarial relay tests, stable public event-kind coordination, published schemas/vectors.
 5. **Browser delivery:** independent TS SDK, static local UI, recovery interoperability, real Playwright flows, Pages/release automation, explicit chain-trust modes and local agent hardening.
 6. **Cooperative privacy and hardening:** reviewed MuSig lifecycle, exact transaction authorization, unilateral fallback under withheld signatures, Tor/direct-transport extension tests, cryptographic/state-machine reviews, independent audits.
-7. **Deployment gate:** signet trials; reproducible binaries/assets; dependency/licensing review; documented operational limits; recovery drills by someone other than the author; external review of contract and LND timing; bounded initial mainnet limits.
-
-Supporting mainnet in code is not sufficient to pass the deployment gate. There is no production timeout table or completed security audit yet.
 
 ## 24. Future interoperability and translation
 

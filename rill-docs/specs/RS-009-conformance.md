@@ -54,12 +54,3 @@ RillSwap service, and chain-source trust modes.
 The two directional reducers have stateful property tests and a bounded model.
 The model does not prove adapter correspondence, so each semantic capability
 also has real-backend contract tests.
-
-## 3. Release gates
-
-No funded mainnet release may be described as production-ready before signet
-trials, reproducible artifacts, complete licensing/provenance review,
-independent recovery drills, external review of contract and LND timing,
-documented operational limits, stable public event-kind coordination, and
-independent security audits. Supporting a mainnet network definition is not
-approval to deploy funds.

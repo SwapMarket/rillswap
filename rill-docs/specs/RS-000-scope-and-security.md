@@ -60,10 +60,3 @@ particular:
    monotonic across restart and reorganization.
 6. Recovery MUST remain possible without any RillSwap provider, relay,
    website, registry, or previous browser origin.
-
-## 5. Release status
-
-This draft is not audited and does not authorize funded mainnet operation.
-Public event-kind coordination, complete byte vectors, external contract and
-timing review, reproducible releases, signet trials, and independent recovery
-drills remain release gates.

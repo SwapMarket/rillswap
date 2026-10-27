@@ -8,9 +8,6 @@ Live swaps use your own Bitcoin Core wallet and LND node. You choose the
 provider explicitly; a directory listing does not prove liquidity,
 availability or honesty.
 
-**Status:** experimental and unaudited. Live swaps support regtest, signet
-and testnet4. Mainnet funding is disabled in code. Do not use real funds.
-
 ## Install
 
 Use a checkout of this monorepo, Python 3.13 or later (CI uses 3.14), `uv`,

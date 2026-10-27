@@ -1,8 +1,5 @@
 # Security policy
 
-RillSwap is pre-release software that has not been audited. Do not use it
-with real funds. Mainnet swaps are disabled in code.
-
 ## Reporting a vulnerability
 
 Report vulnerabilities privately through
@@ -10,7 +7,7 @@ Report vulnerabilities privately through
 Do not open a public issue for a suspected vulnerability.
 
 Include the affected component, version or commit, network (regtest, signet,
-testnet4) and steps to reproduce. Never attach real secrets: redact private
+testnet4, mainnet) and steps to reproduce. Never attach real secrets: redact private
 keys, seeds, MuSig nonces, preimages, recovery backups, LND macaroons, wallet
 credentials, invoices, payment hashes, addresses and transaction identifiers
 unless they come from a disposable test environment.

@@ -3,11 +3,9 @@
 Normative protocol specifications, schemas, test vectors and network
 definitions for RillSwap, plus the design document and release test matrix.
 
-**Status:** no specification here is approved for funded mainnet use yet.
-
 | Path | Contents |
 |---|---|
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Design overview: goals, decisions, state machines, security invariants, release gates |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Design overview: goals, decisions, state machines, security invariants |
 | [`specs/`](specs/) | Normative specifications RS-000 to RS-010 and extensions |
 | `schemas/` | JSON schemas for wire messages, advertisements and recovery files |
 | `vectors/` | Byte-level test vectors |

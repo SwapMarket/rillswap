@@ -8,10 +8,6 @@ It is for operators testing a self-hosted liquidity provider, not a hosted
 service. Running it requires node credentials, liquidity, and careful
 handling of encrypted keys and persistent swap state.
 
-**Status:** experimental and unaudited. Bitcoin funding is limited to
-regtest, signet and testnet4; mainnet funding is disabled in code. Do not use
-real funds.
-
 ## Install
 
 Use a checkout of this monorepo, Python 3.13 or later (CI uses 3.14), `uv`,
@@ -269,7 +265,6 @@ preserve the original node and store state while investigating.
 
 ## Safety limits
 
-- Mainnet funding is disabled.
 - The provider never recreates missing stores, repairs unknown state, replays
   consumed payment dispatches, or treats missing metadata as payment failure.
 - Ambiguous payments can stay unresolved and keep their reserved capacity.

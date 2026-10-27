@@ -17,5 +17,5 @@ environments can be created without protection, so a tag trigger or environment
 name in YAML alone is **not** an authorization gate. The privileged job must
 publish the *same checked ZIP* to the release and only its verified extraction
 to Pages, without rebuilding. Provenance, SBOM, recovery interoperability and
-remote ZIP/Pages byte identity also remain release gates. Local checks alone
+remote ZIP/Pages byte identity are also verification requirements. Local checks alone
 do not satisfy W12. Active swaps never silently adopt new executable code.

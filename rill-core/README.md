@@ -4,8 +4,6 @@ Pure Python protocol logic for RillSwap. It validates messages, reduces
 verified events, inspects recovery records, and builds Bitcoin settlement
 transactions. It does no network, disk, clock, database or notification IO.
 
-**Status:** experimental and unaudited. Do not use with real funds.
-
 ## Install
 
 Python 3.13 or newer. From `rill-core/`:

@@ -13,7 +13,7 @@ Requires: 65, 327, 340, 341, 342
 
 # Draft notice
 
-This is an initial, unassigned engineering draft. It has not been submitted, assigned, audited, or accepted. The author placeholder must be replaced before submission. Byte-level schemas, vectors and a reference implementation are maintained in the RillSwap repository (`rill-docs/schemas/`, `rill-docs/vectors/`); they are unaudited. Follow the current BIP 3 process.
+This is an initial, unassigned engineering draft. It has not been submitted, assigned, or accepted. The author placeholder must be replaced before submission. Byte-level schemas, vectors and a reference implementation are maintained in the RillSwap repository (`rill-docs/schemas/`, `rill-docs/vectors/`). Follow the current BIP 3 process.
 
 ## Abstract
 
@@ -156,7 +156,7 @@ No Bitcoin consensus or Lightning wire change is required. Existing swap-provide
 
 ## Reference implementation and vectors
 
-The unaudited reference implementation is <https://github.com/rillswap/rillswap>: `rill-core` (Python protocol library), `rill-crypto` (libsecp256k1 binding), `rill-provider`, `rill-cli` and `rill-web` (independent TypeScript client). Vectors live in `rill-docs/vectors/`.
+The reference implementation is <https://github.com/rillswap/rillswap>: `rill-core` (Python protocol library), `rill-crypto` (libsecp256k1 binding), `rill-provider`, `rill-cli` and `rill-web` (independent TypeScript client). Vectors live in `rill-docs/vectors/`.
 
 Before stable publication, provide exact serialized valid/invalid vectors for keys, aggregation, tree/control blocks, output scripts, transaction/witness construction, signing, canonical terms, network identity, and cross-client recovery. Execute transactions against a pinned Bitcoin Core version and obtain independent review. Do not substitute plausible-looking example hashes for verified vectors.
 

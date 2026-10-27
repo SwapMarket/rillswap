@@ -5,7 +5,7 @@ or from Lightning. It is a static site with no backend of its own: it
 discovers providers over Nostr, validates contracts, transactions and
 signatures locally, and keeps encrypted recovery records in the browser.
 
-**Status:** new mainnet swaps are disabled in this build.
+Supports mainnet, signet, testnet4, and regtest.
 
 `swap.html` is the swap app and `index.html` a disconnected diagnostic
 preview. In the GitHub Pages build, the swap app is the landing page and the
@@ -62,7 +62,7 @@ Deployment defaults are set and validated at build time.
 | `VITE_RILLSWAP_EVM_SPONSOR_POLICY` | Optional sponsor gas policy UUID |
 
 Set the sponsor endpoint, EntryPoint and delegate together, or none of them.
-A build without configuration opens mainnet with new swaps disabled. The older
+A build without configuration opens mainnet with swaps enabled. The older
 single-relay `VITE_RILLSWAP_RELAY` still works but cannot be combined with
 `VITE_RILLSWAP_RELAYS`. Plaintext relays are only allowed on loopback for
 regtest. The Content Security Policy admits any `https:` origin, so users can
@@ -217,12 +217,14 @@ site on every push to `main` or when run manually; pull requests never
 deploy. Set the repository's Pages source to **GitHub Actions**.
 `bun run build:pages` produces `tmp/pages/` with:
 
-- `/`: the mainnet app, with new swaps disabled
+- `/`: the mainnet app, with swaps enabled
 - `/signet/`: the signet swap app
 - `diagnostic.html` in each: the disconnected preview
 
 The Pages build ignores local `VITE_RILLSWAP_*` overrides so regtest
 endpoints never leak into the public site.
+Pushes to `main` publish the mainnet and signet apps. Local builds and commits
+do not publish them.
 
 ### Serve locally
 

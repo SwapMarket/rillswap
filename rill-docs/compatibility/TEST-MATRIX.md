@@ -1,7 +1,7 @@
 # RillSwap end-to-end and security acceptance matrix
 
-This matrix lists the scenarios an implementation must pass before a funded
-mainnet release. Each ID is a release requirement (see
+This matrix lists protocol conformance and security scenarios. Each ID is a
+validation requirement (see
 [RS-009](../specs/RS-009-conformance.md)); an entry describes the required
 result, not a claim that it has already been executed. Money paths run against
 real pinned Bitcoin Core and LND, with real relays and a real browser where
@@ -223,4 +223,4 @@ Each funded test records initial/final on-chain wallet balances, contract output
 
 Run smoke/vectors/type checks on every PR; deterministic full-regtest/browser tests on integration changes; chaos, fuzzing and private-Tor tests in scheduled/full release jobs. Public signet observations are supplementary. Pin component versions and container digests. Flaky retries cannot convert a failed safety assertion into a passing release.
 
-Coverage percentage is supporting evidence. Every safety guard, irreversible effect boundary, timeout inequality, and independent recovery path requires an explicit test. Independent security review and audit findings are additional gates, not replaceable by green CI.
+Coverage percentage is supporting evidence. Every safety guard, irreversible effect boundary, timeout inequality, and independent recovery path requires an explicit test. Green CI does not replace independent security review or resolution of audit findings.

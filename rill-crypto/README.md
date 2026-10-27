@@ -4,8 +4,6 @@ Native and WebAssembly bindings for the libsecp256k1 operations RillSwap
 uses. The API exposes opaque validated keys and one-shot MuSig2 attempt
 handles; secret MuSig nonces can never be serialized.
 
-**Status:** experimental and unaudited. Do not use with real funds.
-
 ## Build and install
 
 CMake 3.25 or newer and a C compiler. From `rill-crypto/`:

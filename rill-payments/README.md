@@ -6,7 +6,7 @@ merchant server manages a durable ledger, Lightning invoices and signed
 payment acceptance. The dialog alone never pays, creates orders or
 establishes payment acceptance.
 
-**Status:** experimental and unaudited. Mainnet funding is disabled. The
+Merchant checkout supports regtest, signet, and testnet4. The
 [demo shop](examples/demo-shop) uses disposable development payment rails,
 not production integrations.
 

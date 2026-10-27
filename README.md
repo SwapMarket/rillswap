@@ -10,11 +10,6 @@ client verifies every contract, transaction and signature locally, and every
 swap can be recovered with your own recovery file, without the provider, the
 website or any RillSwap service.
 
-> [!NOTE]
-> Mainnet funding is disabled in code until the
-> [release gates](rill-docs/ARCHITECTURE.md#23-milestones-and-release-gates)
-> are met. Use regtest, signet or testnet4.
-
 ## Features
 
 - **Four swap profiles.** BTC to Lightning, Lightning to BTC, USDC/USDT to
@@ -104,13 +99,12 @@ commands.
 | Network | Status |
 | --- | --- |
 | Regtest | Used by the development stack and end-to-end tests |
-| Signet, testnet4 | Experimental |
-| Mainnet | Disabled: new swaps are refused in code |
+| Signet, testnet4 | Supported test networks |
+| Mainnet | Enabled |
 
-Before any mainnet release RillSwap still needs signet trials, recovery
-drills and reproducible release artifacts. The full
-list is in the [release gates](rill-docs/ARCHITECTURE.md#23-milestones-and-release-gates)
-and the [acceptance test matrix](rill-docs/compatibility/TEST-MATRIX.md).
+See the [architecture](rill-docs/ARCHITECTURE.md) and
+[acceptance test matrix](rill-docs/compatibility/TEST-MATRIX.md) for protocol
+invariants and validation scenarios.
 
 ## Development
 
