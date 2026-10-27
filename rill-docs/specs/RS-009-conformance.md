@@ -33,6 +33,12 @@ storage/worker flows, static artifact identity, and chain-trust enforcement.
 `cooperative-v1` additionally requires pinned native and WASM MuSig builds,
 BIP327 and differential vectors, one-shot nonce misuse tests, exact transaction
 authorization, crash abandonment, and unilateral fallback.
+The shared `vectors/wire/cooperative-claim-v1.json` cycle covers both claimant
+roles, closed proposal/result/completion/receipt payloads, null completion reply
+dependencies, feature commitments, and exact attempt/reply correlation. Static
+schema checks and Core/browser consumers use the same cases. These synthetic
+wire vectors do not prove nonce, partial-signature, or transaction validity;
+native/WASM and real-backend tests establish those separately.
 
 ## 2. Test requirements
 

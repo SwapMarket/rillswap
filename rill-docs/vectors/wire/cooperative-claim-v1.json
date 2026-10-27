@@ -1,0 +1,66 @@
+{
+  "format": "rillswap-cooperative-wire-cycles",
+  "description": "Synthetic shape/context vectors, not valid transaction, nonce, partial, or envelope signatures. Both profiles use the same cycle with opposite claimant/cosigner session roles.",
+  "profiles": [
+    { "profile_id": "btc-to-ln/v1", "context_source": "initial-btc-to-ln-v1.json", "claimant_role": "provider", "cosigner_role": "client" },
+    { "profile_id": "ln-to-btc/v1", "context_source": "initial-ln-to-btc-no-prepayment-v1.json", "claimant_role": "client", "cosigner_role": "provider" }
+  ],
+  "messages": {
+    "propose": {
+      "message_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "message_type": "action_request", "sender_role": "claimant", "in_reply_to": null, "prior_request": null,
+      "required_features": ["cooperative-claim/v1"],
+      "payload": {
+        "action": "cooperative_claim_propose", "cooperation_id": "0101010101010101010101010101010101010101010101010101010101010101",
+        "unsigned_transaction": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "payment_preimage": "0404040404040404040404040404040404040404040404040404040404040404",
+        "public_nonce": "020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
+        "deadline_at": 1700000025, "deadline_height": 1000
+      }
+    },
+    "signed": {
+      "message_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "message_type": "action_result", "sender_role": "cosigner", "in_reply_to": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "prior_request": "propose",
+      "required_features": ["cooperative-claim/v1"],
+      "payload": {
+        "action": "cooperative_claim_propose", "cooperation_id": "0101010101010101010101010101010101010101010101010101010101010101", "status": "signed",
+        "public_nonce": "020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
+        "partial_signature": "0303030303030303030303030303030303030303030303030303030303030303"
+      }
+    },
+    "complete": {
+      "message_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "message_type": "action_request", "sender_role": "claimant", "in_reply_to": null, "prior_request": "propose",
+      "required_features": ["cooperative-claim/v1"],
+      "payload": {
+        "action": "cooperative_claim_complete", "cooperation_id": "0101010101010101010101010101010101010101010101010101010101010101",
+        "partial_signature": "0303030303030303030303030303030303030303030303030303030303030303"
+      }
+    },
+    "verified": {
+      "message_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "message_type": "action_result", "sender_role": "cosigner", "in_reply_to": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "prior_request": "complete",
+      "required_features": ["cooperative-claim/v1"],
+      "payload": {
+        "action": "cooperative_claim_complete", "cooperation_id": "0101010101010101010101010101010101010101010101010101010101010101", "status": "verified"
+      }
+    }
+  },
+  "invalid": [
+    { "name": "proposal wrong sender", "message": "propose", "field": "sender_role", "replacement": "cosigner", "shape_valid": true },
+    { "name": "signed wrong sender", "message": "signed", "field": "sender_role", "replacement": "claimant", "shape_valid": true },
+    { "name": "signed missing feature", "message": "signed", "field": "required_features", "replacement": [], "shape_valid": true },
+    { "name": "signed unknown feature", "message": "signed", "field": "required_features", "replacement": ["cooperative-claim/v1", "unknown/v1"], "shape_valid": true },
+    { "name": "signed wrong reply", "message": "signed", "field": "in_reply_to", "replacement": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "shape_valid": true },
+    { "name": "completion is not a reply", "message": "complete", "field": "in_reply_to", "replacement": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "shape_valid": true },
+    { "name": "completion wrong attempt", "message": "complete", "field": "payload.cooperation_id", "replacement": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "shape_valid": true },
+    { "name": "receipt replies to completion", "message": "verified", "field": "in_reply_to", "replacement": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "shape_valid": true },
+    { "name": "proposal extra field", "message": "propose", "field": "payload.extra", "replacement": true, "shape_valid": false },
+    { "name": "proposal Boolean deadline", "message": "propose", "field": "payload.deadline_at", "replacement": true, "shape_valid": false },
+    { "name": "signed extra field", "message": "signed", "field": "payload.extra", "replacement": true, "shape_valid": false },
+    { "name": "signed malformed nonce", "message": "signed", "field": "payload.public_nonce", "replacement": "00", "shape_valid": false },
+    { "name": "signed malformed partial", "message": "signed", "field": "payload.partial_signature", "replacement": "00", "shape_valid": false },
+    { "name": "completion extra field", "message": "complete", "field": "payload.extra", "replacement": true, "shape_valid": false },
+    { "name": "receipt extra partial", "message": "verified", "field": "payload.partial_signature", "replacement": "0303030303030303030303030303030303030303030303030303030303030303", "shape_valid": false }
+  ]
+}

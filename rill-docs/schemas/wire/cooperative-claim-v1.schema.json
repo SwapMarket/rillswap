@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spec.rillswap.invalid/schemas/wire/cooperative-claim-v1.schema.json",
+  "title": "Closed cooperative-claim/v1 action payloads (RS-002)",
+  "description": "Shape only, never signature, role, payment, deadline, transaction, or nonce authority.",
+  "$defs": {
+    "publicNonce": { "type": "string", "pattern": "^[0-9a-f]{132}$" },
+    "readyRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["action", "challenge", "payment_preimage", "deadline_at", "deadline_height"],
+      "properties": {
+        "action": { "const": "cooperative_claim_ready" },
+        "challenge": { "$ref": "common-v1.schema.json#/$defs/hex32" },
+        "payment_preimage": { "$ref": "common-v1.schema.json#/$defs/hex32" },
+        "deadline_at": { "$ref": "common-v1.schema.json#/$defs/exactInteger" },
+        "deadline_height": { "$ref": "common-v1.schema.json#/$defs/exactInteger" }
+      }
+    },
+    "ready": {
+      "type": "object", "additionalProperties": false,
+      "required": ["action", "challenge", "status"],
+      "properties": {
+        "action": { "const": "cooperative_claim_ready" },
+        "challenge": { "$ref": "common-v1.schema.json#/$defs/hex32" },
+        "status": { "const": "ready" }
+      }
+    },
+    "propose": {
+      "type": "object", "additionalProperties": false,
+      "required": ["action", "cooperation_id", "unsigned_transaction", "payment_preimage", "public_nonce", "deadline_at", "deadline_height"],
+      "properties": {
+        "action": { "const": "cooperative_claim_propose" },
+        "cooperation_id": { "$ref": "common-v1.schema.json#/$defs/hex32" },
+        "unsigned_transaction": { "type": "string", "pattern": "^([0-9a-f]{2}){60,1000}$" },
+        "payment_preimage": { "$ref": "common-v1.schema.json#/$defs/hex32" },
+        "public_nonce": { "$ref": "#/$defs/publicNonce" },
+        "deadline_at": { "$ref": "common-v1.schema.json#/$defs/exactInteger" },
+        "deadline_height": { "$ref": "common-v1.schema.json#/$defs/exactInteger" }
+      }
+    },
+    "signed": {
+      "type": "object", "additionalProperties": false,
+      "required": ["action", "cooperation_id", "status", "public_nonce", "partial_signature"],
+      "properties": {
+        "action": { "const": "cooperative_claim_propose" },
+        "cooperation_id": { "$ref": "common-v1.schema.json#/$defs/hex32" },
+        "status": { "const": "signed" },
+        "public_nonce": { "$ref": "#/$defs/publicNonce" },
+        "partial_signature": { "$ref": "common-v1.schema.json#/$defs/hex32" }
+      }
+    },
+    "declined": {
+      "type": "object", "additionalProperties": false,
+      "required": ["action", "cooperation_id", "status"],
+      "properties": {
+        "action": { "const": "cooperative_claim_propose" },
+        "cooperation_id": { "$ref": "common-v1.schema.json#/$defs/hex32" },
+        "status": { "const": "declined" }
+      }
+    },
+    "complete": {
+      "type": "object", "additionalProperties": false,
+      "required": ["action", "cooperation_id", "partial_signature"],
+      "properties": {
+        "action": { "const": "cooperative_claim_complete" },
+        "cooperation_id": { "$ref": "common-v1.schema.json#/$defs/hex32" },
+        "partial_signature": { "$ref": "common-v1.schema.json#/$defs/hex32" }
+      }
+    },
+    "verified": {
+      "type": "object", "additionalProperties": false,
+      "required": ["action", "cooperation_id", "status"],
+      "properties": {
+        "action": { "const": "cooperative_claim_complete" },
+        "cooperation_id": { "$ref": "common-v1.schema.json#/$defs/hex32" },
+        "status": { "const": "verified" }
+      }
+    },
+    "actionRequest": { "oneOf": [{ "$ref": "#/$defs/readyRequest" }, { "$ref": "#/$defs/propose" }, { "$ref": "#/$defs/complete" }] },
+    "actionResult": { "oneOf": [{ "$ref": "#/$defs/ready" }, { "$ref": "#/$defs/signed" }, { "$ref": "#/$defs/declined" }, { "$ref": "#/$defs/verified" }] }
+  }
+}

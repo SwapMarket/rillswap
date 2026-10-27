@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
@@ -30,6 +31,9 @@ ID = "01" * 32
 NONCE = "02" * 66
 PARTIAL = "03" * 32
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "recovery-v1"
+SHARED_CYCLE = json.loads(
+    (Path(__file__).parents[3] / "rill-docs/vectors/wire/cooperative-claim-v1.json").read_text()
+)
 PROPOSE = {
     "action": "cooperative_claim_propose",
     "cooperation_id": ID,
@@ -314,6 +318,63 @@ def test_cooperative_actions_bind_role_feature_and_exact_reply_chain(profile: st
         check_cooperative_action_context(complete, terms, init, accept)
     with pytest.raises(ValueError, match="exact request"):
         check_cooperative_action_context(verified, terms, init, accept, prior_request=propose)
+
+
+@pytest.mark.parametrize("profile", SHARED_CYCLE["profiles"], ids=lambda p: p["profile_id"])
+@pytest.mark.parametrize(
+    "variation",
+    [None, *SHARED_CYCLE["invalid"]],
+    ids=lambda v: "valid cycle" if v is None else v["name"],
+)
+def test_shared_cooperative_wire_cycle(profile: dict, variation: dict | None) -> None:
+    terms, init, accept = _signed_context(profile["profile_id"])
+    session_keys = {
+        "client": init.client_session_xonly_key,
+        "provider": accept.provider_session_xonly_key,
+    }
+    messages = copy.deepcopy(SHARED_CYCLE["messages"])
+    if variation is not None:
+        target = messages[variation["message"]]
+        path = variation["field"].split(".")
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = variation["replacement"]
+    envelopes = {}
+    for name, message in messages.items():
+        role = profile[message["sender_role"] + "_role"]
+        envelopes[name] = _envelope(
+            terms,
+            init,
+            message["payload"],
+            sender=session_keys[role],
+            message_type=message["message_type"],
+            reply_to=message["in_reply_to"],
+            message_id=message["message_id"],
+        ).model_copy(update={"required_features": tuple(message["required_features"])})
+    if variation is not None:
+        name = variation["message"]
+        prior = messages[name]["prior_request"]
+        with pytest.raises(
+            ValueError,
+            match=(
+                r"sender role|signed feature|exact request|different attempt|"
+                r"prior proposal|validation error"
+            ),
+        ):
+            check_cooperative_action_context(
+                envelopes[name],
+                terms,
+                init,
+                accept,
+                prior_request=envelopes[prior] if prior else None,
+            )
+    else:
+        for name, envelope in envelopes.items():
+            prior = messages[name]["prior_request"]
+            parsed = check_cooperative_action_context(
+                envelope, terms, init, accept, prior_request=envelopes[prior] if prior else None
+            )
+            assert parsed.model_dump(mode="json") == messages[name]["payload"]
 
 
 def test_legacy_signed_contract_does_not_authorize_cooperative_action() -> None:
