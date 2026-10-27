@@ -406,3 +406,42 @@ test("the provider directory loads by itself, groups providers by swap type and 
   await page.locator("#swap-settings-close").click();
   await expect(page.locator("#swap-provider-choice")).toHaveText("Provider: automatic, lowest verified price");
 });
+
+test("discovery uses only portable relay filters, so relays that refuse multi-letter tag filters still find providers", async ({ page }) => {
+  const { schnorr } = await import("@noble/curves/secp256k1.js");
+  const { sha256 } = await import("@noble/hashes/sha2.js");
+  const { default: canonicalize } = await import("canonicalize");
+  const { finalizeEvent } = await import("nostr-tools");
+  const { default: application } = await import("../unit/fixtures/manual-advertisement-regtest-v1.json", { with: { type: "json" } });
+  const { default: vector } = await import("../unit/fixtures/nostr-announcement-regtest-v1.json", { with: { type: "json" } });
+  const secret = new Uint8Array(32); secret[31] = 3;
+  const wrapper = structuredClone(application);
+  wrapper.advertisement.provider_identity_xonly_key = Buffer.from(schnorr.getPublicKey(secret)).toString("hex");
+  wrapper.advertisement.created_at = Math.floor(Date.now() / 1000) - 60;
+  wrapper.advertisement.expires_at = wrapper.advertisement.created_at + 3660;
+  const tag = sha256(new TextEncoder().encode("RillSwap/advertisement/v1"));
+  const content = new TextEncoder().encode(canonicalize(wrapper.advertisement)!);
+  const digest = new Uint8Array(64 + content.length); digest.set(tag); digest.set(tag, 32); digest.set(content, 64);
+  wrapper.signature = Buffer.from(schnorr.sign(sha256(digest), secret)).toString("hex");
+  const event = finalizeEvent({ kind: vector.kind, created_at: wrapper.advertisement.created_at, tags: structuredClone(vector.tags), content: canonicalize(wrapper)! }, secret);
+  const filters: Record<string, unknown>[] = [];
+  await page.routeWebSocket("ws://127.0.0.1:7777/", (socket) => {
+    socket.onMessage((message) => {
+      const frame = JSON.parse(String(message));
+      if (frame[0] !== "REQ") return;
+      filters.push(frame[2]);
+      // NIP-01 only standardizes single-letter tag filters; strict relays close the rest.
+      const unindexed = Object.keys(frame[2]).find((key) => /^#.{2,}$/.test(key));
+      if (unindexed) { socket.send(JSON.stringify(["CLOSED", frame[1], `error: unindexed tag filter ${unindexed}`])); return; }
+      socket.send(JSON.stringify(["EVENT", frame[1], event]));
+      socket.send(JSON.stringify(["EOSE", frame[1]]));
+    });
+  });
+  await page.goto(SWAP);
+  await page.locator("#swap-settings-toggle").click();
+  await page.locator("#swap-network").selectOption("regtest");
+  await page.locator("#swap-settings-close").click();
+  await expect(page.locator("#swap-providers-status")).toHaveText("1 provider on regtest.");
+  expect(filters.length).toBeGreaterThan(0);
+  for (const filter of filters) expect(Object.keys(filter).filter((key) => key.startsWith("#"))).toEqual([]);
+});

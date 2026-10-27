@@ -123,7 +123,9 @@ async function observeRelays(
       signal?.throwIfAborted();
       relay = await RelayConnection.open(url, 10_000, undefined, signal);
       signal?.throwIfAborted();
-      const filter: Record<string, unknown> = { kinds: [ANNOUNCEMENT_KIND], "#network": [network.name] };
+      // RS-005: the multi-letter `network` tag is not a portable relay index
+      // (relay.primal.net refuses it); fetch by kind and verify the network locally.
+      const filter: Record<string, unknown> = { kinds: [ANNOUNCEMENT_KIND] };
       if (identity) filter.authors = [identity];
       return { url, result: await relay.queryDetailed(filter, MAX_DISCOVERY_EVENTS) };
     } catch {
