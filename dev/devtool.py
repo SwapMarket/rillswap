@@ -12,12 +12,14 @@ import argparse
 import base64
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
 import sys
 import threading
 import time
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -873,6 +875,28 @@ def cmd_fund_psbt(args: argparse.Namespace) -> None:
     print(signed["psbt"])
 
 
+def btc_amount(value: str) -> str:
+    """Keep fixed-point BTC exact through argparse and the Core RPC boundary."""
+    if (
+        not isinstance(value, str)
+        or not re.fullmatch(r"(?:0|[1-9][0-9]{0,7})(?:\.[0-9]{1,8})?", value)
+        or not 0 < Decimal(value) <= 21_000_000
+    ):
+        raise argparse.ArgumentTypeError(
+            "BTC amount must be positive with at most 8 decimal places"
+        )
+    return value
+
+
+def cmd_send_btc(args: argparse.Namespace) -> None:
+    """Send the exact BTC amount now, with fees paid separately by the user wallet."""
+    amount = btc_amount(args.amount)
+    info = Core()("getblockchaininfo")
+    if not isinstance(info, dict) or info.get("chain") != "regtest":
+        raise SystemExit("send-btc requires the disposable regtest chain")
+    print(Core("user")("sendtoaddress", args.address, amount, "", "", False))
+
+
 def cmd_web_inputs(args: argparse.Namespace) -> None:
     """Print every value the swap.html BTC->LN form asks for."""
     info = load_info()
@@ -1043,6 +1067,11 @@ def main() -> None:
     p.add_argument("address")
     p.add_argument("amount", help="BTC amount exactly as shown, e.g. 0.00050100")
     p.add_argument("--wallet", default="user")
+    p = sub.add_parser(
+        "send-btc", help="send ADDRESS the exact BTC amount from the regtest user wallet"
+    )
+    p.add_argument("address")
+    p.add_argument("amount", type=btc_amount, help="BTC amount, e.g. 0.00100150 (fees are extra)")
     p = sub.add_parser("web-inputs", help="values for the swap.html form")
     p.add_argument("sat", type=int, nargs="?", default=50_000)
     p = sub.add_parser("broadcast", help="broadcast a raw transaction hex")
@@ -1073,6 +1102,7 @@ def main() -> None:
         "address": cmd_address,
         "sign-psbt": cmd_sign_psbt,
         "fund-psbt": cmd_fund_psbt,
+        "send-btc": cmd_send_btc,
         "web-inputs": cmd_web_inputs,
         "broadcast": cmd_broadcast,
         "swap": cmd_swap,

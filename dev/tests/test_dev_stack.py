@@ -65,7 +65,7 @@ def test_static_cookie_matches_rpcauth():
 def test_chain_reader_is_whitelisted_loopback_only_and_stateless():
     assert matches("rill-chain", "rill-dev-chain-regtest")
     assert (
-        "-rpcwhitelist=rill-chain:getblockchaininfo,getblockhash,getrawtransaction,getblockheader,gettxout"
+        "-rpcwhitelist=rill-chain:getblockchaininfo,getblockhash,getrawtransaction,getblockheader,gettxout,getdescriptoractivity"
         in COMPOSE
     )
     assert "-rpcwhitelistdefault=0" in COMPOSE

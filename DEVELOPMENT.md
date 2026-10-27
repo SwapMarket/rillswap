@@ -242,14 +242,12 @@ chain API and gas sponsor, and a recovery wallet derived and stored in the
 browser. Pick the pair with **You send / You receive**.
 
 - **BTC to Lightning:** `dev/devctl web-inputs 50000` prints a fresh user
-   invoice. Paste it, get a quote, save the recovery files the page offers, then
-   use **Advanced** to paste a finalized PSBT from
-   `dev/devctl fund-psbt <address> <btc>` (the exact address and amount shown).
-   After the page validates it and the provider acknowledges funding, broadcast
-   its displayed raw transaction with `dev/devctl broadcast <rawtx>`, then click
-   **I broadcast it**. The page shows the preimage once the maker pays the invoice.
-   Plain wallet sends require an address-indexed mempool API; the scoped local
-   chain reader has no address history, so it cannot discover those deposits.
+  invoice. Paste it, accept a quote, then run
+  `dev/devctl send-btc <address> <btc>` with the exact deposit address and BTC
+  amount shown. This signs and broadcasts immediately from the user wallet,
+  paying the transaction fee separately. It prints the transaction ID.
+  The browser discovers the deposit and proceeds after confirmation.
+  **Advanced** still supports `fund-psbt` and explicit raw transaction broadcast.
 - **Lightning to BTC:** compare offers, approve one, then pay the hold invoice
   with `dev/devctl pay <bolt11>`. The page claims the on-chain output.
 - **USDC/USDT to Lightning:** needs an injected EVM wallet (for example
@@ -264,6 +262,27 @@ Recovery files are encrypted to the browser-derived age identity. The
 recovery panel can inspect them and prepare explicitly approved refunds. To
 recover with the CLI instead, download `rillswap-recovery.age-key` from the
 recovery details.
+
+The local explorer shows transaction inputs, exact output amounts, and active
+chain confirmation status at `http://127.0.0.1:8091/tx/<txid>`. Use **Refresh
+status** to update it. It does not estimate transaction fees.
+
+Address discovery reads the full active regtest history and mempool only when
+requested, without a wallet import, index, or startup scan. Queries have a
+12-second scan budget, a one-million-block cap, and bounded results. Timeouts,
+reorganizations, and oversized histories return unavailable rather than partial
+or empty history. For an oversized disposable history, start fresh with
+`dev/devctl nuke` (this deletes the development stack's data).
+
+Existing volumes need no migration. After updating this chain API, recreate the
+Core and reader containers so Core grants the added read-only activity RPC:
+
+```sh
+docker compose -f dev/compose.yaml up -d --force-recreate bitcoind chain
+```
+
+An older Core container without that permission returns unavailable for address
+queries. Existing volumes are retained by the recreation command.
 
 ## Paying in the demo shop
 

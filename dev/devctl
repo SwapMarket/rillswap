@@ -30,6 +30,7 @@ chain and wallets
   invoice <sat> [--node user|maker]
   pay <bolt11> [--node user|maker]
   fund-psbt <address> <btc>  finalized PSBT from the Core user wallet
+  send-btc <address> <btc>  send now from the Core user wallet (fees are extra)
   sign-psbt <psbt> [--hex]   sign/finalize a PSBT with the Core user wallet
   broadcast <rawtx>
 
@@ -81,7 +82,7 @@ case "$cmd" in
     status) compose ps -a "$@" ;;
     logs) compose logs -f --tail=100 "$@" ;;
     restart) compose restart "$@" ;;
-    info | balances | mine | miner | address | invoice | pay | sign-psbt | fund-psbt | web-inputs | broadcast | swap | shop-smoke | pay-xmr | xmr-smoke)
+    info | balances | mine | miner | address | invoice | pay | sign-psbt | fund-psbt | send-btc | web-inputs | broadcast | swap | shop-smoke | pay-xmr | xmr-smoke)
         devtool "$cmd" "$@"
         ;;
     smoke)

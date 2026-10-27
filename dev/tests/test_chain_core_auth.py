@@ -58,7 +58,7 @@ for method in ['getblockchaininfo', 'getblockhash', 'getrawtransaction', 'getblo
     assert call(request(method), 'rill-broadcast', 'rill-dev-broadcast-regtest')[0] == 403
 
 # Actual transaction observations on this isolated node, not existing dev funds.
-# Only the privileged test setup mines/sends; the adapter still has five reads.
+# Only the privileged test setup mines/sends; the adapter has read-only RPCs.
 import importlib.util
 spec = importlib.util.spec_from_file_location('chain_api', '/check/chain_api.py')
 api = importlib.util.module_from_spec(spec)
@@ -92,10 +92,17 @@ transaction = setup_rpc('getrawtransaction', [txid, True])
 vout = next(item['n'] for item in transaction['vout']
     if item['scriptPubKey'].get('address') == destination)
 assert reader.observe(f'/api/tx/{txid}/hex') == transaction['hex']
+history = json.loads(reader.observe(f'/api/address/{destination}/txs'))
+assert len(history) == 1 and history[0]['txid'] == txid
+assert history[0]['vout'][vout]['value'] == 100000
+assert history[0]['status'] == {'confirmed': False}
+assert 'Not confirmed on the active chain' in reader.observe(f'/tx/{txid}')
 unavailable(f'/api/tx/{txid}/outspend/{vout}')  # Mempool-only is not confirmed UTXO evidence.
 mined = setup_rpc('generatetoaddress', [1, address])[0]
 status = json.loads(reader.observe(f'/api/tx/{txid}/status'))
 assert status['confirmed'] and status['block_height'] == 102 and status['block_hash'] == mined
+assert json.loads(reader.observe(f'/api/address/{destination}/txs'))[0]['status'] == status
+assert '1 confirmation(s), block 102' in reader.observe(f'/tx/{txid}')
 assert json.loads(reader.observe(f'/api/tx/{txid}/outspend/{vout}')) == {'spent': False}
 unavailable(f'/api/tx/{txid}/outspend/4294967295')
 unavailable('/api/tx/' + '0'*64 + '/hex')
@@ -122,6 +129,8 @@ unavailable(f'/api/tx/{txid}/outspend/{vout}')  # Mempool spend remains UNKNOWN,
 setup_rpc('generatetoaddress', [1, address])
 unavailable(f'/api/tx/{txid}/outspend/{vout}')  # Confirmed spent is likewise unavailable.
 assert json.loads(reader.observe(f'/api/tx/{spend}/status'))['confirmed']
+history = json.loads(reader.observe(f'/api/address/{destination}/txs'))
+assert len(history) == 1 and history[0]['txid'] == txid and history[0]['status']['confirmed']
 setup_rpc('invalidateblock', [mined])
 assert json.loads(reader.observe(f'/api/tx/{txid}/status')) == {'confirmed': False}
 unavailable(f'/api/tx/{txid}/outspend/{vout}')

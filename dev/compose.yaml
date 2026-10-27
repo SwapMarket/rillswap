@@ -92,7 +92,7 @@ services:
       - -rpcauth=__cookie__:9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d$$a7f9835b158cc878c3a5d0c408ee19f9b64d5c1f510e01eb8e4b7b963194ead9
       # Chain observations only; introducing this reader must not restrict existing clients.
       - -rpcauth=rill-chain:571483e8a4d64c1cab99d7893c619cc8$$152bd5aa8a0d5d6e54f8a3673c4f324c5e77127374637cd7953f52ee086983f0
-      - -rpcwhitelist=rill-chain:getblockchaininfo,getblockhash,getrawtransaction,getblockheader,gettxout
+      - -rpcwhitelist=rill-chain:getblockchaininfo,getblockhash,getrawtransaction,getblockheader,gettxout,getdescriptoractivity
       # Explicit raw transaction submission only (separate from the chain reader).
       - -rpcauth=rill-broadcast:2ba7d1442d394611b099cf48b7a1b49a$$0172702bca62fcaa33926db5210c059ae94335d7e6194c739a893b121df1d5e4
       - -rpcwhitelist=rill-broadcast:testmempoolaccept,sendrawtransaction
