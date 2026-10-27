@@ -1,0 +1,105 @@
+name: Provider image
+
+# Builds ghcr.io/rillswap/rill-provider (rill-provider/docker/Dockerfile).
+# Pull requests build and smoke-test amd64 only. Pushes to main, v* tags,
+# manual runs and the weekly rebuild (Debian security updates for tor and
+# friends) smoke-test amd64, then publish amd64 and arm64.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths: &image-inputs
+      - .dockerignore
+      - .github/workflows/provider-image.yml
+      - rill-cli/pyproject.toml
+      - rill-cli/README.md
+      - rill-cli/src/**
+      - rill-core/packages/core/**
+      - rill-crypto/CMakeLists.txt
+      - rill-crypto/c/**
+      - rill-crypto/python/**
+      - rill-docs/networks/**
+      - rill-provider/LICENSE
+      - rill-provider/README.md
+      - rill-provider/docker/**
+      - rill-provider/pyproject.toml
+      - rill-provider/src/**
+  pull_request:
+    paths: *image-inputs
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider-image-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/rillswap/rill-provider
+
+jobs:
+  image:
+    name: Build, smoke-test and publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io with GITHUB_TOKEN
+    env:
+      PUBLISH: ${{ github.repository == 'rillswap/rillswap' && github.event_name != 'pull_request' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        if: env.PUBLISH == 'true'
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          # latest follows main; release tags never move it.
+          flavor: latest=false
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - name: Build amd64 for the smoke test
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: rill-provider/docker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: rill-provider:ci
+          cache-from: type=gha,scope=provider-image
+          cache-to: type=gha,scope=provider-image,mode=max
+      - name: Smoke-test the image through compose.yaml
+        run: rill-provider/docker/smoke-test.sh rill-provider:ci
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        if: env.PUBLISH == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish amd64 and arm64
+        if: env.PUBLISH == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: rill-provider/docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha,scope=provider-image
+          cache-to: type=gha,scope=provider-image,mode=max
