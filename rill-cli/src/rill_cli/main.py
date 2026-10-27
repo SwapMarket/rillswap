@@ -130,7 +130,7 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - one flat command ta
     ):
         operation = commands.add_parser(command, help=description)
         operation.add_argument(
-            "--network", required=True, help="complete trusted regtest network JSON"
+            "--network", required=True, help="complete trusted network JSON file"
         )
         operation.add_argument(
             "--crypto-library", required=True, help="verified native library path"
