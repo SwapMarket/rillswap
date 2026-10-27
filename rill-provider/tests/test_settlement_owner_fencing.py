@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from rill_provider.core_tx_bytes import CoreUnavailableError
 from rill_provider.live_session_store import StaleOwnerError
 from rill_provider.settlement_engine import SettlementEngine
 
@@ -47,3 +48,22 @@ def test_fenced_exposure_release_is_never_retried_on_a_stale_handle() -> None:
     store.release_expired_exposure.side_effect = StaleOwnerError("ownership lost")
     with pytest.raises(StaleOwnerError, match="ownership lost"):
         asyncio.run(engine._release_expired())  # noqa: SLF001 - isolate cleanup's catch
+
+
+def test_a_deferred_swap_is_named_with_its_error_class_only(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    engine, store, _ = _engine()
+    store.settlement_work.return_value = (
+        SimpleNamespace(session_id="aa" * 32, state="FUNDING_SEEN"),
+        SimpleNamespace(session_id="bb" * 32, state="FUNDING_SEEN"),
+    )
+    engine._advance = AsyncMock(  # type: ignore[method-assign]  # noqa: SLF001
+        side_effect=[CoreUnavailableError("backend detail stays private"), "PAYING"]
+    )
+    engine._close_unfunded = AsyncMock(return_value=[])  # type: ignore[method-assign]  # noqa: SLF001
+    engine._release_claims = AsyncMock()  # type: ignore[method-assign]  # noqa: SLF001
+    engine._release_expired = AsyncMock()  # type: ignore[method-assign]  # noqa: SLF001
+    with caplog.at_level("WARNING", logger="rill_provider.settlement_engine"):
+        assert asyncio.run(engine.tick(1000)) == {"bb" * 32: "PAYING"}
+    assert caplog.messages == [f"settlement step deferred for {'aa' * 8} (CoreUnavailableError)"]

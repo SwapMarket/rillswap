@@ -304,6 +304,8 @@ def test_service_routes_reverse_proposals_to_the_cosigner_only(
 
     asyncio.run(exercise())
     assert "sensitive preimage detail" not in caplog.text
+    if outcome == "refused":  # the operator learns the class, never the detail
+        assert "reverse cooperative proposal refused (LiveSessionStoreError)" in caplog.messages
 
 
 def test_forward_profile_never_routes_proposal_requests_to_reverse_cosigner() -> None:

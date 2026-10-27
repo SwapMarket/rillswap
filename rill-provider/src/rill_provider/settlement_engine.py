@@ -990,8 +990,15 @@ class SettlementEngine:
                 raise  # a fenced/uncertain store cannot defer economic work
             except StaleSwapError:
                 continue
-            except Exception:  # noqa: BLE001 - one swap's backend trouble never stops others
-                LOG.warning("settlement step deferred for one swap", exc_info=False)
+            except Exception as error:  # noqa: BLE001 - one swap's backend trouble never stops others
+                # The class only (messages may carry backend detail). A
+                # CoreUnavailableError here is also how an unconfirmed funding
+                # output looks until its first block.
+                LOG.warning(
+                    "settlement step deferred for %s (%s)",
+                    item.session_id[:16],
+                    type(error).__name__,
+                )
                 continue
             if state != item.state:
                 results[item.session_id] = state

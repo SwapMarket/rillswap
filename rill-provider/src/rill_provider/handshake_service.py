@@ -1208,8 +1208,9 @@ class HandshakeService:
             )
         except StaleOwnerError:
             raise
-        except Exception:  # noqa: BLE001 - no proposal, preimage, or backend oracle
-            LOG.warning("reverse cooperative proposal refused")
+        except Exception as error:  # noqa: BLE001 - no proposal, preimage, or backend oracle
+            # The class only, for the operator; the client still gets no reply.
+            LOG.warning("reverse cooperative proposal refused (%s)", type(error).__name__)
             return "refused"
         if reply is None:
             return "proposal-replay"
