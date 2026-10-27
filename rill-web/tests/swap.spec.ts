@@ -242,6 +242,22 @@ test("settings are keyboard accessible and switching networks resets local relay
   for (const url of sockets) expect([...MAINNET_RELAYS, "ws://127.0.0.1:7777/"]).toContain(url);
 });
 
+test("the header network indicator switches an unpublished network in place and follows settings", async ({ page }) => {
+  await page.goto(SWAP);
+  await directorySettled(page);
+  const picker = page.getByRole("combobox", { name: "Switch network" });
+  await expect(picker).toHaveValue("mainnet");
+  expect(await picker.locator("option").allTextContents()).toEqual(["Mainnet", "signet · test funds", "testnet4 · test funds", "regtest · test funds"]);
+  await picker.selectOption("signet");
+  await expect(page).toHaveURL(SWAP); // no deployment map in this build: nothing navigates
+  await page.locator("#swap-settings-toggle").click();
+  await expect(page.locator("#swap-network")).toHaveValue("signet");
+  await expect(page.locator("#swap-chain-api")).toHaveValue("https://mempool.space/signet/api");
+  await page.locator("#swap-network").selectOption("regtest");
+  await page.locator("#swap-settings-close").click();
+  await expect(picker).toHaveValue("regtest");
+});
+
 test("the minimal swap card fits a mobile viewport", async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 812 });
   await page.goto(SWAP);

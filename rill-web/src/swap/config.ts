@@ -18,6 +18,8 @@ export interface SwapDefaults {
   readonly evmAssets?: Readonly<Partial<Record<"USDC" | "USDT", EvmAssetIdentity>>>;
   /** Alchemy-compatible gas sponsor for receiving stablecoins without a wallet extension (all three or none). */
   readonly evmSponsor?: EvmSponsorDefaults;
+  /** Published sibling builds, as relative links: picking one of these networks opens its own page. */
+  readonly deployments?: Readonly<Partial<Record<NetworkName, string>>>;
 }
 export interface EvmSponsorDefaults {
   readonly url: string;
@@ -106,7 +108,22 @@ export function resolveSwapDefaults(env: Record<string, string | undefined>): Sw
     } : {}),
     ...(sponsorDefaults(env, name)),
     ...(env.VITE_RILLSWAP_EVM_ASSETS === undefined ? {} : { evmAssets: parseEvmAssets(env.VITE_RILLSWAP_EVM_ASSETS) }),
+    ...(env.VITE_RILLSWAP_DEPLOYMENTS === undefined ? {} : { deployments: parseDeployments(env.VITE_RILLSWAP_DEPLOYMENTS) }),
   };
+}
+
+// Same-site relative directories only ("./", "../", "./signet/"), so a build
+// works under any Pages prefix and can never send users to another origin.
+const DEPLOYMENT_LINK = /^\.\.?\/(?:[a-z0-9-]+\/)*$/;
+
+function parseDeployments(document: string): NonNullable<SwapDefaults["deployments"]> {
+  const value: unknown = JSON.parse(document);
+  if (value === null || typeof value !== "object" || Array.isArray(value) ||
+      Object.entries(value).some(([name, link]) =>
+        !(NETWORK_NAMES as readonly string[]).includes(name) || typeof link !== "string" || !DEPLOYMENT_LINK.test(link))) {
+    throw new Error("VITE_RILLSWAP_DEPLOYMENTS must map network names to relative directory links such as \"../\" or \"./signet/\"");
+  }
+  return Object.freeze({ ...value as Partial<Record<NetworkName, string>> });
 }
 
 function parseEvmAssets(document: string): NonNullable<SwapDefaults["evmAssets"]> {

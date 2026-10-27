@@ -91,7 +91,13 @@ function mount(root: HTMLElement): void {
   const brand = node("a", "rill", "swap-brand");
   brand.href = "./swap.html";
   brand.setAttribute("aria-label", "RillSwap home");
-  const badge = node("span", "", "swap-network-badge");
+  // The network indicator doubles as a switcher: a published sibling build opens
+  // its own page (reload-stable URL), any other network reconfigures this one.
+  const badge = node("select", "", "swap-network-badge");
+  badge.setAttribute("aria-label", "Switch network");
+  for (const name of Object.keys(NETWORKS)) {
+    badge.append(Object.assign(node("option", name === "mainnet" ? "Mainnet" : `${name} · test funds`), { value: name }));
+  }
   header.append(brand, badge);
   const intro = node("div");
   intro.className = "swap-intro";
@@ -464,9 +470,8 @@ function mount(root: HTMLElement): void {
   relay.oninput = updateDisclosure;
   updateDisclosure();
   const updateNetwork = (): void => {
-    const main = network.value === "mainnet";
     const route = routeFor(fromAsset.value, toAsset.value);
-    badge.textContent = main ? "Mainnet" : `${network.value} · test funds`;
+    badge.value = network.value;
     notice.hidden = true;
     heroTitle.textContent = route.title;
     heroTagline.textContent = route.tagline;
@@ -521,6 +526,16 @@ function mount(root: HTMLElement): void {
     loadDirectory();
   };
   network.onchange = applyNetwork;
+  badge.onchange = () => {
+    const deployment = __SWAP_DEFAULTS__.deployments?.[badge.value as NetworkName];
+    if (deployment !== undefined && badge.value !== __SWAP_DEFAULTS__.network) {
+      badge.value = network.value; // shown until the other page loads, and kept if leaving is canceled
+      location.assign(deployment);
+      return;
+    }
+    network.value = badge.value;
+    applyNetwork();
+  };
   updateNetwork();
   loadDirectory();
   // A swap link reopens its encrypted record locally: inspection decrypts and parses, nothing connects.
@@ -571,7 +586,7 @@ function mount(root: HTMLElement): void {
           row.append(open); savedList.append(row);
           open.onclick = () => {
             if (busy) return;
-            busy = true; open.disabled = settingsButton.disabled = providersButton.disabled = true;
+            busy = true; open.disabled = settingsButton.disabled = providersButton.disabled = badge.disabled = true;
             void (async () => {
               if (network.value !== name) { network.value = name; applyNetwork(); }
               const api = validateMempoolApi(chainApi.value.trim(), name), broadcast = validateMempoolApi(broadcastApi.value.trim(), name);
@@ -591,7 +606,7 @@ function mount(root: HTMLElement): void {
                 download: offerDownload, saved: (file) => { publishLink(file, name); void refreshSavedRecoveries(); } });
             })().catch(() => {
               row.append(node("p", "Could not resume this saved swap. Keep any backups; no payment was retried."));
-              busy = false; open.disabled = settingsButton.disabled = providersButton.disabled = false;
+              busy = false; open.disabled = settingsButton.disabled = providersButton.disabled = badge.disabled = false;
             });
           };
         }
@@ -652,7 +667,7 @@ function mount(root: HTMLElement): void {
     const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button")];
     busy = true;
     for (const control of controls) (control as HTMLInputElement).disabled = true;
-    settingsButton.disabled = providersButton.disabled = true;
+    settingsButton.disabled = providersButton.disabled = badge.disabled = true;
     const guard = (unload: BeforeUnloadEvent): void => unload.preventDefault();
     window.addEventListener("beforeunload", guard);
     const cancellation = new AbortController();
@@ -663,7 +678,7 @@ function mount(root: HTMLElement): void {
     const restore = (): void => {
       busy = false;
       for (const control of controls) (control as HTMLInputElement).disabled = false;
-      settingsButton.disabled = providersButton.disabled = false;
+      settingsButton.disabled = providersButton.disabled = badge.disabled = false;
       window.removeEventListener("beforeunload", guard);
       updateNetwork();
     };
@@ -788,14 +803,14 @@ function mount(root: HTMLElement): void {
     } catch (error) { report(`refused: ${(error as Error).message}`); return; }
     const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button")];
     busy = true; for (const control of controls) (control as HTMLInputElement).disabled = true;
-    settingsButton.disabled = providersButton.disabled = true;
+    settingsButton.disabled = providersButton.disabled = badge.disabled = true;
     const cancellation = new AbortController(), guard = (event: BeforeUnloadEvent): void => event.preventDefault();
     window.addEventListener("beforeunload", guard);
     let executing = false, arrivals: readonly LocatedQuote<PreparedLnErc20Quote>[] = [];
     const current = (): void => cancellation.signal.throwIfAborted();
     const restore = (): void => {
       busy = false; for (const control of controls) (control as HTMLInputElement).disabled = false;
-      settingsButton.disabled = providersButton.disabled = false; window.removeEventListener("beforeunload", guard); updateNetwork();
+      settingsButton.disabled = providersButton.disabled = badge.disabled = false; window.removeEventListener("beforeunload", guard); updateNetwork();
     };
     const edit = node("button", "Edit swap", "swap-edit"); edit.type = "button";
     edit.onclick = () => {
@@ -909,7 +924,7 @@ function mount(root: HTMLElement): void {
     const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button")].filter((control) => control !== receiveAddress);
     busy = true;
     for (const control of controls) (control as HTMLInputElement).disabled = true;
-    settingsButton.disabled = providersButton.disabled = true;
+    settingsButton.disabled = providersButton.disabled = badge.disabled = true;
     const cancellation = new AbortController();
     const selection = (): string => JSON.stringify([network.value, fromAsset.value, toAsset.value, receiveAmount.value, relay.value, identity.value,
       chainApi.value, broadcastApi.value, successFee.value, minReserve.value, claimFee.value, minRefundDelay.value, maxHold.value]);
@@ -926,7 +941,7 @@ function mount(root: HTMLElement): void {
     const restore = (): void => {
       busy = false;
       for (const control of controls) (control as HTMLInputElement).disabled = false;
-      settingsButton.disabled = providersButton.disabled = false;
+      settingsButton.disabled = providersButton.disabled = badge.disabled = false;
       receiveAddress.disabled = false;
       updateNetwork();
     };
@@ -1087,7 +1102,7 @@ function mount(root: HTMLElement): void {
     for (const input of controls) {
       (input as HTMLInputElement).disabled = true;
     }
-    settingsButton.disabled = providersButton.disabled = true;
+    settingsButton.disabled = providersButton.disabled = badge.disabled = true;
     const guard = (unload: BeforeUnloadEvent): void => unload.preventDefault();
     window.addEventListener("beforeunload", guard);
     let cancelled = false;
@@ -1100,7 +1115,7 @@ function mount(root: HTMLElement): void {
     const restore = (): void => {
       busy = false;
       for (const control of controls) (control as HTMLInputElement).disabled = false;
-      settingsButton.disabled = providersButton.disabled = false;
+      settingsButton.disabled = providersButton.disabled = badge.disabled = false;
       updateNetwork();
       window.removeEventListener("beforeunload", guard);
     };

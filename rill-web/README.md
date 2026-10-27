@@ -60,6 +60,7 @@ Deployment defaults are set and validated at build time.
 | `VITE_RILLSWAP_EVM_ENTRY_POINT` | Pinned ERC-4337 EntryPoint address |
 | `VITE_RILLSWAP_EVM_7702_DELEGATE` | Pinned EIP-7702 delegate address |
 | `VITE_RILLSWAP_EVM_SPONSOR_POLICY` | Optional sponsor gas policy UUID |
+| `VITE_RILLSWAP_DEPLOYMENTS` | JSON map from network name to a sibling build's relative directory (`"../"`, `"./signet/"`); the header network picker opens these instead of switching in place |
 
 Set the sponsor endpoint, EntryPoint and delegate together, or none of them.
 A build without configuration opens mainnet with swaps enabled. The older
@@ -221,8 +222,11 @@ deploy. Set the repository's Pages source to **GitHub Actions**.
 - `/signet/`: the signet swap app
 - `diagnostic.html` in each: the disconnected preview
 
-The Pages build ignores local `VITE_RILLSWAP_*` overrides so regtest
-endpoints never leak into the public site.
+The network indicator in the header is a picker: choosing mainnet or signet
+opens the other build, and any other network reconfigures the current page
+like Settings does. The Pages build ignores local `VITE_RILLSWAP_*` overrides
+(it sets its own `VITE_RILLSWAP_DEPLOYMENTS`) so regtest endpoints never leak
+into the public site.
 Pushes to `main` publish the mainnet and signet apps. Local builds and commits
 do not publish them.
 

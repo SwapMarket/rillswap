@@ -22,6 +22,17 @@ describe("explicit deployment defaults", () => {
   test("unconfigured public builds select mainnet with an encrypted relay", () => {
     expect(resolveSwapDefaults({})).toEqual({ network: "mainnet", relays: ["wss://relay.damus.io/", "wss://nos.lol/", "wss://relay.primal.net/"], mempoolApi: "https://mempool.space/api", broadcastApi: "https://mempool.space/api" });
   });
+  test("published sibling builds are same-site relative directories for declared networks only", () => {
+    expect(resolveSwapDefaults({ VITE_RILLSWAP_NETWORK: "signet", VITE_RILLSWAP_DEPLOYMENTS: JSON.stringify({ mainnet: "../", signet: "./" }) }).deployments)
+      .toEqual({ mainnet: "../", signet: "./" });
+    expect(resolveSwapDefaults({ VITE_RILLSWAP_DEPLOYMENTS: JSON.stringify({ signet: "./signet/", testnet4: "./t4-dev/" }) }).deployments)
+      .toEqual({ signet: "./signet/", testnet4: "./t4-dev/" });
+    for (const map of [null, [], "../", { liquid: "./liquid/" }, { signet: 1 }, { signet: "" }, { signet: "/signet/" }, { signet: "//evil.example/" },
+      { signet: "https://evil.example/" }, { signet: "./signet" }, { signet: "../?a" }, { signet: "./Signet/" }, { signet: "javascript:alert(1)//" }]) {
+      expect(() => resolveSwapDefaults({ VITE_RILLSWAP_DEPLOYMENTS: JSON.stringify(map) })).toThrow("VITE_RILLSWAP_DEPLOYMENTS");
+    }
+    expect(() => resolveSwapDefaults({ VITE_RILLSWAP_DEPLOYMENTS: "{" })).toThrow();
+  });
   test("supports every declared network without hostname inference", () => {
     for (const network of NETWORK_NAMES) {
       expect(resolveSwapDefaults({ VITE_RILLSWAP_NETWORK: network }).network).toBe(network);

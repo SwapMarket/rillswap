@@ -30,4 +30,33 @@ for (const prefix of ["", "repository/"]) {
     expect(requests.some((url) => url.includes(`${prefix}signet/assets/`))).toBe(true);
     for (const url of requests) expect(new URL(url).host).toBe("127.0.0.1:18866");
   });
+
+  test(`the header network indicator opens the published sibling build under /${prefix}`, async ({ page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    const base = `http://127.0.0.1:18866/${prefix}`;
+    await page.goto(`${base}signet/`);
+    await directorySettled(page);
+    const picker = page.getByRole("combobox", { name: "Switch network" });
+    await expect(picker).toHaveValue("signet");
+    await picker.selectOption("mainnet");
+    await expect(page).toHaveURL(base);
+    await directorySettled(page);
+    await expect(picker).toHaveValue("mainnet");
+    await picker.selectOption("signet");
+    await expect(page).toHaveURL(`${base}signet/`);
+    await directorySettled(page);
+    await expect(picker).toHaveValue("signet");
+    // A network without a published build still reconfigures in place.
+    await picker.selectOption("testnet4");
+    await expect(page).toHaveURL(`${base}signet/`);
+    await page.locator("#swap-settings-toggle").click();
+    await expect(page.locator("#swap-network")).toHaveValue("testnet4");
+    await page.locator("#swap-settings-close").click();
+    await picker.selectOption("signet"); // the build's own network: in place, no reload
+    await expect(page).toHaveURL(`${base}signet/`);
+    await page.locator("#swap-settings-toggle").click();
+    await expect(page.locator("#swap-network")).toHaveValue("signet");
+    expect(errors).toEqual([]);
+  });
 }

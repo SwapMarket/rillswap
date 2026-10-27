@@ -8,6 +8,8 @@ for (const network of ["mainnet", "signet"] as const) {
   // Local regtest overrides must never leak into a public artifact.
   for (const key of Object.keys(env)) if (key.startsWith("VITE_RILLSWAP_")) delete env[key];
   env.VITE_RILLSWAP_NETWORK = network;
+  // The header network picker opens the sibling build instead of reconfiguring in place.
+  env.VITE_RILLSWAP_DEPLOYMENTS = JSON.stringify(network === "mainnet" ? { mainnet: "./", signet: "./signet/" } : { mainnet: "../", signet: "./" });
   const output = `tmp/pages-build/${network}`;
   const child = Bun.spawn([process.execPath, "node_modules/vite/bin/vite.js", "build", "--outDir", output, "--emptyOutDir"],
     { env, stdout: "inherit", stderr: "inherit" });
