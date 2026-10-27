@@ -517,6 +517,8 @@ def provision_maker(
                 "slot": f"dev-{direction}",
             },
             "relay_urls": [RELAY_INTERNAL],
+            # RS-006: cheap (about 256 hashes), but every client message is mined and checked.
+            "transport_pow_bits": 8,
         }
         if direction == "ln-to-btc":
             config["bitcoin_core"]["wallet"] = "maker"
