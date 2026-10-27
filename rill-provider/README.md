@@ -200,7 +200,10 @@ work it declared when it started, so you can change the value without
 stranding swaps that are in progress. Clients that predate this setting can't
 use an announcement that requires work, so enable it only after the clients
 you serve support it. Each extra bit doubles the cost: 16 bits is about
-65,000 hashes per message on average. Work makes floods more expensive, but
+65,000 hashes per message on average. In desktop Chromium on an HTTPS page,
+that took about half a second per small message. Larger messages, phones, and
+plain HTTP pages (no WebCrypto) take several times longer, and a swap sends
+several messages. Work makes floods more expensive, but
 it is not rate limiting or Sybil protection, because a native sender can
 still produce messages much faster than a browser.
 
