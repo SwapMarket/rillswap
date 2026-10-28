@@ -40,10 +40,12 @@ async function connect(): Promise<{ relay: RelayConnection; socket: FakeSocket }
   return { relay: await opening, socket };
 }
 
-test("relay URLs must be wss unless loopback", () => {
+test("relay URLs must be wss unless loopback or a v3 onion", () => {
   expect(checkRelayUrl("wss://relay.example.org")).toBe("wss://relay.example.org/");
   expect(checkRelayUrl("ws://127.0.0.1:7000")).toBe("ws://127.0.0.1:7000/");
-  for (const bad of ["ws://relay.example.org", "https://relay.example.org", "nonsense"]) {
+  const onion = "ws://oxtrdevav64z64yb7x6rjg4ntzqjhedm5b5zjqulugknhzr46ny2qbad.onion";
+  expect(checkRelayUrl(onion)).toBe(`${onion}/`);
+  for (const bad of ["ws://relay.example.org", "ws://short.onion", "ws://relay.example.org.onion", "https://relay.example.org", "nonsense"]) {
     expect(() => checkRelayUrl(bad)).toThrow(RelayError);
   }
 });

@@ -3,6 +3,7 @@ import { type AnnouncementCandidate, verifyNostrProviderAnnouncement } from "../
 import { parseStrictEventJson } from "../strictEventJson";
 import { ANNOUNCEMENT_KIND, MAX_DISCOVERY_EVENTS } from "./discovery";
 import { MAX_RELAYS } from "./config";
+import { isOnionRelay } from "./publicRelays";
 import { RelayConnection, type RelayQueryResult } from "./relay";
 import { SwapError } from "./session";
 import { ProtocolError, same } from "./wire";
@@ -67,7 +68,8 @@ export function scanAnnouncements(
   const slots = new Map<string, { announcement: AnnouncementCandidate; rawAnnouncement: string; relays: Set<string> }>();
   for (const { url, result } of observations) {
     if (result.truncated) warnings.push(`${url}: more than ${MAX_DISCOVERY_EVENTS} events, discovery incomplete`);
-    else if (result.completion !== "eose") warnings.push(`${url}: incomplete discovery (${result.completion})`);
+    // Onion relays are opportunistic: most browsers cannot reach them at all.
+    else if (result.completion !== "eose" && !isOnionRelay(url)) warnings.push(`${url}: incomplete discovery (${result.completion})`);
     // Budgets are per relay: the author is read before any signature check,
     // so one relay's forged events must not exhaust an identity elsewhere.
     const spent = new Map<string, number>();

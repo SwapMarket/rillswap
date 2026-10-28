@@ -142,7 +142,7 @@ test("the swap page enables mainnet and only loads provider listings when it ope
   await expect(page.locator("#swap-safety")).toHaveCount(0);
   const csp = await page.locator("meta[http-equiv='Content-Security-Policy']").getAttribute("content");
   // Any https mempool instance can be configured; plain http only for local endpoints.
-  expect(csp).toContain("connect-src 'self' wss: ws://127.0.0.1:* ws://localhost:* https: http://127.0.0.1:8091");
+  expect(csp).toContain("connect-src 'self' wss: ws://*.onion:* ws://127.0.0.1:* ws://localhost:* https: http://127.0.0.1:8091");
   expect(csp).not.toMatch(/\shttp:(?:\s|;)/);
   expect(csp).toContain("script-src 'self' 'wasm-unsafe-eval';");
   await directorySettled(page);
@@ -231,7 +231,7 @@ test("settings are keyboard accessible and switching networks resets local relay
   await expect(page.locator("#swap-relay")).toHaveValue("ws://127.0.0.1:7777/");
   await expect(page.locator("#swap-chain-api")).toHaveValue("http://127.0.0.1:8091/api");
   await page.locator("#swap-network").selectOption("signet");
-  await expect(page.locator("#swap-relay")).toHaveValue("wss://relay.damus.io/\nwss://nos.lol/\nwss://relay.primal.net/");
+  await expect(page.locator("#swap-relay")).toHaveValue(MAINNET_RELAYS.join("\n"));
   await expect(page.locator("#swap-chain-api")).toHaveValue("https://mempool.space/signet/api");
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).not.toBeVisible();

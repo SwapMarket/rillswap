@@ -1,5 +1,7 @@
 import { test as base, expect, type Page } from "@playwright/test";
 
+import { PUBLIC_RELAYS } from "../../src/swap/publicRelays";
+
 export { expect };
 
 /**
@@ -27,5 +29,5 @@ export async function directorySettled(page: Page): Promise<void> {
   await expect(page.locator("#swap-providers-status")).not.toHaveText(/^$|Loading providers/);
 }
 
-/** Relays a default (mainnet) build lists providers from. */
-export const MAINNET_RELAYS = ["wss://relay.damus.io/", "wss://nos.lol/", "wss://relay.primal.net/"] as const;
+/** Relays a default public build (mainnet, signet, testnet4) lists providers from. */
+export const MAINNET_RELAYS: readonly string[] = PUBLIC_RELAYS.map((url) => new URL(url).href);

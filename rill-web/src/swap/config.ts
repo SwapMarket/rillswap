@@ -1,6 +1,7 @@
 /** Deployment defaults are public configuration, never wallet credentials. */
 import { validateEvmAssetIdentity } from "../generated/manualAdvertisementValidators.js";
 import type { EvmAssetIdentity } from "../manualProviderAdvertisement";
+import { isOnionRelay, PUBLIC_RELAYS } from "./publicRelays";
 
 export const NETWORK_NAMES = ["mainnet", "signet", "testnet4", "regtest"] as const;
 export type NetworkName = typeof NETWORK_NAMES[number];
@@ -39,14 +40,15 @@ export function validateEvmSponsor(url: string, entryPoint: string, delegate: st
   return { url: validateMempoolApi(url, network), entryPoint, delegate, ...(policyId !== "" ? { policyId: policyId.toLowerCase() } : {}) };
 }
 
-export const MAX_RELAYS = 4;
+export const MAX_RELAYS = 10;
 
 export function validateRelay(value: string, network: NetworkName): string {
   const url = new URL(value);
   const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost";
   if (url.username || url.password || url.hash ||
-      (url.protocol !== "wss:" && !(network === "regtest" && loopback && url.protocol === "ws:"))) {
-    throw new Error("Use a wss:// relay, or an explicit local ws:// relay for regtest");
+      (url.protocol !== "wss:" && !(url.protocol === "ws:" && isOnionRelay(url.href)) &&
+        !(network === "regtest" && loopback && url.protocol === "ws:"))) {
+    throw new Error("Use a wss:// relay, a ws:// onion relay, or an explicit local ws:// relay for regtest");
   }
   return url.href;
 }
@@ -97,7 +99,7 @@ export function resolveSwapDefaults(env: Record<string, string | undefined>): Sw
   return {
     network: name,
     relays: validateRelays(env.VITE_RILLSWAP_RELAYS ?? env.VITE_RILLSWAP_RELAY ??
-      (name === "regtest" ? "ws://127.0.0.1:7777" : "wss://relay.damus.io wss://nos.lol wss://relay.primal.net"), name),
+      (name === "regtest" ? "ws://127.0.0.1:7777" : PUBLIC_RELAYS.join(" ")), name),
     mempoolApi: validateMempoolApi(env.VITE_RILLSWAP_MEMPOOL_API ?? MEMPOOL_APIS[name], name),
     broadcastApi: validateMempoolApi(env.VITE_RILLSWAP_BROADCAST_API ?? (name === "regtest" ? "http://127.0.0.1:8092/api" : env.VITE_RILLSWAP_MEMPOOL_API ?? MEMPOOL_APIS[name]), name),
     ...(env.VITE_RILLSWAP_NODE_API !== undefined || name === "regtest" ? {

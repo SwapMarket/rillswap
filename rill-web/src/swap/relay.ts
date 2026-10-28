@@ -6,6 +6,7 @@
 import { bytesToHex, randomBytes } from "@noble/hashes/utils.js";
 import type { NostrEvent } from "nostr-tools";
 
+import { isOnionRelay } from "./publicRelays";
 import type { RelayLink } from "./session";
 
 const MAX_FRAME_BYTES = 128 * 1024;
@@ -20,7 +21,7 @@ export class RelayError extends Error {
   }
 }
 
-/** wss:// anywhere; plain ws:// only to a loopback relay (local regtest). */
+/** wss:// anywhere; plain ws:// only to a loopback relay (local regtest) or a v3 onion relay. */
 export function checkRelayUrl(text: string): string {
   let url: URL;
   try {
@@ -28,8 +29,10 @@ export function checkRelayUrl(text: string): string {
   } catch {
     throw new RelayError("relay URL is not a URL");
   }
-  if (url.protocol === "wss:" || (url.protocol === "ws:" && LOOPBACK.has(url.hostname))) return url.toString();
-  throw new RelayError("relay URL must use wss:// (ws:// only for a loopback relay)");
+  if (url.protocol === "wss:" || (url.protocol === "ws:" && (LOOPBACK.has(url.hostname) || isOnionRelay(url.href)))) {
+    return url.toString();
+  }
+  throw new RelayError("relay URL must use wss:// (ws:// only for a loopback or onion relay)");
 }
 
 type Waiter = () => void;

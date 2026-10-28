@@ -135,7 +135,7 @@ function mount(root: HTMLElement): void {
   relayLabel.htmlFor = relay.id;
   relay.value = __SWAP_DEFAULTS__.relays.join("\n");
   relay.spellcheck = false;
-  settings.append(relayLabel, relay, node("small", "Up to four relays, used to find providers and talk to them. Each relay sees your IP."));
+  settings.append(relayLabel, relay, node("small", "Up to ten relays, used to find providers and talk to them. Each relay sees your IP unless you use Tor; onion relays only connect in Tor Browser."));
   const chainApi = field(settings, "swap-chain-api", "Mempool API", __SWAP_DEFAULTS__.mempoolApi,
     "Any mempool or Esplora instance over https, for example https://mempool.example/api. Used for confirmations and transaction links.");
   const broadcastApi = field(settings, "swap-broadcast-api", "Transaction broadcast API", __SWAP_DEFAULTS__.broadcastApi,

@@ -59,6 +59,17 @@ test("provider identities are discovered automatically but a manual pin is never
   expect(scanAnnouncements([observed(events)], network, identity).providers.map((p) => p.announcement.identityXOnlyKey)).toEqual([identity]);
 });
 
+test("an unreachable onion relay is not reported, but one that answers still routes the provider", () => {
+  const onion = "ws://gnostr2jnapk72mnagq3cuykfon73temzp77hcbncn4silgt77boruid.onion/";
+  const failed = (url: string): RelayObservation => ({ url, result: { events: [], truncated: false, completion: "error" } });
+  const quiet = scanAnnouncements([observed([announcement()]), failed(onion)], network);
+  expect(quiet.providers).toHaveLength(1);
+  expect(quiet.warnings).toEqual([]);
+  expect(scanAnnouncements([failed("wss://b.test/")], network).warnings).toEqual(["wss://b.test/: incomplete discovery (error)"]);
+  const raw = announcement();
+  expect(scanAnnouncements([observed([raw]), observed([raw], onion)], network).providers[0]!.relayUrls).toEqual(["wss://a.test/", onion]);
+});
+
 test("full network mismatch is refused even when events have plausible tags", () => {
   expect(scanAnnouncements([observed([announcement()])], { ...network, deployment_namespace: "other" }).providers).toEqual([]);
 });
