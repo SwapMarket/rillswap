@@ -241,6 +241,11 @@ rill recover watch-claim "${recovery[@]}" \
   --initial-fee-sat 300 --max-fee-sat 3000 ln-to-btc.age.funded
 ```
 
+It signs only once the funding output has the signed confirmation depth. Pass
+the newest snapshot: from `.fallback` on, it also holds the claim the live swap
+prepared, which may already be broadcast. The watcher then reports that claim
+and exits with `claim_confirmed` once it confirms, without signing another.
+
 `prepare-claim` writes an encrypted claim plan without broadcasting; the plan
 reveals the preimage. `broadcast-claim` is regtest-only and requires
 `--acknowledge-regtest-preimage-disclosure`.
