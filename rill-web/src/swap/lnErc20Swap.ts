@@ -79,6 +79,8 @@ export function checkLnErc20QuoteOffer(payload: unknown, request: Omit<LnErc20Re
 export function checkLnErc20TermsOffer(payload: unknown, context: {
   readonly request: LnErc20FirmRequest; readonly asset: EvmAssetIdentity; readonly network: unknown;
   readonly identity: string; readonly transcript: string; readonly envelopeContractHash: string | null; readonly now: number;
+  /** The EVM tip this client sampled before the firm request. */
+  readonly evmTip: number;
 }): LnToErc20TermsOffer {
   const offer = requireShape<LnToErc20TermsOffer>("validateReverseTermsOffer", payload);
   const terms = offer.terms.contract_terms, { request } = context;
@@ -97,6 +99,10 @@ export function checkLnErc20TermsOffer(payload: unknown, context: {
       (terms.htlc_timelock_block - terms.evm_reference_block) * context.asset.block_seconds + terms.timing_policy.refund_and_ln_resolution_seconds >=
         (terms.timing_policy.min_incoming_htlc_expiry_height - terms.btc_reference_height) * 600) {
     throw new ProtocolError("reverse stablecoin terms do not honor invoice, address, asset, features, or timing limits");
+  }
+  // The signed reference starts every lock scan and the timing math: keep it within ten minutes of blocks of our tip.
+  if (Math.abs(terms.evm_reference_block - context.evmTip) > Math.ceil(600 / context.asset.block_seconds)) {
+    throw new ProtocolError("reverse stablecoin terms reference an EVM block far from the current tip");
   }
   checkSignedOfferBinding(offer, context);
   return offer;
@@ -223,7 +229,7 @@ async function prepareFirm(relay: RelayLink, request: LnErc20Request, options: {
     await session.send(envelope, session.providerKey!);
     const answer = await session.replyTo(envelope, "terms_offer");
     const offer = checkLnErc20TermsOffer(answer.payload, { request: firm, asset: request.asset, network: request.network,
-      identity: request.identity, transcript, envelopeContractHash: answer.contract_hash, now: seconds() });
+      identity: request.identity, transcript, envelopeContractHash: answer.contract_hash, now: seconds(), evmTip: config.evmTip });
     const terms = offer.terms.contract_terms, contractHash = offer.terms.contract_hash;
     let used = false;
     return {

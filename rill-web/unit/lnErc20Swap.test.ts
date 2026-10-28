@@ -17,7 +17,8 @@ const REQUEST: LnErc20FirmRequest = {
   limits: { max_success_fee_sat: "200", min_htlc_timelock_block: 1600, max_incoming_htlc_expiry_height: 300 }, extensions: {},
 };
 const context = (terms = TERMS, request = REQUEST) => ({ request, asset: ASSET, network: TERMS.network_identity,
-  identity: TERMS.provider_identity_key, transcript: "77".repeat(32), envelopeContractHash: signedReverse(terms).terms.contract_hash, now: NOW });
+  identity: TERMS.provider_identity_key, transcript: "77".repeat(32), envelopeContractHash: signedReverse(terms).terms.contract_hash, now: NOW,
+  evmTip: TERMS.evm_reference_block });
 
 describe("LN to ERC20 signed offers", () => {
   test("exact invoice, payout and role binding; ceiling exchange math", () => {
@@ -44,6 +45,18 @@ describe("LN to ERC20 signed offers", () => {
     }
     expect(() => checkLnErc20TermsOffer({ ...signedReverse(), provider_terms_signature: "00".repeat(64) }, context())).toThrow();
     expect(() => checkLnErc20TermsOffer(signedReverse(), { ...context(), now: TERMS.terms_expiry })).toThrow();
+  });
+  test("the signed EVM reference block must be within ten minutes of blocks of the client's tip", () => {
+    const window = Math.ceil(600 / ASSET.block_seconds), reference = TERMS.evm_reference_block;
+    for (const tip of [reference - window, reference + window]) {
+      expect(checkLnErc20TermsOffer(signedReverse(), { ...context(), evmTip: tip }).hold_invoice).toBe(HOLD_INVOICE);
+    }
+    // A stale reference (as if block 0) would make every lock scan start far back; a future one shortens the timing math.
+    for (const tip of [reference - window - 1, reference + window + 1, reference * 100]) {
+      expect(() => checkLnErc20TermsOffer(signedReverse(), { ...context(), evmTip: tip })).toThrow("far from the current tip");
+    }
+    const future = { ...TERMS, evm_reference_block: reference + 1_000 };
+    expect(() => checkLnErc20TermsOffer(signedReverse(future), context(future))).toThrow("far from the current tip");
   });
 });
 
