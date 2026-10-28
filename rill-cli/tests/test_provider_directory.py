@@ -172,3 +172,56 @@ def test_native_directory_lists_anyone_on_the_selected_network(tmp_path: Path) -
     # tampered copy are ignored.
     assert sorted(found) == sorted(keys[:2])
     assert all(len(ads) == 1 for ads in found.values())
+
+
+@pytest.mark.native_crypto
+@NATIVE
+def test_native_directory_lists_every_swap_direction_once(tmp_path: Path) -> None:
+    from rill_crypto import Context  # noqa: PLC0415
+    from rill_provider.provider_identity import AnnouncementTerms, ProviderIdentity  # noqa: PLC0415
+
+    signet = NetworkIdentity.model_validate_json((NETWORKS / "signet.json").read_bytes())
+    now = int(time.time())
+    offers = (("btc-to-ln/v1",), ("ln-to-btc/v1",), ("btc-to-ln/v1", "ln-to-btc/v1"))
+    with Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto:
+        raws: list[bytes] = []
+        keys: dict[str, tuple[str, ...]] = {}
+        for index, profiles in enumerate(offers):
+            custody = x25519.Identity.generate()
+            path = tmp_path / f"identity-{index}.age"
+            xonly = ProviderIdentity.provision(
+                path, recipient=str(custody.to_public()), crypto=crypto
+            )
+            signer = ProviderIdentity.load(
+                path, custody_identity=str(custody), expected_xonly_public_key=xonly, crypto=crypto
+            )
+            keys[xonly] = profiles
+            raws.append(
+                signer.build_announcement(
+                    AnnouncementTerms(
+                        network=signet,
+                        profiles=profiles,
+                        amount_bands=((1000, 100000),),
+                        base_fee_sat=10,
+                        proportional_millionths=1000,
+                        transport_endpoints=("wss://relay.example.invalid/",),
+                        epoch_inbox_xonly_keys=("cc" * 32,),
+                        slot=f"slot-{index}",
+                        created_at=now,
+                        expires_at=now + 3600,
+                    )
+                )
+            )
+        tampered = raws[1].replace(b"relay.example", b"relay.exampla")
+        found = asyncio.run(
+            provider_directory._query(  # noqa: SLF001
+                _Relay([*raws, tampered]),  # type: ignore[arg-type]
+                network=signet,
+                crypto=crypto,
+                now=now,
+                timeout=2.0,
+            )
+        )
+    # An LN to BTC only maker is listed too, and a dual-direction maker once.
+    assert {key: tuple(ads[0]["profiles"]) for key, ads in found.items()} == keys
+    assert all(len(ads) == 1 for ads in found.values())

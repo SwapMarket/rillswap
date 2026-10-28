@@ -2,7 +2,8 @@
 
 Anyone can publish a kind-39417 announcement; this lists every one that
 verifies (NIP-01 and RS-001 application signatures, the complete selected
-network, the btc-to-ln profile, and an unexpired window). A listing is
+network, at least one profile ``rill swap`` runs, and an unexpired window). A
+listing is
 discovery evidence only: it proves neither liquidity, solvency, nor honesty.
 Selecting a provider remains an explicit ``--provider`` choice at swap time,
 and every swap stays enforceable on-chain regardless of who is chosen.
@@ -26,11 +27,15 @@ if TYPE_CHECKING:
     from rill_crypto import Context
     from rill_provider.relay_client import RelayConnection
 
+    from rill_cli.live_swap import ProfileId
+
 # Per relay. A flood ends only that relay's query, so the listing size is
 # bounded by relays times this cap. There is no provider cap: truncating by any
 # sortable key would let a Sybil grind identities to push others out.
 MAX_DIRECTORY_EVENTS = 4096
 HEX32_LENGTH = 64
+# Every direction `rill swap` runs; a provider offering any of them is listed.
+SWAP_PROFILES: tuple[ProfileId, ...] = ("btc-to-ln/v1", "ln-to-btc/v1")
 
 
 def _pubkey(raw: bytes) -> str | None:
@@ -65,13 +70,20 @@ async def _query(
                 identity = _pubkey(raw)
                 if identity is None:
                     continue
-                try:
-                    advertisement = verify_announcement(
-                        raw, identity=identity, network=network, crypto=crypto, now=now
-                    )
-                except Exception:  # noqa: BLE001, S112 - invalid events are ignored
-                    continue
-                found.setdefault(identity, []).append(advertisement)
+                for profile in SWAP_PROFILES:
+                    try:
+                        advertisement = verify_announcement(
+                            raw,
+                            identity=identity,
+                            network=network,
+                            crypto=crypto,
+                            now=now,
+                            profile=profile,
+                        )
+                    except Exception:  # noqa: BLE001, S112 - invalid events are ignored
+                        continue
+                    found.setdefault(identity, []).append(advertisement)
+                    break
     except TimeoutError:
         pass
     return found
