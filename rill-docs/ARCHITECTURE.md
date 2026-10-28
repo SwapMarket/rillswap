@@ -347,7 +347,7 @@ Coin selection is lexicographic rather than simply cheapest:
 
 1. Do not cross locally tracked ownership/provenance clusters by default.
 2. Prefer a single adequate UTXO; otherwise use a small explicitly bounded set inside one cluster.
-3. Avoid dust/toxic change while respecting exact contract value and fee policy.
+3. Avoid dust/toxic change while respecting exact contract value and fee policy; excess not worth a change output goes to the fee.
 4. Compare fee/waste only after the privacy constraints; randomize comparable ties.
 
 Unknown-origin coins start as separate clusters, not one large “unknown” pool. Cluster labels are local heuristics, not proof of anonymity. Change stays labeled with its source cluster and uses a fresh address. A large single input with change may be preferable to consolidating unrelated smaller coins into an exact amount.
@@ -364,7 +364,9 @@ Keep three quantities visible: irrecoverable payment before success, maximum int
 
 For BTC→LN, let L be the invoice value in sats and S the quoted success fee. The contract amount is `V=L+S`; the user additionally pays funding and any refund mining fee. The provider prices routing and claim costs into S subject to an internal fee cap.
 
-For LN→BTC, let V be the contract amount, D the requested nominal net payout, and C the claim-fee reserve (`V=D+C`). Let S be the success fee, including provider funding cost. An optional explicitly negotiated mining prepayment M must satisfy `0≤M≤S`; the held invoice is `V+S−M`, and total successful LN payment is `V+S`, excluding the user's own routing fee. Use distinct prepayment and principal hashes. Actual net payout is V minus the authorized claim fee; do not promise D under arbitrary fee conditions.
+For LN→BTC, let V be the contract amount, D the requested nominal net payout, and C the claim-fee reserve (`V=D+C`). Let S be the success fee, including provider funding cost. An optional explicitly negotiated mining prepayment M must satisfy `0≤M≤S`; the held invoice is `V+S−M`, and total successful LN payment is `V+S`, excluding the user's own routing fee. Use distinct prepayment and principal hashes. Users ask for an exact amount at an address, so C is priced at quote time for the cooperative claim to confirm in the next block, and the claim pays exactly C: the address receives D. Only a claim still unconfirmed late in its window pays more, up to the authorized claim fee cap, to beat the refund. Actual net payout is V minus the claim fee actually paid; do not promise D under arbitrary fee conditions.
+
+Fee rates target first-block inclusion for most transactions without overpaying: the economical two-block estimate of the party's own Core node, or a mempool API's `fastestFee`, never below the node's relay and mempool minimum. Without an estimate, quote or fund later rather than guess.
 
 An upfront fee can be stolen by an uncooperative provider. Make M=0 the client default unless the user explicitly accepts a bounded nonzero exposure. The extension may be essential to some operators' economics, but is not a cryptographic guarantee. Quote signatures establish authenticated terms, not automatic damages.
 

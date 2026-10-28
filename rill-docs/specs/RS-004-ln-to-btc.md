@@ -100,6 +100,26 @@ as refund party. They MUST satisfy all of the following:
 - `timing_policy.min_incoming_htlc_expiry_height <=
   max_incoming_htlc_expiry_height`.
 
+The user asks for an exact amount at its destination, so the claim pays `C`
+as its fee and `C` SHOULD be priced for the cooperative path to confirm in the
+next block or so without overpaying. Both sides use the economical two-block
+estimate of their own Bitcoin Core (`estimatesmartfee 2 ECONOMICAL`) or a
+mempool API's `fastestFee`, never below their node's relay and mempool minimum,
+and do not quote or request without one (regtest may use the node minimum):
+- the client SHOULD request `min_claim_fee_reserve_sat` of at least the
+  cooperative (key-path) claim at that estimate and the script-path claim at
+  that minimum, and MUST NOT send the firm request when this exceeds its own
+  `max_claim_fee_sat`;
+- unless its operator fixes `C`, the provider SHOULD quote the larger of the
+  same two amounts at its own estimate and the client's minimum. It answers
+  `limits_unsatisfiable` when the client's minimum exceeds the provider's
+  `max_claim_fee_sat`, since no claim could spend it, and
+  `capacity_unavailable` when it has no estimate or its own reserve exceeds
+  `max_claim_fee_sat`.
+
+The claim vsizes are 99 vB (key path) and 143 vB (script path) to a P2WPKH
+destination, and 111 vB and 155 vB to a P2TR destination.
+
 The client MUST verify every term independently before `terms_accept`, and
 paying the hold invoice is what commits it: the client MUST pay with a final
 CLTV expiry no lower than `min_incoming_htlc_expiry_height`, MUST NOT pay
@@ -142,6 +162,17 @@ preimage from the claim witness on chain (or from an optional
 settles the hold invoice; it MUST settle before the earliest accepted HTLC
 expiry or its Lightning backend will fail the HTLC and the provider loses `V`.
 The claim's `settlement_confirmations` are the client's concern.
+
+The client's first claim, cooperative or unilateral, SHOULD pay exactly `C`
+(at most the signed `max_claim_fee_sat`), so the destination receives exactly
+`D`. A provider SHOULD admit a cooperative claim paying exactly `C` once it
+meets its node's relay and mempool minimum, without repricing the signed
+reserve against a later estimate. If the claim stays unconfirmed, the client
+keeps that fee for the first three quarters of the window ending at
+`refund_lock_height - claim_confirmation_blocks`, then raises it linearly to
+`max_claim_fee_sat` by that height. A smaller payout is the price of a claim
+that is still unconfirmed late; losing the race to the refund would cost both
+the Lightning payment and the coins.
 
 If no claim reaches the provider before `refund_lock_height`, the provider
 refunds to `provider_destination_script` and cancels the hold invoice only

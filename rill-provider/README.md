@@ -254,7 +254,11 @@ needed so the larger script-path claim still pays the node's relay and mempool
 minimum, and never below the client's requested minimum. Indicative quotes
 assume a P2TR destination. Fees are sampled once per tick (15 seconds), never
 per request. Without a sample, or when the reserve would exceed
-`quote.max_claim_fee_sat`, LN to BTC quotes answer `capacity_unavailable`.
+`quote.max_claim_fee_sat`, LN to BTC quotes answer `capacity_unavailable`. A
+client asking for a minimum reserve above `quote.max_claim_fee_sat` gets
+`limits_unsatisfiable`, since no claim could spend it. A cooperative claim
+paying exactly the signed reserve is admitted once it meets the node's relay
+and mempool minimum, even if fees rose after signing.
 
 If your configuration does not set `claim_fee_reserve_sat` (the examples and
 `rill-provider-init` never did), the upgraded provider switches from the former
@@ -296,9 +300,9 @@ estimate. Core's relay and mempool minimum fees, the signed caps and
 fee bumping are unchanged. On mainnet, leave it unset unless you understand
 that a low cap also lowers the starting fee of your claims and refunds. The
 signet example and signet makers created by `rill-provider-init` set 2
-sat/vB. Clients checking a cooperative claim against
-their own Core need the same cap (`rill swap btc-to-ln
---max-fee-estimate-sat-vb`).
+sat/vB. Clients checking a cooperative claim against, or pricing a claim
+fee reserve from, their own Core need the same cap (`rill swap btc-to-ln` or
+`ln-to-btc --max-fee-estimate-sat-vb`).
 
 ### Swap profiles
 
