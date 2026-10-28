@@ -255,3 +255,52 @@ test("cooperation that stops before the proposal keeps the claim cutoff", async 
     expect(f.record.stage).toBe("claim-ready"); expect(f.posts).toBe(0);
   } finally { transport.mockRestore(); e.dispose(); }
 });
+
+for (const boundary of ["journal completion", "proposal publication"] as const) {
+  for (const crossedCutoff of [false, true]) {
+    test(`cooperation timing out at ${boundary} ${crossedCutoff ? "keeps the private claim cutoff" : "can still broadcast a safe fallback"}`, async () => {
+      const f = await executionFixture("signed"), e = await f.prepare();
+      const transport = spyOn(globalThis, "fetch").mockImplementation(f.fetch);
+      const expire = () => { f.now.seconds += 31; f.tipHeight = crossedCutoff ? 219 : 218; };
+      try {
+        await e.accept(f.assertCurrent); await e.exposeInvoice(f.assertCurrent); await e.receiveFunding();
+        f.tipHeight = 218; await e.prepareClaim(API, 100n, f.assertCurrent);
+        if (boundary === "journal completion") {
+          f.callback = (stage) => { if (stage === "claim-unknown") expire(); };
+        } else {
+          const send = f.session.send.bind(f.session);
+          f.session.send = async (envelope, key, authorize) => {
+            if (envelope.payload.action === "cooperative_claim_propose") expire();
+            return send(envelope, key, authorize);
+          };
+        }
+        const exposure = e.exposeClaim(API, BROADCAST, "broadcast", f.assertCurrent);
+        if (crossedCutoff) await expect(exposure).rejects.toThrow("Reverse claim refused");
+        else expect((await exposure).outcome).toBe("accepted");
+        expect(f.events).not.toContain("action:cooperative_claim_propose");
+        expect(f.events.filter((event) => event === "claim-unknown")).toHaveLength(1);
+        expect(f.events.slice(f.events.indexOf("claim-unknown") + 1).some((event) => event.startsWith("api:GET:"))).toBe(true);
+        expect(f.posts).toBe(crossedCutoff ? 0 : 1);
+        expect(f.record.stage).toBe(crossedCutoff ? "claim-unknown" : "accepted");
+        if (!crossedCutoff) expect(parseTransaction(hexToBytes(f.postedTransactions[0]!)).inputs[0]!.witness).toHaveLength(4);
+      } finally { transport.mockRestore(); e.dispose(); }
+    });
+  }
+}
+
+test("a lost proposal acknowledgment still broadcasts the fallback after the cutoff", async () => {
+  const f = await executionFixture("signed"), e = await f.prepare();
+  const transport = spyOn(globalThis, "fetch").mockImplementation(f.fetch), send = f.session.send.bind(f.session);
+  f.session.send = async (envelope, key, authorize) => {
+    await send(envelope, key, authorize);
+    if (envelope.payload.action === "cooperative_claim_propose") { f.tipHeight = 219; throw new Error("relay acknowledgment lost"); }
+  };
+  try {
+    await e.accept(f.assertCurrent); await e.exposeInvoice(f.assertCurrent); await e.receiveFunding();
+    f.tipHeight = 218; await e.prepareClaim(API, 100n, f.assertCurrent);
+    expect((await e.exposeClaim(API, BROADCAST, "broadcast", f.assertCurrent)).outcome).toBe("accepted");
+    expect(f.events).toContain("action:cooperative_claim_propose"); expect(f.posts).toBe(1);
+    expect(f.events.slice(f.events.indexOf("action:cooperative_claim_propose") + 1)).not.toContain("api:GET:blocks/tip/height");
+    expect(parseTransaction(hexToBytes(f.postedTransactions[0]!)).inputs[0]!.witness).toHaveLength(4);
+  } finally { transport.mockRestore(); e.dispose(); }
+});

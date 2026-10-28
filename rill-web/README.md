@@ -173,12 +173,15 @@ script-path claim at that rate, so the cooperative claim pays at least as much;
 without an estimate, or if that reserve exceeds your maximum claim fee, it
 stops before any payment. Live swaps first attempt a cooperative
 key-path claim, keeping the script and preimage off chain. The signed unilateral
-fallback is saved before disclosure and used if cooperation fails. Transient
-chain-read failures retry before the one-shot broadcast election, never after an
-unknown submission; the funding read right after cooperation is retried in place
-up to three times, so a block arriving then keeps the cooperative claim.
-Cooperation cannot outlive the original payment window;
-longer funding confirmations select the unilateral fallback. Advanced holds the fee details, one optional
+fallback is saved and its one-shot exposure journaled before the proposal can be
+published. If cooperation stops before publication, the funding and claim safety
+margin are checked again (up to three attempts for unknown reads). Once publication
+may have revealed the preimage, the claim proceeds even if that margin passes or
+chain reads fail. Cooperation has its own nonrenewing 30-second window, independent
+of the original quote deadline. An interruption after journaling leaves only manual
+fallback export on Resume, never another automatic broadcast. Upgrades preserve
+existing records without inferring disclosure for older `claim-ready` swaps.
+Advanced holds the fee details, one optional
 latest swap backup, manual checks, and exact fallback export. Notifications are
 optional and request permission only when enabled; no service worker is installed.
 

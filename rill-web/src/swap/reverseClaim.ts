@@ -32,14 +32,13 @@ export function effectiveClaimDepth(signed: number, requested?: number): number 
   return requested === undefined ? signed : Math.min(requested, signed);
 }
 
-/** Funding reads after cooperation; a block landing mid-read (at depth 0, the funding confirming) is retried. */
+/** Funding reads after unpublished cooperation; a block landing mid-read is retried. */
 export const FRESH_READ_ATTEMPTS = 3;
 const FRESH_READ_PAUSE_MS = 500;
 
 /**
- * Re-read the funding before exposing a cooperative claim. Only an unknown read is
- * retried, so the signed cooperative claim survives a transient failure; a spend,
- * a stale context, or any other refusal fails at once.
+ * Re-read funding when cooperation stopped before publication. Only an unknown
+ * read is retried; a spend, a stale context, or any other refusal fails at once.
  */
 async function freshFundingObservation(context: ClaimContext, api: string) {
   for (let attempt = 1; ; attempt++) {
@@ -92,10 +91,13 @@ export interface ReverseClaimExposure {
   readonly transactionHex?: string;
 }
 
-/** The durable digest always binds the unilateral fallback, even if a live cooperative witness is used later. */
+/**
+ * The durable digest always binds the unilateral fallback, even if a live cooperative witness is used later.
+ * Cooperation must await beforeDisclosure, then call onDisclosure immediately before possible publication.
+ */
 export async function exposeJournaledReverseClaim(context: ClaimContext, api: string, broadcastApi: string,
   action: "download" | "broadcast", beforeExposure: () => void,
-  cooperate?: (tipHeight: number, beforeDisclosure: () => Promise<void>) => Promise<{ readonly raw: string; readonly txid: string } | null>): Promise<{ readonly record: ReverseJournalRecord; readonly exposure: ReverseClaimExposure }> {
+  cooperate?: (tipHeight: number, beforeDisclosure: () => Promise<void>, onDisclosure: () => void) => Promise<{ readonly raw: string; readonly txid: string } | null>): Promise<{ readonly record: ReverseJournalRecord; readonly exposure: ReverseClaimExposure }> {
   context.assertCurrent();
   const report = inspectReverseRecoveryPlaintext(context.plaintext, context.network), doc = parseRecoveryPlaintext(context.plaintext).document;
   const fallback = (doc.extensions as Record<string, unknown>)[REVERSE_FALLBACK_EXTENSION] as { transaction: string };
@@ -116,7 +118,7 @@ export async function exposeJournaledReverseClaim(context: ClaimContext, api: st
   const expose = async (): Promise<void> => { context.assertCurrent(); beforeExposure(); record = await context.journal.beginClaimExposure(record); };
   if (action === "broadcast" && cooperate) {
     try {
-      const candidate = await cooperate(observation.tipHeight, async () => { await expose(); disclosed = true; }); context.assertCurrent();
+      const candidate = await cooperate(observation.tipHeight, expose, () => { disclosed = true; }); context.assertCurrent();
       if (candidate) {
         const parsed = parseTransaction(hexToBytes(candidate.raw));
         const terms = doc.contract_terms as unknown as LnToBtcTerms;
@@ -126,13 +128,13 @@ export async function exposeJournaledReverseClaim(context: ClaimContext, api: st
         transaction = candidate.raw;
       }
     } catch { context.assertCurrent(); /* Invalid/refused cooperation uses the already-durable fallback. */ }
-    // A sent proposal gave the provider the preimage: withholding the claim now only helps its refund.
+    // Publication may disclose the preimage even without a relay acknowledgement. Journaling alone does not.
     if (!disclosed) {
       const fresh = await freshFundingObservation(context, api);
       require(fresh.confirmations >= depth && fresh.tipHeight + report.claimConfirmationBlocks < report.refundLockHeight + 1);
     }
   }
-  if (!disclosed) await expose();
+  if (record.stage === "claim-ready") await expose();
   // A committed election (including a rejected readback) never renews POST authority.
   try {
     context.assertCurrent();

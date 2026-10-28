@@ -224,10 +224,10 @@ export async function prepareReverseExecution(session: Session, handshake: Hands
       async exposeClaim(chainApi: string, broadcastApi: string, action: "download" | "broadcast", approve: () => void) {
         current(); approve();
         if (record.stage === "claim-ready") require(!exposing);
-        const cooperative = config.cooperation && terms.required_features.includes(COOPERATIVE_CLAIM_FEATURE) ? (tipHeight: number, beforeDisclosure: () => Promise<void>) => reverseCooperativeClaim({
+        const cooperative = config.cooperation && terms.required_features.includes(COOPERATIVE_CLAIM_FEATURE) ? (tipHeight: number, beforeDisclosure: () => Promise<void>, onDisclosure: () => void) => reverseCooperativeClaim({
           session, init, accept, terms, binding: parts.funding.at(-1)!.binding as RecoveryFundingBinding, contractSecret: contract.secret, preimage,
           feeSat: BigInt(inspectReverseRecoveryPlaintext(document!, network).fallbackFeeSat!), expectedTxid: record.claim!.txid,
-          tipHeight, beforeDisclosure, capabilities: config.cooperation!, assertCurrent: () => { current(); approve(); },
+          tipHeight, beforeDisclosure, onDisclosure, capabilities: config.cooperation!, assertCurrent: () => { current(); approve(); },
           ...(config.report ? { report: config.report } : {}),
         }) : undefined;
         const result = await exposeJournaledReverseClaim(claimContext(approve), chainApi, broadcastApi, action,

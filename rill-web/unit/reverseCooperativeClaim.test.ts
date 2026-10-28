@@ -98,6 +98,28 @@ test("the reverse claimant burns before its nonce, verifies a key-path spend and
   } finally { f.provider.destroy(); }
 });
 
+test("durable election precedes the publication-boundary disclosure marker", async () => {
+  const f = await claimant();
+  try {
+    expect(await reverseCooperativeClaim({ ...f.options,
+      beforeDisclosure: async () => { f.events.push("journal"); },
+      onDisclosure: () => { f.events.push("disclosure"); },
+    })).not.toBeNull();
+    expect(f.events).toEqual(["burn", "nonce", "journal", "disclosure", "propose", "complete"]);
+  } finally { f.provider.destroy(); }
+});
+
+test("a failed disclosure election never reaches publication or its disclosure marker", async () => {
+  const f = await claimant();
+  try {
+    expect(await reverseCooperativeClaim({ ...f.options,
+      beforeDisclosure: async () => { f.events.push("journal"); throw new Error("storage unavailable"); },
+      onDisclosure: () => { f.events.push("disclosure"); },
+    })).toBeNull();
+    expect(f.events).toEqual(["burn", "nonce", "journal"]);
+  } finally { f.provider.destroy(); }
+});
+
 for (const mode of ["declined", "bad partial", "bad nonce", "extra payload", "wrong reply", "wrong role", "wrong contract", "missing feature", "expired reply", "slow preparation", "canceled"]) {
   test(`reverse ${mode} leaves the saved unilateral fallback as the only claim path`, async () => {
     const f = await claimant(mode);

@@ -24,6 +24,8 @@ interface ReverseCooperationOptions {
   readonly tipHeight: number;
   /** Durably journal the claim exposure: the proposal carries the preimage. */
   readonly beforeDisclosure?: () => Promise<void>;
+  /** Called after the final liveness check, immediately before possible proposal publication. */
+  readonly onDisclosure?: () => void;
   readonly capabilities: Cosigner;
   readonly assertCurrent: () => void;
   readonly monotonicClock?: () => number;
@@ -102,7 +104,7 @@ export async function reverseCooperativeClaim(options: ReverseCooperationOptions
       step = "recording the disclosure";
       if (options.beforeDisclosure) { await bounded(options.beforeDisclosure); live(); }
       step = "sending the proposal";
-      await bounded(() => session.send(proposal, session.providerKey!, live)); live();
+      await bounded(() => session.send(proposal, session.providerKey!, () => { live(); options.onDisclosure?.(); })); live();
       step = "waiting for the provider's signature";
       const reply = await bounded(() => session.replyTo(proposal, "action_result", remaining())); live();
       step = "checking the provider's reply";

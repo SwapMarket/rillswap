@@ -79,6 +79,10 @@ const reverseJournal = await Bun.build({ entrypoints: ["src/browserReverseJourna
 if (!reverseJournal.success) throw new AggregateError(reverseJournal.logs, "reverse journal test bundle failed");
 writeFileSync("tmp/preview/test-only/reverse-journal.html", '<!doctype html><script type="module">import { BrowserReverseJournal } from "./browserReverseJournal.js";' +
   'window.BrowserReverseJournal = BrowserReverseJournal; window.reverseJournalReady = true;</script>');
+const reverseClaim = await Bun.build({ entrypoints: ["src/swap/reverseClaim.ts"], outdir: "tmp/preview/test-only", target: "browser", format: "esm" });
+if (!reverseClaim.success) throw new AggregateError(reverseClaim.logs, "reverse claim test bundle failed");
+writeFileSync("tmp/preview/test-only/reverse-claim.html", '<!doctype html><script type="module">import { BrowserReverseJournal } from "./browserReverseJournal.js"; import * as actions from "./reverseClaim.js";' +
+  'window.BrowserReverseJournal = BrowserReverseJournal; window.reverseClaimActions = actions; window.reverseClaimReady = true;</script>');
 const reverseRecovery = await Bun.build({ entrypoints: ["src/browserReverseRecovery.ts", "src/recoveryKeys.ts", "src/reverseRecoveryUi.ts"], outdir: "tmp/preview/test-only", target: "browser", format: "esm" });
 if (!reverseRecovery.success) throw new AggregateError(reverseRecovery.logs, "reverse recovery test bundle failed");
 const { reverseCase } = await import("../unit/fixtures/reverseRecoveryCases");
