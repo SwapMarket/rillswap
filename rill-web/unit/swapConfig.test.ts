@@ -23,7 +23,7 @@ describe("explicit deployment defaults", () => {
   test("unconfigured public builds select mainnet with an encrypted relay", () => {
     expect(resolveSwapDefaults({})).toEqual({ network: "mainnet", relays: [
       "wss://relay.primal.net/", "wss://relay.snort.social/", "wss://nostr.oxtr.dev/", "wss://relay.ditto.pub/",
-      "wss://nostr.bitcoiner.social/", "wss://nostr.azzamo.net/", "wss://relay.angor.io/", "wss://nostr.stakey.net/",
+      "wss://nostr.azzamo.net/", "wss://relay.angor.io/",
       "ws://oxtrdevav64z64yb7x6rjg4ntzqjhedm5b5zjqulugknhzr46ny2qbad.onion/",
       "ws://gnostr2jnapk72mnagq3cuykfon73temzp77hcbncn4silgt77boruid.onion/",
     ], mempoolApi: "https://mempool.space/api", broadcastApi: "https://mempool.space/api" });

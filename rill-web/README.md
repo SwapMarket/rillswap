@@ -67,11 +67,11 @@ Deployment defaults are set and validated at build time.
 Set the sponsor endpoint, EntryPoint and delegate together, or none of them.
 A build without configuration opens mainnet with swaps enabled. The older
 single-relay `VITE_RILLSWAP_RELAY` still works but cannot be combined with
-`VITE_RILLSWAP_RELAYS`. Up to ten relays are allowed. Plaintext `ws://` relays
+`VITE_RILLSWAP_RELAYS`. Up to eight relays are allowed. Plaintext `ws://` relays
 are only allowed on loopback for regtest and for v3 onion relays, which Tor
 encrypts and authenticates end to end.
 
-Without configuration, mainnet, signet and testnet4 use eight public relays
+Without configuration, mainnet, signet and testnet4 use six public relays
 that serve RillSwap's gift-wrapped messages without NIP-42 AUTH, keep provider
 announcements, and accept Tor exits, plus two onion relays. The onion relays
 are opportunistic: they only connect in a browser that reaches onion services

@@ -40,7 +40,7 @@ export function validateEvmSponsor(url: string, entryPoint: string, delegate: st
   return { url: validateMempoolApi(url, network), entryPoint, delegate, ...(policyId !== "" ? { policyId: policyId.toLowerCase() } : {}) };
 }
 
-export const MAX_RELAYS = 10;
+export const MAX_RELAYS = 8;
 
 export function validateRelay(value: string, network: NetworkName): string {
   const url = new URL(value);

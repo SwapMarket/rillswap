@@ -15,10 +15,8 @@ export const PUBLIC_RELAYS: readonly string[] = Object.freeze([
   "wss://relay.snort.social",
   "wss://nostr.oxtr.dev",
   "wss://relay.ditto.pub",
-  "wss://nostr.bitcoiner.social",
   "wss://nostr.azzamo.net",
   "wss://relay.angor.io",
-  "wss://nostr.stakey.net",
   "ws://oxtrdevav64z64yb7x6rjg4ntzqjhedm5b5zjqulugknhzr46ny2qbad.onion",
   "ws://gnostr2jnapk72mnagq3cuykfon73temzp77hcbncn4silgt77boruid.onion",
 ]);
