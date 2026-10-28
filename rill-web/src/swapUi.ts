@@ -22,6 +22,7 @@ import { readChainTip } from "./swap/chainTip";
 import { BrowserRecoveryWallet, parseWalletBackup } from "./browserRecoveryWallet";
 import { type DirectoryEntry, DIRECTORY_PROFILES, discoverDirectory, discoverMarketplace, eligibleProviders, indicativeFee, ineligibilityReason, quoteProviders, quoteReverseProviders,
   estimateFromDirectory, providerLimits, type LocatedQuote, MAX_QUOTE_PROVIDERS, quoteErc20Providers, quoteLnErc20Providers, selectEvmAsset, unexpired } from "./swap/marketplace";
+import { erc20Rank, fastestAndCheapest, forwardRank, lnErc20Rank, type Ranked, reverseRank, type SortMode } from "./swap/ranking";
 import type { Erc20SwapRequest, PreparedErc20Swap } from "./swap/erc20Swap";
 import { EvmRpc } from "./swap/evmHtlc";
 import { connectEvmWallet, mountErc20Execution, mountLnErc20Execution, parseTokenAmount, tokenLabel, type LnErc20Claimer } from "./erc20Ui";
@@ -29,7 +30,7 @@ import { EvmClaimJournal } from "./evmClaimJournal";
 import type { PreparedLnErc20Quote } from "./swap/lnErc20Swap";
 import type { PreparedReverseQuote, ReverseSwapRequest } from "./swap/reverseSwap";
 import { invoiceBinding } from "./swap/bolt11";
-import { quoteSelectionLabel, stoppedSwapAdvice } from "./swapUiStatus";
+import { confirmationsLabel, fundingWaitText, quoteSelectionLabel, stoppedSwapAdvice } from "./swapUiStatus";
 import { ASSETS, type AssetId, routeFor, STABLECOIN_SYMBOL } from "./swapPairs";
 import { recoveryPanel } from "./recoveryUi";
 import { parseSwapLink, swapLinkFragment } from "./swapLink";
@@ -59,6 +60,22 @@ function field(root: HTMLElement, id: string, label: string, value = "", hint = 
   root.append(caption, input);
   if (hint) root.append(node("small", hint));
   return input;
+}
+
+/**
+ * Manual-selection tags for each offer: its funding depth, plus "Fastest" and
+ * "Cheapest" when several offers differ (one offer can carry both).
+ */
+function offerTags<T>(offers: readonly T[], key: (offer: T) => Ranked): (offer: T) => HTMLElement[] {
+  const { fastest, cheapest } = fastestAndCheapest(offers, key);
+  const tag = (text: string, kind: string): HTMLElement => {
+    const element = node("span", text); element.className = `swap-offer-tag ${kind}`; return element;
+  };
+  return (offer) => [
+    tag(confirmationsLabel(key(offer).depth), "depth"),
+    ...(offer === fastest ? [tag("Fastest", "fastest")] : []),
+    ...(offer === cheapest ? [tag("Cheapest", "cheapest")] : []),
+  ];
 }
 
 const btc = (sats: bigint): string => `${sats / 100_000_000n}.${(sats % 100_000_000n).toString().padStart(8, "0")}`;
@@ -158,7 +175,17 @@ function mount(root: HTMLElement): void {
       evmSponsorPolicy.value.trim()) : null;
   const identity = field(settings, "swap-provider", "Provider identity", "",
     "Automatic by default. Optionally pin a provider's 64-character public identity key, or choose one under Providers.");
-  identity.placeholder = "Automatic (lowest verified provider price)";
+  const rankingLabel = node("label", "Provider ranking");
+  const ranking = node("select", "", "swap-ranking");
+  rankingLabel.htmlFor = ranking.id;
+  ranking.append(Object.assign(node("option", "Fastest payment, then lowest price"), { value: "time" }),
+    Object.assign(node("option", "Lowest price, then fastest payment"), { value: "price" }));
+  ranking.value = "time";
+  settings.append(rankingLabel, ranking, node("small", "Fastest means the fewest funding confirmations the provider waits for. " +
+    "Providers that do not announce it rank after those that do. Applies to automatic choice and the order of offers."));
+  const sortMode = (): SortMode => ranking.value === "price" ? "price" : "time";
+  const automaticText = (): string => sortMode() === "time" ? "fastest payment, then lowest price" : "lowest price, then fastest payment";
+  identity.placeholder = "Automatic (by provider ranking)";
   // The provider directory: every announced provider with its limits and fees, browsable before any amount.
   const providers = node("dialog", "", "swap-providers");
   const providersHead = node("div");
@@ -182,7 +209,7 @@ function mount(root: HTMLElement): void {
   let directoryEntries: readonly DirectoryEntry[] = [];
   const showProviderChoice = (): void => {
     const pinned = identity.value.trim();
-    providerChoice.textContent = pinned ? `Provider: ${pinned.slice(0, 12)}… (chosen by you)` : "Provider: automatic, lowest verified price";
+    providerChoice.textContent = pinned ? `Provider: ${pinned.slice(0, 12)}… (chosen by you)` : `Provider: automatic, ${automaticText()}`;
   };
   /** One table per swap type; a provider serving several types appears in each of them. */
   const renderDirectory = (): void => {
@@ -194,7 +221,7 @@ function mount(root: HTMLElement): void {
       return control;
     };
     const automatic = node("div", "", "swap-provider-automatic");
-    automatic.append(node("p", "Automatic: ask every eligible provider and take the lowest signed price."), choose("", "Use automatic"));
+    automatic.append(node("p", `Automatic: ask every eligible provider and take the best signed offer (${automaticText()}).`), choose("", "Use automatic"));
     providersList.replaceChildren(automatic);
     for (const profile of DIRECTORY_PROFILES) {
       const entries = directoryEntries.filter((entry) => entry.profiles.includes(profile));
@@ -203,7 +230,9 @@ function mount(root: HTMLElement): void {
       group.className = "swap-provider-group"; group.dataset.profile = profile;
       const stablecoin = profile.includes("erc20");
       const head = node("tr");
-      for (const title of ["Provider", ...(stablecoin ? ["Assets"] : []), "Limits (sat)", "Fee", `On ${FEE_SAMPLE.toLocaleString()} sat`, "Listed until", ""]) head.append(node("th", title));
+      for (const title of ["Provider", ...(stablecoin ? ["Assets"] : []), "Limits (sat)", "Fee", `On ${FEE_SAMPLE.toLocaleString()} sat`, "Confirmations", "Listed until", ""]) {
+        head.append(node("th", title));
+      }
       const body = node("tbody");
       for (const entry of entries) {
         const row = node("tr");
@@ -217,6 +246,7 @@ function mount(root: HTMLElement): void {
           node("td", entry.amountBands.map((band) => `${BigInt(band.minimum_sat).toLocaleString()} – ${BigInt(band.maximum_sat).toLocaleString()}`).join(", ")),
           node("td", `${BigInt(fee.base_sat).toLocaleString()} sat + ${(fee.proportional_millionths / 10_000).toFixed(2)}%`),
           node("td", `${indicativeFee(fee, FEE_SAMPLE).toLocaleString()} sat`),
+          node("td", entry.fundingConfirmations === null ? "unknown" : String(entry.fundingConfirmations)),
           node("td", new Date(entry.expiresAt * 1000).toLocaleString())];
         const action = node("td"); action.append(choose(entry.identity, "Choose"));
         row.append(...cells, action);
@@ -265,7 +295,7 @@ function mount(root: HTMLElement): void {
     });
   };
   reloadProviders.onclick = loadDirectory;
-  identity.oninput = () => { showProviderChoice(); updateEstimate(); renderDirectory(); };
+  identity.oninput = ranking.onchange = () => { showProviderChoice(); updateEstimate(); renderDirectory(); };
   renderDirectory();
   showProviderChoice();
   const pair = node("div", "", "swap-pair");
@@ -303,9 +333,12 @@ function mount(root: HTMLElement): void {
   // Live estimate from announced fees, so Swap can proceed without a separate review when the signed quote is no worse.
   const estimate = node("p", "", "swap-estimate");
   estimate.setAttribute("role", "status");
-  let estimatedTotal: bigint | null = null;
+  // The directory entry the shown estimate names: a signed offer no worse on both price and depth may skip review.
+  let estimatedTotal: bigint | null = null, estimatedDepth: number | null = null;
+  const withinEstimate = (price: bigint, depth: number | null): boolean => estimatedTotal !== null && price <= estimatedTotal &&
+    (estimatedDepth === null || (depth !== null && depth <= estimatedDepth));
   const updateEstimate = (): void => {
-    estimatedTotal = null;
+    estimatedTotal = null; estimatedDepth = null;
     const route = routeFor(fromAsset.value, toAsset.value);
     if (route.profile === null || route.unavailable) { estimate.textContent = ""; return; }
     if (route.profile === "ln-to-erc20/v1") {
@@ -328,12 +361,13 @@ function mount(root: HTMLElement): void {
       return;
     }
     if (!directoryLoaded) { estimate.textContent = "Loading provider fees..."; return; }
-    const found = estimateFromDirectory(directoryEntries, route.profile, amount, identity.value.trim());
+    const found = estimateFromDirectory(directoryEntries, route.profile, amount, identity.value.trim(), undefined, sortMode());
     if ("reason" in found) { estimate.textContent = found.reason; return; }
-    estimatedTotal = amount + found.feeSat;
-    estimate.textContent = route.profile === "btc-to-ln/v1"
-      ? `You send about ${estimatedTotal.toLocaleString()} sat (${amount.toLocaleString()} sat invoice + ${found.feeSat.toLocaleString()} sat provider fee via ${found.identity.slice(0, 12)}…). Your wallet's network fee is extra.`
-      : `You pay about ${estimatedTotal.toLocaleString()} sat over Lightning (${found.feeSat.toLocaleString()} sat provider fee via ${found.identity.slice(0, 12)}…) to receive ${amount.toLocaleString()} sat.`;
+    estimatedTotal = amount + found.feeSat; estimatedDepth = found.fundingConfirmations;
+    estimate.textContent = (route.profile === "btc-to-ln/v1"
+      ? `You send about ${estimatedTotal.toLocaleString()} sat (${amount.toLocaleString()} sat invoice + ${found.feeSat.toLocaleString()} sat provider fee via ${found.identity.slice(0, 12)}…). Your wallet's network fee is extra. `
+      : `You pay about ${estimatedTotal.toLocaleString()} sat over Lightning (${found.feeSat.toLocaleString()} sat provider fee via ${found.identity.slice(0, 12)}…) to receive ${amount.toLocaleString()} sat. `) +
+      fundingWaitText(route.profile, found.fundingConfirmations);
   };
   invoice.oninput = receiveAmount.oninput = updateEstimate;
   form.append(invoiceBox, receiveBox, estimate);
@@ -734,7 +768,8 @@ function mount(root: HTMLElement): void {
         const directory = await discoverMarketplace(urls, NETWORKS[name], pinned || undefined, cancellation.signal, "erc20-to-ln/v1");
         assertCurrent();
         for (const warning of directory.warnings) report(warning);
-        const eligible = eligibleProviders(directory.providers, principal);
+        const mode = sortMode();
+        const eligible = eligibleProviders(directory.providers, principal, mode);
         if (eligible.length === 0) throw new Error(ineligibilityReason(providerLimits(directory.providers), principal));
         const selection = selectEvmAsset(eligible, trusted);
         if (selection === null) throw new Error(`No announced provider serves ${symbol} for this network.`);
@@ -755,7 +790,7 @@ function mount(root: HTMLElement): void {
         const info = await recoveryWallet.info(); assertCurrent();
         setStatus("Comparing verified provider quotes", 1);
         report(`Requesting up to ${MAX_QUOTE_PROVIDERS} eligible offers from ${selection.providers.length} announced providers`);
-        const result = await quoteErc20Providers(selection.providers, { ...request, ageRecipient: info.recipient }, cancellation.signal);
+        const result = await quoteErc20Providers(selection.providers, { ...request, ageRecipient: info.recipient }, cancellation.signal, mode);
         arrivals = result.quotes;
         if (cancellation.signal.aborted) return;
         if (arrivals.length === 0) throw new Error(`No provider returned acceptable terms (${result.reasons.join("; ")}). Nothing was accepted or locked.`);
@@ -765,11 +800,12 @@ function mount(root: HTMLElement): void {
         const priceClaim = node("p", "", "swap-quote-selection");
         const showQuote = (): void => {
           const quote = selected.prepared.quote;
-          priceClaim.textContent = quoteSelectionLabel(selected === arrivals[0], arrivals.length);
+          priceClaim.textContent = quoteSelectionLabel(selected === arrivals[0], arrivals.length, mode);
           quoteSummary.replaceChildren(node("h2", tokenLabel(quote.lockAmountTokenBase, asset)),
             node("p", `Pays your ${principal.toLocaleString()} sat invoice at ${tokenLabel(quote.rateTokenBasePerBtc, asset)} per BTC. ` +
               `Provider fee: ${tokenLabel(quote.successFeeTokenBase, asset)}. Your wallet's gas is extra.`),
-            node("small", `Refundable from EVM block ${quote.timelockBlock} if the provider never pays. Offer expires ${new Date(quote.expiresAt * 1000).toLocaleTimeString()}.`));
+            node("small", `The provider pays after ${quote.fundingConfirmations} EVM block confirmation${quote.fundingConfirmations === 1 ? "" : "s"} of your lock. ` +
+              `Refundable from EVM block ${quote.timelockBlock} if the provider never pays. Offer expires ${new Date(quote.expiresAt * 1000).toLocaleTimeString()}.`));
         };
         showQuote();
         review.append(quoteSummary, priceClaim, node("small", "Signatures authenticate offers, not provider reputation."));
@@ -778,12 +814,13 @@ function mount(root: HTMLElement): void {
         }
         const offers = node("details");
         offers.append(node("summary", "Provider details & manual selection"));
+        const tags = offerTags(arrivals, erc20Rank);
         for (const [index, quote] of arrivals.entries()) {
           const label = node("label"), option = node("input");
           option.type = "radio"; option.name = "verified-provider"; option.checked = index === 0;
           option.onchange = () => { selected = quote; showQuote(); };
           label.append(option, node("span", `${tokenLabel(quote.prepared.quote.lockAmountTokenBase, asset)} · ${quote.prepared.quote.providerIdentity.slice(0, 12)}…`),
-            node("small", `Transport: ${quote.relayUrl}; identity: ${quote.prepared.quote.providerIdentity}`));
+            ...tags(quote), node("small", `Transport: ${quote.relayUrl}; identity: ${quote.prepared.quote.providerIdentity}`));
           offers.append(label);
         }
         const accept = node("button", "Swap with this quote", "swap-quote-accept");
@@ -859,28 +896,33 @@ function mount(root: HTMLElement): void {
         if (!selection) throw new Error(`No announced provider serves ${symbol} for this network`);
         for (const warning of directory.warnings) report(warning);
         const asset = selection.asset, payoutTokenBase = parseTokenAmount(amount, asset.token_decimals, "Amount to receive");
+        const mode = sortMode();
         const result = await quoteLnErc20Providers(selection.providers, { network: NETWORKS[name], asset, payoutTokenBase, limits: {
           maxSuccessFeeSat: positive(successFee, "provider fee"), minTimelockDelayBlocks: Number(positive(evmClaimWindow, "minimum EVM claim window")),
           maxIncomingHtlcDelayBlocks: Number(positive(maxHold, "maximum Lightning hold")),
-        } }, cancellation.signal);
+        } }, cancellation.signal, mode);
         arrivals = result.quotes; current();
         if (!arrivals.length) throw new Error(`No acceptable estimate (${result.reasons.join("; ")}). Nothing was accepted or paid.`);
         let selected = arrivals[0]!;
         const review = node("div", "", "swap-quote-review"), summary = node("div", "", "swap-quote-summary");
+        const priceClaim = node("p", "", "swap-quote-selection");
         const show = (): void => {
           const offer = selected.prepared.quote.offer;
+          priceClaim.textContent = quoteSelectionLabel(selected === arrivals[0], arrivals.length, mode);
           summary.replaceChildren(node("h2", `${BigInt(offer.economics.hold_invoice_sat).toLocaleString()} sat`),
             node("p", `Pay over Lightning to receive ${tokenLabel(payoutTokenBase, asset)} on ${asset.name}. ` +
               `Provider fee: ${offer.economics.success_fee_sat} sat. Your EVM wallet pays claim gas.`),
-            node("small", `Claim window: ${offer.timelock_delay_blocks} EVM blocks. Lightning hold budget: ${offer.incoming_htlc_expiry_delta_blocks} Bitcoin blocks.`));
+            node("small", `Claim after ${offer.funding_confirmations} EVM block confirmation${offer.funding_confirmations === 1 ? "" : "s"} of the provider's lock. ` +
+              `Claim window: ${offer.timelock_delay_blocks} EVM blocks. Lightning hold budget: ${offer.incoming_htlc_expiry_delta_blocks} Bitcoin blocks.`));
         };
-        show(); review.append(summary);
+        show(); review.append(summary, priceClaim);
         const choices = node("details"); choices.append(node("summary", "Provider details & manual selection"));
+        const tags = offerTags(arrivals, lnErc20Rank);
         for (const [index, quote] of arrivals.entries()) {
           const label = node("label"), radio = node("input"); radio.type = "radio"; radio.name = "verified-provider"; radio.checked = index === 0;
           radio.onchange = () => { selected = quote; show(); };
           label.append(radio, node("span", `${quote.prepared.quote.offer.economics.hold_invoice_sat} sat · ${quote.prepared.quote.providerIdentity.slice(0, 12)}`),
-            node("small", `Identity: ${quote.prepared.quote.providerIdentity}; transport: ${quote.relayUrl}`)); choices.append(label);
+            ...tags(quote), node("small", `Identity: ${quote.prepared.quote.providerIdentity}; transport: ${quote.relayUrl}`)); choices.append(label);
         }
         const accept = node("button", "Swap with this quote", "swap-quote-accept"); accept.type = "button";
         review.append(choices, node("p", "By continuing you accept the provider's signed terms. " +
@@ -992,11 +1034,12 @@ function mount(root: HTMLElement): void {
       try {
         const directory = await discoverMarketplace(urls, request.network, pinned || undefined, cancellation.signal, "ln-to-btc/v1");
         for (const warning of directory.warnings) report(warning);
-        const eligible = eligibleProviders(directory.providers, request.payoutSat);
+        const mode = sortMode();
+        const eligible = eligibleProviders(directory.providers, request.payoutSat, mode);
         if (eligible.length === 0) throw new Error(ineligibilityReason(providerLimits(directory.providers), request.payoutSat));
         setStatus("Comparing provider estimates", 1);
         report(`Requesting up to ${MAX_QUOTE_PROVIDERS} eligible offers from ${eligible.length} announced providers`);
-        const result = await quoteReverseProviders(eligible, request, cancellation.signal);
+        const result = await quoteReverseProviders(eligible, request, cancellation.signal, mode);
         arrivals = result.quotes;
         if (cancellation.signal.aborted) return;
         if (arrivals.length === 0) throw new Error(`No provider returned acceptable terms (${result.reasons.join("; ")}). Nothing was paid.`);
@@ -1006,20 +1049,27 @@ function mount(root: HTMLElement): void {
         review.append(node("p", "Estimated price", "swap-quote-kind"), node("h2", `${quote.holdInvoiceSat.toLocaleString()} sat`),
           node("p", `You pay this over Lightning (plus your wallet's routing fee) and receive ${quote.payoutSat.toLocaleString()} sat on-chain.`),
           node("small", `Provider fee: ${quote.successFeeSat.toLocaleString()} sat. Claim fee reserve: ${quote.claimFeeReserveSat.toLocaleString()} sat. ` +
-            `Payout after ${quote.fundingConfirmations} confirmation${quote.fundingConfirmations === 1 ? "" : "s"} (about ${quote.fundingConfirmations * 10} min). ` +
+            `${fundingWaitText("ln-to-btc/v1", quote.fundingConfirmations)} ` +
             `If the swap fails, your Lightning payment may stay pending for up to about ${quote.incomingHtlcExpiryDeltaBlocks} blocks. ` +
             `Estimate expires ${new Date(quote.expiresAt * 1000).toLocaleTimeString()}.`),
-          node("p", `Lowest estimate among ${arrivals.length} responding provider${arrivals.length === 1 ? "" : "s"}.`, "swap-quote-selection"),
+          node("p", `${mode === "time" ? "Fastest" : "Lowest"} estimate among ${arrivals.length} responding provider${arrivals.length === 1 ? "" : "s"}` +
+            `${mode === "time" ? " (fewest funding confirmations, then lowest price)" : ""}.`, "swap-quote-selection"),
           node("p", "Nothing was paid and no address or payment hash was shared. Continue checks the selected provider's final signed terms before any payment.", "swap-reverse-pending"));
         if (directory.warnings.length || result.failures || eligible.length > MAX_QUOTE_PROVIDERS) {
           review.append(node("small", "Some relays or providers did not return complete results. This is not a market-wide best-price guarantee."));
         }
         const providers = node("details"); providers.append(node("summary", "Provider details & manual selection"));
         const chosen = node("p", `Selected provider: ${selected.prepared.quote.providerIdentity}`, "swap-reverse-selected");
+        const tags = offerTags(arrivals, reverseRank);
         for (const [index, located] of arrivals.entries()) {
           const label = node("label"), option = node("input"); option.type = "radio"; option.name = "reverse-provider"; option.checked = index === 0;
-          option.onchange = () => { selected = located; chosen.textContent = `Selected provider: ${located.prepared.quote.providerIdentity}. Estimated hold: ${located.prepared.quote.holdInvoiceSat} sat.`; };
-          label.append(option, node("span", `${located.prepared.quote.holdInvoiceSat} sat · ${located.prepared.quote.providerIdentity.slice(0, 12)}…`)); providers.append(label);
+          option.onchange = () => {
+            selected = located;
+            chosen.textContent = `Selected provider: ${located.prepared.quote.providerIdentity}. Estimated hold: ${located.prepared.quote.holdInvoiceSat} sat. ` +
+              fundingWaitText("ln-to-btc/v1", located.prepared.quote.fundingConfirmations);
+          };
+          label.append(option, node("span", `${located.prepared.quote.holdInvoiceSat} sat · ${located.prepared.quote.providerIdentity.slice(0, 12)}…`), ...tags(located));
+          providers.append(label);
         }
         const wallet = await walletPromise; assertCurrent(); const info = await wallet.info(); assertCurrent();
         const continueSwap = node("button", "Continue with selected provider", "swap-reverse-continue"); continueSwap.type = "button";
@@ -1057,7 +1107,7 @@ function mount(root: HTMLElement): void {
         review.append(providers, chosen, node("p", "By continuing you accept the provider's signed terms.", "swap-reverse-consent"),
           refusal, continueSwap, done);
         // One-step swap: a signed price no worse than the shown estimate, with the address already entered, continues directly.
-        if (estimatedTotal !== null && quote.holdInvoiceSat <= estimatedTotal && receiveAddress.value.trim()) {
+        if (withinEstimate(quote.holdInvoiceSat, quote.fundingConfirmations) && receiveAddress.value.trim()) {
           report(`signed price ${quote.holdInvoiceSat} sat is within the shown estimate ${estimatedTotal} sat; continuing`);
           if (continueWith()) return;
         }
@@ -1192,11 +1242,12 @@ function mount(root: HTMLElement): void {
         if (cancelled) return;
         for (const warning of directory.warnings) report(warning);
         const binding = invoiceBinding(request.invoice, name);
-        const eligible = eligibleProviders(directory.providers, BigInt(binding.amount_msat) / 1000n);
+        const mode = sortMode();
+        const eligible = eligibleProviders(directory.providers, BigInt(binding.amount_msat) / 1000n, mode);
         if (eligible.length === 0) throw new Error(ineligibilityReason(providerLimits(directory.providers), BigInt(binding.amount_msat) / 1000n));
         setStatus("Comparing verified provider quotes", 1);
         report(`Requesting up to ${MAX_QUOTE_PROVIDERS} eligible offers from ${eligible.length} announced providers`);
-        const result = await quoteProviders(eligible, request, cancellation.signal);
+        const result = await quoteProviders(eligible, request, cancellation.signal, mode);
         arrivals = result.quotes;
         if (cancelled) { for (const quote of arrivals) quote.dispose(); return; }
         if (arrivals.length === 0) throw new Error(`No provider returned acceptable terms (${result.reasons.join("; ")}). Nothing was accepted or funded.`);
@@ -1206,9 +1257,10 @@ function mount(root: HTMLElement): void {
         const priceClaim = node("p", "", "swap-quote-selection");
         const showQuote = (): void => {
           const quote = selected.prepared.quote;
-          priceClaim.textContent = quoteSelectionLabel(selected === arrivals[0], arrivals.length);
+          priceClaim.textContent = quoteSelectionLabel(selected === arrivals[0], arrivals.length, mode);
           quoteSummary.replaceChildren(node("h2", `${quote.contractAmountSat.toLocaleString()} sat`),
-            node("p", `Provider fee: ${quote.successFeeSat.toLocaleString()} sat. Your wallet's network fee is extra.`),
+            node("p", `Provider fee: ${quote.successFeeSat.toLocaleString()} sat. Your wallet's network fee is extra. ` +
+              fundingWaitText("btc-to-ln/v1", quote.fundingConfirmations)),
             node("small", `Refund after block ${quote.refundLockHeight}. Offer expires ${new Date(quote.expiresAt * 1000).toLocaleTimeString()}.`));
         };
         showQuote();
@@ -1220,6 +1272,7 @@ function mount(root: HTMLElement): void {
         }
         const offers = node("details");
         offers.append(node("summary", "Provider details & manual selection"));
+        const tags = offerTags(arrivals, forwardRank);
         for (const [index, quote] of arrivals.entries()) {
           const label = node("label");
           const option = node("input");
@@ -1228,14 +1281,14 @@ function mount(root: HTMLElement): void {
           option.checked = index === 0;
           option.onchange = () => { selected = quote; showQuote(); };
           label.append(option, node("span", `${quote.prepared.quote.contractAmountSat} sat · ${quote.prepared.quote.providerIdentity.slice(0, 12)}…`),
-            node("small", `Transport: ${quote.relayUrl}; identity: ${quote.prepared.quote.providerIdentity}`));
+            ...tags(quote), node("small", `Transport: ${quote.relayUrl}; identity: ${quote.prepared.quote.providerIdentity}`));
           offers.append(label);
         }
         const accept = node("button", "Use this quote", "swap-quote-accept");
         accept.type = "button";
         review.append(offers, node("p", "By continuing you accept the provider's signed terms.", "swap-quote-consent"), accept, cancel);
         // One-step swap: a signed price no worse than the shown estimate is accepted without a separate review.
-        const direct = estimatedTotal !== null && selected.prepared.quote.contractAmountSat <= estimatedTotal;
+        const direct = withinEstimate(selected.prepared.quote.contractAmountSat, selected.prepared.quote.fundingConfirmations);
         if (direct) report(`signed price ${selected.prepared.quote.contractAmountSat} sat is within the shown estimate ${estimatedTotal} sat; continuing`);
         else { panel.replaceChildren(review); setStatus("Quote ready. Review before continuing", 1); }
         const accepted = direct ? selected : await new Promise<LocatedQuote | null>((resolve) => {

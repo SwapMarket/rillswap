@@ -15,6 +15,7 @@ import {
   type FirmQuoteRequest,
   type HandshakeInit,
   ProtocolError,
+  requireAnnouncedDepth,
   requireShape,
 } from "../src/swap/wire";
 import auth from "./fixtures/authentication-cases-v1.json";
@@ -30,6 +31,14 @@ test("vendored wire schemas equal rill-docs", () => {
     const docs = readFileSync(resolve(import.meta.dir, "../../rill-docs", file), "utf8");
     expect(readFileSync(resolve(import.meta.dir, "../src", file), "utf8")).toBe(docs);
   }
+});
+
+test("an offer may wait fewer funding confirmations than announced, never more", () => {
+  expect(() => requireAnnouncedDepth(0, 1)).not.toThrow();
+  expect(() => requireAnnouncedDepth(1, 1)).not.toThrow();
+  expect(() => requireAnnouncedDepth(6, null)).not.toThrow(); // nothing announced, nothing to hold it to
+  expect(() => requireAnnouncedDepth(2, 1)).toThrow(ProtocolError);
+  expect(() => requireAnnouncedDepth(1, 0)).toThrow("more than the announced 0");
 });
 
 describe("handshake accept", () => {

@@ -13,7 +13,7 @@ import { stagingAddress } from "./gasSponsor";
 import { clientAcceptanceHash } from "./hashes";
 import { handshake, newKeyPair } from "./handshake";
 import { Session, SwapError, type RelayLink } from "./session";
-import { checkSignedOfferBinding, MAX_SATS, ProtocolError, requireShape, same, sats } from "./wire";
+import { checkSignedOfferBinding, MAX_SATS, ProtocolError, requireAnnouncedDepth, requireShape, same, sats } from "./wire";
 
 export const LN_TO_ERC20 = "ln-to-erc20/v1";
 export interface LnErc20Request {
@@ -167,6 +167,7 @@ export async function prepareLnErc20Quote(relay: RelayLink, request: LnErc20Requ
     await session.send(envelope, session.providerKey!);
     const answer = await session.replyTo(envelope, "quote_offer");
     const offer = checkLnErc20QuoteOffer(answer.payload, request, Math.floor(clock() / 1000));
+    requireAnnouncedDepth(offer.funding_confirmations, provider.fundingConfirmations);
     let used = false;
     return {
       quote: Object.freeze({ providerIdentity: request.identity, providerSlot: provider.slot, offer }),
@@ -178,6 +179,11 @@ export async function prepareLnErc20Quote(relay: RelayLink, request: LnErc20Requ
         if (BigInt(execution.terms.economics.hold_invoice_sat) > BigInt(offer.economics.hold_invoice_sat)) {
           execution.dispose();
           throw new SwapError("Firm price increased. Nothing was accepted or paid; request another quote");
+        }
+        // Ranked and shown on the estimate's depth: the signed terms must keep it.
+        if (execution.terms.funding_confirmations !== offer.funding_confirmations) {
+          execution.dispose();
+          throw new ProtocolError("signed funding confirmations differ from the estimate");
         }
         return execution;
       },

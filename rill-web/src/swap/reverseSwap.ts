@@ -9,7 +9,7 @@ import { verifyNostrProviderAnnouncement } from "../nostrProviderAnnouncement";
 import { handshake } from "./handshake";
 import { type RelayLink, Session, SwapError } from "./session";
 import type { SwapRequest } from "./swap";
-import { MAX_SATS, ProtocolError, requireShape, sats } from "./wire";
+import { MAX_SATS, ProtocolError, requireAnnouncedDepth, requireShape, sats } from "./wire";
 import type { PreparedReverseExecution, ReverseExecutionConfiguration } from "./reverseExecution";
 
 export const REVERSE_PROFILE = "ln-to-btc/v1";
@@ -123,6 +123,7 @@ export async function prepareReverseQuote(
     await session.send(envelope, session.providerKey!);
     const answer = await session.replyTo(envelope, "quote_offer");
     const offer = checkReverseQuoteOffer(answer.payload, request, Math.floor(clock() / 1000));
+    requireAnnouncedDepth(offer.funding_confirmations, provider.fundingConfirmations);
     const economics = offer.economics;
     let used = false, disposed = false;
     let firmSession: Session | undefined;
@@ -151,7 +152,13 @@ export async function prepareReverseQuote(
         try {
           const agreed = await handshake(firmSession, provider, identity);
           configuration.assertCurrent(); if (disposed) throw new SwapError("Estimate discarded");
-          return await prepareReverseExecution(firmSession, agreed, request, configuration, clock);
+          const execution = await prepareReverseExecution(firmSession, agreed, request, configuration, clock);
+          // Ranked and shown on the estimate's depth: the signed terms must keep it.
+          if (execution.terms.funding_confirmations !== offer.funding_confirmations) {
+            execution.dispose();
+            throw new ProtocolError("signed funding confirmations differ from the estimate");
+          }
+          return execution;
         } catch (error) { firmSession.secret.fill(0); throw error; }
       },
       dispose: () => { used = disposed = true; session.secret.fill(0); firmSession?.secret.fill(0); },

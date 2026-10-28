@@ -29,7 +29,7 @@ class FixtureSession {
 }
 mock.module("../../src/swap/session", () => ({ Session: FixtureSession, SwapError: Error }));
 mock.module("../../src/swap/discovery", () => ({ discoverProvider: async () => ({ advertisedEpochInboxKeys: ["8".repeat(64)], requiresEpochBinding: false, revision: 1 }) }));
-mock.module("../../src/swap/wire", () => ({ checkHandshakeAccept: () => ({}), checkTermsOffer: () => terms, requireShape: (_name: string, value: unknown) => value,
+mock.module("../../src/swap/wire", () => ({ checkHandshakeAccept: () => ({}), checkTermsOffer: () => terms, requireAnnouncedDepth: () => {}, requireShape: (_name: string, value: unknown) => value,
   COOPERATIVE_CLAIM_FEATURE: "fixture", EPOCH_SESSION_EXTENSION: "fixture", EPOCH_SESSION_FEATURE: "fixture" }));
 mock.module("../../src/swap/hashes", () => ({ clientAcceptanceHash: () => new Uint8Array(32), fundingBindingHash: () => new Uint8Array(32),
   epochBoundSessionId: () => new Uint8Array(32), handshakeHash: () => new Uint8Array(32) }));

@@ -16,7 +16,8 @@ class FakeSession {
   }
   async replyTo(_env: unknown, type: string) {
     if (type === "quote_offer") return { payload: { kind: "ln-to-erc20", indicative: true, economics: TERMS.economics, evm_asset: ASSET,
-      funding_confirmations: 2, settlement_confirmations: 2, evm_reference_block: 1000, timelock_delay_blocks: 1800,
+      // "firm-depth": the estimate claims one block less than the signed terms will wait.
+      funding_confirmations: mode === "firm-depth" ? 1 : 2, settlement_confirmations: 2, evm_reference_block: 1000, timelock_delay_blocks: 1800,
       incoming_htlc_expiry_delta_blocks: 200, expires_at: NOW + 600, extensions: {} } };
     if (type === "terms_offer") {
       const invoice = testHoldInvoice(request.payment_hash as string);

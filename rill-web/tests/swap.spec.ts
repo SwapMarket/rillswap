@@ -379,7 +379,7 @@ test("the provider directory loads by itself, groups providers by swap type and 
   await page.locator("#swap-settings-toggle").click();
   await page.locator("#swap-network").selectOption("regtest");
   await page.locator("#swap-settings-close").click();
-  await expect(page.locator("#swap-provider-choice")).toHaveText("Provider: automatic, lowest verified price");
+  await expect(page.locator("#swap-provider-choice")).toHaveText("Provider: automatic, fastest payment, then lowest price");
   // Switching to regtest loads its directory without opening the dialog.
   await expect(page.locator("#swap-providers-status")).toHaveText("1 provider on regtest.");
   expect(requests).toBe(1);
@@ -389,7 +389,7 @@ test("the provider directory loads by itself, groups providers by swap type and 
   await expect(page.locator(".swap-provider-group")).toHaveCount(2);
   await expect(page.locator(".swap-provider-group h3")).toHaveText(["Bitcoin → Lightning", "Lightning → Bitcoin"]);
   const group = page.locator('.swap-provider-group[data-profile="ln-to-btc/v1"]');
-  await expect(group.locator("th")).toHaveText(["Provider", "Limits (sat)", "Fee", "On 100,000 sat", "Listed until", ""]);
+  await expect(group.locator("th")).toHaveText(["Provider", "Limits (sat)", "Fee", "On 100,000 sat", "Confirmations", "Listed until", ""]);
   const entry = group.locator("tbody tr");
   await expect(entry).toHaveCount(1);
   await expect(entry.locator("td").nth(0)).toHaveText(`${identity.slice(0, 12)}…`);
@@ -397,6 +397,7 @@ test("the provider directory loads by itself, groups providers by swap type and 
   await expect(entry.locator("td").nth(1)).toHaveText("1,000 – 100,000");
   await expect(entry.locator("td").nth(2)).toHaveText("50 sat + 0.10%");
   await expect(entry.locator("td").nth(3)).toHaveText("150 sat");
+  await expect(entry.locator("td").nth(4)).toHaveText("unknown"); // this announcement predates the depth extension
   await expect(page.locator("#swap-provider-automatic button")).toHaveText("Selected");
   await entry.getByRole("button", { name: "Choose" }).click();
   // The choice applies to every table the provider appears in.
@@ -409,8 +410,12 @@ test("the provider directory loads by itself, groups providers by swap type and 
   await page.locator("#swap-settings-toggle").click();
   await expect(page.locator("#swap-provider")).toHaveValue(identity);
   await page.locator("#swap-provider").fill("");
+  await expect(page.locator("#swap-ranking")).toHaveValue("time"); // fastest first by default
+  await page.locator("#swap-ranking").selectOption("price");
   await page.locator("#swap-settings-close").click();
-  await expect(page.locator("#swap-provider-choice")).toHaveText("Provider: automatic, lowest verified price");
+  await expect(page.locator("#swap-provider-choice")).toHaveText("Provider: automatic, lowest price, then fastest payment");
+  await page.locator("#swap-providers-toggle").click();
+  await expect(page.locator("#swap-provider-automatic p")).toContainText("(lowest price, then fastest payment)");
 });
 
 

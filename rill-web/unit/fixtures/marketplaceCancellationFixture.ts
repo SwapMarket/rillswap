@@ -23,7 +23,7 @@ mock.module("../../src/swap/relay", () => ({ RelayConnection: FakeRelay }));
 mock.module("../../src/swap/swap", () => ({ prepareSwap: async (relay: FakeRelay): Promise<PreparedSwap> => {
   if (relay.url === "wss://slow/") return new Promise((_resolve, reject) => { rejectSlow = reject; readySlow?.(); });
   return { quote: { providerIdentity: relay.url, providerSlot: "default", contractAmountSat: 1010n,
-    successFeeSat: 10n, contractHash: "0".repeat(64), refundLockHeight: 100, expiresAt: 9999 },
+    successFeeSat: 10n, contractHash: "0".repeat(64), refundLockHeight: 100, expiresAt: 9999, fundingConfirmations: 1 },
     dispose: () => { disposed.add(relay.url); }, execute: async () => { throw new Error("not used"); } };
 } }));
 const { quoteProviders } = await import("../../src/swap/marketplace");

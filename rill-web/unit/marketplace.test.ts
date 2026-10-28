@@ -4,7 +4,8 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import canonicalize from "canonicalize";
 import { finalizeEvent, getPublicKey } from "nostr-tools";
 import { MAX_DISCOVERY_EVENTS } from "../src/swap/discovery";
-import { directoryFromObservations, eligibleProviders, estimateFromDirectory, indicativeFee, ineligibilityReason, MAX_IDENTITY_EVENTS, providerLimits, rankQuotes, scanAnnouncements, type LocatedQuote, type RelayObservation, unexpired } from "../src/swap/marketplace";
+import { directoryFromObservations, eligibleProviders, estimateFromDirectory, indicativeFee, ineligibilityReason, MAX_IDENTITY_EVENTS, providerLimits, rankQuotes, scanAnnouncements, type LocatedProvider, type LocatedQuote, type RelayObservation, unexpired } from "../src/swap/marketplace";
+import { compareRanked, fastestAndCheapest, forwardRank } from "../src/swap/ranking";
 import application from "./fixtures/manual-advertisement-regtest-v1.json";
 import vector from "./fixtures/nostr-announcement-regtest-v1.json";
 import network from "../src/networks/regtest-rillswap-e2e-v1.json";
@@ -13,13 +14,16 @@ let clock: ReturnType<typeof spyOn>;
 beforeEach(() => { clock = spyOn(Date, "now").mockReturnValue(1703021600 * 1000); });
 afterEach(() => clock.mockRestore());
 
-function announcement(revision = 1, fee = "10", secretNumber = 2): string {
+function announcement(revision = 1, fee = "10", secretNumber = 2, confirmations?: number): string {
   const secret = new Uint8Array(32); secret[31] = secretNumber;
   const wrapper = structuredClone(application);
   wrapper.advertisement.provider_identity_xonly_key = getPublicKey(secret);
   wrapper.advertisement.revision = revision;
   wrapper.advertisement.indicative_fee_policy.base_sat = fee;
   wrapper.advertisement.amount_bands = [{ minimum_sat: "100", maximum_sat: "10000" }];
+  if (confirmations !== undefined) {
+    (wrapper.advertisement.extensions as Record<string, unknown>)["rillswap/funding-confirmations"] = { confirmations };
+  }
   const tag = sha256(new TextEncoder().encode("RillSwap/advertisement/v1"));
   const content = new TextEncoder().encode(canonicalize(wrapper.advertisement)!);
   const digest = new Uint8Array(64 + content.length);
@@ -134,9 +138,9 @@ test("the directory estimate picks the lowest announced fee for the direction, h
   const dear = directoryFromObservations([observed([announcement(1, "40", 3)])], network).entries[0]!;
   const reverseOnly = { ...cheap, identity: "ab".repeat(32), profiles: ["ln-to-btc/v1" as const] };
   const entries = [dear, cheap, reverseOnly];
-  expect(estimateFromDirectory(entries, "btc-to-ln/v1", 1000n)).toEqual({ identity: cheap.identity, feeSat: 10n + 1n });
-  expect(estimateFromDirectory(entries, "btc-to-ln/v1", 1000n, dear.identity)).toEqual({ identity: dear.identity, feeSat: 40n + 1n });
-  expect(estimateFromDirectory(entries, "ln-to-btc/v1", 1000n)).toEqual({ identity: reverseOnly.identity, feeSat: 11n }); // equal fees tie on identity
+  expect(estimateFromDirectory(entries, "btc-to-ln/v1", 1000n)).toEqual({ identity: cheap.identity, feeSat: 10n + 1n, fundingConfirmations: null });
+  expect(estimateFromDirectory(entries, "btc-to-ln/v1", 1000n, dear.identity)).toEqual({ identity: dear.identity, feeSat: 40n + 1n, fundingConfirmations: null });
+  expect(estimateFromDirectory(entries, "ln-to-btc/v1", 1000n)).toEqual({ identity: reverseOnly.identity, feeSat: 11n, fundingConfirmations: null }); // equal fees tie on identity
   expect(estimateFromDirectory(entries, "btc-to-ln/v1", 20_000n)).toEqual({ reason: expect.stringContaining("No provider accepts 20,000 sat") });
   expect(estimateFromDirectory(entries, "btc-to-ln/v1", 1000n, reverseOnly.identity)).toEqual({ reason: "The chosen provider does not announce this swap direction." });
   expect(estimateFromDirectory([], "btc-to-ln/v1", 1000n)).toEqual({ reason: expect.stringContaining("No provider announced") });
@@ -149,8 +153,8 @@ test("expired directory entries are neither listed nor estimated", () => {
   const entries = [dear, expiring];
   expect(unexpired(entries, expiring.expiresAt - 1)).toEqual(entries);
   expect(unexpired(entries, expiring.expiresAt)).toEqual([dear]); // expires_at itself is already expired
-  expect(estimateFromDirectory(entries, "btc-to-ln/v1", 1000n, "", expiring.expiresAt - 1)).toEqual({ identity: cheap.identity, feeSat: 11n });
-  expect(estimateFromDirectory(entries, "btc-to-ln/v1", 1000n, "", expiring.expiresAt)).toEqual({ identity: dear.identity, feeSat: 41n });
+  expect(estimateFromDirectory(entries, "btc-to-ln/v1", 1000n, "", expiring.expiresAt - 1)).toEqual({ identity: cheap.identity, feeSat: 11n, fundingConfirmations: null });
+  expect(estimateFromDirectory(entries, "btc-to-ln/v1", 1000n, "", expiring.expiresAt)).toEqual({ identity: dear.identity, feeSat: 41n, fundingConfirmations: null });
   expect(estimateFromDirectory(entries, "btc-to-ln/v1", 1000n, "", dear.expiresAt)).toEqual({ reason: expect.stringContaining("No provider announced") });
 });
 
@@ -158,10 +162,48 @@ test("verified contract prices, not indicative prices, choose the winner with de
   const quote = (amount: bigint, identity: string): LocatedQuote => ({
     relayUrl: "wss://a.test/", dispose: () => {}, prepared: {
       quote: { contractAmountSat: amount, successFeeSat: amount - 1000n, providerIdentity: identity,
-        providerSlot: "primary", contractHash: "0".repeat(64), refundLockHeight: 100, expiresAt: 9999 },
+        providerSlot: "primary", contractHash: "0".repeat(64), refundLockHeight: 100, expiresAt: 9999, fundingConfirmations: 1 },
       dispose: () => {}, execute: async () => { throw new Error("not used"); },
     },
   });
   const expensive = quote(1200n, "a"), cheap = quote(1010n, "b"), tied = quote(1010n, "a");
   expect(rankQuotes([expensive, cheap, tied])).toEqual([tied, cheap, expensive]);
+});
+
+test("time ranking puts fewer funding confirmations first, unknown depths last, and price breaks ties", () => {
+  const slow = announcement(1, "10", 2, 3), fast = announcement(1, "40", 3, 1), unknown = announcement(1, "5", 4);
+  const fastPricey = announcement(1, "60", 5, 1);
+  const { providers } = scanAnnouncements([observed([slow, fast, unknown, fastPricey])], network);
+  const fee = (located: LocatedProvider): string => located.announcement.indicativeFeePolicy.base_sat;
+  expect(eligibleProviders(providers, 1000n).map(fee)).toEqual(["40", "60", "10", "5"]);
+  expect(eligibleProviders(providers, 1000n, "price").map(fee)).toEqual(["5", "10", "40", "60"]);
+  const entries = directoryFromObservations([observed([slow, fast, unknown])], network).entries;
+  expect(entries.map((entry) => entry.fundingConfirmations).sort()).toEqual([1, 3, null]);
+  const time = estimateFromDirectory(entries, "btc-to-ln/v1", 1000n);
+  expect(time).toMatchObject({ feeSat: 41n, fundingConfirmations: 1 });
+  expect(estimateFromDirectory(entries, "btc-to-ln/v1", 1000n, "", undefined, "price")).toMatchObject({ feeSat: 6n, fundingConfirmations: null });
+});
+
+test("signed quotes rank by depth or price, and labels name the fastest and the cheapest", () => {
+  const quote = (amount: bigint, depth: number, identity: string): LocatedQuote => ({
+    relayUrl: "wss://a.test/", dispose: () => {}, prepared: {
+      quote: { contractAmountSat: amount, successFeeSat: 10n, providerIdentity: identity,
+        providerSlot: "primary", contractHash: "0".repeat(64), refundLockHeight: 100, expiresAt: 9999, fundingConfirmations: depth },
+      dispose: () => {}, execute: async () => { throw new Error("not used"); },
+    },
+  });
+  const zeroConf = quote(1200n, 0, "a"), cheap = quote(1010n, 2, "b"), middle = quote(1100n, 1, "c");
+  expect(rankQuotes([cheap, middle, zeroConf])).toEqual([zeroConf, middle, cheap]);
+  expect(rankQuotes([zeroConf, middle, cheap], "price")).toEqual([cheap, middle, zeroConf]);
+  expect(fastestAndCheapest([cheap, middle, zeroConf], forwardRank)).toEqual({ fastest: zeroConf, cheapest: cheap });
+  expect(fastestAndCheapest([cheap], forwardRank)).toEqual({ fastest: null, cheapest: null }); // nothing to compare
+  const same = quote(1010n, 0, "d");
+  expect(fastestAndCheapest([cheap, same], forwardRank)).toEqual({ fastest: same, cheapest: same });
+});
+
+test("unknown depths never outrank a known one in either mode", () => {
+  const known = { depth: 6, price: 100n, tie: "a" }, unknown = { depth: null, price: 100n, tie: "b" };
+  expect(compareRanked("time", known, unknown)).toBeLessThan(0);
+  expect(compareRanked("price", known, unknown)).toBeLessThan(0);
+  expect(compareRanked("price", { ...unknown, price: 99n }, known)).toBeLessThan(0); // price still decides first
 });

@@ -62,3 +62,15 @@ test("continuing an estimate pins its provider and request but opens a new firm 
   expect(result.events.slice(-2)).toEqual(["persist-firm-secrets", "firm-request"]);
   expect(result.refused).toBe(true); expect(result.oldZero).toBe(true); expect(result.allZero).toBe(true);
 });
+test("an estimate waiting longer than announced, or firm terms changing its depth, are refused", async () => {
+  const run = async (scenario: string) => {
+    const child = Bun.spawn([process.execPath, "unit/fixtures/reverseFirmSessionFixture.ts", scenario], { stdout: "pipe", stderr: "pipe" });
+    const [output, errors, status] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+    expect(errors).toBe(""); expect(status).toBe(0); return JSON.parse(output) as { refusal: string; events: string[] };
+  };
+  const lower = await run("announced_lower");
+  expect(lower.refusal).toContain("more than the announced");
+  const mismatch = await run("depth_mismatch");
+  expect(mismatch.refusal).toContain("signed funding confirmations differ from the estimate");
+  expect(mismatch.events.at(-1)).toBe("dispose-firm"); // the firm secrets are wiped, nothing was accepted
+});

@@ -35,6 +35,17 @@ export function requireShape<T>(name: keyof typeof generated, document: unknown)
 
 export const same = (a: unknown, b: unknown): boolean => bytesToHex(jcs(a)) === bytesToHex(jcs(b));
 
+/**
+ * RS-005: an offer may wait fewer funding confirmations than the provider
+ * announced, never more, so ranking on the announcement cannot be gamed. An
+ * announcement without the depth (null) states nothing to hold the offer to.
+ */
+export function requireAnnouncedDepth(offered: number, announced: number | null): void {
+  if (announced !== null && offered > announced) {
+    throw new ProtocolError(`offer waits ${offered} funding confirmations, more than the announced ${announced}`);
+  }
+}
+
 export function sats(value: string, what: string, positive = false): bigint {
   if (!/^(0|[1-9][0-9]{0,15})$/.test(value)) throw new ProtocolError(`${what} malformed`);
   const amount = BigInt(value);

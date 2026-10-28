@@ -140,14 +140,42 @@ describe("private-regtest NIP-01 signed announcement", () => {
     expect(() => accept(event, PUBLIC, NETWORK, "ln-to-erc20/v1")).toThrow(AnnouncementRefusedError);
   });
 
-  test("known handshake requirement does not authorize unrelated signed extensions", () => {
+  test("unknown signed extensions are ignored while known ones still apply", () => {
+    // RS-005: a newer provider's extra keys must not hide its offers.
     const wrapper = structuredClone(application);
     Object.assign(wrapper.advertisement.extensions, {
       "rillswap/handshake-required-features": ["epoch-bound-session/v1"], "test/data": "signed",
     });
     reSignApplication(wrapper);
-    expect(() => accept(JSON.stringify(reSign({ ...fixtureEvent(), content: jcs(wrapper) }))))
-      .toThrow(AnnouncementRefusedError);
+    const candidate = accept(JSON.stringify(reSign({ ...fixtureEvent(), content: jcs(wrapper) })));
+    expect(candidate.requiresEpochBinding).toBe(true);
+    expect(candidate.fundingConfirmations).toBeNull();
+  });
+
+  test("exposes the announced funding depth and refuses a malformed one", () => {
+    const signed = (profiles: string[], value: unknown) => {
+      const wrapper = structuredClone(application);
+      wrapper.advertisement.profiles = profiles;
+      (wrapper.advertisement.extensions as Record<string, unknown>)["rillswap/funding-confirmations"] = value;
+      reSignApplication(wrapper);
+      return JSON.stringify(reSign({ ...fixtureEvent(), content: jcs(wrapper) }));
+    };
+    expect(accept(JSON.stringify(fixtureEvent())).fundingConfirmations).toBeNull(); // unknown, not 0 or 1
+    expect(accept(signed(["btc-to-ln/v1"], { confirmations: 0 })).fundingConfirmations).toBe(0);
+    const both = ["btc-to-ln/v1", "ln-to-btc/v1"];
+    expect(accept(signed(both, { confirmations: 3 }), PUBLIC, NETWORK, "ln-to-btc/v1").fundingConfirmations).toBe(3);
+    // Zero is only for BTC to LN, where the paying provider alone takes the risk.
+    const cases: [string[], unknown][] = [
+      [both, { confirmations: 0 }], [["ln-to-btc/v1"], { confirmations: 0 }],
+      [["btc-to-ln/v1"], { confirmations: -1 }], [["btc-to-ln/v1"], { confirmations: "1" }],
+      [["btc-to-ln/v1"], { confirmations: true }], [["btc-to-ln/v1"], { confirmations: 1, extra: 1 }],
+      [["btc-to-ln/v1"], {}], [["btc-to-ln/v1"], 1], [["btc-to-ln/v1"], null], [["btc-to-ln/v1"], [1]],
+    ];
+    for (const [profiles, value] of cases) {
+      const profile: ProfileId = profiles.includes("btc-to-ln/v1") ? "btc-to-ln/v1" : "ln-to-btc/v1";
+      expect(() => accept(signed(profiles, value), PUBLIC, NETWORK, profile))
+        .toThrow(AnnouncementRefusedError);
+    }
   });
 
   test("published reference signatures, JCS content and address verify independently", () => {
@@ -222,8 +250,9 @@ describe("private-regtest NIP-01 signed announcement", () => {
     const extensions = structuredClone(application);
     (extensions.advertisement.extensions as Record<string, unknown>)["test/data"] = "signed";
     reSignApplication(extensions);
-    expect(() => accept(JSON.stringify(reSign({ ...original, content: jcs(extensions) }))))
-      .toThrow(AnnouncementRefusedError);
+    // Unknown keys are ignored (RS-005); the signature still covers them.
+    expect(accept(JSON.stringify(reSign({ ...original, content: jcs(extensions) }))).source)
+      .toBe("signed-nip01-announcement");
   });
 
   test("expires at now and bounds encoded raw event and decoded content", () => {

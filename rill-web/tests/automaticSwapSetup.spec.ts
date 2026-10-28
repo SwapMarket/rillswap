@@ -251,6 +251,48 @@ test("with announced fees loaded on open, Swap accepts a signed price within the
   expect(await page.evaluate(() => window.uiFixture.executedProviders)).toEqual(["4".repeat(64)]);
 });
 
+test("offers rank fastest first by default, carry Fastest and Cheapest labels, and the setting switches to price first", async ({ page }) => {
+  // Quote "4" is cheaper (1,104 sat) but waits 2 confirmations; quote "5" pays from the mempool.
+  await page.addInitScript(() => { window.uiFixtureQuoteDepths = [2, 0]; });
+  await verifiedQuote(page);
+  const options = page.locator("#swap-quote-review details label");
+  await expect(options).toHaveCount(2);
+  await expect(options.nth(0)).toContainText("1105 sat");
+  await expect(options.nth(0).locator(".swap-offer-tag")).toHaveText(["0 confirmations", "Fastest"]);
+  await expect(options.nth(1).locator(".swap-offer-tag")).toHaveText(["2 confirmations", "Cheapest"]);
+  await expect(page.locator("input[name=verified-provider]").nth(0)).toBeChecked();
+  await expect(page.locator("#swap-quote-selection")).toContainText("Fastest verified provider among 2 responding offers");
+  await expect(page.locator("#swap-quote-summary")).toContainText("pays as soon as it sees your deposit, before any confirmation");
+  await page.locator("#swap-quote-review details summary").click();
+  await options.nth(1).locator("input").check();
+  await expect(page.locator("#swap-quote-selection")).toContainText("Manually selected provider");
+  await expect(page.locator("#swap-quote-summary")).toContainText("after 2 confirmations of your deposit");
+
+  await page.goto(PAGE); await invoice(page);
+  await page.locator("#swap-settings-toggle").click();
+  await page.locator("#swap-ranking").selectOption("price");
+  await page.locator("#swap-settings-close").click();
+  await page.locator("#swap-start").click();
+  await expect(page.locator("#swap-quote-accept")).toBeEnabled();
+  await expect(options.nth(0)).toContainText("1104 sat");
+  await expect(options.nth(0).locator(".swap-offer-tag")).toHaveText(["2 confirmations", "Cheapest"]);
+  await expect(page.locator("#swap-quote-selection")).toContainText("Lowest verified provider price among 2 responding offers");
+  await page.locator("#swap-quote-accept").click();
+  await expect(page.locator("#swap-error")).toContainText("Fixture stopped before funding");
+  expect(await page.evaluate(() => window.uiFixture.executedProviders)).toEqual(["4".repeat(64)]);
+});
+
+test("a signed price within the estimate still needs review when it waits more confirmations than shown", async ({ page }) => {
+  await quotesWithinEstimate(page);
+  await page.addInitScript(() => { window.uiFixtureAnnouncedDepth = 1; window.uiFixtureQuoteDepths = [2, 2]; });
+  await mockTip(page);
+  await page.goto(PAGE); await invoice(page);
+  await expect(page.locator("#swap-estimate")).toContainText("The provider pays after 1 confirmation of your deposit (about 10 min).");
+  await page.locator("#swap-start").click();
+  await expect(page.locator("#swap-quote-accept")).toBeEnabled(); // no one-step swap: 2 confirmations were not shown
+  expect(await page.evaluate(() => window.uiFixture.executed)).toBe(0);
+});
+
 test("with announced fees loaded and the address entered, a Lightning to Bitcoin swap continues directly", async ({ page }) => {
   await quotesWithinEstimate(page);
   await mockTip(page);

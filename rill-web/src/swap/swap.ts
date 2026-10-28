@@ -26,6 +26,7 @@ import {
   type BtcToLnTerms,
   checkTermsOffer,
   type FirmQuoteRequest,
+  requireAnnouncedDepth,
   requireShape,
   type TermsOffer,
 } from "./wire";
@@ -136,6 +137,8 @@ export interface PreparedQuote {
   readonly successFeeSat: bigint;
   readonly refundLockHeight: number;
   readonly expiresAt: number;
+  /** Signed blocks the provider waits on the funding before paying (0: from the mempool). */
+  readonly fundingConfirmations: number;
 }
 
 /** Holds one exact authenticated offer. Preparation does not accept or fund it. */
@@ -217,6 +220,7 @@ export async function prepareSwap(
       now: seconds(),
     });
     if (terms.refund_lock_height <= request.tipHeight) throw new SwapError("offered refund height is already reached");
+    requireAnnouncedDepth(terms.funding_confirmations, provider.fundingConfirmations);
     const offer = answer.payload as unknown as TermsOffer;
     const contractHash = offer.terms.contract_hash;
     const economics = terms.economics;
@@ -233,6 +237,7 @@ export async function prepareSwap(
         successFeeSat: BigInt(economics.success_fee_sat),
         refundLockHeight: terms.refund_lock_height,
         expiresAt: Math.min(terms.terms_expiry, invoice.expires_at, checkoutExpiry),
+        fundingConfirmations: terms.funding_confirmations,
       }),
       dispose: () => {
         if (state === "ready") { state = "disposed"; release(); }
@@ -291,11 +296,12 @@ export async function prepareSwap(
           await session.replyTo(bound, "ack");
           paymentWindow();
           const depth = terms.funding_confirmations;
+          const when = depth === 0 ? "as soon as it sees the transaction" : `at ${depth} confirmation${depth === 1 ? "" : "s"}`;
           if (broadcastByUser) {
             await hooks.broadcast(funding.raw, funding.txid);
-            hooks.report(`funding ${funding.txid} broadcast; waiting for the provider to pay (at ${depth} confirmations)`);
+            hooks.report(`funding ${funding.txid} broadcast; waiting for the provider to pay (${when})`);
           } else {
-            hooks.report(`the provider acknowledged your confirmed deposit ${funding.txid}; waiting for it to pay (at ${depth} confirmations)`);
+            hooks.report(`the provider acknowledged your confirmed deposit ${funding.txid}; waiting for it to pay (${when})`);
           }
           const pendingBlocks = Math.max(0, depth - (broadcastByUser ? 0 : 1));
           const hint =

@@ -9,6 +9,10 @@ test("pre-firm storage failure sends no firm request", async () => {
   const result = await run("secrets"); expect(result.error).toContain("secret commit aborted");
   expect(result.events).not.toContain("send:quote_request:firm");
 });
+test("firm terms waiting more confirmations than the estimate are refused before acceptance", async () => {
+  const result = await run("firm-depth"); expect(result.error).toContain("signed funding confirmations differ from the estimate");
+  expect(result.events).not.toContain("send:terms_accept:"); expect(result.events).not.toContain("invoice");
+});
 test("terms storage failure exposes neither acceptance nor invoice", async () => {
   const result = await run("terms"); expect(result.error).toContain("terms commit aborted");
   expect(result.events).not.toContain("send:terms_accept:"); expect(result.events).not.toContain("invoice");

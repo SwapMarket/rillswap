@@ -66,6 +66,30 @@ export function evmAssetsOf(extensions: Record<string, unknown>): readonly EvmAs
   return keys.size === assets.length ? assets.map((asset) => Object.freeze({ ...asset })) : null;
 }
 
+/** RS-005 extension: the funding_confirmations every offer of this advertisement carries. */
+export const FUNDING_CONFIRMATIONS_EXTENSION = "rillswap/funding-confirmations";
+
+/**
+ * The announced funding depth, null when absent (unknown, never 0 or 1), or
+ * undefined when malformed. Zero is only valid when every listed profile is
+ * BTC to LN, the one direction where only the paying provider takes the risk.
+ */
+export function fundingConfirmationsOf(
+  extensions: Record<string, unknown>, profiles: readonly string[],
+): number | null | undefined {
+  if (!Object.hasOwn(extensions, FUNDING_CONFIRMATIONS_EXTENSION)) return null;
+  const value = extensions[FUNDING_CONFIRMATIONS_EXTENSION];
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const entry = value as Record<string, unknown>;
+  const depth = entry.confirmations;
+  if (Object.keys(entry).length !== 1 || typeof depth !== "number" ||
+      !Number.isSafeInteger(depth) || depth < 0 ||
+      (depth === 0 && !profiles.every((profile) => profile === "btc-to-ln/v1"))) {
+    return undefined;
+  }
+  return depth;
+}
+
 /** Only a historical authenticated offer, not a live endpoint or session. */
 export interface ManualProviderCandidate {
   readonly source: "manual-app-signature-only";
@@ -83,6 +107,8 @@ export interface ManualProviderCandidate {
   readonly indicativeFeePolicy: Readonly<{ base_sat: string; proportional_millionths: number }>;
   /** RS-010 assets served, empty for Bitcoin-only providers. */
   readonly evmAssets: readonly EvmAssetIdentity[];
+  /** RS-005 announced funding depth; null when the provider did not announce one. */
+  readonly fundingConfirmations: number | null;
 }
 
 export class ManualAdvertisementRefusedError extends Error {
@@ -135,7 +161,8 @@ export function verifyManualProviderAdvertisement(
     const { advertisement: ad, signature } = document as unknown as SignedAdvertisement;
     const networkJcs = canonicalize(independentlySelectedNetwork);
     const evmAssets = evmAssetsOf(ad.extensions);
-    if (networkJcs === undefined || evmAssets === null ||
+    const fundingConfirmations = fundingConfirmationsOf(ad.extensions, ad.profiles);
+    if (networkJcs === undefined || evmAssets === null || fundingConfirmations === undefined ||
         (independentlySelectedProfile.includes("erc20") && evmAssets.length === 0) ||
         ad.provider_identity_xonly_key !== approvedIdentityXOnlyKey ||
         !ad.network_identities.some((candidate) => canonicalize(candidate) === networkJcs) ||
@@ -182,6 +209,7 @@ export function verifyManualProviderAdvertisement(
       amountBands: Object.freeze(ad.amount_bands.map((band) => Object.freeze({ ...band }))),
       indicativeFeePolicy: Object.freeze({ ...ad.indicative_fee_policy }),
       evmAssets: Object.freeze(evmAssets),
+      fundingConfirmations,
     });
   } catch {
     // Do not leak untrusted input, signature details, or endpoint strings.

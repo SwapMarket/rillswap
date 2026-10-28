@@ -4,9 +4,9 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import canonicalize from "canonicalize";
 import { verifyEvent, type NostrEvent } from "nostr-tools";
 
-import { EVM_ASSETS_EXTENSION, verifyManualProviderAdvertisement, type ManualProviderCandidate } from "./manualProviderAdvertisement";
+import { verifyManualProviderAdvertisement, type ManualProviderCandidate } from "./manualProviderAdvertisement";
 import { parseStrictEventJson } from "./strictEventJson";
-import { TRANSPORT_POW_EXTENSION, transportWorkRequirement } from "./transportPow";
+import { transportWorkRequirement } from "./transportPow";
 import type { ProfileId } from "./swapPairs";
 
 const HEX32 = /^[0-9a-f]{64}$/;
@@ -15,23 +15,18 @@ const encoder = new TextEncoder();
 const HANDSHAKE_REQUIREMENTS = "rillswap/handshake-required-features";
 
 /**
- * Only the epoch-binding requirement, the RS-010 asset list and the RS-006
- * transport work requirement are understood; any other extension key refuses
- * the announcement. The asset list's contents are validated by the manual
- * advertisement verifier, the work requirement by transportWorkRequirement.
+ * RS-005: unknown extension keys are ignored and the rest of the announcement
+ * is used. Known keys must be well formed: the handshake requirement may only
+ * name the epoch-binding feature (an unknown requirement refuses), the RS-010
+ * asset list and RS-005 funding depth are validated by the manual
+ * advertisement verifier, the RS-006 work requirement by transportWorkRequirement.
  */
 function supportedExtensions(value: unknown): boolean {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const extensions = value as Record<string, unknown>;
-  for (const key of Object.keys(extensions)) {
-    if (key === EVM_ASSETS_EXTENSION || key === TRANSPORT_POW_EXTENSION) continue;
-    const required = extensions[HANDSHAKE_REQUIREMENTS];
-    if (key !== HANDSHAKE_REQUIREMENTS ||
-        !Array.isArray(required) || required.length !== 1 || required[0] !== "epoch-bound-session/v1") {
-      return false;
-    }
-  }
-  return true;
+  if (!Object.hasOwn(extensions, HANDSHAKE_REQUIREMENTS)) return true;
+  const required = extensions[HANDSHAKE_REQUIREMENTS];
+  return Array.isArray(required) && required.length === 1 && required[0] === "epoch-bound-session/v1";
 }
 
 export interface AnnouncementCandidate extends Omit<ManualProviderCandidate, "source"> {

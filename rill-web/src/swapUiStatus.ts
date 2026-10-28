@@ -8,8 +8,25 @@ export function stoppedSwapAdvice(fundsMayBeCommitted: boolean): string {
       "Otherwise, reload the page to start a new swap.";
 }
 
-export function quoteSelectionLabel(automaticLowest: boolean, count: number): string {
-  return automaticLowest
-    ? `Lowest verified provider price among ${count} responding offers.`
-    : `Manually selected provider (${count} verified offers available).`;
+/** `automatic`: the first offer in the chosen ranking, not a manual pick. */
+export function quoteSelectionLabel(automatic: boolean, count: number, mode: "time" | "price"): string {
+  if (!automatic) return `Manually selected provider (${count} verified offers available).`;
+  return mode === "time"
+    ? `Fastest verified provider among ${count} responding offers (fewest funding confirmations, then lowest price).`
+    : `Lowest verified provider price among ${count} responding offers.`;
+}
+
+/** Short funding depth for lists and tables; null means the provider did not announce it. */
+export function confirmationsLabel(depth: number | null): string {
+  return depth === null ? "confirmations unknown" : `${depth} confirmation${depth === 1 ? "" : "s"}`;
+}
+
+/** When the provider acts on the funding, in the wording of each Bitcoin direction. */
+export function fundingWaitText(profile: "btc-to-ln/v1" | "ln-to-btc/v1", depth: number | null): string {
+  if (depth === null) return "The provider did not announce how many confirmations it waits for.";
+  const minutes = `about ${depth * 10} min`;
+  if (profile === "ln-to-btc/v1") return `Payout after ${confirmationsLabel(depth)} (${minutes}).`;
+  return depth === 0
+    ? "The provider pays as soon as it sees your deposit, before any confirmation."
+    : `The provider pays after ${confirmationsLabel(depth)} of your deposit (${minutes}).`;
 }

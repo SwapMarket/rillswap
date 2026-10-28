@@ -120,6 +120,8 @@ details p, #swap-release-notice { font-size: .78rem; color: #99abb1; }
 #swap-quote-summary h2 { color: #b6eccd; font-size: 1.7rem; }
 #swap-quote-review input[type="radio"] { display: inline-block; width: auto; margin-right: .6rem; accent-color: #b6eccd; }
 #swap-quote-review #swap-edit { background: transparent; color: #b5c6ca; font-weight: 500; }
+.swap-offer-tag { display: inline-block; margin-left: .45rem; padding: .05rem .45rem; border-radius: .6rem; font-size: .72rem; color: #b5c6ca; border: 1px solid #344347; }
+.swap-offer-tag.fastest, .swap-offer-tag.cheapest { color: #11261c; background: #b6eccd; border-color: #b6eccd; font-weight: 600; }
 .swap-qr { display: block; width: min(14rem, 70vw); height: auto; margin: .6rem 0; border-radius: .5rem; }
 pre { background: #111b1e; border: 1px solid #344347; border-radius: .7rem; font: .73rem/1.65 ui-monospace, monospace; padding: 1rem; color: #aac3bd; max-height: 20rem; overflow: auto; }
 footer { text-align: center; color: #7c9298; font-size: .72rem; padding: 1.5rem 0 3rem; }

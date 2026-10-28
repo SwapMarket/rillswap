@@ -1,6 +1,7 @@
 /** Test-only quote orchestration. Real wallet, invoice validation, and tip client remain in use. */
 import { BrowserRecoveryWallet } from "../../src/browserRecoveryWallet";
 import { RecoveryFundingUnavailableError } from "../../src/recoveryFunding";
+import { forwardRank, rank, type SortMode } from "../../src/swap/ranking";
 declare global {
   interface Window {
     uiFixture: { requests: unknown[]; executed: number; executedProviders: string[]; disposed: number;
@@ -13,6 +14,10 @@ declare global {
      * estimate and shows the review step. Set it with `page.addInitScript` before the page loads.
      */
     uiFixtureAnnouncedFeeSat?: string;
+    /** Announced funding depth of the directory entry; unannounced (null) by default. */
+    uiFixtureAnnouncedDepth?: number;
+    /** Signed funding depths of forward quotes "4" (1,104 sat) and "5" (1,105 sat); 1 each by default. */
+    uiFixtureQuoteDepths?: [number, number];
   }
 }
 window.uiFixture = { requests: [], executed: 0, executedProviders: [], disposed: 0, wallet: BrowserRecoveryWallet, infoPending: false };
@@ -23,27 +28,28 @@ export const eligibleProviders = (providers: unknown[]) => providers;
 export const ineligibilityReason = () => "fixture ineligible";
 export const discoverDirectory = async () => ({ warnings: [], entries: [{ identity: "4".repeat(64), slot: "fixture", profiles: ["btc-to-ln/v1", "ln-to-btc/v1"],
   amountBands: [{ minimum_sat: "1000", maximum_sat: "100000000" }], indicativeFeePolicy: { base_sat: window.uiFixtureAnnouncedFeeSat ?? "0", proportional_millionths: 0 },
-  relayUrls: ["ws://127.0.0.1:7777/"], expiresAt: Math.floor(Date.now() / 1000) + 3600 }] });
+  relayUrls: ["ws://127.0.0.1:7777/"], expiresAt: Math.floor(Date.now() / 1000) + 3600, fundingConfirmations: window.uiFixtureAnnouncedDepth ?? null }] });
 export const indicativeFee = (policy: { base_sat: string; proportional_millionths: number }, amount: bigint) =>
   BigInt(policy.base_sat) + (amount * BigInt(policy.proportional_millionths) + 999_999n) / 1_000_000n;
 export const providerLimits = (providers: unknown[]) => providers;
 export const unexpired = <T extends { expiresAt: number }>(entries: readonly T[], now = Math.floor(Date.now() / 1000)) =>
   entries.filter((entry) => entry.expiresAt > now);
 type FixtureEntry = { identity: string; profiles: string[]; amountBands: { minimum_sat: string; maximum_sat: string }[];
-  indicativeFeePolicy: { base_sat: string; proportional_millionths: number } };
+  indicativeFeePolicy: { base_sat: string; proportional_millionths: number }; fundingConfirmations: number | null };
 export const estimateFromDirectory = (entries: FixtureEntry[], profile: string, amount: bigint, pinned = "") => {
   const serving = entries.filter((entry) => entry.profiles.includes(profile) && (!pinned || entry.identity === pinned));
   const eligible = serving.filter((entry) => entry.amountBands.some((band) => amount >= BigInt(band.minimum_sat) && amount <= BigInt(band.maximum_sat)));
   if (eligible.length === 0) return { reason: serving.length === 0 ? "No provider announced this swap direction." : "fixture ineligible" };
-  return { identity: eligible[0]!.identity, feeSat: indicativeFee(eligible[0]!.indicativeFeePolicy, amount) };
+  return { identity: eligible[0]!.identity, feeSat: indicativeFee(eligible[0]!.indicativeFeePolicy, amount), fundingConfirmations: eligible[0]!.fundingConfirmations };
 };
-export const quoteProviders = async (_providers: unknown[], request: unknown) => {
+export const quoteProviders = async (_providers: unknown[], request: unknown, _signal?: AbortSignal, mode: SortMode = "time") => {
   window.uiFixture.requests.push(structuredClone(request));
-  return { failures: 0, reasons: [], quotes: ["4", "5"].map((id) => ({ relayUrl: "ws://127.0.0.1:7777/",
+  const depths = window.uiFixtureQuoteDepths ?? [1, 1];
+  return { failures: 0, reasons: [], quotes: rank(["4", "5"].map((id, index) => ({ relayUrl: "ws://127.0.0.1:7777/",
     dispose: () => { window.uiFixture.disposed++; },
     prepared: {
-      quote: { providerIdentity: id.repeat(64), contractAmountSat: BigInt(1100 + Number(id)), successFeeSat: 100n,
-        refundLockHeight: 300, expiresAt: Math.floor(Date.now() / 1000) + 3600 },
+      quote: { providerIdentity: id.repeat(64), providerSlot: "fixture", contractAmountSat: BigInt(1100 + Number(id)), successFeeSat: 100n,
+        contractHash: "0".repeat(64), refundLockHeight: 300, expiresAt: Math.floor(Date.now() / 1000) + 3600, fundingConfirmations: depths[index]! },
       execute: async (hooks: { saveRecovery: (file: Uint8Array, stage: string) => Promise<void>; fundingSource: (request: unknown) => Promise<unknown> }) => {
         window.uiFixture.executed++; window.uiFixture.executedProviders.push(id.repeat(64));
         await hooks.saveRecovery(new Uint8Array([7, 7, 7]), "terms");
@@ -63,7 +69,7 @@ export const quoteProviders = async (_providers: unknown[], request: unknown) =>
       },
       dispose: () => { window.uiFixture.disposed++; },
     },
-  })) };
+  })), forwardRank, mode) };
 };
 export const quoteReverseProviders = async (_providers: unknown[], request: unknown) => {
   window.uiFixture.requests.push(structuredClone(request));

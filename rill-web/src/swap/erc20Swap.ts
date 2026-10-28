@@ -16,7 +16,7 @@ import { stagingAddress } from "./gasSponsor";
 import { clientAcceptanceHash } from "./hashes";
 import { handshake, newKeyPair } from "./handshake";
 import { type RelayLink, Session, SwapError } from "./session";
-import { checkSignedOfferBinding, type HandshakeAccept, type HandshakeInit, ProtocolError, requireShape, same, sats } from "./wire";
+import { checkSignedOfferBinding, type HandshakeAccept, type HandshakeInit, ProtocolError, requireAnnouncedDepth, requireShape, same, sats } from "./wire";
 import { encryptCanonicalRecoveryForRecipient } from "../recoveryAgeContainer";
 import type { EvmAssetIdentity } from "../manualProviderAdvertisement";
 import { verifyNostrProviderAnnouncement } from "../nostrProviderAnnouncement";
@@ -306,6 +306,8 @@ export interface Erc20Quote {
   readonly timelockBlock: number;
   readonly providerEvmAddress: string;
   readonly expiresAt: number;
+  /** Signed EVM blocks the provider waits on the lock before paying. */
+  readonly fundingConfirmations: number;
 }
 
 export interface Erc20SwapOutcome {
@@ -391,6 +393,7 @@ export async function prepareErc20Swap(
       request: quote, invoiceBinding: invoice, asset, transcript, envelopeContractHash: answer.contract_hash, identity, network, now: seconds(),
     });
     if (terms.htlc_timelock_block <= request.evmTip + terms.funding_confirmations) throw new SwapError("offered timelock is already reached");
+    requireAnnouncedDepth(terms.funding_confirmations, provider.fundingConfirmations);
     const offer = answer.payload as unknown as Erc20TermsOffer;
     const contractHash = offer.terms.contract_hash;
     report(`terms: lock ${terms.economics.lock_amount_token_base} base units, refundable after block ${terms.htlc_timelock_block}`);
@@ -409,6 +412,7 @@ export async function prepareErc20Swap(
         rateTokenBasePerBtc: BigInt(terms.economics.rate_token_base_per_btc),
         timelockBlock: terms.htlc_timelock_block, providerEvmAddress: terms.provider_evm_address,
         expiresAt: Math.min(terms.terms_expiry, invoice.expires_at),
+        fundingConfirmations: terms.funding_confirmations,
       }),
       dispose: () => { if (state === "ready") { state = "disposed"; release(); } },
       execute: async (hooks: Erc20SwapHooks): Promise<Erc20SwapOutcome> => {

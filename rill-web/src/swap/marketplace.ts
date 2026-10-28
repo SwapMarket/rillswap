@@ -12,6 +12,7 @@ import { prepareSwap, type PreparedSwap, type SwapRequest } from "./swap";
 import { type Erc20SwapRequest, type PreparedErc20Swap, prepareErc20Swap } from "./erc20Swap";
 import type { EvmAssetIdentity } from "../manualProviderAdvertisement";
 import { prepareLnErc20Quote, type LnErc20Request, type PreparedLnErc20Quote } from "./lnErc20Swap";
+import { erc20Rank, forwardRank, lnErc20Rank, rank, reverseRank, type SortMode } from "./ranking";
 
 type AnnouncementProfile = Parameters<typeof verifyNostrProviderAnnouncement>[3];
 
@@ -153,6 +154,8 @@ export interface DirectoryEntry {
   readonly evmAssets: AnnouncementCandidate["evmAssets"];
   readonly relayUrls: readonly string[];
   readonly expiresAt: number;
+  /** RS-005 announced funding depth; null when not announced. */
+  readonly fundingConfirmations: number | null;
 }
 
 export const DIRECTORY_PROFILES: readonly AnnouncementProfile[] = ["btc-to-ln/v1", "ln-to-btc/v1", "erc20-to-ln/v1", "ln-to-erc20/v1"];
@@ -180,7 +183,8 @@ export function directoryFromObservations(observations: readonly RelayObservatio
       entries.set(key, previous
         ? { ...previous, profiles: [...previous.profiles, profile], relayUrls: [...new Set([...previous.relayUrls, ...relayUrls])] }
         : { identity: announcement.identityXOnlyKey, slot: announcement.slot, profiles: [profile], amountBands: announcement.amountBands,
-          indicativeFeePolicy: announcement.indicativeFeePolicy, evmAssets: announcement.evmAssets, relayUrls, expiresAt: announcement.expiresAt });
+          indicativeFeePolicy: announcement.indicativeFeePolicy, evmAssets: announcement.evmAssets, relayUrls, expiresAt: announcement.expiresAt,
+          fundingConfirmations: announcement.fundingConfirmations });
     }
   }
   return { entries: [...entries.values()].sort((a, b) => `${a.identity}:${a.slot}`.localeCompare(`${b.identity}:${b.slot}`)), warnings: [...warnings] };
@@ -195,13 +199,12 @@ export interface LocatedQuote<P extends { dispose(): void } = PreparedSwap> {
 
 const estimatedFee = (provider: LocatedProvider, amount: bigint): bigint => indicativeFee(provider.announcement.indicativeFeePolicy, amount);
 
-export function eligibleProviders(providers: readonly LocatedProvider[], amount: bigint): readonly LocatedProvider[] {
-  return providers.filter(({ announcement }) => withinBands(announcement.amountBands, amount))
-    .sort((a, b) => {
-      const difference = estimatedFee(a, amount) - estimatedFee(b, amount);
-      return difference < 0n ? -1 : difference > 0n ? 1 :
-        `${a.announcement.identityXOnlyKey}:${a.announcement.slot}`.localeCompare(`${b.announcement.identityXOnlyKey}:${b.announcement.slot}`);
-    });
+/** Providers serving `amount`, best first: only the first MAX_QUOTE_PROVIDERS are asked to quote. */
+export function eligibleProviders(providers: readonly LocatedProvider[], amount: bigint, mode: SortMode = "time"): readonly LocatedProvider[] {
+  return rank(providers.filter(({ announcement }) => withinBands(announcement.amountBands, amount)), (provider) => ({
+    depth: provider.announcement.fundingConfirmations, price: estimatedFee(provider, amount),
+    tie: `${provider.announcement.identityXOnlyKey}:${provider.announcement.slot}`,
+  }), mode);
 }
 
 const shortIdentity = (provider: LocatedProvider): string => `${provider.announcement.identityXOnlyKey.slice(0, 12)}…`;
@@ -224,51 +227,48 @@ export function ineligibilityReason(providers: readonly { identity: string; amou
 export const providerLimits = (providers: readonly LocatedProvider[]): { identity: string; amountBands: AmountBands }[] =>
   providers.map(({ announcement }) => ({ identity: announcement.identityXOnlyKey, amountBands: announcement.amountBands }));
 
-/** The lowest announced fee for `amount` among directory entries serving `profile` (and `pinned`, if set). */
-export type DirectoryEstimate = { readonly identity: string; readonly feeSat: bigint } | { readonly reason: string };
+/** The announced fee for `amount` of the entry serving `profile` (and `pinned`, if set) that ranks first. */
+export type DirectoryEstimate =
+  | { readonly identity: string; readonly feeSat: bigint; readonly fundingConfirmations: number | null }
+  | { readonly reason: string };
 
 /** Entries whose announcement is still valid at `now` (Unix seconds); an expired offer is not an offer. */
 export const unexpired = (entries: readonly DirectoryEntry[], now = Math.floor(Date.now() / 1000)): readonly DirectoryEntry[] =>
   entries.filter((entry) => entry.expiresAt > now);
 
 export function estimateFromDirectory(entries: readonly DirectoryEntry[], profile: AnnouncementProfile, amount: bigint, pinned = "",
-  now = Math.floor(Date.now() / 1000)): DirectoryEstimate {
+  now = Math.floor(Date.now() / 1000), mode: SortMode = "time"): DirectoryEstimate {
   const serving = unexpired(entries, now).filter((entry) => entry.profiles.includes(profile) && (!pinned || entry.identity === pinned));
-  const eligible = serving.filter((entry) => withinBands(entry.amountBands, amount))
-    .map((entry) => ({ identity: entry.identity, feeSat: indicativeFee(entry.indicativeFeePolicy, amount) }))
-    .sort((a, b) => a.feeSat < b.feeSat ? -1 : a.feeSat > b.feeSat ? 1 : a.identity.localeCompare(b.identity));
+  const eligible = rank(serving.filter((entry) => withinBands(entry.amountBands, amount))
+    .map((entry) => ({ identity: entry.identity, feeSat: indicativeFee(entry.indicativeFeePolicy, amount), fundingConfirmations: entry.fundingConfirmations })),
+  (entry) => ({ depth: entry.fundingConfirmations, price: entry.feeSat, tie: entry.identity }), mode);
   if (eligible.length > 0) return eligible[0]!;
   return { reason: pinned && serving.length === 0 ? "The chosen provider does not announce this swap direction." : ineligibilityReason(serving, amount) };
 }
 
-export function rankQuotes(quotes: readonly LocatedQuote[]): readonly LocatedQuote[] {
-  return [...quotes].sort((a, b) => {
-    const left = a.prepared.quote, right = b.prepared.quote;
-    const difference = left.contractAmountSat - right.contractAmountSat;
-    return difference < 0n ? -1 : difference > 0n ? 1 :
-      `${left.providerIdentity}:${left.providerSlot}`.localeCompare(`${right.providerIdentity}:${right.providerSlot}`);
-  });
+export function rankQuotes(quotes: readonly LocatedQuote[], mode: SortMode = "time"): readonly LocatedQuote[] {
+  return rank(quotes, forwardRank, mode);
 }
 
 /** Each preparation owns its own inbox subscription and retains its exact offer. */
 export async function quoteProviders(
-  providers: readonly LocatedProvider[], request: Omit<SwapRequest, "identity">, signal?: AbortSignal,
+  providers: readonly LocatedProvider[], request: Omit<SwapRequest, "identity">, signal?: AbortSignal, mode: SortMode = "time",
 ): Promise<QuoteFanOut<PreparedSwap>> {
   const result = await fanOutQuotes(providers, (relay, provider) =>
     prepareSwap(relay, { ...request, identity: provider.announcement.identityXOnlyKey }, () => {}, {
       announcement: provider.rawAnnouncement, timeouts: { replyMs: 15_000, settleMs: 600_000 },
     }), signal);
-  return { ...result, quotes: rankQuotes(result.quotes) };
+  return { ...result, quotes: rankQuotes(result.quotes, mode) };
 }
 
 /** LN to BTC: the lowest hold invoice for the same payout wins. Quotes are not payable yet. */
 export async function quoteReverseProviders(
-  providers: readonly LocatedProvider[], request: Omit<ReverseSwapRequest, "identity">, signal?: AbortSignal,
+  providers: readonly LocatedProvider[], request: Omit<ReverseSwapRequest, "identity">, signal?: AbortSignal, mode: SortMode = "time",
 ): Promise<QuoteFanOut<PreparedReverseQuote>> {
   const result = await fanOutQuotes(providers, (relay, provider) =>
     prepareReverseQuote(relay, { ...request, identity: provider.announcement.identityXOnlyKey },
       { announcement: provider.rawAnnouncement }), signal);
-  return { ...result, quotes: rankReverseQuotes(result.quotes) };
+  return { ...result, quotes: rankReverseQuotes(result.quotes, mode) };
 }
 
 /** Discovery selects counterparties, never the trusted asset or its units. */
@@ -281,40 +281,26 @@ export function selectEvmAsset(
 
 /** ERC20 to LN: the smallest lock for the same invoice wins. */
 export async function quoteErc20Providers(
-  providers: readonly LocatedProvider[], request: Omit<Erc20SwapRequest, "identity">, signal?: AbortSignal,
+  providers: readonly LocatedProvider[], request: Omit<Erc20SwapRequest, "identity">, signal?: AbortSignal, mode: SortMode = "time",
 ): Promise<QuoteFanOut<PreparedErc20Swap>> {
   const result = await fanOutQuotes(providers, (relay, provider) =>
     prepareErc20Swap(relay, { ...request, identity: provider.announcement.identityXOnlyKey }, () => {}, {
       announcement: provider.rawAnnouncement, timeouts: { replyMs: 15_000, settleMs: 900_000 },
     }), signal);
-  const quotes = [...result.quotes].sort((a, b) => {
-    const left = a.prepared.quote, right = b.prepared.quote;
-    const difference = left.lockAmountTokenBase - right.lockAmountTokenBase;
-    return difference < 0n ? -1 : difference > 0n ? 1 :
-      `${left.providerIdentity}:${left.providerSlot}`.localeCompare(`${right.providerIdentity}:${right.providerSlot}`);
-  });
-  return { ...result, quotes };
+  return { ...result, quotes: rank(result.quotes, erc20Rank, mode) };
 }
 
 /** Compare Lightning costs for the same exact ERC20 payout without creating hold invoices. */
 export async function quoteLnErc20Providers(
-  providers: readonly LocatedProvider[], request: Omit<LnErc20Request, "identity">, signal?: AbortSignal,
+  providers: readonly LocatedProvider[], request: Omit<LnErc20Request, "identity">, signal?: AbortSignal, mode: SortMode = "time",
 ): Promise<QuoteFanOut<PreparedLnErc20Quote>> {
   const result = await fanOutQuotes(providers, (relay, provider) => prepareLnErc20Quote(relay,
     { ...request, identity: provider.announcement.identityXOnlyKey }, { announcement: provider.rawAnnouncement, replyMs: 15_000 }), signal);
-  return { ...result, quotes: [...result.quotes].sort((a, b) => {
-    const left = BigInt(a.prepared.quote.offer.economics.hold_invoice_sat), right = BigInt(b.prepared.quote.offer.economics.hold_invoice_sat);
-    return left < right ? -1 : left > right ? 1 : a.prepared.quote.providerIdentity.localeCompare(b.prepared.quote.providerIdentity);
-  }) };
+  return { ...result, quotes: rank(result.quotes, lnErc20Rank, mode) };
 }
 
-export function rankReverseQuotes(quotes: readonly LocatedQuote<PreparedReverseQuote>[]): readonly LocatedQuote<PreparedReverseQuote>[] {
-  return [...quotes].sort((a, b) => {
-    const left = a.prepared.quote, right = b.prepared.quote;
-    const difference = left.holdInvoiceSat - right.holdInvoiceSat;
-    return difference < 0n ? -1 : difference > 0n ? 1 :
-      `${left.providerIdentity}:${left.providerSlot}`.localeCompare(`${right.providerIdentity}:${right.providerSlot}`);
-  });
+export function rankReverseQuotes(quotes: readonly LocatedQuote<PreparedReverseQuote>[], mode: SortMode = "time"): readonly LocatedQuote<PreparedReverseQuote>[] {
+  return rank(quotes, reverseRank, mode);
 }
 
 export interface QuoteFanOut<P extends { dispose(): void }> {
