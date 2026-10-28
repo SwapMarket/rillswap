@@ -118,6 +118,17 @@ def _reply(fixture: NativeSdk, mode: str) -> Envelope:
     )
 
 
+def _tip_once_paid(fixture: NativeSdk, height: int) -> None:
+    """Negotiate at the fixture tip; the chain reaches ``height`` while the invoice is held."""
+    pay = fixture.payer.pay.side_effect
+
+    def paid(invoice: str, **bounds: object) -> str:
+        fixture.wallet.tip_height.return_value = height
+        return pay(invoice, **bounds)
+
+    fixture.payer.pay.side_effect = paid
+
+
 def _run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -131,9 +142,10 @@ def _run(
         # Snapshots are stamped by the real wall clock; keep the claimant on it.
         monkeypatch.setattr(reverse.time, "time", wall_clock)
         if mode == "cutoff":
-            fixture.wallet.tip_height.return_value = (
+            _tip_once_paid(
+                fixture,
                 fixture.terms.refund_lock_height
-                - fixture.terms.timing_policy.claim_confirmation_blocks
+                - fixture.terms.timing_policy.claim_confirmation_blocks,
             )
 
         async def receive(wanted: object, *, timeout: float | None = None) -> Envelope:  # noqa: ASYNC109
@@ -237,10 +249,11 @@ def test_tip_past_cooperative_deadline_never_discloses(
     async def exercise(crypto: Context) -> None:
         fixture = NativeSdk(crypto, tmp_path, monkeypatch)
         _featured(fixture, monkeypatch)
-        fixture.wallet.tip_height.return_value = (
+        _tip_once_paid(
+            fixture,
             fixture.terms.refund_lock_height
             - fixture.terms.timing_policy.claim_confirmation_blocks
-            + 1
+            + 1,
         )
 
         def write(candidate: bytes, previous: bytes | None) -> bytes:
