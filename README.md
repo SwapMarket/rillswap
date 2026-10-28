@@ -6,9 +6,20 @@ Your keys stay with you.**
 RillSwap is a provider-neutral atomic swap protocol and reference
 implementation. You swap on-chain Bitcoin or ERC20 stablecoins for Lightning
 payments (and back) with any provider that announces itself on Nostr. Your
-client verifies every contract, transaction and signature locally, and every
-swap can be recovered with your own recovery file, without the provider, the
-website or any RillSwap service.
+client verifies every contract, transaction and signature locally, and keeps
+an encrypted recovery file so a failed swap can be refunded or claimed
+without the provider, the website or any RillSwap service.
+
+<table>
+  <tr>
+    <td width="50%"><img src="rill-docs/images/swap-quote.png" alt="RillSwap swap app quoting a Bitcoin to Lightning swap"></td>
+    <td width="50%"><img src="rill-docs/images/checkout-methods.png" alt="RillPay checkout dialog offering Lightning, Bitcoin, USDC, USDT and Monero"></td>
+  </tr>
+  <tr>
+    <td align="center">Swap app: pay a Lightning invoice with on-chain BTC</td>
+    <td align="center">RillPay merchant checkout (local demo shop, test assets)</td>
+  </tr>
+</table>
 
 ## Features
 

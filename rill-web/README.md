@@ -7,6 +7,19 @@ signatures locally, and keeps encrypted recovery records in the browser.
 
 Supports mainnet, signet, testnet4, and regtest.
 
+<table>
+  <tr>
+    <td width="33%"><img src="../rill-docs/images/swap-quote.png" alt="Quote for a Bitcoin to Lightning swap"></td>
+    <td width="33%"><img src="../rill-docs/images/swap-funding.png" alt="Deposit address and QR code for funding the swap"></td>
+    <td width="33%"><img src="../rill-docs/images/swap-paid.png" alt="Paid invoice with the preimage as proof of payment"></td>
+  </tr>
+  <tr>
+    <td align="center">Paste an invoice and get a verified quote</td>
+    <td align="center">Fund the Taproot contract from any wallet</td>
+    <td align="center">The provider pays; the preimage proves it</td>
+  </tr>
+</table>
+
 `swap.html` is the swap app and `index.html` a disconnected diagnostic
 preview. In the GitHub Pages build, the swap app is the landing page and the
 preview is `diagnostic.html`.

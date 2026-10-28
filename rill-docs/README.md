@@ -12,6 +12,7 @@ definitions for RillSwap, plus the design document and release test matrix.
 | `networks/` | Versioned network identity definitions |
 | [`compatibility/TEST-MATRIX.md`](compatibility/TEST-MATRIX.md) | End-to-end and security acceptance matrix |
 | `proposals/` | BIP and NIP drafts (unassigned, not submitted) |
+| `images/` | Screenshots used by the READMEs |
 | [`SOURCES.md`](SOURCES.md) | External standards referenced by the specifications |
 
 Interoperability is defined by the versioned `specs/`, `schemas/` and

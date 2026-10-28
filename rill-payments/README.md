@@ -34,6 +34,17 @@ http://127.0.0.1:5273/swap.html. See [DEVELOPMENT.md](../DEVELOPMENT.md) for
 the payment walkthrough. The stack uses disposable test funds and public
 development credentials.
 
+<table>
+  <tr>
+    <td width="50%"><img src="../rill-docs/images/checkout-methods.png" alt="RillPay checkout dialog listing payment methods with fees and confirmation times"></td>
+    <td width="50%"><img src="../rill-docs/images/checkout-paid.png" alt="Paid demo order with a verified merchant acceptance signature"></td>
+  </tr>
+  <tr>
+    <td align="center"><code>mountRillPay</code> in the demo shop</td>
+    <td align="center">Paid order with its signed merchant acceptance</td>
+  </tr>
+</table>
+
 For a browser integration, run `bun run build:rillpay` and serve
 `dist/rillpay.js` with your checkout page. This presentation-only example
 shows an unavailable method until your merchant backend is connected:
