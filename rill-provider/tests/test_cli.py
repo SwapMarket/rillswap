@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import signal
 import sqlite3
@@ -308,3 +309,19 @@ def test_signet_example_config_is_servable_as_documented() -> None:
     for url in config.relay_urls:
         RelayConnection(url, proxy=proxy)
     assert config.service_policy().profiles == (config.handshake.profile,)
+
+
+@pytest.mark.parametrize(("level", "library_level"), [("INFO", "WARNING"), ("DEBUG", "NOTSET")])
+def test_client_libraries_only_log_requests_at_debug(level: str, library_level: str) -> None:
+    """httpx logs every Core RPC at INFO, which buried the provider's own lines."""
+    loggers = [logging.getLogger(name) for name in cli.CHATTY_LIBRARY_LOGGERS]
+    saved = [logger.level for logger in loggers]
+    try:
+        for logger in loggers:
+            logger.setLevel(logging.NOTSET)
+        cli._configure_logging(level)  # noqa: SLF001 - the entrypoint's logging setup
+        assert "httpx" in cli.CHATTY_LIBRARY_LOGGERS
+        assert {logging.getLevelName(logger.level) for logger in loggers} == {library_level}
+    finally:
+        for logger, previous in zip(loggers, saved, strict=True):
+            logger.setLevel(previous)

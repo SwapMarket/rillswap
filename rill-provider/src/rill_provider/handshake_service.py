@@ -87,6 +87,15 @@ CLAIM_FEE_WAIT_SECONDS = 2.0  # likewise for the per-tick claim fee sample
 LIQUIDITY_WAIT_SECONDS = 30.0  # once per announcement; the RPCs carry their own timeouts
 FUNDING_BALANCE_WAIT_SECONDS = 5.0  # per LN to BTC firm quote: refuse fast, never hang
 _RELAY_CONNECTED = b""  # in-band wake: tick now and re-announce
+# Relay dispositions that recur without telling an operator anything: history
+# replays after every resubscribe, flood filtering, and paused admission.
+_ROUTINE_DISPOSITIONS = frozenset({"duplicate", "insufficient-work", "unavailable", "deferred"})
+
+
+def _disposition_level(disposition: str) -> int:
+    """Log routine relay dispositions at DEBUG, the rest at INFO."""
+    routine = disposition in _ROUTINE_DISPOSITIONS or disposition.endswith("-replay")
+    return logging.DEBUG if routine else logging.INFO
 
 
 class Relay(Protocol):
@@ -904,7 +913,8 @@ class HandshakeService:
             return
         state.deferred = [frame for frame in state.deferred if frame[0] != session_id]
         for _, _, _, event in held:
-            LOG.info("deferred relay event: %s", await self.handle(event, relays))
+            disposition = await self.handle(event, relays)
+            LOG.log(_disposition_level(disposition), "deferred relay event: %s", disposition)
 
     async def handle(self, event: bytes, relays: Sequence[Relay]) -> str:  # noqa: PLR0911, PLR0912, PLR0915 - one disposition per outcome
         """Route one untrusted relay event; return a content-free disposition."""
@@ -1633,7 +1643,7 @@ class HandshakeService:
                         self._state.republish = True  # a new relay lacks our announcement
                         break
                     disposition = await self.handle(event, list(connected.values()))
-                    LOG.info("relay event: %s", disposition)
+                    LOG.log(_disposition_level(disposition), "relay event: %s", disposition)
         finally:
             self._readiness_closed = True  # fence operations suspended before cleanup awaits
             for task in [*tasks, *broadcasts, *(() if deadline_task is None else (deadline_task,))]:

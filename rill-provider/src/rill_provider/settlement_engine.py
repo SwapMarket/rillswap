@@ -1263,7 +1263,8 @@ class SettlementEngine:
         try:  # harmless if an older attempt is mined: Core rejects the conflict
             await asyncio.to_thread(self._chain.broadcast, latest.raw, latest.txid)
         except Exception:  # noqa: BLE001 - e.g. replacement policy; the next bump retries
-            LOG.info("claim broadcast not accepted; checking confirmations")
+            # Every tick rebroadcasts, and a mined claim is always refused.
+            LOG.debug("claim broadcast not accepted; checking confirmations")
         for attempt in reversed(attempts):
             try:
                 depth = await asyncio.to_thread(self._chain.confirmations, attempt.txid)
@@ -1348,7 +1349,7 @@ class SettlementEngine:
         try:
             await asyncio.to_thread(self._chain.broadcast, selected.raw, selected.txid)
         except Exception:  # noqa: BLE001 - recorded attempt is retried on the next tick
-            LOG.info("cooperative claim not accepted yet")
+            LOG.debug("cooperative claim not accepted yet")  # rebroadcast every tick, as above
         try:
             depth = await asyncio.to_thread(self._chain.confirmations, selected.txid)
         except CoreTransactionUnknownError:

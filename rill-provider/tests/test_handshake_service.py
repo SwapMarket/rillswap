@@ -6,6 +6,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import logging
 import os
 from dataclasses import replace
 from types import SimpleNamespace
@@ -19,7 +20,7 @@ from rill_core.wire.messages import Envelope, HandshakeAccept, HandshakeInit
 from rill_core.wire.quotes import QuoteOffer
 from test_live_session_store import Harness, _bytes
 
-from rill_provider.handshake_service import HandshakeService, ServicePolicy
+from rill_provider.handshake_service import HandshakeService, ServicePolicy, _disposition_level
 from rill_provider.live_session_store import (
     LiveSessionStore,
     LiveSessionStoreError,
@@ -982,3 +983,23 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: P
             "SELECT payment_hash FROM payment_hashes"
         ).fetchall()
         assert reserved == [(BINDING.payment_hash,)]
+
+
+@pytest.mark.parametrize(
+    ("disposition", "level"),
+    [
+        ("duplicate", "DEBUG"),
+        ("insufficient-work", "DEBUG"),
+        ("unavailable", "DEBUG"),
+        ("deferred", "DEBUG"),
+        ("request-replay", "DEBUG"),
+        ("init-replay", "DEBUG"),
+        ("request-answered", "INFO"),
+        ("init-accepted", "INFO"),
+        ("confirm-admitted", "INFO"),
+        ("refused", "INFO"),
+    ],
+)
+def test_routine_relay_dispositions_log_at_debug(disposition: str, level: str) -> None:
+    """Relay history replays after every resubscribe must not flood INFO."""
+    assert logging.getLevelName(_disposition_level(disposition)) == level

@@ -56,6 +56,9 @@ if TYPE_CHECKING:
     from rill_crypto import Context
 
 REFUSED = 2
+# Client libraries that log every request at INFO (httpx: each Core RPC call).
+# They only speak up at WARNING unless --log-level DEBUG asks for everything.
+CHATTY_LIBRARY_LOGGERS = ("httpx", "httpcore", "urllib3", "web3")
 
 
 def _context(library: Path) -> Context:
@@ -482,10 +485,17 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _configure_logging(level: str) -> None:
+    logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
+    if level != "DEBUG":
+        for name in CHATTY_LIBRARY_LOGGERS:
+            logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one operator command; return the process exit status."""
     args = _parser().parse_args(argv)
-    logging.basicConfig(level=args.log_level, format="%(levelname)s %(name)s: %(message)s")
+    _configure_logging(args.log_level)
     try:
         if args.command == "provision-identity":
             return _provision_identity(args)
