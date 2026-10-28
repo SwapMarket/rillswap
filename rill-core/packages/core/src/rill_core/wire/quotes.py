@@ -158,7 +158,7 @@ class QuoteOffer(StrictModel):
     kind: Literal["btc-to-ln"]
     indicative: Literal[True]
     economics: BtcToLnEconomics
-    funding_confirmations: PositiveCount
+    funding_confirmations: ExactInteger  # 0: pays once the funding is in the mempool
     settlement_confirmations: PositiveCount
     refund_resolution_confirmations: PositiveCount
     reference_height: int = Field(strict=True, gt=0, lt=500_000_000)

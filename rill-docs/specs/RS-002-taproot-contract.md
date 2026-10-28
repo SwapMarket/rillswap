@@ -110,7 +110,10 @@ script, reduces only the output by an authorized fee increase, remains within
 the fee cap and dust rule, and receives a fresh signature.
 
 `funding_confirmations` is the minimum best-chain depth before the provider may
-pay in BTC to LN or the user may sign/reveal in LN to BTC.
+pay in BTC to LN or the user may sign/reveal in LN to BTC. In BTC to LN it may
+be 0: the provider then pays once the exact unspent contract output is in its
+own node's mempool, accepting that the client can still double-spend the
+unconfirmed funding (RS-003).
 `settlement_confirmations` is the minimum claim depth before terminal chain
 completion. `refund_resolution_confirmations` is the minimum refund depth
 before terminal refund completion in either direction and, for LN to BTC,

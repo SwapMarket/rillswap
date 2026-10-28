@@ -179,6 +179,16 @@ def test_contract_terms_accept_both_economic_directions(profile_id: str) -> None
     assert terms.profile_id == profile_id
 
 
+def test_only_btc_to_ln_terms_may_pay_at_zero_funding_confirmations() -> None:
+    forward = terms_data("btc-to-ln/v1") | {"funding_confirmations": 0}
+    assert ContractTerms.model_validate(forward).funding_confirmations == 0
+    reverse = terms_data("ln-to-btc/v1") | {"funding_confirmations": 0}
+    with pytest.raises(ValidationError, match="funding_confirmations must be positive"):
+        ContractTerms.model_validate(reverse)
+    with pytest.raises(ValidationError):
+        ContractTerms.model_validate(terms_data("btc-to-ln/v1") | {"funding_confirmations": -1})
+
+
 @pytest.mark.parametrize(
     ("profile_id", "mutate"),
     [

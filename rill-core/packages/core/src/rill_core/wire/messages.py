@@ -188,7 +188,8 @@ class ContractTerms(StrictModel):
     invoice_binding: InvoiceBinding
     economics: BtcToLnEconomics | LnToBtcEconomics = Field(discriminator="kind")
     refund_lock_height: int = Field(strict=True, gt=0, lt=500_000_000)
-    funding_confirmations: PositiveCount
+    # 0 (BTC to LN only): the provider may pay once the funding is in its mempool.
+    funding_confirmations: ExactInteger
     settlement_confirmations: PositiveCount
     refund_resolution_confirmations: PositiveCount
     max_funding_fee_sat: str
@@ -278,6 +279,10 @@ class ContractTerms(StrictModel):
             )
         if (self.claimant, self.refund_party) != ("client", "provider"):
             raise ValueError("LN to BTC roles are reversed")
+        if self.funding_confirmations < 1:
+            # The client reveals the preimage on this depth; zero would let the
+            # provider double-spend its own unconfirmed funding.
+            raise ValueError("LN to BTC funding_confirmations must be positive")
         hold = validate_decimal_sats(
             self.economics.hold_invoice_sat,
             field="hold_invoice_sat",

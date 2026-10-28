@@ -155,7 +155,10 @@ contract hash.
   checks it statically against the binding and terms. It records the binding
   and answers `ack`. It then independently retrieves the transaction from its
   own node and waits for `funding_confirmations` of the exact unspent contract
-  output before any payment.
+  output before any payment. With `funding_confirmations` 0 it pays once that
+  output is unspent in its node's mempool or chain; the client could still
+  double-spend the unconfirmed funding, so this risk is the provider's alone
+  and the client's protections are unchanged.
 - `observation` (provider, unsolicited): `payment_settled` carries the
   preimage the client can check against the payment hash. `payment_failed`
   says the provider will not pay, so the client waits for refund eligibility.
@@ -185,7 +188,8 @@ never trigger a replacement.
 Both parties resolve a contract output that is spent by the other branch only
 on affirmative active-chain evidence, never on the absence of a lookup result.
 The provider treats its claim as lost only when the funding is at
-`funding_confirmations` on the active chain, the tip is past
+`funding_confirmations`, and at least one confirmation, on the active chain,
+the tip is past
 `refund_lock_height`, no recorded attempt is mined, and the output has been
 absent for `refund_resolution_confirmations` blocks built on a block hash that
 is still on the active chain. The client treats its refund as superseded the

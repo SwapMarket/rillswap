@@ -318,7 +318,7 @@
         "kind": { "const": "btc-to-ln" },
         "indicative": { "const": true },
         "economics": { "$ref": "contract-terms-v1.schema.json#/$defs/btcToLnEconomics" },
-        "funding_confirmations": { "$ref": "common-v1.schema.json#/$defs/positiveCount" },
+        "funding_confirmations": { "$ref": "common-v1.schema.json#/$defs/exactInteger" },
         "settlement_confirmations": { "$ref": "common-v1.schema.json#/$defs/positiveCount" },
         "refund_resolution_confirmations": { "$ref": "common-v1.schema.json#/$defs/positiveCount" },
         "reference_height": { "$ref": "#/$defs/blockHeight" },

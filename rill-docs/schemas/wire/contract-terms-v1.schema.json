@@ -78,7 +78,8 @@
       "maximum": 499999999
     },
     "funding_confirmations": {
-      "$ref": "common-v1.schema.json#/$defs/positiveCount"
+      "description": "0 (BTC to LN only) lets the provider pay once the funding transaction is in its mempool.",
+      "$ref": "common-v1.schema.json#/$defs/exactInteger"
     },
     "settlement_confirmations": {
       "$ref": "common-v1.schema.json#/$defs/positiveCount"
@@ -159,6 +160,9 @@
           },
           "economics": {
             "$ref": "#/$defs/lnToBtcEconomics"
+          },
+          "funding_confirmations": {
+            "$ref": "common-v1.schema.json#/$defs/positiveCount"
           },
           "timing_policy": {
             "$ref": "#/$defs/lnToBtcTiming"

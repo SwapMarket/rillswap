@@ -198,9 +198,11 @@ height `h`, the client MUST prove
 `h + claim_confirmation_blocks < R`. Actual accepted HTLC expiries MUST be no
 earlier than the signed minimum.
 
-`funding_confirmations`, `settlement_confirmations`, and
-`refund_resolution_confirmations` are exact JSON integers of at least one.
-Confirmed-only funding therefore cannot be negotiated down to zero.
+`settlement_confirmations` and `refund_resolution_confirmations` are exact
+JSON integers of at least one. `funding_confirmations` is an exact JSON
+integer of at least one for LN to BTC, where the client reveals the preimage
+on that depth, and of at least zero for BTC to LN, where only the paying
+provider bears the funding risk (RS-003).
 
 `contract_hash` is `TaggedHash("RillSwap/contract/v1", JCS(contract_terms))`.
 `ProviderTermsV1` contains exactly `contract_hash`, `contract_terms`, and
