@@ -209,16 +209,25 @@ class CooperativeFeePolicy:
     estimate_sat_kvb: int | None
     estimate_blocks: int
 
-    def fee_floor_sat(self, *, vsize: int, configured_floor_sat: int) -> int:
-        """Integer ceiling for a caller's independently verified final vsize."""
+    def fee_floor_sat(
+        self, *, vsize: int, configured_floor_sat: int, pays_signed_reserve: bool = False
+    ) -> int:
+        """Integer ceiling for a caller's independently verified final vsize.
+
+        ``pays_signed_reserve``: the claim pays exactly the LN to BTC claim fee
+        reserve, which was priced for the next block when quoted and leaves the
+        destination exactly the nominal payout, so it only has to relay.
+        """
         if (
             type(vsize) is not int
             or not 0 < vsize <= MAX_TRANSACTION_HEX_BYTES
             or type(configured_floor_sat) is not int
             or not 0 < configured_floor_sat <= MAX_SATS
+            or type(pays_signed_reserve) is not bool
         ):
             raise ValueError("cooperative fee inputs invalid")
-        rate = max(self.min_relay_sat_kvb, self.mempool_min_sat_kvb, self.estimate_sat_kvb or 0)
+        estimate = 0 if pays_signed_reserve else self.estimate_sat_kvb or 0
+        rate = max(self.min_relay_sat_kvb, self.mempool_min_sat_kvb, estimate)
         return max(configured_floor_sat, (rate * vsize + 999) // 1000)
 
 

@@ -168,6 +168,28 @@ def test_fee_floor_rounds_up_exactly(rate: int, vsize: int, expected: int) -> No
     assert policy.fee_floor_sat(vsize=vsize, configured_floor_sat=300) == 300
 
 
+@pytest.mark.parametrize(
+    ("relay", "mempool", "expected"), [(100, 100, 10), (10_000, 100, 990), (100, 10_000, 990)]
+)
+def test_a_claim_paying_the_signed_reserve_only_has_to_relay(
+    relay: int, mempool: int, expected: int
+) -> None:
+    # 99 vB claim: the estimate of 10 sat/vB would demand 990 sats otherwise.
+    policy = CooperativeFeePolicy(_network("signet"), "aa" * 32, 105, 6, relay, mempool, 10_000, 2)
+    assert policy.fee_floor_sat(vsize=99, configured_floor_sat=1) == 990
+    assert (
+        policy.fee_floor_sat(vsize=99, configured_floor_sat=1, pays_signed_reserve=True) == expected
+    )
+    assert policy.fee_floor_sat(vsize=99, configured_floor_sat=999, pays_signed_reserve=True) == 999
+
+
+@pytest.mark.parametrize("flag", [1, None, "yes"])
+def test_fee_floor_rejects_a_non_boolean_reserve_flag(flag: object) -> None:
+    policy = CooperativeFeePolicy(_network("signet"), "aa" * 32, 105, 6, 0, 0, 1000, 6)
+    with pytest.raises(ValueError, match="fee inputs invalid"):
+        policy.fee_floor_sat(vsize=99, configured_floor_sat=1, pays_signed_reserve=flag)  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize("vsize", [True, 0, -1, 1.5])
 def test_fee_floor_rejects_invalid_vsize(vsize: object) -> None:
     policy = CooperativeFeePolicy(_network("signet"), "aa" * 32, 105, 6, 0, 0, 1000, 6)

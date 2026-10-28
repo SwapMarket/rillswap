@@ -90,6 +90,7 @@ from rill_core.wire.messages import (
     HandshakeAcceptPayload,
     HandshakeInit,
     InvoiceBinding,
+    LnToBtcEconomics,
     require_supported_contract_features,
 )
 from rill_core.wire.quotes import TermsOfferPayload
@@ -4000,9 +4001,14 @@ class LiveSessionStore:
                 raise ValueError("reverse paid evidence differs")  # noqa: TRY301
             plan = final_context.plan
             vsize = (4 * len(plan.base_transaction) + 68 + 3) // 4
-            if plan.fee_sat < policy.fee_floor_sat(
-                vsize=vsize, configured_floor_sat=configured_floor_sat
-            ):
+            economics = terms.economics
+            floor = policy.fee_floor_sat(
+                vsize=vsize,
+                configured_floor_sat=configured_floor_sat,
+                pays_signed_reserve=isinstance(economics, LnToBtcEconomics)
+                and plan.fee_sat == int(economics.claim_fee_reserve_sat),
+            )
+            if plan.fee_sat < floor:
                 raise ValueError("reverse cooperative fee below floor")  # noqa: TRY301
             self.reverse_operations.check(operation)
             original_window.check(tip_height=core.tip_height)

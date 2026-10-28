@@ -7,7 +7,7 @@ import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
 
 import pytest
@@ -538,6 +538,31 @@ def test_unavailable_estimate_needs_explicit_regtest_exemption(
                 await engine._preflight_paid_proposal(reserved.document, configured_floor_sat=1)
 
     asyncio.run(exercise())
+
+
+def test_a_fee_other_than_the_signed_reserve_keeps_the_estimate_floor(
+    reserved: ReservationCase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fixture's claim pays 300 against a 500 sat signed reserve.
+    flags: list[bool] = []
+    original = CooperativeFeePolicy.fee_floor_sat
+
+    def recorded(self: CooperativeFeePolicy, **kwargs: Any) -> int:  # noqa: ANN401
+        flags.append(kwargs["pays_signed_reserve"])
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(CooperativeFeePolicy, "fee_floor_sat", recorded)
+
+    async def exercise() -> None:
+        await _debt(reserved)
+        await _repay(reserved)
+        chain, hold = _backends(reserved)
+        engine = ReverseSettlement(reserved.store, chain, hold, reserved.origin.crypto.crypto)
+        await engine._preflight_paid_proposal(reserved.document, configured_floor_sat=1)
+
+    asyncio.run(exercise())
+    assert flags
+    assert not any(flags)
 
 
 def test_actual_executor_queue_delay_counts_against_original_complete_evidence_interval(
