@@ -18,30 +18,43 @@ interface ClaimContext {
   readonly journal: BrowserReverseJournal;
   readonly network: { readonly name: NetworkName; readonly genesis_hash: string };
   readonly assertCurrent: () => void;
+  /** Funding confirmations this claim waits for, the client's choice (0: mempool). Absent: the signed depth. */
+  readonly claimDepth?: number;
 }
 const require = (ok: boolean): void => { if (!ok) throw new Error("Reverse claim refused. Preserve backups; unknown submissions are never retried."); };
+
+/**
+ * The depth a claim waits for: a lower client choice, never more than the signed funding depth.
+ * Below it the claim reveals the preimage while the provider can still double-spend its funding.
+ */
+export function effectiveClaimDepth(signed: number, requested?: number): number {
+  require(Number.isSafeInteger(signed) && signed >= 1 && (requested === undefined || (Number.isSafeInteger(requested) && requested >= 0)));
+  return requested === undefined ? signed : Math.min(requested, signed);
+}
 
 export async function observeJournaledReverseFunding(context: ClaimContext, api: string) {
   context.assertCurrent();
   const report = inspectReverseRecoveryPlaintext(context.plaintext, context.network), binding = report.fundingHistory.at(-1);
   require(binding !== undefined);
+  const depth = effectiveClaimDepth(report.minFundingDepth, context.claimDepth);
   const observation = await observeReverseRecoveryFunding(context.plaintext, context.network,
-    { fundingAttemptId: binding!.funding_attempt_id, bindingRevision: binding!.binding_revision }, validateMempoolApi(api, context.network.name));
+    { fundingAttemptId: binding!.funding_attempt_id, bindingRevision: binding!.binding_revision }, validateMempoolApi(api, context.network.name),
+    { allowUnconfirmed: depth === 0 });
   context.assertCurrent();
-  return { report, binding: binding!, observation };
+  return { report, binding: binding!, observation, depth };
 }
 
 export async function prepareJournaledReverseClaim(context: ClaimContext, api: string, feeSat: bigint,
   encrypt: (plaintext: Uint8Array) => Promise<Uint8Array>, beforeSign: () => void) {
   context.assertCurrent(); require(context.record.stage === "funded");
-  const { report, binding, observation } = await observeJournaledReverseFunding(context, api);
-  require(observation.confirmations >= report.minFundingDepth && observation.tipHeight + report.claimConfirmationBlocks < report.refundLockHeight + 1);
+  const { report, binding, observation, depth } = await observeJournaledReverseFunding(context, api);
+  require(observation.confirmations >= depth && observation.tipHeight + report.claimConfirmationBlocks < report.refundLockHeight + 1);
   context.assertCurrent();
   beforeSign();
   const claim = constructSelectedReverseClaim(context.plaintext, context.network, {
     fundingAttemptId: binding.funding_attempt_id, bindingRevision: binding.binding_revision,
     rawFundingTransaction: hexToBytes(observation.rawFundingTransactionHex), sampledTipHeight: observation.tipHeight,
-    confirmations: observation.confirmations, feeSat,
+    confirmations: observation.confirmations, minFundingConfirmations: depth, feeSat,
   });
   const fallback = appendReverseClaimFallback(context.plaintext, context.network, hexToBytes(claim.transactionHex));
   try {
@@ -76,8 +89,8 @@ export async function exposeJournaledReverseClaim(context: ClaimContext, api: st
     return { record, exposure: { outcome: "exported", txid, transactionHex: fallback.transaction } };
   }
   require(record.stage === "claim-ready");
-  const { binding, observation } = await observeJournaledReverseFunding(context, api);
-  require(observation.confirmations >= report.minFundingDepth && observation.tipHeight + report.claimConfirmationBlocks < report.refundLockHeight + 1);
+  const { binding, observation, depth } = await observeJournaledReverseFunding(context, api);
+  require(observation.confirmations >= depth && observation.tipHeight + report.claimConfirmationBlocks < report.refundLockHeight + 1);
   verifySelectedReverseClaim(context.plaintext, context.network, { fundingAttemptId: binding.funding_attempt_id, bindingRevision: binding.binding_revision },
     hexToBytes(observation.rawFundingTransactionHex), hexToBytes(fallback.transaction));
   let transaction = fallback.transaction;
@@ -94,7 +107,7 @@ export async function exposeJournaledReverseClaim(context: ClaimContext, api: st
       }
     } catch { context.assertCurrent(); /* Invalid/refused cooperation uses the already-durable fallback. */ }
     const fresh = (await observeJournaledReverseFunding(context, api)).observation;
-    require(fresh.confirmations >= report.minFundingDepth && fresh.tipHeight + report.claimConfirmationBlocks < report.refundLockHeight + 1);
+    require(fresh.confirmations >= depth && fresh.tipHeight + report.claimConfirmationBlocks < report.refundLockHeight + 1);
   }
   context.assertCurrent(); beforeExposure(); record = await context.journal.beginClaimExposure(record);
   // A committed election (including a rejected readback) never renews POST authority.

@@ -8,7 +8,7 @@ const API = "http://127.0.0.1:8091/api";
 
 declare global { interface Window { notificationTest: { requests: number; messages: string[] } } }
 
-async function mountedExecution(page: Page): Promise<void> {
+async function mountedExecution(page: Page, claimConfirmations?: string): Promise<void> {
   await page.route(`${API}/**`, async (route) => {
     const path = new URL(route.request().url()).pathname;
     const confirmed = await page.evaluate(() => window.uiFixture?.reverseClaimConfirmed ?? false);
@@ -18,6 +18,7 @@ async function mountedExecution(page: Page): Promise<void> {
       headers: { "Access-Control-Allow-Origin": "http://127.0.0.1:18765" } });
   });
   await page.goto(PAGE);
+  if (claimConfirmations !== undefined) await chooseClaimConfirmations(page, claimConfirmations);
   await page.getByRole("button", { name: "Switch direction" }).click();
   await page.locator("#swap-receive-amount").fill("50000");
   await page.locator("#swap-start").click();
@@ -25,6 +26,46 @@ async function mountedExecution(page: Page): Promise<void> {
   await page.locator("#swap-reverse-continue").click();
   await expect(page.locator("#swap-reverse-accept")).toHaveText("Accept and show the invoice");
 }
+
+async function chooseClaimConfirmations(page: Page, value: string): Promise<void> {
+  await page.locator("#swap-settings-toggle").click();
+  await page.locator("#swap-reverse-claim-confirmations").fill(value);
+  await page.locator("#swap-settings-close").click();
+}
+
+test("a lower claim depth from Settings is warned before payment and claims at that depth", async ({ page }) => {
+  await mountedExecution(page, "0");
+  expect(await page.evaluate(() => window.uiFixture.reverseClaimConfirmations)).toEqual([0]);
+  // The warning is on the screen that starts payment, before any invoice is shown.
+  await expect(page.locator("#swap-reverse-early-claim")).toContainText("unconfirmed funding, below the provider's signed 2");
+  await expect(page.locator("#swap-reverse-early-claim")).toContainText("double-spend");
+  await expect(page.locator("#swap-reverse-invoice")).toHaveCount(0);
+  await page.locator("#swap-reverse-accept").click();
+  await expect(page.locator("#swap-reverse-invoice")).toHaveText("lnbcrt510010n1fixture");
+  // Unconfirmed (depth 0) funding is claimed without waiting for the signed 2.
+  await page.evaluate(() => { window.uiFixture.reverseFunded = true; });
+  await expect(page.locator("#swap-status")).toContainText("Claim accepted:", { timeout: 10000 });
+  expect(await page.evaluate(() => window.uiFixture.reverseEvents!.filter((e) => e === "broadcast"))).toHaveLength(1);
+});
+
+test("without a Settings choice there is no warning and the claim depth is the signed one", async ({ page }) => {
+  await mountedExecution(page);
+  expect(await page.evaluate(() => window.uiFixture.reverseClaimConfirmations)).toEqual([null]);
+  await expect(page.locator("#swap-reverse-early-claim")).toHaveCount(0);
+});
+
+test("a malformed claim depth blocks continuation before any execution is prepared", async ({ page }) => {
+  await page.goto(PAGE);
+  await chooseClaimConfirmations(page, "-1");
+  await page.getByRole("button", { name: "Switch direction" }).click();
+  await page.locator("#swap-receive-amount").fill("50000");
+  await page.locator("#swap-start").click();
+  await page.locator("#swap-receive-address").fill(scriptAddress(`0014${"11".repeat(20)}`, "regtest"));
+  await page.locator("#swap-reverse-continue").click();
+  await expect(page.locator("#swap-reverse-refusal")).toContainText("Claim confirmations must be a whole number");
+  expect(await page.evaluate(() => window.uiFixture.reverseClaimConfirmations)).toBeUndefined();
+  await expect(page.locator("#swap-reverse-accept")).toHaveCount(0);
+});
 
 test("the reverse flow shows one step at a time and automatically claims after the required depth", async ({ page }) => {
   await mountedExecution(page);

@@ -15,7 +15,7 @@ import { inspectReverseRecoveryPlaintext, checkSelectedReverseFundingTransaction
 import type { BrowserReverseJournal, ReverseJournalRecord } from "../browserReverseJournal";
 import type { BrowserHoldPayer, BoundedHoldPlan, HoldPaymentStatus } from "./browserHoldPayer";
 import { validateMempoolApi, type NetworkName } from "./config";
-import { observeJournaledReverseFunding, prepareJournaledReverseClaim, exposeJournaledReverseClaim } from "./reverseClaim";
+import { effectiveClaimDepth, observeJournaledReverseFunding, prepareJournaledReverseClaim, exposeJournaledReverseClaim } from "./reverseClaim";
 import { reverseCooperativeClaim } from "./reverseCooperativeClaim";
 import type { Cosigner } from "./cooperative";
 import { COOPERATIVE_CLAIM_FEATURE } from "./wire";
@@ -46,6 +46,12 @@ export interface ReverseExecutionConfiguration {
   readonly ageRecipient: string;
   readonly journal: BrowserReverseJournal;
   readonly cooperation?: Cosigner;
+  /**
+   * Claim after this many confirmations of the provider's funding (0: from the mempool) when
+   * below the signed depth; absent waits for the signed depth. This session only: Resume and
+   * recovery wait for the signed depth.
+   */
+  readonly claimConfirmations?: number;
   /** Fixed, secret-free swap log lines (why the cooperative claim did or did not happen). */
   readonly report?: (line: string) => void;
   /** Recheck original UI selection, wallet identity, cancellation and network after awaits. */
@@ -57,6 +63,8 @@ export interface PreparedReverseExecution {
   readonly recoveryFile: Uint8Array;
   readonly record: ReverseJournalRecord;
   readonly claimFeeSat: string | null;
+  /** Funding confirmations this session claims at: the client's lower choice or the signed depth. */
+  readonly claimDepth: number;
   accept(acknowledgeRecovery: () => void): Promise<void>;
   planPayment(payer: BrowserHoldPayer, endpoint: string, feeLimitSat: bigint, approve: () => void): Promise<BoundedHoldPlan>;
   pay(payer: BrowserHoldPayer, plan: BoundedHoldPlan, endpoint: string, approve: () => void): Promise<HoldPaymentStatus>;
@@ -69,7 +77,7 @@ export interface PreparedReverseExecution {
   receiveFunding(timeoutMs?: number): Promise<Uint8Array>;
   /** The provider's signed funding output, once received. */
   readonly funding: { readonly txid: string; readonly vout: number } | null;
-  /** Confirmations of the signed funding on the trusted chain API. Read-only; throws until it confirms. */
+  /** Confirmations of the signed funding on the trusted chain API. Read-only; throws until it confirms (with claimDepth 0, until the mempool has it). */
   fundingDepth(chainApi: string): Promise<number>;
   prepareClaim(chainApi: string, feeSat: bigint, approve: () => void): Promise<{ readonly claim: Omit<ConstructedReverseClaim, "transactionHex">; readonly recoveryFile: Uint8Array }>;
   exposeClaim(chainApi: string, broadcastApi: string, action: "download" | "broadcast", approve: () => void): Promise<{ readonly outcome: "exported" | "accepted" | "unknown"; readonly txid: string; readonly transactionHex?: string }>;
@@ -92,7 +100,8 @@ export async function prepareReverseExecution(session: Session, handshake: Hands
    const dispose = (): void => { disposed = true; contract.secret.fill(0); preimage.fill(0); session.secret.fill(0); document?.fill(0); };
   try {
     current(); require(init.profile_id === "ln-to-btc/v1" && session.profile === init.profile_id &&
-      Number.isSafeInteger(config.tipHeight) && config.tipHeight > 0 && config.tipHeight < 500000000);
+      Number.isSafeInteger(config.tipHeight) && config.tipHeight > 0 && config.tipHeight < 500000000 &&
+      (config.claimConfirmations === undefined || (Number.isSafeInteger(config.claimConfirmations) && config.claimConfirmations >= 0)));
     const limits = request.limits;
     const minimumReserve = minimumClaimFeeReserveSat(config.destinationScript, config.claimFeeRateSatKvb, limits.minClaimFeeReserveSat);
     if (minimumReserve > limits.maxClaimFeeSat) {
@@ -122,6 +131,7 @@ export async function prepareReverseExecution(session: Session, handshake: Hands
     const { terms, holdInvoice } = checkReverseTermsOffer(answer.payload, { request: firm, transcript, envelopeContractHash: answer.contract_hash,
       identity: request.identity, network, now: seconds(), handshakeInit: init, handshakeAccept: accept, decodeInvoice: (value) => invoiceBinding(value, name) });
     const deadlineAt = Math.min(initialDeadline, terms.terms_expiry, terms.invoice_binding.expires_at);
+    const claimDepth = effectiveClaimDepth(terms.funding_confirmations, config.claimConfirmations);
     const live = (): void => { current(); require(seconds() < deadlineAt); };
     const acceptance = { contract_hash: answer.contract_hash!, handshake_hash: transcript, session_id: session.sessionId,
       client_session_xonly_key: session.key, provider_session_xonly_key: session.providerKey! };
@@ -132,10 +142,10 @@ export async function prepareReverseExecution(session: Session, handshake: Hands
     document = recoveryDocument(parts); inspectReverseRecoveryPlaintext(document, network);
     const recoveryFile = await encrypt(document); live(); record = await config.journal.saveTerms(record, recoveryFile); live();
     const claimContext = (approve: () => void) => ({ plaintext: document!, record, journal: config.journal,
-      network: network as { name: NetworkName; genesis_hash: string }, assertCurrent: () => { current(); approve(); } });
+      network: network as { name: NetworkName; genesis_hash: string }, assertCurrent: () => { current(); approve(); }, claimDepth });
     const freeze = (value: unknown): void => { if (value !== null && typeof value === "object") { for (const child of Object.values(value)) freeze(child); Object.freeze(value); } };
     freeze(terms);
-    return Object.freeze({ terms, deadlineAt, get recoveryFile() { return Uint8Array.from(recoveryFile); }, get record() { return record; }, dispose,
+    return Object.freeze({ terms, deadlineAt, claimDepth, get recoveryFile() { return Uint8Array.from(recoveryFile); }, get record() { return record; }, dispose,
       get claimFeeSat() { return inspectReverseRecoveryPlaintext(document!, network).fallbackFeeSat; },
       get funding() {
         const binding = parts.funding[0]?.binding as RecoveryFundingBinding | undefined;

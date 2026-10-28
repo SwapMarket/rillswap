@@ -40,10 +40,21 @@ export interface ReverseExecutionUiOptions extends ReverseProgressOptions {
   readonly destinationScript: string;
   readonly ageRecipient: string;
   readonly nodeApi: string;
+  /** Claim below the signed funding depth (0: from the mempool); absent waits for the signed depth. */
+  readonly claimConfirmations?: number;
   /** The swap log: fixed, secret-free lines such as why the claim was not cooperative. */
   readonly report?: (line: string) => void;
 }
-type ClaimExecution = Pick<PreparedReverseExecution, "terms" | "record" | "recoveryFile" | "claimFeeSat" | "funding" | "fundingDepth" | "receiveFunding" | "prepareClaim" | "exposeClaim" | "dispose">;
+type ClaimExecution = Pick<PreparedReverseExecution, "terms" | "record" | "recoveryFile" | "claimFeeSat" | "claimDepth" | "funding" | "fundingDepth" | "receiveFunding" | "prepareClaim" | "exposeClaim" | "dispose">;
+
+/** The double-spend risk of claiming below the signed depth, or null at the signed depth. */
+export function earlyClaimWarning(depth: number, signed: number): string | null {
+  if (depth >= signed) return null;
+  const funding = depth === 0 ? "unconfirmed funding" : `funding at ${depth} confirmation${depth === 1 ? "" : "s"}`;
+  return `Claiming on ${funding}, below the provider's signed ${signed}. Claiming reveals the payment secret, which lets the provider ` +
+    "settle your Lightning payment; until its funding is buried it can still double-spend it and keep both. " +
+    "Only lower this for providers and amounts you are willing to lose.";
+}
 
 function view(root: HTMLElement, e: ClaimExecution, options: ReverseProgressOptions) {
   const screen = node("section", "", "swap-reverse-steps"), advanced = node("details", "", "swap-reverse-advanced");
@@ -113,8 +124,8 @@ function drive(v: ReturnType<typeof view>, e: ClaimExecution, options: ReversePr
         let depth: number;
         try { depth = await e.fundingDepth(api); current(); }
         catch { current(); v.message.textContent = "Waiting for confirmation data from your mempool API."; return; }
-        v.screen.querySelector("p")!.textContent = `${depth} of ${e.terms.funding_confirmations} confirmations`;
-        if (depth < e.terms.funding_confirmations) return;
+        v.screen.querySelector("p")!.textContent = `${depth} of ${e.claimDepth} confirmations`;
+        if (depth < e.claimDepth) return;
         const fee = v.fee.value.trim();
         if (!/^(0|[1-9][0-9]{0,15})$/.test(fee)) throw new Error("Invalid fee");
         v.fee.disabled = true;
@@ -199,11 +210,15 @@ export async function mountReverseExecution(root: HTMLElement, options: ReverseE
     const claimFeeRateSatKvb = await readNextBlockFeeRate(api, options.network.name, { signal: cancellation.signal }); current();
     execution = await options.prepared.prepareExecution({ destinationScript: options.destinationScript, tipHeight: tip.height, claimFeeRateSatKvb,
       ageRecipient: options.ageRecipient, journal, cooperation: browserCosigner, assertCurrent: current,
+      ...(options.claimConfirmations !== undefined ? { claimConfirmations: options.claimConfirmations } : {}),
       ...(options.report ? { report: options.report } : {}) }); current();
     const e = execution, terms = e.terms, v = view(root, e, options); v.backup(e.recoveryFile);
     v.screen.append(node("h2", `Pay ${BigInt(terms.economics.hold_invoice_sat).toLocaleString()} sat`),
       node("p", `Receive at least ${BigInt(terms.economics.nominal_payout_sat).toLocaleString()} sat in Bitcoin. Your wallet's routing fee is extra.`),
       node("p", "After payment, this page checks confirmations and claims your Bitcoin automatically."));
+    // Before any payment: the client's own lower claim depth risks a provider double-spend.
+    const warning = earlyClaimWarning(e.claimDepth, terms.funding_confirmations);
+    if (warning !== null) { v.screen.append(node("p", warning, "swap-reverse-early-claim")); options.report?.(`warning: ${warning}`); }
     const accept = button(v.screen, "Accept and show the invoice", "swap-reverse-accept");
     const nodeControls = node("section"); v.advanced.append(nodeControls);
     const afterPayment = (settlement?: () => Promise<string | null>): void => {

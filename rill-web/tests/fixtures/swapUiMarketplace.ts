@@ -7,6 +7,8 @@ declare global {
     uiFixture: { requests: unknown[]; executed: number; executedProviders: string[]; disposed: number;
       fundingScript?: string; fundingDepth?: number | undefined; fundingSource?: { psbt: string } | { depositTxid: string };
       reverseEvents?: string[]; reverseFunded?: boolean; reverseDepth?: number; reverseClaimConfirmed?: boolean; reverseBroadcastUnknown?: boolean; reverseNodePayment?: boolean; reverseTransientClaimRead?: boolean; reverseClaimFeeRates?: number[];
+      /** Each prepared execution's claimConfirmations (null: absent, the signed depth). */
+      reverseClaimConfirmations?: (number | null)[];
       fundedRecovery?: number[]; fundingPublished?: boolean;
       wallet: typeof BrowserRecoveryWallet; releaseInfo?: () => void; infoPending: boolean };
     /**
@@ -79,8 +81,9 @@ export const quoteReverseProviders = async (_providers: unknown[], request: unkn
       quote: { providerIdentity: id.repeat(64), payoutSat: 50_000n, holdInvoiceSat: BigInt(51_000 + Number(id)), successFeeSat: 500n,
         claimFeeReserveSat: 500n, fundingConfirmations: 2, refundDelayBlocks: 144, incomingHtlcExpiryDeltaBlocks: 288, expiresAt: Math.floor(Date.now() / 1000) + 3600 },
       // A stand-in execution: enough for the execution UI to accept, show the invoice, and receive fixture funding.
-      prepareExecution: async (configuration: { claimFeeRateSatKvb: number }) => {
+      prepareExecution: async (configuration: { claimFeeRateSatKvb: number; claimConfirmations?: number }) => {
         (window.uiFixture.reverseClaimFeeRates ??= []).push(configuration.claimFeeRateSatKvb);
+        (window.uiFixture.reverseClaimConfirmations ??= []).push(configuration.claimConfirmations ?? null);
         window.uiFixture.reverseEvents = [];
         const events = window.uiFixture.reverseEvents, record: { stage: string; claim?: { txid: string } } = { stage: "terms-ready" };
         const expiresAt = Math.floor(Date.now() / 1000) + 1800;
@@ -89,6 +92,8 @@ export const quoteReverseProviders = async (_providers: unknown[], request: unkn
             funding_confirmations: 2, refund_lock_height: 400, max_claim_fee_sat: "800", client_destination_script: "0014" + "11".repeat(20),
             invoice_binding: { expires_at: expiresAt } },
           recoveryFile: new Uint8Array([8, 8, 8]), record,
+          // As the real execution: a lower client choice, never above the signed 2.
+          claimDepth: Math.min(configuration.claimConfirmations ?? 2, 2),
           get claimFeeSat() { return record.claim ? "500" : null; },
           get funding() { return record.stage === "terms-ready" || record.stage === "payment-unknown" ? null : { txid: "b".repeat(64), vout: 0 }; },
           fundingDepth: async () => { events.push("depth"); return window.uiFixture.reverseDepth ?? 0; },

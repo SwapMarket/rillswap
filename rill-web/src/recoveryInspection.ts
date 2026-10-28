@@ -567,6 +567,8 @@ export function inspectReverseRecoveryPlaintext(plaintext: Uint8Array, independe
 export interface SelectedReverseClaimInput extends SelectedRecoveryRefundInput {
   /** Caller observation, not a chain proof. Fresh independent API consistency checks are mandatory. */
   readonly confirmations: number;
+  /** The client's explicit lower claim depth (0: mempool), at most the signed one. Absent: the signed depth. */
+  readonly minFundingConfirmations?: number;
 }
 export interface ConstructedReverseClaim extends Omit<ConstructedRecoveryRefund, "refundLockHeight"> {
   readonly signatureHash: string;
@@ -636,13 +638,15 @@ export function verifySelectedReverseClaim(plaintext: Uint8Array, independentlyS
 export function constructSelectedReverseClaim(plaintext: Uint8Array, independentlySelectedNetwork: unknown, input: SelectedReverseClaimInput): ConstructedReverseClaim {
   let secret: Uint8Array | undefined, auxiliary: Uint8Array | undefined;
   try {
-    const { fundingAttemptId, bindingRevision, sampledTipHeight: tip, confirmations, feeSat, rawFundingTransaction } = input;
+    const { fundingAttemptId, bindingRevision, sampledTipHeight: tip, confirmations, feeSat, rawFundingTransaction, minFundingConfirmations } = input;
     require(rawFundingTransaction instanceof Uint8Array && rawFundingTransaction.length > 0 && rawFundingTransaction.length <= MAX_TRANSACTION_BYTES);
     const raw = Uint8Array.from(rawFundingTransaction), record = authenticateRecovery(plaintext, independentlySelectedNetwork, "ln-to-btc/v1");
     require(isSupportedRecoveryNetwork(record.network_identity));
     const binding = selectBinding(record, { fundingAttemptId, bindingRevision }), terms = record.contract_terms as LnToBtcTerms;
     checkFundingTransaction(raw, binding);
-    require(Number.isSafeInteger(tip) && tip > 0 && tip < 500000000 && Number.isSafeInteger(confirmations) && confirmations >= terms.funding_confirmations && confirmations <= tip + 1);
+    const minimum = minFundingConfirmations ?? terms.funding_confirmations;
+    require(Number.isSafeInteger(minimum) && minimum >= 0 && minimum <= terms.funding_confirmations);
+    require(Number.isSafeInteger(tip) && tip > 0 && tip < 500000000 && Number.isSafeInteger(confirmations) && confirmations >= minimum && confirmations <= tip + 1);
     require(tip + terms.timing_policy.claim_confirmation_blocks < terms.refund_lock_height + 1);
     require(typeof feeSat === "bigint" && feeSat >= 0n && feeSat <= BigInt(terms.max_claim_fee_sat) && feeSat <= BigInt(terms.economics.claim_fee_reserve_sat));
     const output = { value: BigInt(binding.contract_value_sat) - feeSat, script: hexToBytes(terms.client_destination_script) };

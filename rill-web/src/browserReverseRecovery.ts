@@ -85,7 +85,7 @@ export async function loadBrowserReverseRecovery(original: Uint8Array, identity:
 /** Explicit Resume of a native browser execution. No acceptance, payment, or new cooperative nonce authority. */
 export async function resumeBrowserReverseExecution(original: Uint8Array, identity: string, network: Network,
   urls: readonly string[], assertCurrent: () => void): Promise<Pick<PreparedReverseExecution,
-    "terms" | "record" | "recoveryFile" | "claimFeeSat" | "funding" | "fundingDepth" | "receiveFunding" | "prepareClaim" | "exposeClaim" | "dispose">> {
+    "terms" | "record" | "recoveryFile" | "claimFeeSat" | "claimDepth" | "funding" | "fundingDepth" | "receiveFunding" | "prepareClaim" | "exposeClaim" | "dispose">> {
   network = structuredClone(network); urls = [...urls];
   const loaded = await load(original, identity, network);
   let disposed = false, preparing = false, exposing = false;
@@ -97,7 +97,9 @@ export async function resumeBrowserReverseExecution(original: Uint8Array, identi
     const context = (approve: () => void) => ({ plaintext: loaded.plaintext, record: loaded.record as ReverseJournalRecord,
       journal: loaded.journal, network, assertCurrent: () => { current(); approve(); } });
     return {
-      terms, get record() { return loaded.record as ReverseJournalRecord; }, get recoveryFile() { return ciphertextOf(loaded.record); }, dispose,
+      // Resume waits for the signed funding depth; a live session's lower choice is not stored.
+      terms, claimDepth: terms.funding_confirmations,
+      get record() { return loaded.record as ReverseJournalRecord; }, get recoveryFile() { return ciphertextOf(loaded.record); }, dispose,
       get claimFeeSat() { return inspectReverseRecoveryPlaintext(loaded.plaintext, network).fallbackFeeSat; },
       get funding() {
         const binding = inspectReverseRecoveryPlaintext(loaded.plaintext, network).fundingHistory.at(-1);

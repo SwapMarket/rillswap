@@ -115,7 +115,7 @@ export async function executionFixture(cooperation: "unilateral" | "signed" | "d
       check(); await authorize(); check(); events.push("payment-post"); return "IN_FLIGHT";
     },
   } as unknown as BrowserHoldPayer;
-  let posts = 0, spent = false, tipHeight = 200, failFreshAfterCooperation = false; const postedTransactions: string[] = [];
+  let posts = 0, spent = false, unconfirmed = false, tipHeight = 200, failFreshAfterCooperation = false; const postedTransactions: string[] = [];
   const fetch = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const path = String(url).split("/api/")[1]!; events.push(`api:${init?.method ?? "GET"}:${path}`);
     if (init?.method === "POST") { posts++; postedTransactions.push(init.body as string); return new Response(parseTransaction(hexToBytes(init.body as string)).txid); }
@@ -124,11 +124,11 @@ export async function executionFixture(cooperation: "unilateral" | "signed" | "d
     }
     const responses: Record<string, string> = { "block-height/0": source.network_identity.genesis_hash, "blocks/tip/height": String(tipHeight), "blocks/tip/hash": "a".repeat(64),
       [`tx/${funding?.payload.binding ? (funding.payload.binding as { funding_txid: string }).funding_txid : ""}/hex`]: fundingHex,
-      [`tx/${funding?.payload.binding ? (funding.payload.binding as { funding_txid: string }).funding_txid : ""}/status`]: JSON.stringify({ confirmed: true, block_height: 190, block_hash: "d".repeat(64) }),
+      [`tx/${funding?.payload.binding ? (funding.payload.binding as { funding_txid: string }).funding_txid : ""}/status`]: JSON.stringify(unconfirmed ? { confirmed: false } : { confirmed: true, block_height: 190, block_hash: "d".repeat(64) }),
       [`tx/${funding?.payload.binding ? (funding.payload.binding as { funding_txid: string }).funding_txid : ""}/outspend/0`]: JSON.stringify({ spent }), "block-height/190": "d".repeat(64) };
     if (!(path in responses)) throw new Error("unexpected endpoint"); return new Response(responses[path]!);
   };
-  const prepare = (extra: { readonly report?: (line: string) => void; readonly claimFeeRateSatKvb?: number } = {}) => prepareReverseExecution(session, { init: saved.handshake_init as HandshakeInit, accept: saved.handshake_accept as HandshakeAccept,
+  const prepare = (extra: { readonly report?: (line: string) => void; readonly claimFeeRateSatKvb?: number; readonly claimConfirmations?: number } = {}) => prepareReverseExecution(session, { init: saved.handshake_init as HandshakeInit, accept: saved.handshake_accept as HandshakeAccept,
     acceptSignature: saved.provider_identity_signature, transcript }, request,
     { destinationScript: source.contract_terms.client_destination_script, tipHeight: 200, claimFeeRateSatKvb: 1000, ageRecipient: identity.recipient, journal, assertCurrent,
       ...(cooperation === "unilateral" ? {} : { cooperation: capabilities }), ...extra }, () => now.seconds * 1000);
@@ -137,6 +137,8 @@ export async function executionFixture(cooperation: "unilateral" | "signed" | "d
     set approved(value: boolean) { approved = value; }, set fail(stage: string) { fail = stage; }, set callback(value: (stage: string) => void) { callback = value; },
     set rejectReadback(stage: string) { rejectReadback = stage; },
     set spent(value: boolean) { spent = value; }, set tipHeight(value: number) { tipHeight = value; },
+    /** The provider's funding is only in the mempool. */
+    set unconfirmed(value: boolean) { unconfirmed = value; },
     set failFreshAfterCooperation(value: boolean) { failFreshAfterCooperation = value; },
   };
 }

@@ -183,6 +183,19 @@ function mount(root: HTMLElement): void {
   ranking.value = "time";
   settings.append(rankingLabel, ranking, node("small", "Fastest means the fewest funding confirmations the provider waits for. " +
     "Providers that do not announce it rank after those that do. Applies to automatic choice and the order of offers."));
+  const claimConfirmations = field(settings, "swap-reverse-claim-confirmations", "Lightning to Bitcoin: claim after confirmations", "",
+    "Empty waits for the funding confirmations the provider signed. A lower number (0: unconfirmed) claims sooner, but the claim reveals " +
+    "your payment secret: the provider can then settle your Lightning payment and still double-spend its unconfirmed or shallow " +
+    "funding, keeping both. Only lower it for providers and amounts you are willing to lose.");
+  claimConfirmations.inputMode = "numeric";
+  claimConfirmations.placeholder = "Provider's signed depth";
+  /** The chosen claim depth, frozen when a swap continues; undefined waits for the signed depth. */
+  const chosenClaimConfirmations = (): number | undefined => {
+    const value = claimConfirmations.value.trim();
+    if (value === "") return undefined;
+    if (!/^(0|[1-9][0-9]{0,2})$/.test(value)) throw new Error("Claim confirmations must be a whole number of blocks, or empty (Settings)");
+    return Number(value);
+  };
   const sortMode = (): SortMode => ranking.value === "price" ? "price" : "time";
   const automaticText = (): string => sortMode() === "time" ? "fastest payment, then lowest price" : "lowest price, then fastest payment";
   identity.placeholder = "Automatic (by provider ranking)";
@@ -1077,10 +1090,11 @@ function mount(root: HTMLElement): void {
         /** True once continuation started; false when the address or estimate blocks it (the review explains). */
         const continueWith = (): boolean => {
           if (executing) return false;
-          let destinationScript: string;
+          let destinationScript: string, claimDepth: number | undefined;
           try {
             if (!receiveAddress.value.trim()) throw new Error("Enter the Bitcoin address that should receive the payout");
             destinationScript = addressScript(receiveAddress.value.trim(), name);
+            claimDepth = chosenClaimConfirmations();
             if (Date.now() / 1000 >= selected.prepared.quote.expiresAt) throw new Error("Estimate expired. Request a fresh quote.");
           } catch (error) { refusal.textContent = (error as Error).message; return false; }
           refusal.textContent = "";
@@ -1098,7 +1112,7 @@ function mount(root: HTMLElement): void {
             await mountReverseExecution(panel, { prepared: selected.prepared, network: { ...NETWORKS[name], name }, destinationScript,
               ageRecipient: info.recipient, chainApi: chainApi.value.trim(), broadcastApi: broadcastApi.value.trim(), assertCurrent,
               nodeApi: __SWAP_DEFAULTS__.network === name ? __SWAP_DEFAULTS__.nodeApi ?? "" : name === "regtest" ? "http://127.0.0.1:8093" : "",
-              status: (message, step) => setStatus(message, step), report,
+              status: (message, step) => setStatus(message, step), report, ...(claimDepth !== undefined ? { claimConfirmations: claimDepth } : {}),
               download: offerDownload, saved: (file) => { publishLink(file, name); void refreshSavedRecoveries(); } });
           })().catch(() => { report("stopped: Reverse execution could not continue. Keep backups; no uncertain payment will be retried."); });
           return true;

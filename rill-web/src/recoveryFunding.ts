@@ -14,8 +14,9 @@ export interface RecoveryFundingObservation {
   readonly networkName: string;
   readonly fundingTxid: string;
   readonly fundingVout: number;
-  readonly fundingBlockHeight: number;
-  readonly fundingBlockHash: string;
+  /** Null only for reverse funding still in the mempool, observed on explicit request (0 confirmations). */
+  readonly fundingBlockHeight: number | null;
+  readonly fundingBlockHash: string | null;
   readonly confirmations: number;
   readonly tipHeight: number;
   readonly tipHash: string;
@@ -86,19 +87,24 @@ export async function observeRecoveryFunding(
   return observeFunding(plaintext, independentlySelectedNetwork, selection, base, options, "btc-to-ln/v1");
 }
 
-/** Same explicit trusted-API consistency boundary, independently authenticated reverse evidence. */
+/**
+ * Same explicit trusted-API consistency boundary, independently authenticated reverse evidence.
+ * `allowUnconfirmed` reports the provider's funding while it is only in the mempool as 0
+ * confirmations, for a client that chose to claim that early (the provider can still double-spend it).
+ */
 export async function observeReverseRecoveryFunding(
   plaintext: Uint8Array,
   independentlySelectedNetwork: { readonly name: NetworkName; readonly genesis_hash: string },
   selection: RecoveryFundingSelection, base: string,
-  options: { readonly signal?: AbortSignal; readonly fetch?: ChainFetch } = {},
+  options: { readonly signal?: AbortSignal; readonly fetch?: ChainFetch; readonly allowUnconfirmed?: boolean } = {},
 ): Promise<RecoveryFundingObservation> {
-  return observeFunding(plaintext, independentlySelectedNetwork, selection, base, options, "ln-to-btc/v1");
+  return observeFunding(plaintext, independentlySelectedNetwork, selection, base, options, "ln-to-btc/v1", options.allowUnconfirmed === true);
 }
 
 async function observeFunding(plaintext: Uint8Array,
   independentlySelectedNetwork: { readonly name: NetworkName; readonly genesis_hash: string }, selection: RecoveryFundingSelection, base: string,
   options: { readonly signal?: AbortSignal; readonly fetch?: ChainFetch }, profile: "btc-to-ln/v1" | "ln-to-btc/v1",
+  allowUnconfirmed = false,
 ): Promise<RecoveryFundingObservation> {
   let snapshot: Uint8Array | undefined, spent = false;
   try {
@@ -121,7 +127,8 @@ async function observeFunding(plaintext: Uint8Array,
       signal, method: "GET", credentials: "omit", redirect: "error", cache: "no-store", referrerPolicy: "no-referrer",
     }), signal, limit);
     const tip = await readChainTip(api, network, { signal, fetch: transport });
-    let inclusion: { height: number; hash: string } | undefined;
+    // Null: still in the mempool (only with allowUnconfirmed). Both passes must agree.
+    let inclusion: { height: number; hash: string } | null | undefined;
     let rawHex: string | undefined;
     for (let pass = 0; pass < 2; pass++) {
       const text = await get(`tx/${binding.funding_txid}/hex`, MAX_TRANSACTION_BYTES * 2);
@@ -131,14 +138,19 @@ async function observeFunding(plaintext: Uint8Array,
       (profile === "ln-to-btc/v1" ? checkSelectedReverseFundingTransaction : checkSelectedRecoveryFundingTransaction)(snapshot, network, chosen, hexToBytes(text));
       rawHex = text;
       const status = jsonObject(await get(`tx/${binding.funding_txid}/status`));
-      require(status.confirmed === true && typeof status.block_height === "number" && Number.isSafeInteger(status.block_height) && status.block_height >= 0 && status.block_height <= tip.height);
-      require(typeof status.block_hash === "string" && HEX32.test(status.block_hash));
-      const height = status.block_height as number, hash = status.block_hash as string;
-      if (height === tip.height) require(hash === tip.hash);
-      if (height === 0) require(hash === network.genesis_hash);
-      require(await get(`block-height/${height}`, 128) === hash);
-      if (inclusion) require(inclusion.height === height && inclusion.hash === hash);
-      inclusion = { height, hash };
+      if (allowUnconfirmed && status.confirmed === false) {
+        require(inclusion === undefined || inclusion === null);
+        inclusion = null;
+      } else {
+        require(status.confirmed === true && typeof status.block_height === "number" && Number.isSafeInteger(status.block_height) && status.block_height >= 0 && status.block_height <= tip.height);
+        require(typeof status.block_hash === "string" && HEX32.test(status.block_hash));
+        const height = status.block_height as number, hash = status.block_hash as string;
+        if (height === tip.height) require(hash === tip.hash);
+        if (height === 0) require(hash === network.genesis_hash);
+        require(await get(`block-height/${height}`, 128) === hash);
+        if (inclusion !== undefined) require(inclusion !== null && inclusion.height === height && inclusion.hash === hash);
+        inclusion = { height, hash };
+      }
       const outspend = await readOutspend(get, binding.funding_txid, binding.contract_vout);
       spent = outspend.spent === true;
       require(outspend.spent === false);
@@ -149,8 +161,8 @@ async function observeFunding(plaintext: Uint8Array,
     return Object.freeze({ observation: "trusted-api", networkName: network.name,
       rawFundingTransactionHex: rawHex!,
       fundingTxid: binding.funding_txid, fundingVout: binding.contract_vout,
-      fundingBlockHeight: inclusion!.height, fundingBlockHash: inclusion!.hash,
-      confirmations: tip.height - inclusion!.height + 1, tipHeight: tip.height, tipHash: tip.hash,
+      fundingBlockHeight: inclusion?.height ?? null, fundingBlockHash: inclusion?.hash ?? null,
+      confirmations: inclusion ? tip.height - inclusion.height + 1 : 0, tipHeight: tip.height, tipHash: tip.hash,
       refundLockHeight: report.refundLockHeight, refundMatureAtObservedTip: tip.height > report.refundLockHeight });
   } catch { /* Never expose document, parser, endpoint response, or nested error details. */ }
   finally { snapshot?.fill(0); }
