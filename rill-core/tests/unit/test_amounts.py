@@ -17,6 +17,13 @@ def test_sats_round_trip_maximum() -> None:
     assert value.to_wire() == str(MAX_SATS)
 
 
+@pytest.mark.parametrize("value", [str(MAX_SATS + 1), "1" * 17, "9" * 5_000])
+def test_sats_reject_values_above_maximum_as_validation_errors(value: str) -> None:
+    # Over-long digit strings must not surface int()'s own ValueError.
+    with pytest.raises(ValidationError, match="exceeds the protocol maximum"):
+        Sats.from_wire(value)
+
+
 def test_checked_amount_arithmetic_rejects_range_errors() -> None:
     with pytest.raises(ValidationError):
         Sats(MAX_SATS).checked_add(Sats(1))

@@ -16,13 +16,13 @@ def parse_canonical_decimal(value: str, *, field: str, maximum: int) -> int:
         msg = f"{field} must be a decimal string"
         raise ValidationError(msg)
     if value == "0":
-        parsed = 0
-    elif value and value[0] in "123456789" and value.isascii() and value.isdecimal():
-        parsed = int(value)
-    else:
+        return 0
+    if not (value and value[0] in "123456789" and value.isascii() and value.isdecimal()):
         msg = f"{field} is not a canonical nonnegative decimal string"
         raise ValidationError(msg)
-    if parsed > maximum:
+    # A canonical decimal with more digits than the bound exceeds it; checking
+    # length first also keeps int() away from its digit limit and quadratic cost.
+    if len(value) > len(str(maximum)) or (parsed := int(value)) > maximum:
         msg = f"{field} exceeds the protocol maximum"
         raise ValidationError(msg)
     return parsed
