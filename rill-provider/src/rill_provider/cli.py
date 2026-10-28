@@ -360,8 +360,8 @@ async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
         require_supported_network(config.network)
     except ValidationError:
         raise OperatorConfigError("network is not supported for serving") from None
-    _warn_on_a_mainnet_fee_ceiling(config)
     lnd = config.lnd
+    _warn_on_a_mainnet_fee_ceiling(config)
     if (
         config.network.name != "regtest"
         and config.provider_destination_script is not None
