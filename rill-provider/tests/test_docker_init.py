@@ -156,6 +156,10 @@ def test_erc20_maker_config_is_refused_until_the_operator_fills_it(
     loaded = load_config(_write(tmp_path, config))
     assert loaded.evm is not None
     assert loaded.evm.signer_key_file == tmp_path / "evm-signer.key"
+    # The EVM schedule's depth, not the Bitcoin quote's, is announced.
+    deeper_evm = loaded.evm.model_copy(update={"funding_confirmations": 3})
+    deeper = loaded.model_copy(update={"evm": deeper_evm})
+    assert deeper.service_policy().funding_confirmations == 3
     assert loaded.lnd is not None
     assert (loaded.lnd.invoices_macaroon is not None) is (profile == "ln-to-erc20")
 

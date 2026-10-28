@@ -69,7 +69,10 @@ def test_advertisement_address_and_event_id_match_docs_vector() -> None:
         expected["provider_identity_xonly_key"], _terms(expected)
     )
     # Policy: revision equals created_at (stateless strict increase). The
-    # vector uses revision 1; every other member must match exactly.
+    # vector uses revision 1; every other member must match exactly. The
+    # vector predates the always-announced funding depth, which clients treat
+    # as unknown when absent.
+    assert built["extensions"].pop(identity.FUNDING_CONFIRMATIONS_EXTENSION) == {"confirmations": 1}
     assert built["revision"] == expected["created_at"]
     assert {**built, "revision": expected["revision"]} == expected
     address = identity.announcement_address(_terms(expected).network, expected["slot"])
@@ -90,7 +93,8 @@ def test_epoch_requirement_is_advertised_only_when_explicitly_enabled() -> None:
         ad["provider_identity_xonly_key"], _terms(ad, epoch_bound_sessions=True)
     )
     assert enabled["extensions"] == {
-        identity.HANDSHAKE_FEATURES_EXTENSION: [identity.EPOCH_SESSION_FEATURE]
+        identity.HANDSHAKE_FEATURES_EXTENSION: [identity.EPOCH_SESSION_FEATURE],
+        identity.FUNDING_CONFIRMATIONS_EXTENSION: {"confirmations": 1},
     }
     with pytest.raises(ProviderIdentityError):
         identity._advertisement(  # noqa: SLF001
@@ -377,6 +381,33 @@ def test_evm_assets_are_advertised_in_the_rs010_extension() -> None:
         identity._advertisement(  # noqa: SLF001
             "bb" * 32, _terms(manual["advertisement"], evm_assets=(asset.model_dump(),))
         )
+
+
+def test_funding_confirmations_are_always_advertised_and_zero_only_pays_lightning() -> None:
+    manual, _event = _vectors()
+    key = identity.FUNDING_CONFIRMATIONS_EXTENSION
+    ad = manual["advertisement"]
+    forward = ("btc-to-ln/v1",)
+    for depth in (0, 1, 6):
+        terms = _terms(ad, profiles=forward, funding_confirmations=depth)
+        built = identity._advertisement("bb" * 32, terms)  # noqa: SLF001
+        assert built["extensions"][key] == {"confirmations": depth}
+    for profile in ("ln-to-btc/v1", "erc20-to-ln/v1", "ln-to-erc20/v1"):
+        terms = _terms(ad, profiles=(profile,), funding_confirmations=1)
+        assert identity._advertisement("bb" * 32, terms)["extensions"][key] == {  # noqa: SLF001
+            "confirmations": 1
+        }
+        with pytest.raises(ProviderIdentityError):  # only the paying provider may take 0-conf risk
+            identity._advertisement(  # noqa: SLF001
+                "bb" * 32, _terms(ad, profiles=(profile,), funding_confirmations=0)
+            )
+    with pytest.raises(ProviderIdentityError):  # the vector also lists ln-to-btc/v1
+        identity._advertisement("bb" * 32, _terms(ad, funding_confirmations=0))  # noqa: SLF001
+    for depth in (-1, True, 1.0, 2**53):
+        with pytest.raises(ProviderIdentityError):
+            identity._advertisement(  # noqa: SLF001
+                "bb" * 32, _terms(ad, profiles=forward, funding_confirmations=depth)
+            )
 
 
 def test_transport_work_is_advertised_only_when_required() -> None:

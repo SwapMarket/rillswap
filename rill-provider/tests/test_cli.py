@@ -235,11 +235,27 @@ def test_bitcoin_core_cookie_resolves_and_quote_settings_reach_the_service(
     assert config.bitcoin_core is not None
     assert config.bitcoin_core.cookie_file == tmp_path / "core.cookie"
     assert config.service_policy().quote.lifetime == 30
-    assert config.service_policy().quote.funding_confirmations == 2
+    assert config.service_policy().quote.funding_confirmations == 1
+    assert config.service_policy().funding_confirmations == 1  # what the announcement carries
     with pytest.raises(OperatorConfigError):
         load_config(_config(tmp_path, quote={"lifetime": 0}))
     with pytest.raises(OperatorConfigError):  # not a representable wire integer
         load_config(_config(tmp_path, quote={"funding_confirmations": 2**53}))
+
+
+def test_zero_funding_confirmations_are_only_accepted_for_btc_to_ln(tmp_path: Path) -> None:
+    zero = load_config(_config(tmp_path, quote={"funding_confirmations": 0}))
+    assert zero.service_policy().funding_confirmations == 0
+    reverse = {
+        "profile": "ln-to-btc/v1",
+        "encryption_suites": ["noise-xk-secp256k1-chachapoly-sha256/v1"],
+        "capabilities": ["core/v1", "recovery/v1"],
+    }
+    assert load_config(_config(tmp_path, handshake=reverse)).service_policy().funding_confirmations
+    with pytest.raises(OperatorConfigError):  # the client would reveal on an unconfirmed lockup
+        load_config(_config(tmp_path, handshake=reverse, quote={"funding_confirmations": 0}))
+    with pytest.raises(OperatorConfigError):
+        load_config(_config(tmp_path, quote={"funding_confirmations": -1}))
 
 
 def test_lnd_paths_resolve_and_destination_script_is_checked(tmp_path: Path) -> None:

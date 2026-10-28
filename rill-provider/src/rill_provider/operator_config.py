@@ -11,7 +11,7 @@ import os
 import stat
 from pathlib import Path  # noqa: TC003 - pydantic resolves field types at runtime
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from rill_core.domain.amounts import MAX_SATS
 from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE
 from rill_core.wire.types import (
@@ -82,7 +82,10 @@ class BitcoinCore(_Strict):
 class QuoteSettings(_Strict):
     """Quote parameters beyond the public announcement terms."""
 
-    funding_confirmations: int = Field(default=2, ge=1, le=MAX_WIRE_INTEGER)
+    # Blocks on the client's funding before paying (btc-to-ln; 0 pays from the
+    # mempool, see README) or on the provider's lockup before the client may
+    # claim (ln-to-btc, at least 1). Announced and signed into every quote.
+    funding_confirmations: int = Field(default=1, ge=0, le=MAX_WIRE_INTEGER)
     settlement_confirmations: int = Field(default=3, ge=1, le=MAX_WIRE_INTEGER)
     refund_resolution_confirmations: int = Field(default=6, ge=1, le=MAX_WIRE_INTEGER)
     max_refund_delay_blocks: int = Field(default=288, ge=1, le=MAX_WIRE_INTEGER)
@@ -244,6 +247,14 @@ class OperatorConfig(_Strict):
             require_v1_destination_script(value, field="provider_destination_script")
         return value
 
+    @model_validator(mode="after")
+    def _zero_conf_only_pays_lightning(self) -> OperatorConfig:
+        # In ln-to-btc the client reveals the preimage on this depth, so zero
+        # would let this provider double-spend its own unconfirmed lockup.
+        if self.quote.funding_confirmations == 0 and self.handshake.profile != "btc-to-ln/v1":
+            raise ValueError("quote.funding_confirmations 0 is only allowed for btc-to-ln/v1")
+        return self
+
     def handshake_policy(self) -> HandshakePolicy:
         """Return the store-bound negotiation policy."""
         h = self.handshake
@@ -283,6 +294,7 @@ class OperatorConfig(_Strict):
             profile=self.handshake.profile,  # type: ignore[arg-type]
             provider_destination_script=self.provider_destination_script,
             evm_assets=self.evm.assets() if self.evm is not None else (),
+            evm_funding_confirmations=self.evm.funding_confirmations if self.evm else 1,
             transport_pow_bits=self.transport_pow_bits,
             follow_liquidity=t.follow_liquidity,
             liquidity_margin_percent=t.liquidity_margin_percent,

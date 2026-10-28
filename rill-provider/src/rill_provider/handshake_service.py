@@ -124,6 +124,7 @@ class ServicePolicy:
     provider_destination_script: str | None = None  # required for firm offers
     profile: ProfileId = "btc-to-ln/v1"  # the one negotiated profile this service serves
     evm_assets: tuple[EvmAssetIdentity, ...] = ()  # RS-010: announced served assets
+    evm_funding_confirmations: int = 1  # RS-010: the EVM schedule's funding depth
     relay_proxy: str | None = None  # checked loopback CONNECT proxy, or direct
     # RS-006 transport proof of work required on new sessions' messages; 0 = off.
     transport_pow_bits: int = 0
@@ -144,6 +145,13 @@ class ServicePolicy:
             and self.max_sends_per_tick > 0
         ):
             raise ValueError("service schedule unsupported")
+
+    @property
+    def funding_confirmations(self) -> int:
+        """The announced depth every quote for the served profile carries (RS-005)."""
+        if self.profile in EVM_PROFILES:
+            return self.evm_funding_confirmations
+        return self.quote.funding_confirmations
 
 
 @dataclass(slots=True)
@@ -771,6 +779,7 @@ class HandshakeService:
                 epoch_bound_sessions=self._store.requires_epoch_bound_sessions,
                 evm_assets=policy.evm_assets,
                 transport_pow_bits=policy.transport_pow_bits,
+                funding_confirmations=policy.funding_confirmations,
             )
         )
         if bands != state.bands:

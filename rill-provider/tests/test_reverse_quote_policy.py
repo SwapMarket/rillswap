@@ -29,6 +29,7 @@ from rill_provider.quote_policy import (
 
 HASH = "16b72cfab7dbca73cb348f4e59a74b5c56d6e95574c1e9ca84850d69f5fa9430"
 SCHEDULE = QuoteSchedule(
+    funding_confirmations=2,  # pinned: reverse tests probe depth below a multi-block wait
     max_claim_fee_sat=400,
     reverse_refund_delay_blocks=144,
     refund_and_ln_resolution_blocks=40,
@@ -290,7 +291,8 @@ def test_fixed_reserve_ignores_fee_samples() -> None:
 
 def test_reverse_schedule_windows_must_fit() -> None:
     with pytest.raises(ValueError, match="unsupported"):
-        QuoteSchedule(reverse_refund_delay_blocks=44)  # 2 + 36 + 6 = 44 does not fit
+        # 2 + 36 + 6 = 44 does not fit
+        QuoteSchedule(funding_confirmations=2, reverse_refund_delay_blocks=44)
     with pytest.raises(ValueError, match="unsupported"):
         QuoteSchedule(hold_invoice_lifetime=100)  # shorter than the terms lifetime
     with pytest.raises(ValueError, match="unsupported"):

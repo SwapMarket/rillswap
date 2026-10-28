@@ -61,6 +61,7 @@ FIRM = {
     },
 }
 FIRM_SCHEDULE = QuoteSchedule(
+    funding_confirmations=2,  # pinned: settlement tests step through a multi-block wait
     max_funding_fee_sat=500,
     max_claim_fee_sat=400,
     max_refund_fee_sat=600,

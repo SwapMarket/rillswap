@@ -62,7 +62,9 @@ INDICATIVE_CLAIM_DESTINATION = bytes([0x51, 0x20]) + bytes(32)  # P2TR: the larg
 class QuoteSchedule:
     """Operator-chosen quote parameters beyond the public announcement terms."""
 
-    funding_confirmations: int = 2
+    # Depth before paying (BTC to LN; 0 = pay from the mempool) or before the
+    # client may claim (LN to BTC, at least 1). Announced (RS-005).
+    funding_confirmations: int = 1
     settlement_confirmations: int = 3
     refund_resolution_confirmations: int = 6
     max_refund_delay_blocks: int = 288
@@ -89,7 +91,6 @@ class QuoteSchedule:
             self.reverse_refund_delay_blocks,
             self.refund_and_ln_resolution_blocks,
             self.hold_invoice_lifetime,
-            self.funding_confirmations,
             self.settlement_confirmations,
             self.refund_resolution_confirmations,
             self.max_refund_delay_blocks,
@@ -109,6 +110,7 @@ class QuoteSchedule:
         )
         if not (
             all(0 < value <= MAX_WIRE_INTEGER for value in counts)
+            and 0 <= self.funding_confirmations <= MAX_WIRE_INTEGER
             and all(0 <= value <= MAX_SATS for value in fees)
             and self.outgoing_cltv_budget_blocks + self.learn_and_claim_blocks
             < self.max_refund_delay_blocks

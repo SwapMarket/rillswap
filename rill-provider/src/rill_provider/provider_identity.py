@@ -72,9 +72,13 @@ class AnnouncementTerms:
     epoch_bound_sessions: bool = False
     evm_assets: tuple[EvmAssetIdentity, ...] = ()  # RS-010 served assets
     transport_pow_bits: int = 0  # RS-006 transport proof of work; 0 = not required
+    # RS-005: the funding_confirmations every quote carries; 0 only for btc-to-ln.
+    funding_confirmations: int = 1
 
 
 EVM_ASSETS_EXTENSION = "rillswap/evm-assets-v1"
+FUNDING_CONFIRMATIONS_EXTENSION = "rillswap/funding-confirmations"
+MAX_ANNOUNCED_CONFIRMATIONS = 9_007_199_254_740_991  # exact JSON integer bound
 
 
 def _xonly(public_keys: Context, scalar: bytes) -> str:
@@ -240,6 +244,9 @@ def _advertisement(identity: str, terms: AnnouncementTerms) -> dict[str, Any]:
         type(terms.epoch_bound_sessions) is bool
         and type(terms.transport_pow_bits) is int
         and 0 <= terms.transport_pow_bits <= transport_pow.MAX_WORK_BITS
+        and type(terms.funding_confirmations) is int
+        and 0 <= terms.funding_confirmations <= MAX_ANNOUNCED_CONFIRMATIONS
+        and (terms.funding_confirmations > 0 or set(terms.profiles) == {"btc-to-ln/v1"})
         and type(terms.network) is NetworkIdentity
         and _supported(terms.network)
         and 1 <= len(terms.profiles) <= 8  # noqa: PLR2004
@@ -298,5 +305,6 @@ def _advertisement(identity: str, terms: AnnouncementTerms) -> dict[str, Any]:
                 if terms.transport_pow_bits
                 else {}
             ),
+            FUNDING_CONFIRMATIONS_EXTENSION: {"confirmations": terms.funding_confirmations},
         },
     }
