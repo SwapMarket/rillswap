@@ -25,10 +25,12 @@ Both profiles use the contract in RS-002. Script-path claim and refund are the
 required settlement paths. Cooperative key-path claim is an optional privacy
 optimization and MUST NOT be required for recovery.
 
-Version 1 excludes zero-confirmation LN to BTC funding, P2WSH contracts,
-BOLT12, AMP, keysend, PTLCs, additional assets, batching, and early
-cooperative refunds. A BTC to LN provider MAY announce zero funding
-confirmations; it then bears the double-spend risk alone (RS-003).
+Version 1 excludes P2WSH contracts, BOLT12, AMP, keysend, PTLCs, additional
+assets, batching, and early cooperative refunds. A BTC to LN provider MAY
+announce zero funding confirmations; it then bears the double-spend risk
+alone (RS-003). LN to BTC terms sign at least one funding confirmation; a
+client MAY explicitly claim at a lower depth and then bears the double-spend
+risk alone (RS-004).
 Asset extensions, such as the ERC20 profiles in RS-010, define their own
 profiles outside the base protocol.
 

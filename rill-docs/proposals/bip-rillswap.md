@@ -35,7 +35,7 @@ A common settlement profile enables different transports and discovery systems w
 
 A **user** initiates a swap. A **provider** offers the opposite side. A **claimant** is the party authorized to consume the hashlocked branch. A **funder** is the party authorized to consume the timed refund branch. The roles differ by direction.
 
-The initial profile uses BOLT11, an exact 32-byte SHA256 preimage, a fixed invoice amount restricted to whole satoshis, and confirmed Bitcoin funding. A BTC-to-LN provider may opt in to paying against unconfirmed funding, at its own risk; LN-to-BTC funding always requires confirmation. It does not support AMP, keysend, PTLCs, or alternative assets.
+The initial profile uses BOLT11, an exact 32-byte SHA256 preimage, a fixed invoice amount restricted to whole satoshis, and confirmed Bitcoin funding. A BTC-to-LN provider may opt in to paying against unconfirmed funding, at its own risk. LN-to-BTC terms always require at least one confirmation, though the user may explicitly claim earlier at its own risk. It does not support AMP, keysend, PTLCs, or alternative assets.
 
 The initial identifiers are `rillswap/taproot-htlc/btc-to-ln/v1` and `rillswap/taproot-htlc/ln-to-btc/v1`. They are proposed identifiers, not claims of compatibility with existing service APIs.
 
