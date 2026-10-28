@@ -22,7 +22,6 @@ interface ReverseCooperationOptions {
   readonly feeSat: bigint;
   readonly expectedTxid: string;
   readonly tipHeight: number;
-  readonly originalDeadlineAt: number;
   readonly capabilities: Cosigner;
   readonly assertCurrent: () => void;
   readonly monotonicClock?: () => number;
@@ -35,9 +34,11 @@ const exact = (value: Record<string, unknown>, keys: readonly string[]): boolean
 export async function reverseCooperativeClaim(options: ReverseCooperationOptions): Promise<{ readonly raw: string; readonly txid: string } | null> {
   const { session, terms, binding } = options;
   const monotonic = options.monotonicClock ?? (() => performance.now());
-  // Preparation, storage, publication and signing all spend this one original window.
+  // Preparation, storage, publication and signing all spend this one nonrenewing 30 s window. The
+  // quote deadline does not bound it: the lockup confirms long after the terms expire, and the
+  // claim height cutoff below is what keeps the unilateral fallback safe.
   const started = monotonic(), wallStart = session.clock(); let wallHighWater = wallStart;
-  const deadlineAt = Math.floor(Math.min(wallStart + 30000, options.originalDeadlineAt * 1000) / 1000);
+  const deadlineAt = Math.floor((wallStart + 30000) / 1000);
   const deadlineMono = started + deadlineAt * 1000 - wallStart;
   const remaining = (): number => {
     options.assertCurrent();

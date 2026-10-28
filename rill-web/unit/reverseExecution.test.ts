@@ -141,6 +141,25 @@ for (const cooperation of ["signed", "declined", "bad partial"] as const) {
   });
 }
 
+test("cooperation still runs when the lockup confirms long after the quote deadline", async () => {
+  const f = await executionFixture("signed"), e = await f.prepare(), transport = spyOn(globalThis, "fetch").mockImplementation(f.fetch);
+  const proposals: Record<string, unknown>[] = [], send = f.session.send.bind(f.session);
+  f.session.send = async (envelope, key, authorize) => {
+    if (envelope.payload.action === "cooperative_claim_propose") proposals.push(envelope.payload);
+    return send(envelope, key, authorize);
+  };
+  try {
+    await e.accept(f.assertCurrent); await e.exposeInvoice(f.assertCurrent);
+    // Two confirmations take minutes to an hour; the terms (80 s) and the page's quote deadline are long gone.
+    f.now.seconds += 3600; expect(f.now.seconds).toBeGreaterThan(e.deadlineAt);
+    await e.receiveFunding(); await e.prepareClaim(API, 100n, f.assertCurrent);
+    const result = await e.exposeClaim(API, BROADCAST, "broadcast", f.assertCurrent);
+    expect(proposals).toHaveLength(1); expect(proposals[0]!.deadline_at).toBe(f.now.seconds + 30);
+    expect(result.outcome).toBe("accepted"); expect(f.posts).toBe(1);
+    expect(parseTransaction(hexToBytes(f.postedTransactions[0]!)).inputs[0]!.witness).toHaveLength(1);
+  } finally { transport.mockRestore(); e.dispose(); }
+});
+
 test("a transient post-cooperation read retries the fallback without another proposal or POST authority", async () => {
   const f = await executionFixture("signed"), e = await f.prepare(), transport = spyOn(globalThis, "fetch").mockImplementation(f.fetch);
   try {

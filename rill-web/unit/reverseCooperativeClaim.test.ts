@@ -80,7 +80,7 @@ async function claimant(mode = "signed", mutateReply: (reply: Envelope) => Envel
   } as unknown as Session;
   const options = { session, init: verified.handshake_init as unknown as HandshakeInit, accept: verified.handshake_accept as unknown as HandshakeAccept,
     terms, binding, contractSecret: hexToBytes(data.record.user_secret.contract_secret_key), preimage: hexToBytes(data.record.monotonic_knowledge.preimage!),
-    feeSat: 100n, expectedTxid: parseTransaction(plan.baseTransaction).txid, tipHeight: data.tipHeight, originalDeadlineAt: 1700000600,
+    feeSat: 100n, expectedTxid: parseTransaction(plan.baseTransaction).txid, tipHeight: data.tipHeight,
     capabilities, assertCurrent: () => { if (!current) throw new Error("Selection changed"); }, monotonicClock: () => mono };
   return { options, events, sent, provider };
 }
