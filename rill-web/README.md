@@ -180,6 +180,18 @@ longer funding confirmations select the unilateral fallback. Advanced holds the 
 latest swap backup, manual checks, and exact fallback export. Notifications are
 optional and request permission only when enabled; no service worker is installed.
 
+By default the claim waits for the funding confirmations the provider signed
+(at least 1). **Lightning to Bitcoin: claim after confirmations** in Settings
+claims earlier, down to 0 (straight from the mempool), and the provider still
+cooperates. The page shows a warning before you pay: the claim reveals the
+payment secret, so the provider can settle your Lightning payment and then
+double-spend its unconfirmed or shallow funding, keeping both. Only lower it
+for providers and amounts you are willing to lose. The choice applies to that
+swap's open page only; Resume and recovery wait for the signed depth. Claiming
+at 0 needs a chain API that reports mempool outputs, as Esplora and mempool
+do. The local dev chain API does not, so there the claim waits for the first
+confirmation.
+
 **USDC or USDT to Lightning.** Paste the Lightning invoice and connect an
 injected EVM wallet on the provider's chain. Approve the token allowance if
 needed and authorize the contract lock. The wallet keeps the refund key and

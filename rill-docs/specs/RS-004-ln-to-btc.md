@@ -148,6 +148,14 @@ the Taproot script, and `V`, and that the transaction bytes pay exactly that
 output; it then appends the binding to its recovery record's
 `funding_history` before waiting for `funding_confirmations`.
 
+The signed `funding_confirmations` is at least 1. A client MAY explicitly
+choose to claim at a lower depth, down to 0 (the funding only in the mempool),
+after the same pre-reveal checks. It then accepts that the provider, having
+learned the preimage, can still double-spend unconfirmed or shallow funding.
+The risk is the client's alone, so a provider SHOULD cooperate on such a
+claim: its own exact contract output, unspent in its node's mempool, is enough
+evidence. Absent an explicit client choice, the signed depth applies.
+
 Other provider notices are `observation` payloads and carry no authority:
 `hold_accepted`, `hold_settled`, `swap_aborted` (with a short `reason`, sent
 only when nothing was funded), `refund_broadcast`, and `refund_confirmed`

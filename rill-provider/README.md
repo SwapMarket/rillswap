@@ -341,8 +341,12 @@ service user, and must have owner-only permissions. Bitcoin profiles include
 funding needs before the swap moves on. For BTC to LN it is how long you wait
 on the client's deposit before paying the invoice. For Lightning to BTC it is
 how long the client waits on your lockup before claiming; it must be at least
-1. ERC20 profiles use `evm.funding_confirmations` instead (EVM blocks, at
-least 1). The value is signed into every offer and announced as
+1. A Lightning to BTC client may choose to claim earlier, even from the
+mempool (the CLI's `--claim-confirmations`, a web Settings field), and the
+provider still cooperates: the client takes the double-spend risk, and your
+own funding, unspent in your node's mempool, is enough evidence. ERC20
+profiles use `evm.funding_confirmations` instead (EVM blocks, at least 1).
+The value is signed into every offer and announced as
 `rillswap/funding-confirmations`. The web app ranks providers by it by
 default (fewest confirmations first, then lowest price) and labels the
 fastest and cheapest offers. Clients refuse offers that wait longer than you
