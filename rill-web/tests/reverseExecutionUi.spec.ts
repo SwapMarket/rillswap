@@ -13,7 +13,8 @@ async function mountedExecution(page: Page): Promise<void> {
     const path = new URL(route.request().url()).pathname;
     const confirmed = await page.evaluate(() => window.uiFixture?.reverseClaimConfirmed ?? false);
     await route.fulfill({ body: path.endsWith("/status") ? JSON.stringify({ confirmed, block_height: 99, block_hash: "a".repeat(64) }) :
-      path.endsWith("/0") ? regtest.genesis_hash : path.endsWith("/height") ? "100" : "a".repeat(64),
+      path.endsWith("/0") ? regtest.genesis_hash : path.endsWith("/height") ? "100"
+        : path.endsWith("/v1/fees/recommended") ? JSON.stringify({ fastestFee: 2, halfHourFee: 1, hourFee: 1, economyFee: 1, minimumFee: 1 }) : "a".repeat(64),
       headers: { "Access-Control-Allow-Origin": "http://127.0.0.1:18765" } });
   });
   await page.goto(PAGE);

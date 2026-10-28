@@ -22,10 +22,25 @@ import { COOPERATIVE_CLAIM_FEATURE } from "./wire";
 import type { ReverseSwapRequest } from "./reverseSwap";
 
 const require = (ok: boolean): void => { if (!ok) throw new SwapError("Reverse execution refused. Keep backups; no payment or exposure is retried."); };
+
+/**
+ * The least claim fee reserve to ask for: the cooperative (key-path) claim at the next-block
+ * rate, so the claim pays exactly the reserve and the destination receives exactly the payout.
+ * One Taproot key-path input and one output: 77 vB plus the destination script (99 P2WPKH, 111 P2TR).
+ */
+export function minimumClaimFeeReserveSat(destinationScript: string, rateSatKvb: number, configuredSat: bigint): bigint {
+  if (!/^(?:[0-9a-f]{2}){1,80}$/.test(destinationScript) || !Number.isSafeInteger(rateSatKvb) || rateSatKvb <= 0) {
+    throw new SwapError("Invalid claim fee inputs");
+  }
+  const vsize = BigInt(77 + destinationScript.length / 2), nextBlock = (vsize * BigInt(rateSatKvb) + 999n) / 1000n;
+  return nextBlock > configuredSat ? nextBlock : configuredSat;
+}
 const sign = (digest: Uint8Array, key: Uint8Array): string => bytesToHex(schnorr.sign(digest, key, randomBytes(32)));
 export interface ReverseExecutionConfiguration {
   readonly destinationScript: string;
   readonly tipHeight: number;
+  /** Next-block fee rate (sat/kvB) from the trusted chain API; the claim reserve must pay at least this. */
+  readonly claimFeeRateSatKvb: number;
   readonly ageRecipient: string;
   readonly journal: BrowserReverseJournal;
   readonly cooperation?: Cosigner;
@@ -77,9 +92,13 @@ export async function prepareReverseExecution(session: Session, handshake: Hands
     current(); require(init.profile_id === "ln-to-btc/v1" && session.profile === init.profile_id &&
       Number.isSafeInteger(config.tipHeight) && config.tipHeight > 0 && config.tipHeight < 500000000);
     const limits = request.limits;
+    const minimumReserve = minimumClaimFeeReserveSat(config.destinationScript, config.claimFeeRateSatKvb, limits.minClaimFeeReserveSat);
+    if (minimumReserve > limits.maxClaimFeeSat) {
+      throw new SwapError(`The minimum claim fee reserve (${minimumReserve} sat, at least the next-block fee) exceeds your maximum claim fee (${limits.maxClaimFeeSat} sat)`);
+    }
     const firm = checkReverseFirmQuoteRequest({ kind: "ln-to-btc", mode: "firm", nominal_payout_sat: request.payoutSat.toString(),
       payment_hash: bytesToHex(sha256(preimage)), client_contract_compressed_key: contract.compressed, recovery_authorization_xonly_key: authorization.xonly,
-      client_destination_script: config.destinationScript, limits: { max_success_fee_sat: limits.maxSuccessFeeSat.toString(), min_claim_fee_reserve_sat: limits.minClaimFeeReserveSat.toString(),
+      client_destination_script: config.destinationScript, limits: { max_success_fee_sat: limits.maxSuccessFeeSat.toString(), min_claim_fee_reserve_sat: minimumReserve.toString(),
         max_claim_fee_sat: limits.maxClaimFeeSat.toString(), min_refund_lock_height: config.tipHeight + limits.minRefundDelayBlocks,
         max_incoming_htlc_expiry_height: config.tipHeight + limits.maxIncomingHtlcDelayBlocks }, extensions: {} });
     const initialDeadline = seconds() + 600;

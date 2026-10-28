@@ -1,5 +1,6 @@
 /** Explicitly trusted chain observations. No keys, addresses, or invoices are transmitted. */
 import { validateMempoolApi, type NetworkName } from "./config";
+import { parseStrictEventJson } from "../strictEventJson";
 
 export interface ObservedTip {
   readonly height: number;
@@ -37,6 +38,33 @@ export async function readBoundedChainText(response: Response, signal: AbortSign
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
   return new TextDecoder("utf-8", { fatal: true }).decode(bytes).trim();
+}
+
+/** Highest next-block rate accepted from a chain API, in sat/vB; anything above is treated as broken. */
+const MAX_NEXT_BLOCK_SAT_VB = 10_000;
+
+/**
+ * The chain API's next-block fee rate (mempool `fastestFee`), in whole sat/kvB rounded up.
+ * Advice from an explicitly trusted API, used only as a floor for what this browser asks for.
+ */
+export async function readNextBlockFeeRate(
+  base: string,
+  name: NetworkName,
+  options: { readonly signal?: AbortSignal; readonly fetch?: ChainFetch } = {},
+): Promise<number> {
+  const api = validateMempoolApi(base, name);
+  const signal = options.signal
+    ? AbortSignal.any([options.signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000);
+  signal.throwIfAborted();
+  const response = await (options.fetch ?? fetch)(`${api}/v1/fees/recommended`, {
+    signal, credentials: "omit", redirect: "error", cache: "no-store", referrerPolicy: "no-referrer",
+  });
+  const data = parseStrictEventJson(await readBoundedChainText(response, signal, 1024), 1024);
+  const rate = data !== null && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>).fastestFee : undefined;
+  if (typeof rate !== "number" || !Number.isFinite(rate) || rate <= 0 || rate > MAX_NEXT_BLOCK_SAT_VB) {
+    throw new Error("Chain API returned no usable next-block fee rate");
+  }
+  return Math.ceil(Number((rate * 1000).toFixed(3))); // 1.1 sat/vB is 1100, not 1101
 }
 
 /** Matching genesis is a sanity check, not independent chain or signet challenge validation. */

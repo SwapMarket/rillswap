@@ -141,8 +141,12 @@ stop the swap and cannot currently be refunded from the panel.
 **Lightning to Bitcoin.** Enter the amount and Bitcoin address, accept the signed
 price, and pay the invoice from any Lightning wallet (or a configured LND node).
 The page checks the provider's funding and confirmations, then saves and broadcasts
-the claim automatically. Keep the page open. The claim uses the signed fee reserve
-while preserving the nominal payout. Live swaps first attempt a cooperative
+the claim automatically. Keep the page open. The claim pays exactly the signed fee
+reserve, so the address receives exactly the requested amount. Before asking for
+signed terms, the page reads the chain API's next-block fee rate (`fastestFee`
+from `/v1/fees/recommended`) and asks for a reserve that pays the cooperative claim
+at that rate; without an estimate, or if that reserve exceeds your maximum claim
+fee, it stops before any payment. Live swaps first attempt a cooperative
 key-path claim, keeping the script and preimage off chain. The signed unilateral
 fallback is saved before disclosure and used if cooperation fails. Transient
 chain-read failures retry before the one-shot broadcast election, never after an
@@ -209,7 +213,7 @@ details and pass it as `--identity` to `rill recover watch-refund` or
 | --- | --- |
 | Nostr relays | Your IP, keys used for messaging, message sizes and timing; swap payloads are encrypted |
 | Swap provider | The swap terms and the invoice or payout details needed for the flow |
-| Chain API | Your IP and the public transactions and outputs you query |
+| Chain API | Your IP, the public transactions and outputs you query, and when you request fee estimates |
 | Gas sponsor | The claim preimage and the receiving address |
 
 Funding checks are observations from a trusted API, not independent

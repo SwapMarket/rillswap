@@ -43,7 +43,8 @@ async function mockTip(page: Page, genesis = regtest.genesis_hash): Promise<stri
     requests.push(route.request().url());
     expect(route.request().postData()).toBeNull();
     const path = new URL(route.request().url()).pathname;
-    await route.fulfill({ body: path.endsWith("/0") ? genesis : path.endsWith("/height") ? "100" : "a".repeat(64),
+    await route.fulfill({ body: path.endsWith("/0") ? genesis : path.endsWith("/height") ? "100"
+      : path.endsWith("/v1/fees/recommended") ? JSON.stringify({ fastestFee: 3, halfHourFee: 2, hourFee: 1, economyFee: 1, minimumFee: 1 }) : "a".repeat(64),
       headers: { "Access-Control-Allow-Origin": "http://127.0.0.1:18765" } });
   });
   return requests;
@@ -182,7 +183,7 @@ test("Lightning to Bitcoin keeps estimates private and retains sessions only unt
     limits: { minRefundDelayBlocks: number; maxIncomingHtlcDelayBlocks: number; minClaimFeeReserveSat: bigint } };
   expect(request.payoutSat).toBe(50_000n);
   expect(Object.keys(request).sort()).toEqual(["limits", "network", "payoutSat"]);
-  expect(request.limits).toMatchObject({ minRefundDelayBlocks: 72, maxIncomingHtlcDelayBlocks: 432, minClaimFeeReserveSat: 500n });
+  expect(request.limits).toMatchObject({ minRefundDelayBlocks: 72, maxIncomingHtlcDelayBlocks: 432, minClaimFeeReserveSat: 0n });
   await expect(page.locator("#swap-reverse-continue")).toBeEnabled(); // the stored browser key is the approval
   await expect(page.locator("#swap-reverse-key-backup")).toHaveCount(0);
   await expect(page.locator("#swap-start")).toBeDisabled();
@@ -213,6 +214,26 @@ test("continuing a Lightning to Bitcoin estimate sends only the address entered 
   await expect(page.locator("#swap-receive-address")).toBeDisabled();
   await expect.poll(() => page.evaluate(() => window.uiFixture.disposed)).toBe(1); // the unselected estimate only
   await expect(page.locator("#swap-reverse-continue")).toHaveCount(0); // execution replaced the estimate review
+  // The firm request is priced from the chain API's next-block rate (3 sat/vB).
+  await expect.poll(() => page.evaluate(() => window.uiFixture.reverseClaimFeeRates)).toEqual([3000]);
+});
+
+test("without a next-block fee estimate, a Lightning to Bitcoin swap stops before the firm request", async ({ page }) => {
+  await page.route(`${API}/**`, async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/v1/fees/recommended")) { await route.fulfill({ status: 503, body: "", headers: { "Access-Control-Allow-Origin": "http://127.0.0.1:18765" } }); return; }
+    await route.fulfill({ body: path.endsWith("/0") ? regtest.genesis_hash : path.endsWith("/height") ? "100" : "a".repeat(64),
+      headers: { "Access-Control-Allow-Origin": "http://127.0.0.1:18765" } });
+  });
+  await page.goto(PAGE);
+  await page.getByRole("button", { name: "Switch direction" }).click();
+  await page.locator("#swap-receive-amount").fill("50000");
+  await page.locator("#swap-start").click();
+  await page.locator("#swap-receive-address").fill(scriptAddress(`0014${"11".repeat(20)}`, "regtest"));
+  await page.locator("#swap-reverse-continue").click();
+  await expect(page.locator("#swap-reverse-prepare-error")).toContainText("unavailable");
+  await expect(page.getByText("Could not prepare this swap. No payment was started.")).toBeVisible();
+  expect(await page.evaluate(() => window.uiFixture.reverseClaimFeeRates)).toBeUndefined();
 });
 
 test("with announced fees loaded on open, Swap accepts a signed price within the estimate without a review step", async ({ page }) => {

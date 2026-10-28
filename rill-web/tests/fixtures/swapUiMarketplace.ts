@@ -5,7 +5,7 @@ declare global {
   interface Window {
     uiFixture: { requests: unknown[]; executed: number; executedProviders: string[]; disposed: number;
       fundingScript?: string; fundingSource?: { psbt: string } | { depositTxid: string };
-      reverseEvents?: string[]; reverseFunded?: boolean; reverseDepth?: number; reverseClaimConfirmed?: boolean; reverseBroadcastUnknown?: boolean; reverseNodePayment?: boolean; reverseTransientClaimRead?: boolean;
+      reverseEvents?: string[]; reverseFunded?: boolean; reverseDepth?: number; reverseClaimConfirmed?: boolean; reverseBroadcastUnknown?: boolean; reverseNodePayment?: boolean; reverseTransientClaimRead?: boolean; reverseClaimFeeRates?: number[];
       fundedRecovery?: number[]; fundingPublished?: boolean;
       wallet: typeof BrowserRecoveryWallet; releaseInfo?: () => void; infoPending: boolean };
     /**
@@ -73,7 +73,8 @@ export const quoteReverseProviders = async (_providers: unknown[], request: unkn
       quote: { providerIdentity: id.repeat(64), payoutSat: 50_000n, holdInvoiceSat: BigInt(51_000 + Number(id)), successFeeSat: 500n,
         claimFeeReserveSat: 500n, fundingConfirmations: 2, refundDelayBlocks: 144, incomingHtlcExpiryDeltaBlocks: 288, expiresAt: Math.floor(Date.now() / 1000) + 3600 },
       // A stand-in execution: enough for the execution UI to accept, show the invoice, and receive fixture funding.
-      prepareExecution: async () => {
+      prepareExecution: async (configuration: { claimFeeRateSatKvb: number }) => {
+        (window.uiFixture.reverseClaimFeeRates ??= []).push(configuration.claimFeeRateSatKvb);
         window.uiFixture.reverseEvents = [];
         const events = window.uiFixture.reverseEvents, record: { stage: string; claim?: { txid: string } } = { stage: "terms-ready" };
         const expiresAt = Math.floor(Date.now() / 1000) + 1800;

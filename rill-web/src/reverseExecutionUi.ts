@@ -4,7 +4,7 @@ import { BrowserReverseJournal } from "./browserReverseJournal";
 import { BrowserHoldPayer } from "./swap/browserHoldPayer";
 import { browserCosigner } from "./swap/browserCosigner";
 import { explorerTxUrl, validateMempoolApi, type NetworkName } from "./swap/config";
-import { readBoundedChainText, readChainTip } from "./swap/chainTip";
+import { readBoundedChainText, readChainTip, readNextBlockFeeRate } from "./swap/chainTip";
 import { notifySwap, requestSwapNotifications } from "./swap/notifications";
 import { parseStrictEventJson } from "./strictEventJson";
 import { qrSvg } from "./qr";
@@ -195,7 +195,9 @@ export async function mountReverseExecution(root: HTMLElement, options: ReverseE
   try {
     current(); options.status("Checking signed final terms", 0);
     const api = validateMempoolApi(options.chainApi, options.network.name), tip = await readChainTip(api, options.network); current();
-    execution = await options.prepared.prepareExecution({ destinationScript: options.destinationScript, tipHeight: tip.height,
+    // No estimate, no swap: the claim reserve must pay at least the next-block rate.
+    const claimFeeRateSatKvb = await readNextBlockFeeRate(api, options.network.name, { signal: cancellation.signal }); current();
+    execution = await options.prepared.prepareExecution({ destinationScript: options.destinationScript, tipHeight: tip.height, claimFeeRateSatKvb,
       ageRecipient: options.ageRecipient, journal, cooperation: browserCosigner, assertCurrent: current,
       ...(options.report ? { report: options.report } : {}) }); current();
     const e = execution, terms = e.terms, v = view(root, e, options); v.backup(e.recoveryFile);
@@ -255,5 +257,9 @@ export async function mountReverseExecution(root: HTMLElement, options: ReverseE
       })().catch(() => { if (!cancellation.signal.aborted) v.message.textContent = "Could not connect or prepare the payment. No payment will be retried."; });
     };
     return stopped;
-  } catch { stopped(); root.replaceChildren(node("p", "Could not prepare this swap. No payment was started.")); return stopped; }
+  } catch (error) {
+    stopped();
+    root.replaceChildren(node("p", "Could not prepare this swap. No payment was started."), node("small", (error as Error).message, "swap-reverse-prepare-error"));
+    return stopped;
+  }
 }

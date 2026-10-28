@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import regtest from "../src/networks/regtest-rillswap-e2e-v1.json";
-import { readChainTip, type ChainFetch } from "../src/swap/chainTip";
+import { readChainTip, readNextBlockFeeRate, type ChainFetch } from "../src/swap/chainTip";
 import { mempoolApiForNetwork, resolveSwapDefaults, validateMempoolApi } from "../src/swap/config";
 
 const network = { name: "regtest" as const, genesis_hash: regtest.genesis_hash };
@@ -46,4 +46,27 @@ test("canceled reads make no request and never fall back to another operator", a
   await expect(readChainTip("http://127.0.0.1:8091/api", network, { signal: cancellation.signal,
     fetch: (async () => { requests++; return new Response(); }) as ChainFetch })).rejects.toThrow();
   expect(requests).toBe(0);
+});
+
+test("next-block fee reads take the chain API's fastestFee in whole sat/kvB, rounded up", async () => {
+  const requests: string[] = [];
+  const read = (body: string) => readNextBlockFeeRate("http://127.0.0.1:8091/api", "regtest", { fetch: (async (url, options) => {
+    requests.push(String(url));
+    expect(options?.credentials).toBe("omit"); expect(options?.redirect).toBe("error"); expect(options?.body).toBeUndefined();
+    return new Response(body);
+  }) as ChainFetch });
+  expect(await read(JSON.stringify({ fastestFee: 2, halfHourFee: 1, hourFee: 1, economyFee: 1, minimumFee: 1 }))).toBe(2000);
+  expect(await read('{"fastestFee":1.1}')).toBe(1100); // not 1101 from binary rounding
+  expect(await read('{"fastestFee":0.1234}')).toBe(124);
+  expect(new Set(requests)).toEqual(new Set(["http://127.0.0.1:8091/api/v1/fees/recommended"]));
+});
+
+test("missing, nonpositive, implausible or oversized fee rates fail closed", async () => {
+  for (const body of ['{"fastestFee":0}', '{"fastestFee":-1}', '{"fastestFee":"2"}', "{}", "[2]", "null", '{"fastestFee":10001}',
+    '{"fastestFee":2,"fastestFee":3}', JSON.stringify({ fastestFee: 2, pad: "x".repeat(1024) })]) {
+    await expect(readNextBlockFeeRate("http://127.0.0.1:8091/api", "regtest", {
+      fetch: (async () => new Response(body)) as ChainFetch,
+    })).rejects.toThrow();
+  }
+  await expect(readNextBlockFeeRate("http://127.0.0.1:8091/api", "mainnet", { fetch: (async () => new Response('{"fastestFee":2}')) as ChainFetch })).rejects.toThrow();
 });

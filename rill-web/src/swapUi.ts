@@ -375,8 +375,8 @@ function mount(root: HTMLElement): void {
   const delay = field(limits, "swap-delay", "Maximum refund delay (blocks)", "288",
     "If the provider never pays, your refund unlocks within this many blocks (288 is about two days).");
   limits.append(node("p", "Lightning → Bitcoin", "swap-reverse-limits"));
-  const minReserve = field(limits, "swap-min-claim-reserve", "Minimum claim fee reserve (sat)", "500",
-    "On-chain fee budget the provider must lock for your claim.");
+  const minReserve = field(limits, "swap-min-claim-reserve", "Minimum claim fee reserve (sat)", "0",
+    "Your claim pays exactly this on-chain reserve. Continue always asks for at least the next-block fee from your chain API; set a higher floor here if you want one.");
   const minRefundDelay = field(limits, "swap-min-refund-delay", "Minimum time before provider refund (blocks)", "72");
   const maxHold = field(limits, "swap-max-hold", "Maximum Lightning hold (blocks)", "432",
     "How long your Lightning payment may stay pending (432 is about three days).");
