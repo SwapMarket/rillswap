@@ -128,6 +128,9 @@ services:
   # across restarts (block history survives; historical state does not).
   # A restored chain resumes from its last saved block time, so the clock is
   # moved to wall time at start: the shop's receipt rail compares the two.
+  # Anvil keeps whole seconds, so `date +%s` alone can leave it up to a second
+  # behind and a block mined right after a preparation would predate it; one
+  # second ahead keeps block time at or after wall time.
   # SIGTERM is forwarded so Anvil saves its state on stop.
   anvil:
     image: ghcr.io/foundry-rs/foundry@sha256:f69e1b8d1dda17d89227a4d0513b1d86f93ece430dea8d87aaea643da3607d3e # v1.8.4
@@ -141,7 +144,7 @@ services:
         pid=$$!
         trap 'kill -TERM $$pid' TERM INT
         until cast block-number -r http://127.0.0.1:8545 >/dev/null 2>&1; do sleep 0.5; done
-        cast rpc anvil_setTime "$$(date +%s)" -r http://127.0.0.1:8545 >/dev/null
+        cast rpc anvil_setTime "$$(( $$(date +%s) + 1 ))" -r http://127.0.0.1:8545 >/dev/null
         wait $$pid
         wait $$pid
     volumes:

@@ -98,6 +98,15 @@ case "$cmd" in
         compose exec -T shop bun pay-token.ts "${1:?usage: devctl pay-token <order-id>}"
         ;;
     token-smoke)
+        # The receipt rail refuses a block older than the merchant's preparation
+        # time, so a block mined now must not carry an earlier timestamp.
+        before=$(date +%s)
+        compose exec -T anvil cast rpc evm_mine -r http://127.0.0.1:8545 >/dev/null
+        stamp=$(compose exec -T anvil cast block latest -f timestamp -r http://127.0.0.1:8545)
+        if [ "$stamp" -lt "$before" ]; then
+            echo "token-smoke: anvil block time $stamp lags wall time $before" >&2
+            exit 1
+        fi
         compose exec -T shop bun pay-token.ts --new fusdc
         compose exec -T shop bun pay-token.ts --new fusdt
         ;;
