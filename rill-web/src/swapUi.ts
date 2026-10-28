@@ -21,7 +21,7 @@ import { GasSponsor, newStagingSecret, stagingAddress } from "./swap/gasSponsor"
 import { readChainTip } from "./swap/chainTip";
 import { BrowserRecoveryWallet, parseWalletBackup } from "./browserRecoveryWallet";
 import { type DirectoryEntry, DIRECTORY_PROFILES, discoverDirectory, discoverMarketplace, eligibleProviders, indicativeFee, ineligibilityReason, quoteProviders, quoteReverseProviders,
-  estimateFromDirectory, providerLimits, type LocatedQuote, MAX_QUOTE_PROVIDERS, quoteErc20Providers, quoteLnErc20Providers, selectEvmAsset } from "./swap/marketplace";
+  estimateFromDirectory, providerLimits, type LocatedQuote, MAX_QUOTE_PROVIDERS, quoteErc20Providers, quoteLnErc20Providers, selectEvmAsset, unexpired } from "./swap/marketplace";
 import type { Erc20SwapRequest, PreparedErc20Swap } from "./swap/erc20Swap";
 import { EvmRpc } from "./swap/evmHtlc";
 import { connectEvmWallet, mountErc20Execution, mountLnErc20Execution, parseTokenAmount, tokenLabel, type LnErc20Claimer } from "./erc20Ui";
@@ -39,6 +39,8 @@ import { resumeBrowserReverseExecution } from "./browserReverseRecovery";
 import { decryptRecoveryContainer } from "./recoveryKeys";
 
 const NETWORKS = { mainnet, signet, testnet4, regtest } as const;
+/** How often an idle, visible page reloads the provider directory. */
+const DIRECTORY_REFRESH_MS = 5 * 60_000;
 
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, text = "", id?: string): HTMLElementTagNameMap[K] {
   const element = document.createElement(tag);
@@ -227,22 +229,40 @@ function mount(root: HTMLElement): void {
     }
   };
   let directoryLoaded = false;
-  /** Loads on page load and network change; the estimate line and the Providers dialog share it. */
+  let directoryWarnings: readonly string[] = [];
+  let directoryGeneration = 0, directoryLoading = false, directoryAttemptAt = 0;
+  const showDirectoryStatus = (): void => {
+    const count = directoryEntries.length;
+    providersStatus.textContent = count === 0 ? "No providers found on your relays." :
+      `${count} provider${count === 1 ? "" : "s"} on ${network.value}.` +
+      (directoryWarnings.length ? ` Discovery was incomplete: ${directoryWarnings.join("; ")}.` : "");
+  };
+  /**
+   * Loads on page load, network change, Refresh, and periodically (see refreshDirectory); the estimate
+   * line and the Providers dialog share it. Only the newest load may apply its result.
+   */
   const loadDirectory = (): void => {
     const name = network.value as NetworkName;
+    const generation = ++directoryGeneration; // also discards a load still running for other settings
+    directoryAttemptAt = Date.now();
     let urls: readonly string[];
-    try { urls = validateRelays(relay.value.trim(), name); } catch (error) { providersStatus.textContent = (error as Error).message; return; }
+    try { urls = validateRelays(relay.value.trim(), name); } catch (error) {
+      directoryLoading = false; reloadProviders.disabled = false;
+      providersStatus.textContent = (error as Error).message; return;
+    }
+    directoryLoading = true;
     reloadProviders.disabled = true;
     providersStatus.textContent = "Loading providers...";
     void discoverDirectory(urls, NETWORKS[name]).then((directory) => {
-      if (network.value !== name) return;
-      directoryEntries = directory.entries;
+      if (generation !== directoryGeneration) return;
+      directoryEntries = directory.entries; directoryWarnings = directory.warnings;
       directoryLoaded = true;
       renderDirectory();
-      providersStatus.textContent = directory.entries.length === 0 ? "No providers found on your relays." :
-        `${directory.entries.length} provider${directory.entries.length === 1 ? "" : "s"} on ${name}.` +
-        (directory.warnings.length ? ` Discovery was incomplete: ${directory.warnings.join("; ")}.` : "");
-    }, (error: Error) => { providersStatus.textContent = error.message; }).finally(() => { reloadProviders.disabled = false; updateEstimate(); });
+      showDirectoryStatus();
+    }, (error: Error) => { if (generation === directoryGeneration) providersStatus.textContent = error.message; }).finally(() => {
+      if (generation !== directoryGeneration) return;
+      directoryLoading = false; reloadProviders.disabled = false; updateEstimate();
+    });
   };
   reloadProviders.onclick = loadDirectory;
   identity.oninput = () => { showProviderChoice(); updateEstimate(); renderDirectory(); };
@@ -522,7 +542,7 @@ function mount(root: HTMLElement): void {
     updateDisclosure();
     updateNetwork();
     recovery.clearFundingObservation();
-    directoryEntries = []; directoryLoaded = false; renderDirectory(); providersStatus.textContent = "";
+    directoryEntries = []; directoryWarnings = []; directoryLoaded = false; renderDirectory(); providersStatus.textContent = "";
     loadDirectory();
   };
   network.onchange = applyNetwork;
@@ -538,6 +558,19 @@ function mount(root: HTMLElement): void {
   };
   updateNetwork();
   loadDirectory();
+  // Offers expire (makers re-announce about every 30 minutes), so the directory drops expired entries
+  // and reloads itself while the page is visible and no swap is running. A swap discovers afresh anyway.
+  const refreshDirectory = (): void => {
+    const live = unexpired(directoryEntries);
+    if (live.length !== directoryEntries.length) {
+      directoryEntries = live; renderDirectory(); updateEstimate();
+      if (!directoryLoading) showDirectoryStatus();
+    }
+    if (document.visibilityState === "visible" && !busy && !directoryLoading &&
+        Date.now() - directoryAttemptAt >= DIRECTORY_REFRESH_MS) loadDirectory();
+  };
+  setInterval(refreshDirectory, 60_000);
+  document.addEventListener("visibilitychange", refreshDirectory);
   // A swap link reopens its encrypted record locally: inspection decrypts and parses, nothing connects.
   const savedRecoveries = node("details", "", "swap-saved-recoveries");
   savedRecoveries.append(node("summary", "Your swaps"));

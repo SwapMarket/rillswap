@@ -27,6 +27,8 @@ export const discoverDirectory = async () => ({ warnings: [], entries: [{ identi
 export const indicativeFee = (policy: { base_sat: string; proportional_millionths: number }, amount: bigint) =>
   BigInt(policy.base_sat) + (amount * BigInt(policy.proportional_millionths) + 999_999n) / 1_000_000n;
 export const providerLimits = (providers: unknown[]) => providers;
+export const unexpired = <T extends { expiresAt: number }>(entries: readonly T[], now = Math.floor(Date.now() / 1000)) =>
+  entries.filter((entry) => entry.expiresAt > now);
 type FixtureEntry = { identity: string; profiles: string[]; amountBands: { minimum_sat: string; maximum_sat: string }[];
   indicativeFeePolicy: { base_sat: string; proportional_millionths: number } };
 export const estimateFromDirectory = (entries: FixtureEntry[], profile: string, amount: bigint, pinned = "") => {

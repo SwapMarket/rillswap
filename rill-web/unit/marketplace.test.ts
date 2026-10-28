@@ -4,7 +4,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import canonicalize from "canonicalize";
 import { finalizeEvent, getPublicKey } from "nostr-tools";
 import { MAX_DISCOVERY_EVENTS } from "../src/swap/discovery";
-import { directoryFromObservations, eligibleProviders, estimateFromDirectory, indicativeFee, ineligibilityReason, MAX_IDENTITY_EVENTS, providerLimits, rankQuotes, scanAnnouncements, type LocatedQuote, type RelayObservation } from "../src/swap/marketplace";
+import { directoryFromObservations, eligibleProviders, estimateFromDirectory, indicativeFee, ineligibilityReason, MAX_IDENTITY_EVENTS, providerLimits, rankQuotes, scanAnnouncements, type LocatedQuote, type RelayObservation, unexpired } from "../src/swap/marketplace";
 import application from "./fixtures/manual-advertisement-regtest-v1.json";
 import vector from "./fixtures/nostr-announcement-regtest-v1.json";
 import network from "../src/networks/regtest-rillswap-e2e-v1.json";
@@ -140,6 +140,18 @@ test("the directory estimate picks the lowest announced fee for the direction, h
   expect(estimateFromDirectory(entries, "btc-to-ln/v1", 20_000n)).toEqual({ reason: expect.stringContaining("No provider accepts 20,000 sat") });
   expect(estimateFromDirectory(entries, "btc-to-ln/v1", 1000n, reverseOnly.identity)).toEqual({ reason: "The chosen provider does not announce this swap direction." });
   expect(estimateFromDirectory([], "btc-to-ln/v1", 1000n)).toEqual({ reason: expect.stringContaining("No provider announced") });
+});
+
+test("expired directory entries are neither listed nor estimated", () => {
+  const cheap = directoryFromObservations([observed([announcement(1, "10", 2)])], network).entries[0]!;
+  const dear = directoryFromObservations([observed([announcement(1, "40", 3)])], network).entries[0]!;
+  const expiring = { ...cheap, expiresAt: dear.expiresAt - 100 };
+  const entries = [dear, expiring];
+  expect(unexpired(entries, expiring.expiresAt - 1)).toEqual(entries);
+  expect(unexpired(entries, expiring.expiresAt)).toEqual([dear]); // expires_at itself is already expired
+  expect(estimateFromDirectory(entries, "btc-to-ln/v1", 1000n, "", expiring.expiresAt - 1)).toEqual({ identity: cheap.identity, feeSat: 11n });
+  expect(estimateFromDirectory(entries, "btc-to-ln/v1", 1000n, "", expiring.expiresAt)).toEqual({ identity: dear.identity, feeSat: 41n });
+  expect(estimateFromDirectory(entries, "btc-to-ln/v1", 1000n, "", dear.expiresAt)).toEqual({ reason: expect.stringContaining("No provider announced") });
 });
 
 test("verified contract prices, not indicative prices, choose the winner with deterministic ties", () => {

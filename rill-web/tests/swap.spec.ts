@@ -345,7 +345,8 @@ test("the swap page installs no service worker, so no release replaces it mid-sw
   for (const src of scripts) expect(new URL(src).host).toBe("127.0.0.1:18765");
 });
 
-test("the provider directory loads by itself, groups providers by swap type and chooses the pinned provider", async ({ page }) => {
+/** A signed regtest provider announcement (both Bitcoin directions) that expires `expiresIn` seconds from now. */
+async function regtestAnnouncement(expiresIn: number): Promise<{ event: unknown; identity: string }> {
   const { schnorr } = await import("@noble/curves/secp256k1.js");
   const { sha256 } = await import("@noble/hashes/sha2.js");
   const { default: canonicalize } = await import("canonicalize");
@@ -355,13 +356,18 @@ test("the provider directory loads by itself, groups providers by swap type and 
   const secret = new Uint8Array(32); secret[31] = 2;
   const wrapper = structuredClone(application);
   wrapper.advertisement.provider_identity_xonly_key = getPublicKey(secret);
-  wrapper.advertisement.expires_at = Math.floor(Date.now() / 1000) + 3600;
+  wrapper.advertisement.expires_at = Math.floor(Date.now() / 1000) + expiresIn;
   wrapper.advertisement.created_at = Math.floor(Date.now() / 1000) - 60;
   const tag = sha256(new TextEncoder().encode("RillSwap/advertisement/v1"));
   const content = new TextEncoder().encode(canonicalize(wrapper.advertisement)!);
   const digest = new Uint8Array(64 + content.length); digest.set(tag); digest.set(tag, 32); digest.set(content, 64);
   wrapper.signature = Buffer.from(schnorr.sign(sha256(digest), secret)).toString("hex");
   const event = finalizeEvent({ kind: vector.kind, created_at: wrapper.advertisement.created_at, tags: structuredClone(vector.tags), content: canonicalize(wrapper)! }, secret);
+  return { event, identity: wrapper.advertisement.provider_identity_xonly_key };
+}
+
+test("the provider directory loads by itself, groups providers by swap type and chooses the pinned provider", async ({ page }) => {
+  const { event, identity } = await regtestAnnouncement(3600);
   let requests = 0;
   await page.routeWebSocket("ws://127.0.0.1:7777/", (socket) => {
     socket.onMessage((message) => {
@@ -386,8 +392,8 @@ test("the provider directory loads by itself, groups providers by swap type and 
   await expect(group.locator("th")).toHaveText(["Provider", "Limits (sat)", "Fee", "On 100,000 sat", "Listed until", ""]);
   const entry = group.locator("tbody tr");
   await expect(entry).toHaveCount(1);
-  await expect(entry.locator("td").nth(0)).toHaveText(`${wrapper.advertisement.provider_identity_xonly_key.slice(0, 12)}…`);
-  await expect(entry.locator("td").nth(0)).toHaveAttribute("title", new RegExp(`^${wrapper.advertisement.provider_identity_xonly_key}`));
+  await expect(entry.locator("td").nth(0)).toHaveText(`${identity.slice(0, 12)}…`);
+  await expect(entry.locator("td").nth(0)).toHaveAttribute("title", new RegExp(`^${identity}`));
   await expect(entry.locator("td").nth(1)).toHaveText("1,000 – 100,000");
   await expect(entry.locator("td").nth(2)).toHaveText("50 sat + 0.10%");
   await expect(entry.locator("td").nth(3)).toHaveText("150 sat");
@@ -399,12 +405,40 @@ test("the provider directory loads by itself, groups providers by swap type and 
   await page.locator("#swap-providers-load").click();
   await expect.poll(() => requests).toBe(2);
   await page.locator("#swap-providers-close").click();
-  await expect(page.locator("#swap-provider-choice")).toHaveText(`Provider: ${wrapper.advertisement.provider_identity_xonly_key.slice(0, 12)}… (chosen by you)`);
+  await expect(page.locator("#swap-provider-choice")).toHaveText(`Provider: ${identity.slice(0, 12)}… (chosen by you)`);
   await page.locator("#swap-settings-toggle").click();
-  await expect(page.locator("#swap-provider")).toHaveValue(wrapper.advertisement.provider_identity_xonly_key);
+  await expect(page.locator("#swap-provider")).toHaveValue(identity);
   await page.locator("#swap-provider").fill("");
   await page.locator("#swap-settings-close").click();
   await expect(page.locator("#swap-provider-choice")).toHaveText("Provider: automatic, lowest verified price");
+});
+
+
+test("the provider directory reloads itself while idle and drops offers once they expire", async ({ page }) => {
+  await page.clock.install();
+  const { event } = await regtestAnnouncement(150);
+  let requests = 0;
+  await page.routeWebSocket("ws://127.0.0.1:7777/", (socket) => {
+    socket.onMessage((message) => {
+      const frame = JSON.parse(String(message));
+      if (frame[0] === "REQ") { requests++; socket.send(JSON.stringify(["EVENT", frame[1], event])); socket.send(JSON.stringify(["EOSE", frame[1]])); }
+    });
+  });
+  await page.goto(SWAP);
+  await page.locator("#swap-settings-toggle").click();
+  await page.locator("#swap-network").selectOption("regtest");
+  await page.locator("#swap-settings-close").click();
+  const status = page.locator("#swap-providers-status");
+  await expect(status).toHaveText("1 provider on regtest.");
+  await expect(page.locator(".swap-provider")).toHaveCount(2);
+  // The offer expires before the next reload is due: it leaves the list without contacting any relay.
+  await page.clock.fastForward("03:00");
+  await expect(status).toHaveText("No providers found on your relays.");
+  await expect(page.locator(".swap-provider")).toHaveCount(0);
+  expect(requests).toBe(1);
+  // Five minutes after the last load, the directory asks the relays again.
+  await page.clock.fastForward("02:30");
+  await expect.poll(() => requests).toBe(2);
 });
 
 test("discovery uses only portable relay filters, so relays that refuse multi-letter tag filters still find providers", async ({ page }) => {

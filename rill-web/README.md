@@ -40,8 +40,10 @@ VITE_RILLSWAP_NETWORK=signet bunx vite --host 127.0.0.1
 ```
 
 Open `/swap.html` and pick a test network in Settings. The page loads
-provider listings from the configured relays when it opens and when you
-switch networks; nothing else connects until you start a swap.
+provider listings from the configured relays when it opens, when you
+switch networks, and again every five minutes while the tab is visible and
+no swap is running; expired offers leave the list as soon as they expire.
+Nothing else connects until you start a swap.
 
 ## Configuration
 

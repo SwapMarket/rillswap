@@ -227,8 +227,13 @@ export const providerLimits = (providers: readonly LocatedProvider[]): { identit
 /** The lowest announced fee for `amount` among directory entries serving `profile` (and `pinned`, if set). */
 export type DirectoryEstimate = { readonly identity: string; readonly feeSat: bigint } | { readonly reason: string };
 
-export function estimateFromDirectory(entries: readonly DirectoryEntry[], profile: AnnouncementProfile, amount: bigint, pinned = ""): DirectoryEstimate {
-  const serving = entries.filter((entry) => entry.profiles.includes(profile) && (!pinned || entry.identity === pinned));
+/** Entries whose announcement is still valid at `now` (Unix seconds); an expired offer is not an offer. */
+export const unexpired = (entries: readonly DirectoryEntry[], now = Math.floor(Date.now() / 1000)): readonly DirectoryEntry[] =>
+  entries.filter((entry) => entry.expiresAt > now);
+
+export function estimateFromDirectory(entries: readonly DirectoryEntry[], profile: AnnouncementProfile, amount: bigint, pinned = "",
+  now = Math.floor(Date.now() / 1000)): DirectoryEstimate {
+  const serving = unexpired(entries, now).filter((entry) => entry.profiles.includes(profile) && (!pinned || entry.identity === pinned));
   const eligible = serving.filter((entry) => withinBands(entry.amountBands, amount))
     .map((entry) => ({ identity: entry.identity, feeSat: indicativeFee(entry.indicativeFeePolicy, amount) }))
     .sort((a, b) => a.feeSat < b.feeSat ? -1 : a.feeSat > b.feeSat ? 1 : a.identity.localeCompare(b.identity));
