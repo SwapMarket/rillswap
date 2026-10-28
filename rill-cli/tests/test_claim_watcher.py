@@ -1,4 +1,4 @@
-"""The LN-to-BTC claim is bumped each block toward the maximum until it confirms."""
+"""The LN-to-BTC claim holds its fee, then is bumped toward the maximum until it confirms."""
 
 from __future__ import annotations
 
@@ -46,17 +46,40 @@ def _watcher(fake: Chain, **overrides: object) -> ClaimWatcher:
     return ClaimWatcher(**arguments)  # type: ignore[arg-type]
 
 
-def test_the_fee_rises_linearly_to_the_maximum_at_the_deadline() -> None:
+def test_the_fee_holds_then_rises_linearly_to_the_maximum_in_the_last_quarter() -> None:
     target = {
         tip: claim_fee_target(
             initial=300, maximum=3_300, start_height=100, deadline_height=110, tip=tip
         )
-        for tip in (99, 100, 105, 110, 200)
+        for tip in (99, 100, 105, 107, 108, 109, 110, 200)
     }
-    assert target == {99: 300, 100: 300, 105: 1_800, 110: 3_300, 200: 3_300}
+    # A 10-block window ramps over its last ceil(10 / 4) = 3 blocks.
+    assert target == {
+        99: 300,
+        100: 300,
+        105: 300,
+        107: 300,
+        108: 1_300,
+        109: 2_300,
+        110: 3_300,
+        200: 3_300,
+    }
     assert (
         claim_fee_target(initial=300, maximum=100, start_height=0, deadline_height=0, tip=0) == 300
     )
+    # Default provider timing: about 135 blocks, so the exact reserve holds for
+    # 101 blocks and the claim pays more only in the last 34.
+    assert {
+        tip: claim_fee_target(
+            initial=155, maximum=5_000, start_height=3, deadline_height=138, tip=tip
+        )
+        for tip in (3, 104, 105, 138)
+    } == {3: 155, 104: 155, 105: 155 + 4_845 // 34, 138: 5_000}
+    # One-block window: the deadline block already pays the maximum.
+    assert [
+        claim_fee_target(initial=300, maximum=900, start_height=9, deadline_height=10, tip=tip)
+        for tip in (9, 10)
+    ] == [300, 900]
 
 
 def test_one_attempt_per_block_until_it_confirms() -> None:
@@ -65,9 +88,13 @@ def test_one_attempt_per_block_until_it_confirms() -> None:
     assert watcher.step() is None
     assert watcher.step() is None  # same block: rebroadcast only
     assert [fee for _txid, fee in chain.sent] == [300, 300]
-    chain.tip = 105
+    chain.tip = 105  # still the initial fee: rebroadcast, no new attempt
     assert watcher.step() is None
-    assert [attempt.fee_sat for attempt in watcher.attempts] == [300, 1_800]
+    assert [attempt.fee_sat for attempt in watcher.attempts] == [300]
+    assert [fee for _txid, fee in chain.sent] == [300, 300, 300]
+    chain.tip = 108
+    assert watcher.step() is None
+    assert [attempt.fee_sat for attempt in watcher.attempts] == [300, 1_300]
     chain.unspent, chain.mined = False, watcher.attempts[0].txid  # the first one won
     assert watcher.step() == ("claim_confirmed", watcher.attempts[0].txid)
 

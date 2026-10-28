@@ -2,13 +2,14 @@
 
 The claim must confirm before ``refund_lock_height``: after that the provider
 may refund, and a refund that wins the race keeps both the Lightning payment
-(already settled from the claim's preimage) and the coins. Each new block
-re-signs the claim at a fee that rises linearly from the initial fee to the
-maximum by ``deadline_height`` and replaces the previous attempt when it
-beats it by the incremental relay fee; otherwise the latest attempt is
-rebroadcast. Definitively private attempts cannot be submitted after the height
-deadline. Ambiguous transmissions retain rebroadcast authority because the
-preimage may already be exposed. Nothing is signed after ``deadline_height``:
+(already settled from the claim's preimage) and the coins. The initial fee
+holds for the first three quarters of the window; in the last quarter each
+new block re-signs the claim at a fee that rises linearly to the maximum by
+``deadline_height`` and replaces the previous attempt when it beats it by
+the incremental relay fee; otherwise the latest attempt is rebroadcast.
+Definitively private attempts cannot be submitted after the height deadline.
+Ambiguous transmissions retain rebroadcast authority because the preimage may
+already be exposed. Nothing is signed after ``deadline_height``:
 a first claim that late would reveal the preimage while the provider may already
 refund. One of the 32 attempt slots is reserved for the maximum fee, with enough
 replacement relay headroom. Attempts are kept in memory
@@ -67,13 +68,22 @@ class ClaimAttempt:
 def claim_fee_target(
     *, initial: int, maximum: int, start_height: int, deadline_height: int, tip: int
 ) -> int:
-    """Linear from ``initial`` at ``start_height`` to ``maximum`` at the deadline."""
+    """Hold ``initial`` for three quarters of the window, then rise linearly to ``maximum``.
+
+    The initial fee is already priced for the next block, so a claim pays
+    more (and its destination receives less) only when it is still
+    unconfirmed in the last quarter before ``deadline_height``, where losing
+    the race to the refund would cost both the payment and the coins.
+    """
     maximum = max(initial, maximum)
     span = deadline_height - start_height
     if span <= 0 or tip >= deadline_height:
         return maximum
-    elapsed = max(0, tip - start_height)
-    return initial + (maximum - initial) * elapsed // span
+    ramp = -(-span // 4)  # the last quarter, at least one block
+    elapsed = tip - (deadline_height - ramp)
+    if elapsed <= 0:
+        return initial
+    return initial + (maximum - initial) * elapsed // ramp
 
 
 class ClaimWatcher:

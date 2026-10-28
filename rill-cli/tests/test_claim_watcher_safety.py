@@ -92,8 +92,9 @@ def test_unknown_submission_before_callback_failure_is_not_forgotten() -> None:
 
 def test_long_schedule_reaches_cap_without_evicting_older_confirmation_evidence() -> None:
     chain = Chain()
-    watcher = _watcher(chain, max_fee_sat=20_000, deadline_height=200)
-    for chain.tip in range(100, 201):
+    # A 200-block window ramps over its last 50 blocks: more bumps than slots.
+    watcher = _watcher(chain, max_fee_sat=20_000, deadline_height=300)
+    for chain.tip in range(100, 301):
         watcher.step()
     assert len(watcher.attempts) == MAX_ATTEMPTS
     assert watcher.attempts[-1].fee_sat == 20_000
@@ -109,14 +110,15 @@ def test_replacement_uses_candidate_size_and_reserves_final_relay_headroom() -> 
         raw, txid, signed_fee, size = chain.sign(fee, height)
         return raw, txid, signed_fee, size if height == 100 else 350
 
-    watcher = _watcher(chain, max_fee_sat=1_000, deadline_height=110, sign=sign)
+    # A 40-block window holds 300 sat until 130, then ramps 70 sat per block.
+    watcher = _watcher(chain, max_fee_sat=1_000, deadline_height=140, sign=sign)
     watcher.step()
-    chain.tip = 103  # 510 sat beats the old size, but not the candidate's 350 sat relay increment.
-    watcher.step()
-    assert len(watcher.attempts) == 1
-    chain.tip = 107  # 790 sat would leave too little headroom for the final replacement.
+    chain.tip = 133  # 510 sat beats the old size, but not the candidate's 350 sat relay increment.
     watcher.step()
     assert len(watcher.attempts) == 1
-    chain.tip = 110
+    chain.tip = 137  # 790 sat would leave too little headroom for the final replacement.
+    watcher.step()
+    assert len(watcher.attempts) == 1
+    chain.tip = 140
     watcher.step()
     assert [attempt.fee_sat for attempt in watcher.attempts] == [300, 1_000]
