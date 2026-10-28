@@ -294,6 +294,13 @@ def run(args: argparse.Namespace, network: NetworkIdentity, identity: str) -> st
     ceiling = getattr(args, "max_fee_estimate_sat_vb", None)
     if ceiling is not None and not 1 <= ceiling <= MAX_FEE_ESTIMATE_CEILING_SAT_VB:
         raise SwapError("fee estimate ceiling out of range")
+    if ceiling is not None and network.name == "mainnet":
+        # For skewed estimators such as signet's; mainnet's tracks real demand.
+        _report(
+            f"warning: --max-fee-estimate-sat-vb caps your Core's mainnet fee estimate at "
+            f"{ceiling} sat/vB; in a fee spike the claim fee reserve and cooperative claim "
+            "checks fall below the next-block rate and claims may confirm late"
+        )
     credentials = X25519Credentials(args.recipient, identity)
     # Refuse an unsafe relay route before the native library, files, or wallet.
     proxy = require_relay_route(network, args.relay_proxy, allow_direct=args.allow_direct_relay)

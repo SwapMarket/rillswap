@@ -147,7 +147,7 @@ upgrade-triggered action or retroactive disclosure assumption.
 | `--min-claim-fee-reserve-sat` | Reverse: optional claim fee reserve floor, default none (the next-block reserve) |
 | `--max-funding-fee-sat`, `--max-refund-fee-sat` | Forward fee limits, default 5,000 sat each |
 | `--max-refund-delay-blocks` | Forward refund delay limit, default 288 blocks |
-| `--max-fee-estimate-sat-vb` | Cap your Core's fee estimate: forward when checking the provider's cooperative claim fee, reverse when pricing the claim fee reserve. Use it on signet, whose estimator can report hundreds of sat/vB and make you refuse every cooperative claim or overpay the reserve; relay and mempool minimums still apply |
+| `--max-fee-estimate-sat-vb` | Cap your Core's fee estimate: forward when checking the provider's cooperative claim fee, reverse when pricing the claim fee reserve. Use it on signet, whose estimator can report hundreds of sat/vB and make you refuse every cooperative claim or overpay the reserve; relay and mempool minimums still apply. On mainnet, setting it prints a warning, since a cap can price fees below the next-block rate |
 | `--max-claim-fee-sat` | Reverse claim fee ceiling, default 5,000 sat |
 | `--max-routing-fee-sat` | Reverse routing fee limit, default 1,000 sat |
 | `--min-refund-delay-blocks` | Reverse minimum provider refund delay, default 72 blocks |

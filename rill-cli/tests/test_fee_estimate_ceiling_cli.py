@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, Mock
 
@@ -139,3 +140,35 @@ def test_wallet_passes_the_ceiling_only_when_set(
         port=38332, cookie_path=cookie, network=network, max_fee_estimate_sat_vb=2
     )
     assert not cookie.exists()
+
+
+@pytest.mark.parametrize("command", ["btc-to-ln", "ln-to-btc"])
+@pytest.mark.parametrize(
+    ("network", "extra", "warned"),
+    [
+        ("mainnet", ("--max-fee-estimate-sat-vb", "2"), True),
+        ("mainnet", (), False),
+        ("signet", ("--max-fee-estimate-sat-vb", "2"), False),
+    ],
+)
+def test_a_mainnet_ceiling_is_warned_about_before_any_setup(  # noqa: PLR0913, PLR0917
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    network: str,
+    extra: tuple[str, ...],
+    warned: bool,  # noqa: FBT001
+) -> None:
+    # A warning, never a refusal: the swap still runs with the cap.
+    class StopError(Exception):
+        pass
+
+    monkeypatch.setattr(swap_command, "X25519Credentials", Mock(side_effect=StopError))
+    with pytest.raises(StopError):
+        swap_command.run(
+            _parse(*extra, command=command),
+            SimpleNamespace(name=network),  # type: ignore[arg-type]
+            "unused",
+        )
+    stderr = capsys.readouterr().err
+    assert ("caps your Core's mainnet fee estimate at 2 sat/vB" in stderr) is warned
