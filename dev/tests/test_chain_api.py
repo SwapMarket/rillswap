@@ -57,6 +57,7 @@ def test_allowed_cors_and_local_probes(server):
         "/api/block-height/0",
         "/api/blocks/tip/height",
         "/api/blocks/tip/hash",
+        "/api/v1/fees/recommended",
         "/api/block-height/100",
         f"/api/tx/{'a' * 64}/hex",
         f"/api/tx/{'a' * 64}/status",
@@ -121,6 +122,9 @@ def test_duplicate_host_and_origin_headers_are_refused(server, header):
         f"/api/tx/{'a' * 64}%2fhex",
         "/api/block-height/%30",
         "/api/tx/../../wallet/test",
+        "/api/v1/fees/recommended/",
+        "/api/v1/fees/recommended?x=1",
+        "/api/v1/fees/precise",
     ],
 )
 def test_routes_are_exact_and_read_only(server, path):
@@ -275,6 +279,22 @@ def test_transaction_routes_project_only_chain_observations(reader_samples):
     assert reader.observe("/api/block-height/99") == "c" * 64
     assert all(method in api.RPC_METHODS for method, _ in calls)
     assert ("gettxout", (txid, 0, False)) in calls and ("gettxout", (txid, 0, True)) in calls
+
+
+def test_regtest_fees_are_fixed_after_the_network_check(reader_samples):
+    reader, samples, calls, _txid = reader_samples
+    fees = json.loads(reader.observe("/api/v1/fees/recommended"))
+    assert fees == {
+        "fastestFee": 1,
+        "halfHourFee": 1,
+        "hourFee": 1,
+        "economyFee": 1,
+        "minimumFee": 1,
+    }
+    assert calls == [("getblockchaininfo", ()), ("getblockhash", (0,))]  # no fee RPC
+    samples[("getblockhash", (0,))] = "f" * 64
+    with pytest.raises(api.ChainUnavailable):
+        reader.observe("/api/v1/fees/recommended")
 
 
 def test_unconfirmed_and_stale_transaction_status(reader_samples):

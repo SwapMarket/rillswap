@@ -25,6 +25,11 @@ TRANSACTION_ROUTE = re.compile(r"/api/tx/([0-9a-f]{64})/(hex|status)\Z")
 OUTSPEND_ROUTE = re.compile(r"/api/tx/([0-9a-f]{64})/outspend/(0|[1-9][0-9]{0,9})\Z")
 EXPLORER_ROUTE = re.compile(r"/tx/([0-9a-f]{64})\Z")
 ADDRESS_ROUTE = re.compile(r"/api/address/(bcrt1[0-9a-z]{8,90})/txs\Z")
+# Regtest has no fee market: mempool's recommended-fees shape at a fixed 1 sat/vB,
+# at or above Core's default relay minimum, so no fee RPC needs whitelisting.
+REGTEST_FEES = json.dumps(
+    {"fastestFee": 1, "halfHourFee": 1, "hourFee": 1, "economyFee": 1, "minimumFee": 1}
+)
 MAX_RAW_TRANSACTION_BYTES = 100_000
 MAX_TRANSACTION_RPC_BYTES = 4 * 1024 * 1024
 MAX_ADDRESS_BLOCKS = 1_000_000
@@ -49,6 +54,8 @@ def route(path: str) -> tuple[str, tuple[str, ...]] | None:
         return "tip-height", ()
     if path == "/api/blocks/tip/hash":
         return "tip-hash", ()
+    if path == "/api/v1/fees/recommended":
+        return "fees", ()
     if (match := BLOCK_ROUTE.fullmatch(path)) and int(match[1]) < 500_000_000:
         return "block-height", (match[1],)
     if match := TRANSACTION_ROUTE.fullmatch(path):
@@ -221,6 +228,8 @@ class ChainReader:
             return str(height)
         if kind == "tip-hash":
             return tip_hash
+        if kind == "fees":
+            return REGTEST_FEES
         if kind == "block-height":
             selected_height = int(params[0])
             if selected_height > height:
@@ -600,7 +609,7 @@ class ChainHandler(BaseHTTPRequestHandler):
                 200,
                 value,
                 origin,
-                json_body=parsed[0] in {"status", "outspend", "address"},
+                json_body=parsed[0] in {"status", "outspend", "address", "fees"},
                 html_body=parsed[0] == "explorer",
             )
         except ChainUnavailable:
