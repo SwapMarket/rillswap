@@ -181,6 +181,8 @@ rlp==5.0.0
     #   eth-rlp
 ruff==0.16.8
     # via -r requirements-dev.in
+segno==1.6.6
+    # via rill-cli
 toolz==1.2.0
     # via cytoolz
 types-requests==2.33.0.20261006

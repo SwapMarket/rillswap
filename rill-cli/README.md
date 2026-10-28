@@ -109,7 +109,8 @@ coins when no single one covers the amount and fee reserve.
 2. Read your Core's economical two-block fee estimate, then request and verify
    signed terms, a wallet destination and the hold invoice.
 3. Write the encrypted recovery snapshot before accepting.
-4. Pay the hold invoice through LND within your routing fee limit.
+4. Pay the hold invoice through LND within your routing fee limit, or show it
+   for another wallet (`--pay-with external`, below).
 5. Verify the provider's funding transaction and write a `.funded` successor.
 6. Wait for the required depth, then sign and broadcast the claim, bumping its
    fee within the signed limits only if it is still unconfirmed late. Once the
@@ -141,6 +142,27 @@ and keeps rebroadcasting the claim until `--settle-timeout`. If the funding
 never returns, the swap ends unresolved and you keep the journal and recovery
 file. Recovery commands keep waiting for the signed depth.
 
+#### Paying from another Lightning wallet
+
+`--pay-with external` needs no LND: the CLI decodes the hold invoice itself
+and prints the amount, the payment deadline, a terminal QR code and the
+invoice text. Pay it from any Lightning wallet. Leave out `--lnd-port`,
+`--lnd-tls-cert` and `--lnd-macaroon`. The wallet chooses the route and its
+fee, so `--max-routing-fee-sat` does not apply.
+
+The provider funds the contract only after its node holds your payment
+(the exact payment hash, for the agreed amount, with enough time left), so
+the funding transaction is the proof that you paid. Your payment then stays
+held until the claim reveals the preimage, which by default is after the
+signed funding confirmations. Wallets that do not support hold invoices may
+show the payment as pending for that long, or as failed after their own
+timeout. The payment is still held and settles with the claim; paying again
+is refused. After the funding arrives, the CLI prints the payment hash and
+invoice again with that reminder. If your wallet times out quickly,
+`--claim-confirmations 0` claims, and so settles your payment, as soon as the
+funding is in the mempool, with the double-spend risk described above. If nobody pays, the provider cancels
+the swap when the invoice expires and nothing is at risk.
+
 The claim watcher keeps the initial fee for the first three quarters of the
 window before `refund_lock_height` minus the claim confirmations; in the last
 quarter it raises the fee linearly to the ceiling, so a stuck claim still beats
@@ -164,7 +186,8 @@ upgrade-triggered action or retroactive disclosure assumption.
 | `--max-refund-delay-blocks` | Forward refund delay limit, default 288 blocks |
 | `--max-fee-estimate-sat-vb` | Cap your Core's fee estimate: forward when checking the provider's cooperative claim fee, reverse when pricing the claim fee reserve. Use it on signet, whose estimator can report hundreds of sat/vB and make you refuse every cooperative claim or overpay the reserve; relay and mempool minimums still apply. On mainnet, setting it prints a warning, since a cap can price fees below the next-block rate |
 | `--max-claim-fee-sat` | Reverse claim fee ceiling, default 5,000 sat |
-| `--max-routing-fee-sat` | Reverse routing fee limit, default 1,000 sat |
+| `--pay-with` | Reverse: `lnd` (default) pays from your LND; `external` shows the invoice for any wallet |
+| `--max-routing-fee-sat` | Reverse routing fee limit with `--pay-with lnd`, default 1,000 sat |
 | `--min-refund-delay-blocks` | Reverse minimum provider refund delay, default 72 blocks |
 | `--max-incoming-htlc-delay-blocks` | Reverse Lightning hold limit, default 432 blocks |
 | `--claim-confirmations` | Reverse: claim after this many funding confirmations instead of the signed depth (0: from the mempool), with a double-spend warning |
@@ -296,7 +319,8 @@ reveals the preimage. `broadcast-claim` is regtest-only and requires
 2. Inspect any `.funded` or `.paid` successors, including ones written without
    a success message. A missing file does not prove nothing happened.
 3. Check Core transactions and LND invoice or payment state (for reverse
-   swaps, `lncli listpayments`).
+   swaps, `lncli listpayments`, or your wallet's payments with
+   `--pay-with external`).
 4. Do not retry payment, signing or submission blindly, and never delete an
    intent to force another attempt. A timed-out RPC may still be running.
 5. Choose the refund or claim workflow only after reconciling this evidence.

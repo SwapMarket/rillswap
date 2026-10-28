@@ -837,8 +837,9 @@ def _swap(args: argparse.Namespace) -> int:
     except Exception:  # noqa: BLE001 - must not print secret native/library errors
         if args.command == "ln-to-btc":  # the provider funds and refunds; the user claims
             sys.stderr.write(
-                "Swap failed. Keep all recovery files, check `lncli listpayments` and do not "
-                "pay again. If a funded recovery snapshot ('.funded') exists, claim with "
+                "Swap failed. Keep all recovery files, check the payment in your Lightning "
+                "wallet (`lncli listpayments` with LND) and do not pay again. If a funded "
+                "recovery snapshot ('.funded') exists, claim with "
                 "`rill recover watch-claim` before its refund lock.\n"
             )
         else:

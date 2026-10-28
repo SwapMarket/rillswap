@@ -4,7 +4,8 @@ One swap, one fresh session: discover and verify the provider announcement,
 handshake, request firm terms for a payout the client chose (the client
 picks the preimage), verify the terms and the hold invoice, write the
 encrypted recovery file (with the preimage), accept, pay the hold invoice
-from the local LND, wait for the provider's signed ``funding_binding``,
+from the local LND (or show it for an external wallet), wait for the
+provider's signed ``funding_binding``,
 verify it, write the funded recovery snapshot, wait for the signed depth,
 then claim the contract to the client's destination: by key path with the
 provider's MuSig2 partial when the terms require cooperative claims, otherwise
@@ -75,6 +76,7 @@ from rill_provider.core_tx_bytes import NextBlockFee
 from rill_provider.lnd_payment_observation import LndObservationError
 
 from rill_cli.claim_watcher import ClaimAttempt, ClaimWatcher
+from rill_cli.external_wallet import DO_NOT_PAY_AGAIN
 from rill_cli.live_swap import (
     SwapError,
     _handshake,
@@ -115,8 +117,9 @@ REVERSE_REPLY_GRACE_SECONDS = 5
 # provider costs privacy only, never the bounded unilateral claim.
 REVERSE_UNILATERAL_RESERVE_SECONDS = 60
 _T = TypeVar("_T")
+_CHECK_PAYMENT = "check the payment in your Lightning wallet (`lncli listpayments` with LND)"
 _UNRESOLVED = (
-    "reverse swap status unresolved; preserve all recovery files, check `lncli listpayments`, "
+    f"reverse swap status unresolved; preserve all recovery files, {_CHECK_PAYMENT}, "
     "and do not retry payment; if funded, use `rill recover watch-claim` before the refund lock"
 )
 
@@ -267,7 +270,11 @@ class ClaimWallet(Protocol):
 
 
 class HoldPayer(Protocol):
-    """The user's own LND (``LndHoldPayer``)."""
+    """The user's own LND (``LndHoldPayer``) or wallet (``ExternalWalletPayer``).
+
+    ``"SHOWN"`` means the invoice was shown for an external wallet, whose
+    payment is not observable; only the provider's funding proves it is held.
+    """
 
     def pay(  # noqa: PLR0913 - exact invoice bounds and original lifetime
         self,
@@ -279,8 +286,8 @@ class HoldPayer(Protocol):
         fee_limit_sat: int,
         deadline: float | None = None,
         submission_allowed: Callable[[], bool] | None = None,
-    ) -> HoldStatus:
-        """Submit the hold payment once."""
+    ) -> HoldStatus | Literal["SHOWN"]:
+        """Submit (or show) the hold payment once."""
         ...
 
 
@@ -432,10 +439,10 @@ async def _await_funding(  # noqa: PLR0912, PLR0913 - one FIFO and its explicit 
             raise SwapError("funding deadline must be finite")
         deadline = min(deadline, absolute_deadline)
     timeout_error = (
-        "provider funding not observed in time; check `lncli listpayments`; "
+        f"provider funding not observed in time; {_CHECK_PAYMENT}; "
         "the held payment fails back when the provider cancels the hold; do not retry payment"
     )
-    context_hint = "funding status unresolved; check `lncli listpayments`; do not retry payment"
+    context_hint = f"funding status unresolved; {_CHECK_PAYMENT}; do not retry payment"
     async with session.settlement_stream():
         while True:
             remaining = deadline - time.monotonic()
@@ -1395,11 +1402,14 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
                 )
             except LndObservationError:
                 raise SwapError("hold payment outcome unknown; " + _UNRESOLVED) from None
-            if status == "FAILED":
+            if status == "SHOWN":
+                report("waiting for your wallet's payment, then for the provider's funding")
+            elif status == "FAILED":
                 raise SwapError("the hold invoice could not be paid; nothing is at risk")
-            if status not in {"IN_FLIGHT", "SUCCEEDED"}:
+            elif status in {"IN_FLIGHT", "SUCCEEDED"}:
+                report(f"hold payment observed ({status}); waiting for the provider's funding")
+            else:
                 raise SwapError("hold payment outcome unknown; " + _UNRESOLVED)
-            report(f"hold payment observed ({status}); waiting for the provider's funding")
 
             lifetime.check()
             script = reconstruct_taproot_contract(terms, keys=crypto).script_pubkey
@@ -1423,6 +1433,11 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
                 f"funded recovery snapshot written (funding {binding.funding_txid}, "
                 f"attempt {binding.funding_attempt_id} revision 0)"
             )
+            if status == "SHOWN":  # the external wallet may already show a timeout
+                report(
+                    f"The provider funded, so it holds your payment {hold.payment_hash} of "
+                    f"invoice {offer.hold_invoice}. {DO_NOT_PAY_AGAIN}"
+                )
             value = int(economics.contract_amount_sat)
             await _await_depth(
                 wallet,

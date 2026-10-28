@@ -25,6 +25,7 @@ from rill_cli.age_container import (
     encrypt_verified_plaintext,
     verify_export_ciphertext,
 )
+from rill_cli.external_wallet import ExternalWalletPayer, offline_invoice_decoder
 from rill_cli.hold_payment import LndHoldPayer
 from rill_cli.live_reverse_swap import ReverseSwapLimits, ReverseSwapOutcome, run_reverse_swap
 from rill_cli.live_swap import SwapError, SwapLimits, SwapOutcome, run_swap
@@ -37,6 +38,8 @@ if TYPE_CHECKING:
 
     from rill_core.recovery import OfflineRecoveryInspection
     from rill_core.wire.types import NetworkIdentity
+
+    from rill_cli.live_reverse_swap import HoldPayer
 
 
 def add_parser(categories: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -65,8 +68,16 @@ def add_parser(categories: argparse._SubParsersAction[argparse.ArgumentParser]) 
     forward.add_argument("--wallet", required=True, help="Core wallet that funds the swap")
     forward.add_argument("--lnd-macaroon", required=True, help="invoice-decoding macaroon")
     reverse = kinds.add_parser("ln-to-btc", help="receive on-chain BTC by paying over Lightning")
-    _common_arguments(reverse)
+    _common_arguments(reverse, lnd_required=False)
     reverse.add_argument("--payout-sat", required=True, type=int, help="on-chain amount wanted")
+    reverse.add_argument(
+        "--pay-with",
+        choices=("lnd", "external"),
+        default="lnd",
+        help="lnd: pay the hold invoice from your LND (needs --lnd-port, --lnd-tls-cert and "
+        "--lnd-macaroon). external: show it as text and a QR code for any Lightning wallet; "
+        "the payment stays pending until the claim (see --claim-confirmations)",
+    )
     reverse.add_argument(
         "--min-claim-fee-reserve-sat",
         type=int,
@@ -108,11 +119,11 @@ def add_parser(categories: argparse._SubParsersAction[argparse.ArgumentParser]) 
     )
     reverse.add_argument("--wallet", required=True, help="Core wallet receiving the payout")
     reverse.add_argument(
-        "--lnd-macaroon", required=True, help="macaroon able to decode and send payments"
+        "--lnd-macaroon", help="macaroon able to decode and send payments (--pay-with lnd)"
     )
 
 
-def _common_arguments(command: argparse.ArgumentParser) -> None:
+def _common_arguments(command: argparse.ArgumentParser, *, lnd_required: bool = True) -> None:
     command.add_argument("--network", required=True, help="complete trusted network JSON file")
     command.add_argument("--crypto-library", required=True, help="verified native library path")
     command.add_argument("--relay", required=True, help="Nostr relay URL (ws:// or wss://)")
@@ -130,8 +141,10 @@ def _common_arguments(command: argparse.ArgumentParser) -> None:
     command.add_argument("--max-claim-fee-sat", type=int, default=5_000)
     command.add_argument("--core-port", required=True, type=int, help="loopback Core RPC port")
     command.add_argument("--core-cookie", required=True, help="Core .cookie file")
-    command.add_argument("--lnd-port", required=True, type=int, help="loopback LND gRPC port")
-    command.add_argument("--lnd-tls-cert", required=True, help="LND tls.cert")
+    command.add_argument(
+        "--lnd-port", required=lnd_required, type=int, help="loopback LND gRPC port"
+    )
+    command.add_argument("--lnd-tls-cert", required=lnd_required, help="LND tls.cert")
     command.add_argument("--recipient", required=True, help="X25519 age recipient")
     command.add_argument("--identity", required=True, help="matching private age identity file")
     command.add_argument(
@@ -287,6 +300,8 @@ def run(args: argparse.Namespace, network: NetworkIdentity, identity: str) -> st
     """Run the swap; return the final report line."""
     output = Path(args.recovery_output)
     limits: SwapLimits | None = None
+    if args.command == "ln-to-btc":
+        _check_payment_source(args)
     if args.command == "btc-to-ln":
         limits = SwapLimits(
             max_success_fee_sat=args.max_success_fee_sat,
@@ -320,13 +335,6 @@ def run(args: argparse.Namespace, network: NetworkIdentity, identity: str) -> st
             )
             return document  # Only after verified publication, readback, and directory fsync.
 
-        decoder = LndInvoiceDecoder(
-            host="127.0.0.1",
-            port=args.lnd_port,
-            tls_certificate_path=args.lnd_tls_cert,
-            macaroon_path=args.lnd_macaroon,
-            network=network,
-        )
         wallet = WalletRpc(
             port=args.core_port,
             cookie_path=args.core_cookie,
@@ -337,9 +345,16 @@ def run(args: argparse.Namespace, network: NetworkIdentity, identity: str) -> st
             max_fee_estimate_sat_vb=getattr(args, "max_fee_estimate_sat_vb", None),
         )
         if args.command == "ln-to-btc":
-            return asyncio.run(_reverse(args, network, crypto, decoder, wallet, write_recovery))
+            return asyncio.run(_reverse(args, network, crypto, wallet, write_recovery))
         if limits is None:
             raise SwapError("unsupported swap direction")
+        decoder = LndInvoiceDecoder(
+            host="127.0.0.1",
+            port=args.lnd_port,
+            tls_certificate_path=args.lnd_tls_cert,
+            macaroon_path=args.lnd_macaroon,
+            network=network,
+        )
 
         async def swap() -> str:
             async with RelayConnection(args.relay, proxy=proxy) as connection:
@@ -362,20 +377,40 @@ def run(args: argparse.Namespace, network: NetworkIdentity, identity: str) -> st
         return asyncio.run(swap())
 
 
-async def _reverse(  # noqa: PLR0913, PLR0917 - explicit already-built handles
+def _check_payment_source(args: argparse.Namespace) -> None:
+    """Require LND credentials exactly when the CLI pays from LND."""
+    credentials = (args.lnd_port, args.lnd_tls_cert, args.lnd_macaroon)
+    if args.pay_with == "lnd" and None in credentials:
+        raise SwapError("--pay-with lnd needs --lnd-port, --lnd-tls-cert and --lnd-macaroon")
+    if args.pay_with == "external" and credentials != (None, None, None):
+        raise SwapError("--pay-with external takes no LND credentials")
+
+
+async def _reverse(
     args: argparse.Namespace,
     network: NetworkIdentity,
     crypto: Context,
-    decoder: LndInvoiceDecoder,
     wallet: WalletRpc,
     write_recovery: Callable[[bytes, bytes | None], bytes | None],
 ) -> str:
-    payer = LndHoldPayer(
-        port=args.lnd_port,
-        tls_certificate_path=args.lnd_tls_cert,
-        macaroon_path=args.lnd_macaroon,
-        network=network,
-    )
+    payer: HoldPayer
+    if args.pay_with == "external":
+        payer = ExternalWalletPayer(write=_report)
+        decode_invoice = offline_invoice_decoder(network, crypto)
+    else:
+        payer = LndHoldPayer(
+            port=args.lnd_port,
+            tls_certificate_path=args.lnd_tls_cert,
+            macaroon_path=args.lnd_macaroon,
+            network=network,
+        )
+        decode_invoice = LndInvoiceDecoder(
+            host="127.0.0.1",
+            port=args.lnd_port,
+            tls_certificate_path=args.lnd_tls_cert,
+            macaroon_path=args.lnd_macaroon,
+            network=network,
+        ).decode
     limits = ReverseSwapLimits(
         max_success_fee_sat=args.max_success_fee_sat,
         min_claim_fee_reserve_sat=args.min_claim_fee_reserve_sat,
@@ -393,7 +428,7 @@ async def _reverse(  # noqa: PLR0913, PLR0917 - explicit already-built handles
             identity=args.provider,
             network=network,
             payout_sat=args.payout_sat,
-            decode_invoice=decoder.decode,
+            decode_invoice=decode_invoice,
             payer=payer,
             wallet=wallet,
             write_recovery=write_recovery,

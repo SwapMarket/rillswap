@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -26,6 +27,7 @@ from rill_provider.quote_policy import ClaimFeeRate
 from test_live_swap import NATIVE, NETWORK, PROVIDER_TESTS, TIP, FakeWallet
 
 from rill_cli.age_container import X25519Credentials, verify_export_ciphertext
+from rill_cli.external_wallet import ExternalWalletPayer
 from rill_cli.live_reverse_swap import ReverseSwapLimits, ReverseSwapOutcome, run_reverse_swap
 from rill_cli.swap_command import _reverse_report, _write_recovery_snapshot
 from rill_cli.wallet_rpc import ConfirmedOutput
@@ -159,6 +161,20 @@ class FakeHold:
         self.payments.append({"bolt11": bolt11, **bounds})
         self.paid.add(invoice["hash"])
         return "IN_FLIGHT"
+
+
+@dataclass
+class ExternalWallet:
+    """The user's own wallet, paying a moment after the CLI shows the invoice."""
+
+    hold: FakeHold
+    shown: list[str] = field(default_factory=list)
+
+    def pay(self, bolt11: str, **bounds: Any) -> str:  # noqa: ANN401
+        status = ExternalWalletPayer(write=self.shown.append).pay(bolt11, **bounds)
+        payment_hash = self.hold.invoices[bolt11]["hash"]
+        threading.Timer(1.0, self.hold.paid.add, (payment_hash,)).start()
+        return status
 
 
 class FakeChain:
@@ -355,8 +371,14 @@ def test_native_ln_to_btc_swap_claims_unconfirmed_funding_on_request(tmp_path: P
     _native_ln_to_btc_swap(tmp_path, 0)
 
 
+@pytest.mark.native_crypto
+@NATIVE
+def test_native_ln_to_btc_swap_paid_from_an_external_wallet(tmp_path: Path) -> None:
+    _native_ln_to_btc_swap(tmp_path, None, external=True)
+
+
 def _native_ln_to_btc_swap(  # noqa: PLR0915
-    tmp_path: Path, claim_confirmations: int | None
+    tmp_path: Path, claim_confirmations: int | None, *, external: bool = False
 ) -> None:
     sys.path.insert(0, str(PROVIDER_TESTS))
     from fake_relay import FakeRelay  # type: ignore[import-not-found]  # noqa: PLC0415
@@ -378,6 +400,7 @@ def _native_ln_to_btc_swap(  # noqa: PLR0915
     credentials = X25519Credentials(str(unlock.to_public()), str(unlock))
     output = tmp_path / "swap.age"
     hold = FakeHold()
+    wallet_app = ExternalWallet(hold)
     chain = FakeChain() if claim_confirmations is None else MempoolFundingChain()
     recoveries: list[bytes] = []
     reports: list[str] = []
@@ -487,7 +510,7 @@ def _native_ln_to_btc_swap(  # noqa: PLR0915
                         network=NETWORK,
                         payout_sat=PAYOUT,
                         decode_invoice=hold.decode,
-                        payer=hold,
+                        payer=wallet_app if external else hold,
                         wallet=wallet,
                         write_recovery=write_recovery,
                         limits=ReverseSwapLimits(
@@ -558,6 +581,16 @@ def _native_ln_to_btc_swap(  # noqa: PLR0915
     (record,) = funded["funding_history"]
     assert record["binding"]["funder_role"] == "provider"
     assert record["binding"]["funding_txid"] == outcome.funding_txid
+    if external:
+        # The provider funded only once the wallet's payment was held, and the
+        # CLI then reminded the user not to pay again.
+        (shown,) = wallet_app.shown
+        assert hold.payments == []
+        assert next(iter(hold.invoices)) in shown.splitlines()
+        (reminder,) = [line for line in reports if line.startswith("The provider funded")]
+        assert initial["contract_terms"]["invoice_binding"]["payment_hash"] in reminder
+        assert "Do not pay again" in reminder
+        return
     # The client paid with a final expiry at or after the provider's minimum.
     (payment,) = hold.payments
     timing = initial["contract_terms"]["timing_policy"]

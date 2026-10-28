@@ -274,6 +274,43 @@ def test_native_reverse_sdk_propagates_one_original_deadline_and_keeps_paid_dist
 
 @NATIVE_ONLY
 @pytest.mark.native_crypto
+def test_native_reverse_sdk_reminds_an_external_wallet_once_funding_proves_the_hold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def exercise(crypto: Context) -> None:
+        fixture = NativeSdk(crypto, tmp_path, monkeypatch)
+        shown = fixture.payer.pay.side_effect
+
+        def show(invoice: str, **bounds: object) -> str:
+            shown(invoice, **bounds)  # the same lifetime bounds as an LND payment
+            return "SHOWN"
+
+        fixture.payer.pay.side_effect = show
+        result = await fixture.run()
+        assert result.claim_txid == fixture.claim_txid
+        assert not any("hold payment observed" in report for report in fixture.reports)
+        waiting = fixture.reports.index(
+            "waiting for your wallet's payment, then for the provider's funding"
+        )
+        funded = next(
+            index
+            for index, report in enumerate(fixture.reports)
+            if report.startswith("funded recovery snapshot written")
+        )
+        reminder = fixture.reports[funded + 1]
+        assert waiting < funded
+        assert reminder.startswith("The provider funded, so it holds your payment")
+        assert fixture.terms.invoice_binding.payment_hash in reminder
+        assert INVOICE in reminder
+        assert reminder.endswith("Do not pay again.")
+
+    with Context(library_path=NATIVE_LIBRARY) as crypto:
+        asyncio.run(exercise(crypto))
+
+
+@NATIVE_ONLY
+@pytest.mark.native_crypto
 def test_native_reverse_terms_waiting_longer_than_announced_are_refused_before_paying(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
