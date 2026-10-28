@@ -40,6 +40,7 @@ from rill_provider.operator_config import (
 )
 from rill_provider.payment_reconciliation import reconcile_payment
 from rill_provider.provider_identity import ProviderIdentity, ProviderIdentityError
+from rill_provider.quote_policy import ClaimFeeRate
 from rill_provider.relay_client import (
     RelayConnection,
     RelayError,
@@ -176,6 +177,32 @@ def _chain_tip(config: OperatorConfig) -> Callable[[], int] | None:
     except ValueError:
         raise OperatorConfigError("bitcoin_core requires a supported network") from None
     return reader.tip_height
+
+
+def _claim_fee(config: OperatorConfig) -> Callable[[], ClaimFeeRate] | None:
+    """Return next-block claim pricing for LN to BTC with an automatic reserve."""
+    core = config.bitcoin_core
+    if (
+        core is None
+        or config.handshake.profile != "ln-to-btc/v1"
+        or config.quote.claim_fee_reserve_sat is not None
+    ):
+        return None
+    try:
+        reader = CoreTransactionReader(
+            port=core.port,
+            cookie_path=core.cookie_file,
+            network=config.network,
+            max_fee_estimate_sat_vb=core.max_fee_estimate_sat_vb,
+        )
+    except ValueError:
+        raise OperatorConfigError("bitcoin_core requires a supported network") from None
+
+    def sample() -> ClaimFeeRate:
+        fee = reader.next_block_fee()
+        return ClaimFeeRate(rate_sat_kvb=fee.rate_sat_kvb, floor_sat_kvb=fee.floor_sat_kvb)
+
+    return sample
 
 
 def _payment_sender(config: OperatorConfig) -> LndPaymentSender | None:
@@ -406,6 +433,7 @@ async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
             hold_invoices=_hold_invoices(config),
             evm_settlement=_evm_settlement(config, store, crypto),
             liquidity=_liquidity(config),
+            claim_fee=_claim_fee(config),
         )
         await service.run(stop)
 

@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from rill_core.domain.amounts import MAX_SATS
+from rill_core.errors import ValidationError
+from rill_core.settlement import claim_vsizes
 from rill_core.wire.canonical import canonicalize, parse_model_json
 from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE, contract_hash
 from rill_core.wire.messages import ContractTerms, InvoiceBinding, ProviderTerms
@@ -53,6 +55,7 @@ type InvoiceOutcome = InvoiceBinding | Literal["rejected", "unavailable"] | None
 # LN to BTC: the hold invoice the caller opened for this request and its decoding.
 type HoldOutcome = tuple[str, InvoiceBinding] | Literal["unavailable"] | None
 MAX_HOLD_CLTV_DELTA = 2016  # what LND accepts for an invoice's final CLTV
+INDICATIVE_CLAIM_DESTINATION = bytes([0x51, 0x20]) + bytes(32)  # P2TR: the larger claim
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +79,8 @@ class QuoteSchedule:
     # LN to BTC (RS-004): the provider funds and may refund after this delay.
     reverse_refund_delay_blocks: int = 144
     refund_and_ln_resolution_blocks: int = 40
-    claim_fee_reserve_sat: int = 1_000
+    # None: priced per quote from next-block fees (``reverse_claim_fee_reserve``).
+    claim_fee_reserve_sat: int | None = None
     hold_invoice_lifetime: int = 3_600
 
     def __post_init__(self) -> None:
@@ -101,7 +105,7 @@ class QuoteSchedule:
             self.max_funding_fee_sat,
             self.max_claim_fee_sat,
             self.max_refund_fee_sat,
-            self.claim_fee_reserve_sat,
+            0 if self.claim_fee_reserve_sat is None else self.claim_fee_reserve_sat,
         )
         if not (
             all(0 < value <= MAX_WIRE_INTEGER for value in counts)
@@ -138,6 +142,19 @@ class FirmSigner:
 
 
 @dataclass(frozen=True, slots=True)
+class ClaimFeeRate:
+    """Next-block fee evidence for pricing the LN to BTC claim, in sat/kvB.
+
+    ``rate_sat_kvb`` pays the cooperative claim; ``floor_sat_kvb`` (the
+    node's relay and mempool minimum) is the least the script-path claim,
+    paying the same fee, may fall to.
+    """
+
+    rate_sat_kvb: int
+    floor_sat_kvb: int
+
+
+@dataclass(frozen=True, slots=True)
 class QuoteTerms:
     """Everything one answer depends on, fixed before the store transaction."""
 
@@ -152,6 +169,7 @@ class QuoteTerms:
     profile: ProfileId = "btc-to-ln/v1"
     hold: HoldOutcome = None
     evm: EvmQuoteContext | None = None  # RS-010 profiles only
+    claim_fee: ClaimFeeRate | None = None  # this tick's sample; LN to BTC only
 
 
 def _error(code: str, message: str) -> Answer:
@@ -332,10 +350,45 @@ def _firm(  # noqa: PLR0911 - one closed answer per rule
     )
 
 
-def reverse_economics(terms: QuoteTerms, payout: int) -> dict[str, str]:
+def reverse_claim_fee_reserve(
+    terms: QuoteTerms, request: ReverseFirmQuoteRequest | None = None
+) -> int | None:
+    """Return the claim fee reserve ``C``, or ``None`` when none can be quoted now.
+
+    A configured reserve is used as is. Otherwise the client's claim pays
+    exactly ``C``, so the destination receives exactly the nominal payout:
+    ``C`` pays the cooperative (key-path) claim at this tick's next-block
+    rate, keeps the larger script-path claim at or above the node floor, and
+    honors the client's minimum. Indicative quotes size a P2TR destination,
+    the larger claim. A reserve above ``max_claim_fee_sat`` could not be
+    spent as signed, so it is not quoted.
+    """
+    schedule = terms.schedule
+    if schedule.claim_fee_reserve_sat is not None:
+        return schedule.claim_fee_reserve_sat
+    fee = terms.claim_fee
+    if fee is None:
+        return None
+    destination = (
+        INDICATIVE_CLAIM_DESTINATION
+        if request is None
+        else bytes.fromhex(request.client_destination_script)
+    )
+    try:
+        cooperative, unilateral = claim_vsizes(destination)
+    except ValidationError:
+        return None
+    reserve = max(
+        -(-cooperative * fee.rate_sat_kvb // 1000),
+        -(-unilateral * fee.floor_sat_kvb // 1000),
+        0 if request is None else int(request.limits.min_claim_fee_reserve_sat),
+    )
+    return reserve if reserve <= schedule.max_claim_fee_sat else None
+
+
+def reverse_economics(terms: QuoteTerms, payout: int, reserve: int) -> dict[str, str]:
     """RS-004 economics for payout ``D``: ``V = D + C``, ``H = V + S`` (no prepayment)."""
     fee = success_fee(terms, payout)
-    reserve = terms.schedule.claim_fee_reserve_sat
     return {
         "kind": "ln-to-btc",
         "contract_amount_sat": str(payout + reserve),
@@ -347,22 +400,27 @@ def reverse_economics(terms: QuoteTerms, payout: int) -> dict[str, str]:
     }
 
 
-def hold_invoice_msat(terms: QuoteTerms, payout: int) -> int:
-    """Return the hold invoice amount ``H`` in msat for payout ``D``."""
-    return int(reverse_economics(terms, payout)["hold_invoice_sat"]) * 1000
+def hold_invoice_msat(terms: QuoteTerms, request: ReverseFirmQuoteRequest) -> int | None:
+    """Return the hold invoice amount ``H`` in msat, or ``None`` when unquotable now."""
+    payout = int(request.nominal_payout_sat)
+    reserve = reverse_claim_fee_reserve(terms, request)
+    if reserve is None or not any(low <= payout <= high for low, high in terms.amount_bands):
+        return None
+    return int(reverse_economics(terms, payout, reserve)["hold_invoice_sat"]) * 1000
 
 
 def _reverse_indicative(request: ReverseIndicativeQuoteRequest, terms: QuoteTerms) -> Answer:
     payout = int(request.nominal_payout_sat)
     if not any(low <= payout <= high for low, high in terms.amount_bands):
         return _error("amount_out_of_range", "amount outside announced bands")
-    if terms.tip_height is None or terms.tip_height <= 0:
+    reserve = reverse_claim_fee_reserve(terms)
+    if terms.tip_height is None or terms.tip_height <= 0 or reserve is None:
         return _error("capacity_unavailable", "quotes temporarily unavailable")
     schedule = terms.schedule
     offer: dict[str, Any] = {
         "kind": "ln-to-btc",
         "indicative": True,
-        "economics": reverse_economics(terms, payout),
+        "economics": reverse_economics(terms, payout, reserve),
         "funding_confirmations": schedule.funding_confirmations,
         "settlement_confirmations": schedule.settlement_confirmations,
         "refund_resolution_confirmations": schedule.refund_resolution_confirmations,
@@ -393,29 +451,36 @@ def _reverse_firm(  # noqa: PLR0911 - one closed answer per rule
         return _error("amount_out_of_range", "amount outside announced bands")
     if context.is_payment_hash_reserved(request.payment_hash):  # RS-004: no ownership oracle
         return _error("request_unacceptable", "request cannot be offered")
+    limits = request.limits
+    if (
+        schedule.claim_fee_reserve_sat is None
+        and int(limits.min_claim_fee_reserve_sat) > schedule.max_claim_fee_sat
+    ):  # no claim could spend such a reserve, whatever fees do
+        return _error("limits_unsatisfiable", "client limits cannot be met")
     hold = terms.hold
+    reserve = reverse_claim_fee_reserve(terms, request)
     if (
         tip is None
         or tip <= 0
         or hold is None
         or hold == "unavailable"
+        or reserve is None
         or not context.economic_capacity_available
     ):
         return _error("capacity_unavailable", "firm quotes temporarily unavailable")
     bolt11, binding = hold
-    economics = reverse_economics(terms, payout)
+    economics = reverse_economics(terms, payout, reserve)
     if (
         binding.payment_hash != request.payment_hash
         or binding.amount_msat != str(int(economics["hold_invoice_sat"]) * 1000)
         or binding.min_final_cltv_delta < schedule.incoming_htlc_expiry_delta_blocks
     ):
         return _error("capacity_unavailable", "firm quotes temporarily unavailable")
-    limits = request.limits
     lock = tip + schedule.reverse_refund_delay_blocks - 1  # first refundable block: tip + delay
     min_incoming = tip + schedule.incoming_htlc_expiry_delta_blocks
     if (
         int(economics["success_fee_sat"]) > int(limits.max_success_fee_sat)
-        or schedule.claim_fee_reserve_sat < int(limits.min_claim_fee_reserve_sat)
+        or reserve < int(limits.min_claim_fee_reserve_sat)
         or schedule.max_claim_fee_sat > int(limits.max_claim_fee_sat)
         or lock < limits.min_refund_lock_height
         or min_incoming > limits.max_incoming_htlc_expiry_height

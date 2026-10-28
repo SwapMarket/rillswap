@@ -43,6 +43,7 @@ from rill_provider.lnd_invoice_decode import InvoiceRejectedError
 from rill_provider.lnd_payment_observation import LndObservationError
 from rill_provider.provider_identity import AnnouncementTerms
 from rill_provider.quote_policy import (
+    ClaimFeeRate,
     FirmSigner,
     HoldOutcome,
     InvoiceOutcome,
@@ -82,6 +83,7 @@ MAX_SEEN_EVENTS = 4096
 MAX_DEFERRED_PER_SESSION = 2
 MAX_DEFERRED_EVENTS = 64
 TIP_LOOKUP_WAIT_SECONDS = 2.0  # waiting bound, not cancellation of Core's worker thread
+CLAIM_FEE_WAIT_SECONDS = 2.0  # likewise for the per-tick claim fee sample
 LIQUIDITY_WAIT_SECONDS = 30.0  # once per announcement; the RPCs carry their own timeouts
 _RELAY_CONNECTED = b""  # in-band wake: tick now and re-announce
 
@@ -159,6 +161,7 @@ class _State:
     attempts: dict[str, int] = field(default_factory=dict)
     seen: OrderedDict[str, None] = field(default_factory=OrderedDict)
     tip: int | None = None  # per-tick snapshot; requests never trigger RPC
+    claim_fee: ClaimFeeRate | None = None  # per-tick snapshot, like the tip
     # (session_id, event_id, received_at, event): frames that reached a session
     # before its confirm, handled once the confirm is admitted.
     deferred: list[tuple[str, str, int, bytes]] = field(default_factory=list)
@@ -181,6 +184,7 @@ class HandshakeService:
         hold_invoices: LndHoldInvoices | None = None,
         evm_settlement: EvmSettlementEngine | None = None,
         liquidity: Callable[[], int] | None = None,
+        claim_fee: Callable[[], ClaimFeeRate] | None = None,
     ) -> None:
         """Bind already-acquired, already-verified resources.
 
@@ -192,6 +196,9 @@ class HandshakeService:
         moves funded swaps to payment and claim once per tick. ``liquidity``
         (blocking, satoshis this provider can pay out in one swap) is sampled
         once per announcement to cap the announced and admitted amounts.
+        ``claim_fee`` (blocking, next-block fee evidence) is sampled once per
+        tick like the tip and prices LN to BTC claim reserves; without a
+        sample, quotes with an automatic reserve answer ``capacity_unavailable``.
         """
         self._store = store
         self._identity = identity
@@ -215,6 +222,8 @@ class HandshakeService:
         self._deadline_wall_anchor, self._deadline_monotonic_anchor = self._now(), time.monotonic()
         self._deadline_high_water = self._deadline_wall_anchor
         self._tip_lookup: asyncio.Task[int] | None = None
+        self._claim_fee = claim_fee
+        self._claim_fee_lookup: asyncio.Task[ClaimFeeRate] | None = None
         self._tip_lookup_started: float | None = None
         # These maps are never reconstructed from signed outbox or inbox rows.
         self._readiness_probes: dict[str, ReadinessChallenge] = {}
@@ -560,6 +569,7 @@ class HandshakeService:
         self._store.expire_idle(now=now, idle_timeout=policy.handshake_timeout)
         self._purge_deferred(now)
         await self._refresh_tip()
+        await self._refresh_claim_fee()
         if epochs != state.announced_keys or now >= state.announced_at + (
             policy.announcement_refresh
         ):
@@ -630,6 +640,31 @@ class HandshakeService:
         self._state.tip = await self._sample_tip()
         if self._state.tip is None:
             LOG.warning("chain tip unavailable; quotes answered capacity_unavailable")
+
+    async def _refresh_claim_fee(self) -> None:
+        """Replace the claim fee snapshot; a failed sample leaves none, never an old one."""
+        if self._claim_fee is None:
+            return
+        task = self._claim_fee_lookup
+        if task is None or task.done():  # share one outstanding Core lookup
+            task = asyncio.create_task(asyncio.to_thread(self._claim_fee))
+            self._claim_fee_lookup = task
+
+            def consume(done: asyncio.Task[ClaimFeeRate]) -> None:
+                if not done.cancelled():
+                    with suppress(Exception):
+                        done.exception()  # avoid an unobserved late RPC failure
+
+            task.add_done_callback(consume)
+        try:
+            sample = await asyncio.wait_for(asyncio.shield(task), CLAIM_FEE_WAIT_SECONDS)
+        except Exception as error:  # noqa: BLE001 - no fee evidence, no automatic reserve
+            sample = None
+            LOG.warning(
+                "claim fee unavailable (%s); LN to BTC quotes answered capacity_unavailable",
+                type(error).__name__,
+            )
+        self._state.claim_fee = sample if isinstance(sample, ClaimFeeRate) else None
 
     async def _sample_tip(self) -> int | None:
         height, _ = await self._sample_tip_with_age()
@@ -1041,10 +1076,7 @@ class HandshakeService:
         except ValueError:
             return None  # the quote rules answer request_unacceptable
         if isinstance(request, ReverseFirmQuoteRequest):
-            payout = int(request.nominal_payout_sat)
-            value_msat: int | None = hold_invoice_msat(terms, payout)
-            if not any(low <= payout <= high for low, high in terms.amount_bands):
-                value_msat = None
+            value_msat = hold_invoice_msat(terms, request)  # None: unquotable now
         elif isinstance(request, LnToErc20FirmQuoteRequest):
             value_msat = ln_to_erc20_hold_msat(terms, request)  # None: unquotable now
         else:
@@ -1221,6 +1253,7 @@ class HandshakeService:
             firm=self._firm_signer(),
             invoice=invoice,
             profile=policy.profile,
+            claim_fee=self._state.claim_fee,
         )
         if policy.profile in EVM_PROFILES:
             evm = self._evm_settlement

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -17,7 +18,14 @@ from rill_core.wire.reverse_quotes import (
 )
 from test_quote_policy import CONTRACT, FIRM, HANDSHAKE, SIGNER, _context
 
-from rill_provider.quote_policy import QuoteSchedule, QuoteTerms, answer_quote, hold_invoice_msat
+from rill_provider.quote_policy import (
+    ClaimFeeRate,
+    QuoteSchedule,
+    QuoteTerms,
+    answer_quote,
+    hold_invoice_msat,
+    reverse_claim_fee_reserve,
+)
 
 HASH = "16b72cfab7dbca73cb348f4e59a74b5c56d6e95574c1e9ca84850d69f5fa9430"
 SCHEDULE = QuoteSchedule(
@@ -94,6 +102,12 @@ def _error(answer: Any) -> str:  # noqa: ANN401
     return parse_model_json(QuoteError, canonicalize(answer.payload)).code
 
 
+def _firm_request(payload: dict[str, Any]) -> ReverseFirmQuoteRequest:
+    request = parse_quote_request(canonicalize(payload | {"extensions": {}}))
+    assert isinstance(request, ReverseFirmQuoteRequest)
+    return request
+
+
 def test_indicative_reverse_quote_prices_the_hold_invoice() -> None:
     answer = _answer(INDICATIVE)
     assert answer.message_type == "quote_offer"
@@ -108,7 +122,7 @@ def test_indicative_reverse_quote_prices_the_hold_invoice() -> None:
         "hold_invoice_sat": "100700",
     }
     assert (offer.refund_delay_blocks, offer.incoming_htlc_expiry_delta_blocks) == (144, 185)
-    assert hold_invoice_msat(TERMS, 100_000) == 100_700_000
+    assert hold_invoice_msat(TERMS, _firm_request(REVERSE_FIRM)) == 100_700_000
     assert _error(_answer(INDICATIVE | {"nominal_payout_sat": "999"})) == "amount_out_of_range"
     assert _error(_answer(INDICATIVE, tip_height=None)) == "capacity_unavailable"
     assert _error(_answer(INDICATIVE, prior=8)) == "unsupported_request"
@@ -125,8 +139,7 @@ def test_firm_reverse_request_gets_terms_binding_the_hold_invoice() -> None:
     assert answer.payment_hash == HASH
     offer = parse_model_json(TermsOfferPayload, canonicalize(answer.payload))
     assert offer.hold_invoice == "lnbcrt1007u1hold"
-    request = parse_quote_request(canonicalize(REVERSE_FIRM | {"extensions": {}}))
-    assert isinstance(request, ReverseFirmQuoteRequest)
+    request = _firm_request(REVERSE_FIRM)
     check_reverse_terms_offer(request, offer, handshake_hash=HANDSHAKE, invoice_binding=HOLD)
     terms = offer.terms.contract_terms
     assert (terms.claimant, terms.refund_party) == ("client", "provider")
@@ -190,6 +203,88 @@ def test_reserved_hash_and_later_firm_requests_are_refused() -> None:
     hold = ("lnbcrt1007u1hold", HOLD)
     assert _error(_answer(REVERSE_FIRM, reserved=(HASH,), hold=hold)) == "request_unacceptable"
     assert _error(_answer(REVERSE_FIRM, prior=1, hold=hold)) == "unsupported_request"
+
+
+AUTOMATIC = replace(SCHEDULE, claim_fee_reserve_sat=None)
+NEXT_BLOCK = ClaimFeeRate(rate_sat_kvb=2_000, floor_sat_kvb=100)
+AUTOMATIC_FIRM = _limits(min_claim_fee_reserve_sat="150")
+
+
+def _automatic(payload: dict[str, Any], hold_sat: int | None = None, **changes: Any) -> Any:  # noqa: ANN401
+    """Answer with an automatic reserve and a hold invoice for ``hold_sat``."""
+    hold = None
+    if hold_sat is not None:
+        hold = ("lnbcrt1hold", HOLD.model_copy(update={"amount_msat": str(hold_sat * 1000)}))
+    return _answer(
+        payload, **{"schedule": AUTOMATIC, "claim_fee": NEXT_BLOCK, "hold": hold} | changes
+    )
+
+
+def test_automatic_indicative_reserve_pays_a_p2tr_cooperative_claim_at_the_next_block_rate() -> (
+    None
+):
+    answer = _automatic(INDICATIVE)
+    assert answer.message_type == "quote_offer", answer.payload
+    offer = parse_model_json(ReverseQuoteOffer, canonicalize(answer.payload))
+    # 111 vB P2TR key-path claim at 2 sat/vB; 155 vB script path at 0.1 sat/vB is 16.
+    assert offer.economics.claim_fee_reserve_sat == "222"
+    assert offer.economics.contract_amount_sat == "100222"
+    assert offer.economics.hold_invoice_sat == "100422"
+    assert _error(_automatic(INDICATIVE, claim_fee=None)) == "capacity_unavailable"
+
+
+def test_automatic_firm_reserve_is_exactly_the_destination_claim_fee() -> None:
+    # P2WPKH destination: 99 vB key-path claim at 2 sat/vB is 198, above the client's 150.
+    answer = _automatic(AUTOMATIC_FIRM, hold_sat=100_000 + 198 + 200)
+    assert answer.message_type == "terms_offer", answer.payload
+    offer = parse_model_json(TermsOfferPayload, canonicalize(answer.payload))
+    economics = offer.terms.contract_terms.economics
+    assert (economics.claim_fee_reserve_sat, economics.contract_amount_sat) == ("198", "100198")
+    hold = HOLD.model_copy(update={"amount_msat": "100398000"})
+    check_reverse_terms_offer(
+        _firm_request(AUTOMATIC_FIRM), offer, handshake_hash=HANDSHAKE, invoice_binding=hold
+    )
+    assert (
+        hold_invoice_msat(
+            _with(schedule=AUTOMATIC, claim_fee=NEXT_BLOCK), _firm_request(AUTOMATIC_FIRM)
+        )
+        == 100_398_000
+    )
+
+
+@pytest.mark.parametrize(
+    ("fee", "minimum", "reserve"),
+    [
+        (ClaimFeeRate(2_000, 100), "150", 198),  # the cooperative claim at the rate
+        (ClaimFeeRate(1_000, 1_000), "100", 143),  # script path kept at the node floor
+        (ClaimFeeRate(1_000, 100), "300", 300),  # the client's minimum
+        (ClaimFeeRate(1_001, 100), "0", 100),  # rounded up to whole sats
+    ],
+)
+def test_automatic_reserve_is_the_largest_requirement(
+    fee: ClaimFeeRate, minimum: str, reserve: int
+) -> None:
+    terms = _with(schedule=AUTOMATIC, claim_fee=fee)
+    request = _firm_request(_limits(min_claim_fee_reserve_sat=minimum))
+    assert reverse_claim_fee_reserve(terms, request) == reserve
+
+
+def test_automatic_reserve_never_exceeds_the_signed_claim_cap() -> None:
+    # 99 vB at 4.05 sat/vB is 401 sats, over max_claim_fee_sat 400: fees too high now.
+    expensive = ClaimFeeRate(4_050, 100)
+    terms = _with(schedule=AUTOMATIC, claim_fee=expensive)
+    assert reverse_claim_fee_reserve(terms, _firm_request(AUTOMATIC_FIRM)) is None
+    assert hold_invoice_msat(terms, _firm_request(AUTOMATIC_FIRM)) is None
+    assert _error(_automatic(AUTOMATIC_FIRM, claim_fee=expensive)) == "capacity_unavailable"
+    assert _error(_automatic(INDICATIVE, claim_fee=expensive)) == "capacity_unavailable"
+    # A client minimum no signed claim could spend is a limit, not a capacity problem.
+    impossible = _limits(min_claim_fee_reserve_sat="401")
+    assert _error(_automatic(impossible, claim_fee=None)) == "limits_unsatisfiable"
+
+
+def test_fixed_reserve_ignores_fee_samples() -> None:
+    assert reverse_claim_fee_reserve(_with(claim_fee=None)) == 500
+    assert reverse_claim_fee_reserve(_with(claim_fee=ClaimFeeRate(50_000, 50_000))) == 500
 
 
 def test_reverse_schedule_windows_must_fit() -> None:

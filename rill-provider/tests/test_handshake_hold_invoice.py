@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import nullcontext
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
 
@@ -20,7 +21,7 @@ from test_reverse_quote_policy import HASH, HOLD, REVERSE_FIRM, SCHEDULE
 
 from rill_provider.handshake_service import HandshakeService, ServicePolicy
 from rill_provider.live_session_store import Answer, OutboxEntry, RequestAnswer
-from rill_provider.quote_policy import QuoteTerms
+from rill_provider.quote_policy import ClaimFeeRate, QuoteTerms
 from rill_provider.reverse_operations import ReverseOperations
 
 if TYPE_CHECKING:
@@ -76,7 +77,13 @@ def _terms(**changes: Any) -> QuoteTerms:  # noqa: ANN401
     return QuoteTerms(**base | changes)
 
 
-def _service(hold: Mock | None, store: Mock | None = None) -> tuple[HandshakeService, Mock]:
+def _service(
+    hold: Mock | None,
+    store: Mock | None = None,
+    *,
+    policy: ServicePolicy = POLICY,
+    claim_fee: Callable[[], ClaimFeeRate] | None = None,
+) -> tuple[HandshakeService, Mock]:
     store = store or Mock()
     store.classify_request.return_value = "new"
     store.payment_hash_reserved.return_value = False
@@ -89,10 +96,11 @@ def _service(hold: Mock | None, store: Mock | None = None) -> tuple[HandshakeSer
         store,
         Mock(),
         Mock(),
-        POLICY,
+        policy,
         invoice_decoder=lambda _bolt11: HOLD,
         hold_invoices=hold,
         clock=lambda: 1_700_000_000,
+        claim_fee=claim_fee,
     )
     return service, store
 
@@ -236,6 +244,69 @@ def test_unbound_hold_invoices_are_canceled_after_the_answer(
 
 async def _same(terms: QuoteTerms) -> QuoteTerms:
     return terms
+
+
+def _answer_automatic(
+    monkeypatch: pytest.MonkeyPatch, claim_fee: Callable[[], ClaimFeeRate]
+) -> tuple[Mock, list[QuoteTerms]]:
+    """Run one tick's fee sample, then answer a firm request with an automatic reserve."""
+    hold = _hold()
+    automatic = replace(SCHEDULE, claim_fee_reserve_sat=None, max_claim_fee_sat=1_000)
+    policy = replace(POLICY, quote=automatic)
+    service, store = _service(hold, policy=policy, claim_fee=claim_fee)
+    seen: list[QuoteTerms] = []
+
+    def answer_request(
+        _document: bytes, *, responder: Callable[..., Answer], **_kwargs: object
+    ) -> RequestAnswer:
+        responder(Mock(), (), Mock())
+        return RequestAnswer("11" * 32, "22" * 32, "00" * 32, replay=False)
+
+    def answer(
+        _request: object, _prior: object, _context: object, terms: QuoteTerms, _t: object
+    ) -> Answer:
+        seen.append(terms)
+        return Answer("terms_offer", {})
+
+    store.answer_request.side_effect = answer_request
+    monkeypatch.setattr("rill_provider.handshake_service.answer_client_request", answer)
+
+    async def none(*_a: object, **_k: object) -> None:
+        return None
+
+    monkeypatch.setattr(service, "_send_pending", none)
+    monkeypatch.setattr(service, "_route_ready", lambda _d, terms: _same(terms))
+    service._state.tip = 850  # noqa: SLF001
+    asyncio.run(service._refresh_claim_fee())  # noqa: SLF001 - the per-tick step alone
+    asyncio.run(service._answer(_document(REVERSE_FIRM), [], now=1_700_000_000))  # noqa: SLF001
+    return hold, seen
+
+
+def test_automatic_reserve_prices_the_hold_from_this_ticks_fee_sample(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    samples: list[None] = []
+
+    def claim_fee() -> ClaimFeeRate:
+        samples.append(None)
+        return ClaimFeeRate(rate_sat_kvb=6_000, floor_sat_kvb=100)
+
+    hold, seen = _answer_automatic(monkeypatch, claim_fee)
+    # P2WPKH destination: 99 vB at 6 sat/vB is 594, over the client's 500 minimum.
+    hold.add.assert_called_once_with(
+        HASH, value_msat=(100_000 + 594 + 200) * 1000, expiry_seconds=3_600, cltv_expiry_delta=185
+    )
+    assert [terms.claim_fee for terms in seen] == [ClaimFeeRate(6_000, 100)]
+    assert len(samples) == 1  # requests never trigger fee RPC
+
+
+def test_failed_fee_sample_opens_no_hold(monkeypatch: pytest.MonkeyPatch) -> None:
+    def claim_fee() -> ClaimFeeRate:
+        raise RuntimeError("Core next-block fee estimate unavailable")
+
+    hold, seen = _answer_automatic(monkeypatch, claim_fee)
+    hold.add.assert_not_called()
+    assert [terms.claim_fee for terms in seen] == [None]
 
 
 def test_hold_binding_is_an_invoice_binding() -> None:

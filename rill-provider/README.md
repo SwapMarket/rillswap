@@ -230,6 +230,24 @@ This needs Core's `listunspent`. If you generated the `rpcwhitelist` before
 this release, add `listunspent` to it and restart Core; until then the
 provider logs a warning and lets Core pick the inputs, at the same rate.
 
+### LN to BTC claim fee reserve
+
+The contract holds the payout plus a claim fee reserve. The client's claim
+pays exactly the reserve as its fee, so the destination receives exactly the
+requested amount. Unless `quote.claim_fee_reserve_sat` is set, the provider
+prices the reserve for each quote: the cooperative (key-path) claim to the
+client's destination at the same next-block rate it funds with, raised if
+needed so the larger script-path claim still pays the node's relay and mempool
+minimum, and never below the client's requested minimum. Indicative quotes
+assume a P2TR destination. Fees are sampled once per tick (15 seconds), never
+per request. Without a sample, or when the reserve would exceed
+`quote.max_claim_fee_sat`, LN to BTC quotes answer `capacity_unavailable`.
+
+If your configuration does not set `claim_fee_reserve_sat` (the examples and
+`rill-provider-init` never did), the upgraded provider switches from the former
+fixed 1,000 sat default to automatic pricing; swaps already signed keep their
+reserve. Set it to keep a fixed reserve instead.
+
 Admission limits include `max_sessions`, `max_tombstones`,
 `new_sessions_per_minute` and `max_active_reservations`. The last one bounds
 unreleased firm offers and accepted swaps (default 4). A swap holds its

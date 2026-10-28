@@ -99,7 +99,8 @@ class QuoteSettings(_Strict):
     # LN to BTC (RS-004) only: provider funding window and hold invoice terms.
     reverse_refund_delay_blocks: int = Field(default=144, ge=1, le=MAX_WIRE_INTEGER)
     refund_and_ln_resolution_blocks: int = Field(default=40, ge=1, le=MAX_WIRE_INTEGER)
-    claim_fee_reserve_sat: int = Field(default=1_000, ge=0, le=MAX_SATS)
+    # Unset: priced per quote from next-block fees so the claim pays exactly it.
+    claim_fee_reserve_sat: int | None = Field(default=None, ge=0, le=MAX_SATS)
     hold_invoice_lifetime: int = Field(default=3_600, ge=1, le=MAX_WIRE_INTEGER)
 
 
