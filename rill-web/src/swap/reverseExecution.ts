@@ -8,7 +8,7 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import { newKeyPair, type Handshake } from "./handshake";
 import { invoiceBinding } from "./bolt11";
 import { Session, SwapError } from "./session";
-import { checkReverseFirmQuoteRequest, checkReverseTermsOffer, requireShape, type ReverseTermsOffer, type LnToBtcTerms } from "./wire";
+import { checkReverseClaimWindow, checkReverseFirmQuoteRequest, checkReverseTermsOffer, requireShape, type ReverseTermsOffer, type LnToBtcTerms } from "./wire";
 import { recoveryDocument, type RecoveryParts } from "./recovery";
 import { encryptCanonicalRecoveryForRecipient } from "../recoveryAgeContainer";
 import { inspectReverseRecoveryPlaintext, checkSelectedReverseFundingTransaction, type RecoveryFundingBinding, type ConstructedReverseClaim } from "../recoveryInspection";
@@ -136,6 +136,7 @@ export async function prepareReverseExecution(session: Session, handshake: Hands
     const answer = await session.replyTo(envelope, "terms_offer"); current();
     const { terms, holdInvoice } = checkReverseTermsOffer(answer.payload, { request: firm, transcript, envelopeContractHash: answer.contract_hash,
       identity: request.identity, network, now: seconds(), handshakeInit: init, handshakeAccept: accept, decodeInvoice: (value) => invoiceBinding(value, name) });
+    checkReverseClaimWindow(terms, config.tipHeight, limits.minRefundDelayBlocks);
     const deadlineAt = Math.min(initialDeadline, terms.terms_expiry, terms.invoice_binding.expires_at);
     let claimDepth = effectiveClaimDepth(terms.funding_confirmations, config.claimConfirmations);
     const live = (): void => { current(); require(seconds() < deadlineAt); };

@@ -96,6 +96,9 @@ as refund party. They MUST satisfy all of the following:
 - `success_fee_sat <= max_success_fee_sat`,
   `claim_fee_reserve_sat >= min_claim_fee_reserve_sat`,
   `max_claim_fee_sat <= limits.max_claim_fee_sat`;
+- `claim_fee_reserve_sat <= max(min_claim_fee_reserve_sat, max_claim_fee_sat)`:
+  `C` raises `H` one for one, so beyond both what the client asked for and the
+  most fee a signed claim may spend it buys the client nothing;
 - `refund_lock_height >= min_refund_lock_height`;
 - `timing_policy.min_incoming_htlc_expiry_height <=
   max_incoming_htlc_expiry_height`.
@@ -126,6 +129,13 @@ The client MUST verify every term independently before `terms_accept`, and
 paying the hold invoice is what commits it: the client MUST pay with a final
 CLTV expiry no lower than `min_incoming_htlc_expiry_height`, MUST NOT pay
 before its recovery record is durable, and MUST NOT pay after `terms_expiry`.
+At the tip `T` it sees once the terms arrive, the client SHOULD also refuse
+terms with `refund_lock_height - T` below its refund delay (blocks found while
+negotiating shorten it), and MUST refuse terms whose
+`funding_confirmations + client_response_blocks + claim_confirmation_blocks`
+exceeds `refund_lock_height - T`, since its claim deadline would then fall
+before it could claim. The provider's own schedule keeps that sum below its
+refund delay.
 The provider MUST reserve `payment_hash` durably in the same transaction that
 records the offer, exactly as RS-003 reserves the invoice hash.
 

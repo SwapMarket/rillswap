@@ -5,7 +5,7 @@ import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { contractHash, providerTermsHash, handshakeHash, handshakeInitHash } from "../src/swap/hashes";
 import type { InvoiceBinding } from "../src/swap/bolt11";
 import {
-  checkReverseFirmQuoteRequest, checkReverseTermsOffer, COOPERATIVE_CLAIM_FEATURE, type LnToBtcTerms, ProtocolError,
+  checkReverseClaimWindow, checkReverseFirmQuoteRequest, checkReverseTermsOffer, COOPERATIVE_CLAIM_FEATURE, reverseClaimFeeReserveCeiling, type LnToBtcTerms, ProtocolError,
   type ReverseFirmQuoteRequest, type ReverseOfferContext, type HandshakeInit, type HandshakeAccept, checkLnToBtcTerms,
 } from "../src/swap/wire";
 import taproot from "./fixtures/taproot-cases-v1.json";
@@ -94,6 +94,26 @@ describe("LN to BTC terms offer", () => {
       { client_destination_script: "5120" + "11".repeat(32) }]) {
       expect(() => checkReverseTermsOffer(sign(terms), context({ request: { ...request, ...changed } }))).toThrow("does not honor request");
     }
+  });
+
+  test("a reserve above both the asked minimum and the spendable claim fee is refused", () => {
+    const reserve = BigInt(terms.economics.claim_fee_reserve_sat), spendable = BigInt(terms.max_claim_fee_sat);
+    expect(reserve > spendable).toBe(true); // the vector's reserve is valid only because the client asked for it
+    const asked = { ...request, limits: { ...request.limits, min_claim_fee_reserve_sat: spendable.toString() } };
+    expect(() => checkReverseTermsOffer(sign(terms), context({ request: asked }))).toThrow("inflated claim fee reserve");
+    expect(reverseClaimFeeReserveCeiling("100", "400")).toBe(400n);
+    expect(reverseClaimFeeReserveCeiling(500n, 400n)).toBe(500n);
+  });
+
+  test("the claim window is checked at the tip the client sees", () => {
+    const margins = terms.funding_confirmations + terms.timing_policy.client_response_blocks + terms.timing_policy.claim_confirmation_blocks;
+    const lock = terms.refund_lock_height;
+    expect(() => checkReverseClaimWindow(terms, lock - 72, 72)).not.toThrow();
+    expect(() => checkReverseClaimWindow(terms, lock - 71, 72)).toThrow("refund delay is shorter");
+    expect(() => checkReverseClaimWindow(terms, lock - margins, 0)).not.toThrow();
+    expect(() => checkReverseClaimWindow(terms, lock - margins + 1, 0)).toThrow("no claim window");
+    const swallowed = { ...terms, timing_policy: { ...terms.timing_policy, claim_confirmation_blocks: 1_000 } };
+    expect(() => checkReverseClaimWindow(swallowed, lock - 200, 72)).toThrow("no claim window");
   });
 
   test("the hold invoice must decode to exactly the signed binding", () => {

@@ -18,6 +18,7 @@ from rill_core.wire.reverse_quotes import (
     ReverseFirmQuoteRequest,
     ReverseIndicativeQuoteRequest,
     ReverseQuoteOffer,
+    check_reverse_claim_window,
     check_reverse_terms_offer,
 )
 
@@ -140,6 +141,13 @@ def test_reverse_terms_offer_honoring_the_request_passes() -> None:
             "claim fee reserve",
         ),
         ({"limits": {**_request()["limits"], "max_claim_fee_sat": "399"}}, {}, {}, "claim fee"),
+        # Reserve 500 is above both the asked 100 and the 400 a claim may spend.
+        (
+            {"limits": {**_request()["limits"], "min_claim_fee_reserve_sat": "100"}},
+            {},
+            {},
+            "inflated claim fee reserve",
+        ),
         (
             {"limits": {**_request()["limits"], "min_refund_lock_height": 1101}},
             {},
@@ -169,6 +177,52 @@ def test_reverse_terms_offer_violating_the_request_is_refused(
             handshake_hash=offer.terms.handshake_hash,
             invoice_binding=_binding(**binding_changes),
         )
+
+
+def test_reverse_claim_fee_reserve_may_reach_the_spendable_claim_fee() -> None:
+    # A provider pricing a higher next-block fee than the client may reserve up
+    # to its signed claim fee cap, never beyond it.
+    offer = _offer({"max_claim_fee_sat": "500"})
+    limits = {
+        **_request()["limits"],
+        "min_claim_fee_reserve_sat": "100",
+        "max_claim_fee_sat": "500",
+    }
+    check_reverse_terms_offer(
+        _firm(limits=limits),
+        offer,
+        handshake_hash=offer.terms.handshake_hash,
+        invoice_binding=_binding(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("tip", "min_delay", "reason"),
+    [
+        (1028, 72, None),  # exactly the requested 72 blocks remain
+        (1029, 72, "refund delay is shorter"),  # a block found during negotiation
+        (1086, 0, None),  # 14 blocks left: funding 2 + response 6 + claim 6
+        (1087, 0, "no claim window"),
+    ],
+)
+def test_reverse_claim_window_is_checked_at_a_fresh_tip(
+    tip: int, min_delay: int, reason: str | None
+) -> None:
+    terms = _offer().terms.contract_terms
+    assert isinstance(terms, ContractTerms)
+    if reason is None:
+        check_reverse_claim_window(terms, tip_height=tip, min_refund_delay_blocks=min_delay)
+    else:
+        with pytest.raises(ValueError, match=reason):
+            check_reverse_claim_window(terms, tip_height=tip, min_refund_delay_blocks=min_delay)
+
+
+def test_reverse_claim_window_refuses_margins_that_swallow_the_delay() -> None:
+    timing = {**REVERSE_TERMS["timing_policy"], "claim_confirmation_blocks": 1_000}
+    terms = _offer({"timing_policy": timing}).terms.contract_terms
+    assert isinstance(terms, ContractTerms)
+    with pytest.raises(ValueError, match="no claim window"):
+        check_reverse_claim_window(terms, tip_height=1000, min_refund_delay_blocks=72)
 
 
 def test_reverse_terms_offer_must_bind_the_session() -> None:

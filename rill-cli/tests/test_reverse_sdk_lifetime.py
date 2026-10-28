@@ -334,6 +334,28 @@ def test_native_reverse_terms_waiting_longer_than_announced_are_refused_before_p
 
 @NATIVE_ONLY
 @pytest.mark.native_crypto
+def test_native_reverse_terms_are_checked_at_the_tip_after_negotiation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def exercise(crypto: Context) -> None:
+        fixture = NativeSdk(crypto, tmp_path, monkeypatch)
+        lock = fixture.terms.refund_lock_height
+        # The request is built at 1000; 95 blocks later the signed funding,
+        # response and claim margins no longer fit before the refund lock.
+        fixture.wallet.tip_height.side_effect = [1000, lock - 5]
+        with pytest.raises(SwapError, match="no claim window"):
+            await fixture.run()
+        fixture.payer.pay.assert_not_called()
+        assert fixture.documents == []
+        assert fixture.broadcasts == []
+
+    with Context(library_path=NATIVE_LIBRARY) as crypto:
+        asyncio.run(exercise(crypto))
+
+
+@NATIVE_ONLY
+@pytest.mark.native_crypto
 @pytest.mark.parametrize("payment", ["before exception", "after exception", "UNKNOWN", "FAILED"])
 def test_native_reverse_sdk_never_interprets_ambiguous_payment_as_unsubmitted(
     tmp_path: Path,

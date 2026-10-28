@@ -183,5 +183,45 @@ def check_reverse_terms_offer(
         raise ValueError("terms offer does not honor request: success fee")
     if int(economics.claim_fee_reserve_sat) < int(limits.min_claim_fee_reserve_sat):
         raise ValueError("terms offer does not honor request: claim fee reserve")
+    if int(economics.claim_fee_reserve_sat) > reverse_claim_fee_reserve_ceiling(
+        limits.min_claim_fee_reserve_sat, terms.max_claim_fee_sat
+    ):
+        raise ValueError("terms offer does not honor request: inflated claim fee reserve")
     if int(terms.max_claim_fee_sat) > int(limits.max_claim_fee_sat):
         raise ValueError("terms offer does not honor request: claim fee")
+
+
+def reverse_claim_fee_reserve_ceiling(min_reserve_sat: str, max_claim_fee_sat: str) -> int:
+    """Largest claim fee reserve ``C`` a client accepts (RS-004).
+
+    ``C`` raises the Lightning payment one for one. Above both the reserve the
+    client asked for and the most fee a signed claim may spend, it buys the
+    client nothing it wanted, so the provider may not add it.
+    """
+    return max(int(min_reserve_sat), int(max_claim_fee_sat))
+
+
+def check_reverse_claim_window(
+    terms: ContractTerms, *, tip_height: int, min_refund_delay_blocks: int
+) -> None:
+    """Raise ValueError unless the client still has its claim window at ``tip_height``.
+
+    Run with a tip sampled after the terms arrived: blocks found during
+    negotiation shorten the delay the request asked for. The signed margins
+    (funding depth, client response, claim confirmation) must also fit before
+    the refund lock, as the provider's own schedule promises; otherwise the
+    client's claim deadline would fall before it can claim.
+    """
+    timing = terms.timing_policy
+    if not isinstance(timing, LnToBtcTiming):
+        raise ValueError("terms do not carry LN to BTC timing")  # noqa: TRY004
+    remaining = terms.refund_lock_height - tip_height
+    if remaining < min_refund_delay_blocks:
+        raise ValueError("terms refund delay is shorter than requested at the current tip")
+    margins = (
+        terms.funding_confirmations
+        + timing.client_response_blocks
+        + timing.claim_confirmation_blocks
+    )
+    if margins > remaining:
+        raise ValueError("terms claim margins leave no claim window before the refund lock")

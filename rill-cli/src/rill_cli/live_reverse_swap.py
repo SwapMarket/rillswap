@@ -68,6 +68,7 @@ from rill_core.wire.quotes import TermsOfferPayload
 from rill_core.wire.reverse_quotes import (
     ReverseFirmQuoteRequest,
     ReverseQuoteLimits,
+    check_reverse_claim_window,
     check_reverse_terms_offer,
 )
 from rill_core.wire.settlement_messages import FundingBindingPayload, parse_observation
@@ -1334,6 +1335,16 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
                 now=int(time.time()),
             )
             require_announced_depth(terms.funding_confirmations, advertisement)
+            # Blocks found while negotiating shorten the delay the request asked for.
+            fresh_tip = await lifetime.worker(wallet.tip_height)
+            try:
+                check_reverse_claim_window(
+                    terms,
+                    tip_height=fresh_tip,
+                    min_refund_delay_blocks=limits.min_refund_delay_blocks,
+                )
+            except ValueError as error:
+                raise SwapError(str(error)) from None
             depth = claim_depth(terms.funding_confirmations, limits.claim_confirmations)
             warning = early_claim_warning(depth, terms.funding_confirmations)
             if warning is not None:

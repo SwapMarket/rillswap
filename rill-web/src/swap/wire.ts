@@ -479,6 +479,8 @@ export function checkReverseTermsOffer(payload: unknown, context: ReverseOfferCo
     [terms.timing_policy.min_incoming_htlc_expiry_height <= limits.max_incoming_htlc_expiry_height, "incoming HTLC expiry"],
     [BigInt(economics.success_fee_sat) <= BigInt(limits.max_success_fee_sat), "success fee"],
     [BigInt(economics.claim_fee_reserve_sat) >= BigInt(limits.min_claim_fee_reserve_sat), "claim fee reserve"],
+    [BigInt(economics.claim_fee_reserve_sat) <= reverseClaimFeeReserveCeiling(limits.min_claim_fee_reserve_sat, terms.max_claim_fee_sat),
+      "inflated claim fee reserve"],
     [BigInt(terms.max_claim_fee_sat) <= BigInt(limits.max_claim_fee_sat), "claim fee"],
   ];
   for (const [ok, what] of checks) {
@@ -486,4 +488,29 @@ export function checkReverseTermsOffer(payload: unknown, context: ReverseOfferCo
   }
   checkSignedOfferBinding(offer, context);
   return { terms, holdInvoice: offer.hold_invoice };
+}
+
+/**
+ * Largest claim fee reserve C a client accepts (RS-004), mirroring rill-core.
+ * C raises the Lightning payment one for one; above both the reserve the client
+ * asked for and the most fee a signed claim may spend, it buys the client nothing.
+ */
+export function reverseClaimFeeReserveCeiling(minReserveSat: string | bigint, maxClaimFeeSat: string | bigint): bigint {
+  const minimum = BigInt(minReserveSat), spendable = BigInt(maxClaimFeeSat);
+  return minimum > spendable ? minimum : spendable;
+}
+
+/**
+ * Refuse terms that no longer leave the client its claim window at tipHeight
+ * (mirrors rill-core check_reverse_claim_window): the refund lock must stay
+ * minRefundDelayBlocks ahead, and the signed funding, response and claim
+ * confirmation margins must fit before it, as the provider's schedule promises.
+ */
+export function checkReverseClaimWindow(terms: LnToBtcTerms, tipHeight: number, minRefundDelayBlocks: number): void {
+  const remaining = terms.refund_lock_height - tipHeight;
+  if (remaining < minRefundDelayBlocks) throw new ProtocolError("terms refund delay is shorter than requested at the current tip");
+  const { client_response_blocks: response, claim_confirmation_blocks: claim } = terms.timing_policy;
+  if (terms.funding_confirmations + response + claim > remaining) {
+    throw new ProtocolError("terms claim margins leave no claim window before the refund lock");
+  }
 }

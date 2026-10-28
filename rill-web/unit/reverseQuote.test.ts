@@ -39,6 +39,17 @@ test("offers beyond any limit, expired, inconsistent, or for another payout are 
   expect(() => checkReverseQuoteOffer(prepayment, request, now)).toThrow("mining prepayment");
 });
 
+test("an indicative reserve above both the asked minimum and the spendable claim fee is refused", () => {
+  const reserve = BigInt(economics.claim_fee_reserve_sat!);
+  const base = prepaid ? { ...offer, economics: { ...economics, mining_prepayment_sat: "0",
+    hold_invoice_sat: (BigInt(economics.contract_amount_sat!) + BigInt(economics.success_fee_sat!)).toString() } } : offer;
+  const inflated = { ...base, max_claim_fee_sat: (reserve - 1n).toString() };
+  const limits = { ...request.limits, minClaimFeeReserveSat: 0n };
+  expect(() => checkReverseQuoteOffer(inflated, { ...request, limits }, now)).toThrow("inflated claim fee reserve");
+  // Up to the spendable claim fee, a higher reserve is an honest fee estimate.
+  expect(checkReverseQuoteOffer({ ...base, max_claim_fee_sat: reserve.toString() }, { ...request, limits }, now).kind).toBe("ln-to-btc");
+});
+
 test("price discovery sends only an indicative request, exposes no invoice, and zeroes its session secret", async () => {
   const child = Bun.spawn([process.execPath, "unit/fixtures/reverseQuoteFixture.ts"], { stdout: "pipe", stderr: "pipe" });
   const [output, errors, status] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);

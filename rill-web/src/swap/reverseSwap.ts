@@ -9,7 +9,7 @@ import { verifyNostrProviderAnnouncement } from "../nostrProviderAnnouncement";
 import { handshake } from "./handshake";
 import { type RelayLink, Session, SwapError } from "./session";
 import type { SwapRequest } from "./swap";
-import { MAX_SATS, ProtocolError, requireAnnouncedDepth, requireShape, sats } from "./wire";
+import { MAX_SATS, ProtocolError, requireAnnouncedDepth, requireShape, reverseClaimFeeReserveCeiling, sats } from "./wire";
 import type { PreparedReverseExecution, ReverseExecutionConfiguration } from "./reverseExecution";
 
 export const REVERSE_PROFILE = "ln-to-btc/v1";
@@ -87,6 +87,7 @@ export function checkReverseQuoteOffer(payload: unknown, request: Omit<ReverseSw
     [payout === request.payoutSat, "payout"],
     [fee <= limits.maxSuccessFeeSat, "success fee"],
     [reserve >= limits.minClaimFeeReserveSat, "claim fee reserve"],
+    [reserve <= reverseClaimFeeReserveCeiling(limits.minClaimFeeReserveSat, sats(offer.max_claim_fee_sat, "claim fee")), "inflated claim fee reserve"],
     [sats(offer.max_claim_fee_sat, "claim fee") <= limits.maxClaimFeeSat, "claim fee"],
     [offer.refund_delay_blocks >= limits.minRefundDelayBlocks, "refund delay"],
     [offer.incoming_htlc_expiry_delta_blocks <= limits.maxIncomingHtlcDelayBlocks, "Lightning hold"],
