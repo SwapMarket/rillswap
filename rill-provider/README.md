@@ -206,10 +206,20 @@ provider stops announcing until liquidity recovers. If the source fails, the
 last cap stays (the configured bands before any reading). The Docker template
 uses one band of 10,000 to 10,000,000 sat.
 
+A request the provider can no longer fill between announcements is refused
+at quote time with `capacity_unavailable`, before the client pays anything:
+BTC to LN and ERC20 to LN need a payable route to the invoice, and LN to BTC
+needs a wallet balance covering the contract plus `quote.max_funding_fee_sat`
+before a hold invoice is opened. The LN to BTC check also applies with
+`follow_liquidity` off; while the balance cannot be read, quotes are admitted
+as before. LN to ERC20 does not check its token balance. Concurrent quotes
+each see the whole balance.
+
 LN to BTC reads the balance with Core's `getbalances`. If you generated the
 `rpcwhitelist` before this release, add `getbalances` to it and restart
-Core; until then the provider logs `liquidity unavailable` and keeps the
-configured bands.
+Core; until then the provider logs `liquidity unavailable` and `funding
+balance unavailable`, keeps the configured bands, and does not check firm
+quotes against the balance.
 
 ### LN to BTC funding
 

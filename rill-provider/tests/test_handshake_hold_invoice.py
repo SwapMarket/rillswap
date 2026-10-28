@@ -83,6 +83,7 @@ def _service(
     *,
     policy: ServicePolicy = POLICY,
     claim_fee: Callable[[], ClaimFeeRate] | None = None,
+    liquidity: Callable[[], int] | None = None,
 ) -> tuple[HandshakeService, Mock]:
     store = store or Mock()
     store.classify_request.return_value = "new"
@@ -101,6 +102,7 @@ def _service(
         hold_invoices=hold,
         clock=lambda: 1_700_000_000,
         claim_fee=claim_fee,
+        liquidity=liquidity,
     )
     return service, store
 
@@ -311,3 +313,53 @@ def test_failed_fee_sample_opens_no_hold(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_hold_binding_is_an_invoice_binding() -> None:
     assert isinstance(HOLD, InvoiceBinding)
+
+
+# The fixed schedule's contract: payout 100,000 plus a 500 claim reserve (H less
+# the 200 success fee), funded with at most max_funding_fee_sat on chain.
+FUNDING_NEED = 100_500 + SCHEDULE.max_funding_fee_sat
+
+
+@pytest.mark.parametrize(("balance", "opened"), [(FUNDING_NEED, True), (FUNDING_NEED - 1, False)])
+def test_no_hold_is_opened_when_the_wallet_cannot_fund_the_contract(
+    balance: int,
+    opened: bool,  # noqa: FBT001
+) -> None:
+    hold = _hold()
+    service, _ = _service(hold, liquidity=lambda: balance)
+    outcome = asyncio.run(_open(service, _document(REVERSE_FIRM), _terms()))
+    assert (outcome == ("lnbcrt1007u1hold", HOLD)) is opened
+    assert (outcome is None) is not opened  # answered capacity_unavailable, nothing to cancel
+    assert hold.add.called is opened
+
+
+def test_an_unreadable_balance_admits_the_quote_as_before(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    readings: list[int | Exception] = [PermissionError("getbalances not whitelisted")] * 2
+
+    def balance() -> int:
+        reading = readings.pop(0)
+        if isinstance(reading, Exception):
+            raise reading
+        return reading
+
+    hold = _hold()
+    service, _ = _service(hold, liquidity=balance)
+    for _ in range(2):  # an upgraded node's old whitelist must not stop LN to BTC
+        assert asyncio.run(_open(service, _document(REVERSE_FIRM), _terms())) is not None
+    assert hold.add.call_count == 2
+    warnings = [r for r in caplog.records if "funding balance unavailable" in r.message]
+    assert len(warnings) == 1  # once per failure streak
+    readings.append(FUNDING_NEED - 1)  # readable again: a known shortfall refuses
+    assert asyncio.run(_open(service, _document(REVERSE_FIRM), _terms())) is None
+    assert hold.add.call_count == 2
+
+
+def test_the_funding_check_applies_without_following_liquidity() -> None:
+    hold = _hold()
+    policy = replace(POLICY, follow_liquidity=False)
+    service, _ = _service(hold, policy=policy, liquidity=lambda: FUNDING_NEED - 1)
+    assert service._liquidity_cap is None  # noqa: SLF001 - announced bands stay configured
+    assert asyncio.run(_open(service, _document(REVERSE_FIRM), _terms())) is None
+    hold.add.assert_not_called()

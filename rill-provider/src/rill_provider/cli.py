@@ -222,15 +222,14 @@ def _payment_sender(config: OperatorConfig) -> LndPaymentSender | None:
 
 
 def _liquidity(config: OperatorConfig) -> Callable[[], int] | None:
-    """Return what caps the announced amounts: what this profile pays out from.
+    """Return what this profile pays out from, read by the announcement cap.
 
     LN payouts (btc-to-ln, erc20-to-ln) are bounded by the best single channel,
-    LN to BTC by the Core funding wallet. LN to ERC20 has no token balance
+    LN to BTC by the Core funding wallet, which also gates each firm quote
+    (even with ``follow_liquidity`` off). LN to ERC20 has no token balance
     source yet, so its configured bands stay as they are.
     """
     profile, core = config.handshake.profile, config.bitcoin_core
-    if not config.terms.follow_liquidity:
-        return None
     if profile in ("btc-to-ln/v1", "erc20-to-ln/v1"):
         sender = _payment_sender(config)
         return None if sender is None else sender.largest_channel_send_sat

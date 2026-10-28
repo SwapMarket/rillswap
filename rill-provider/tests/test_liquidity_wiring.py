@@ -57,9 +57,16 @@ def test_ln_to_btc_follows_the_funding_wallet() -> None:
     assert source.__self__._wallet_path == "/wallet/maker"  # type: ignore[attr-defined]  # noqa: SLF001
 
 
+def test_not_following_liquidity_keeps_the_source_for_the_funding_check() -> None:
+    config = _config("ln-to-btc/v1", follow_liquidity=False)
+    assert config.service_policy().follow_liquidity is False
+    source = cli._liquidity(config)  # noqa: SLF001
+    assert source is not None
+    assert source.__name__ == "trusted_balance_sat"
+
+
 def test_no_source_keeps_the_configured_bands() -> None:
     assert cli._liquidity(_config("ln-to-erc20/v1")) is None  # noqa: SLF001
-    assert cli._liquidity(_config(follow_liquidity=False)) is None  # noqa: SLF001
     config = _config()
     unpaid = config.model_copy(
         update={"lnd": config.lnd.model_copy(update={"payment_macaroon": None})}  # type: ignore[union-attr]

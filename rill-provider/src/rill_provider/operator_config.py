@@ -284,6 +284,7 @@ class OperatorConfig(_Strict):
             provider_destination_script=self.provider_destination_script,
             evm_assets=self.evm.assets() if self.evm is not None else (),
             transport_pow_bits=self.transport_pow_bits,
+            follow_liquidity=t.follow_liquidity,
             liquidity_margin_percent=t.liquidity_margin_percent,
         )
 

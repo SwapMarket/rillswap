@@ -85,6 +85,7 @@ MAX_DEFERRED_EVENTS = 64
 TIP_LOOKUP_WAIT_SECONDS = 2.0  # waiting bound, not cancellation of Core's worker thread
 CLAIM_FEE_WAIT_SECONDS = 2.0  # likewise for the per-tick claim fee sample
 LIQUIDITY_WAIT_SECONDS = 30.0  # once per announcement; the RPCs carry their own timeouts
+FUNDING_BALANCE_WAIT_SECONDS = 5.0  # per LN to BTC firm quote: refuse fast, never hang
 _RELAY_CONNECTED = b""  # in-band wake: tick now and re-announce
 
 
@@ -127,6 +128,7 @@ class ServicePolicy:
     # RS-006 transport proof of work required on new sessions' messages; 0 = off.
     transport_pow_bits: int = 0
     # With a liquidity source: announce this random percent range below it.
+    follow_liquidity: bool = True
     liquidity_margin_percent: tuple[int, int] = (10, 20)
 
     def __post_init__(self) -> None:
@@ -213,10 +215,11 @@ class HandshakeService:
         self._liquidity = liquidity
         self._liquidity_cap = (
             None
-            if liquidity is None
+            if liquidity is None or not policy.follow_liquidity
             else LiquidityCap(policy.amount_bands, margin_percent=policy.liquidity_margin_percent)
         )
         self._liquidity_failing = False
+        self._funding_balance_failing = False
         self._state = _State(bands=policy.amount_bands)
         self._deadline_healthy = True
         self._deadline_wall_anchor, self._deadline_monotonic_anchor = self._now(), time.monotonic()
@@ -1085,6 +1088,12 @@ class HandshakeService:
             value_msat is None
             or self._store.payment_hash_reserved(request.payment_hash)
             or not self._store.firm_capacity_available()
+            or (
+                isinstance(request, ReverseFirmQuoteRequest)
+                and not await self._can_fund(
+                    value_msat // 1000 - success_fee(terms, int(request.nominal_payout_sat)), terms
+                )
+            )
         ):
             return None  # refused without opening anything
         hold_invoices, decoder, schedule = (
@@ -1111,6 +1120,36 @@ class HandshakeService:
             )
             return "unavailable"
         return (bolt11, binding)
+
+    async def _can_fund(self, contract_sat: int, terms: QuoteTerms) -> bool:
+        """Whether the funding wallet now covers the contract and its maximum funding fee.
+
+        Liquidity moves between announcements. A refusal here costs the client
+        one quote, while a hold invoice the provider cannot fund holds the
+        client's payment until it is canceled. Only a known shortfall refuses:
+        without a source, or while the balance cannot be read (e.g. an
+        ``rpcwhitelist`` without ``getbalances``), quotes are admitted as before.
+        """
+        source = self._liquidity
+        if source is None:
+            return True
+        try:
+            balance = await asyncio.wait_for(
+                asyncio.to_thread(source), FUNDING_BALANCE_WAIT_SECONDS
+            )
+        except Exception as error:  # noqa: BLE001 - unknown is not a shortfall
+            if not self._funding_balance_failing:
+                LOG.warning(
+                    "funding balance unavailable (%s); firm quotes not checked against it",
+                    type(error).__name__,
+                )
+            self._funding_balance_failing = True
+            return True
+        self._funding_balance_failing = False
+        if balance < contract_sat + terms.schedule.max_funding_fee_sat:
+            LOG.warning("funding wallet cannot cover the request; answered capacity_unavailable")
+            return False
+        return True
 
     def _matching_unused_hold(  # noqa: PLR0911 - each failed proof independently forbids cleanup
         self,
