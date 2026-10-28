@@ -43,12 +43,12 @@ def test_the_cap_is_a_random_margin_below_liquidity_within_the_range() -> None:
     assert draws.calls == [(1_000, 2_000)]  # 10-20 % in basis points
 
 
-def test_the_cap_holds_until_liquidity_falls_below_it_then_redraws() -> None:
+def test_the_cap_holds_while_liquidity_stays_within_the_margin_of_it() -> None:
     draws = _Draws(1_000, 2_000)
     cap = LiquidityCap(BANDS, rng=draws)
     cap.observe(4_000_000)
     assert cap.bands() == ((10_000, 3_600_000),)
-    for liquidity in (3_600_000, 3_900_000, 12_000_000):  # covered: nothing to reveal
+    for liquidity in (3_600_000, 3_900_000, 4_500_000):  # covered, at most 20 % above
         cap.observe(liquidity)
         assert cap.bands() == ((10_000, 3_600_000),)
     cap.observe(3_599_999)  # below the announced maximum: a fresh margin
@@ -56,11 +56,37 @@ def test_the_cap_holds_until_liquidity_falls_below_it_then_redraws() -> None:
     assert len(draws.calls) == 2
 
 
-def test_liquidity_covering_every_band_lifts_the_cap() -> None:
+def test_the_cap_rises_with_liquidity_but_never_above_the_configured_maximum() -> None:
+    draws = _Draws(1_000, 1_500, 2_000)
+    cap = LiquidityCap(BANDS, rng=draws)
+    cap.observe(2_000_000)
+    assert cap.bands() == ((10_000, 1_800_000),)
+    cap.observe(2_250_000)  # 20 % below is exactly the cap: still plausible, kept
+    assert cap.bands() == ((10_000, 1_800_000),)
+    cap.observe(6_000_000)  # the operator refilled the wallet: a fresh, higher draw
+    assert cap.bands() == ((10_000, 5_100_000),)
+    cap.observe(11_000_000)  # 10 % below would exceed the maximum: clamped
+    assert cap.bands() == ((10_000, 8_800_000),)
+    cap.observe(12_500_000)  # covers the maximum even 20 % below: no draw
+    assert cap.bands() == BANDS
+    assert len(draws.calls) == 3
+
+
+def test_a_drained_wallet_lowers_the_cap_from_the_maximum() -> None:
     cap = LiquidityCap(BANDS, rng=_Draws(1_000))
+    cap.observe(50_000_000)
+    assert cap.bands() == BANDS
+    cap.observe(10_500_000)  # still covers the announced maximum: nothing to reveal
+    assert cap.bands() == BANDS
+    cap.observe(3_000_000)  # drained externally
+    assert cap.bands() == ((10_000, 2_700_000),)
+
+
+def test_liquidity_covering_every_band_lifts_the_cap() -> None:
+    cap = LiquidityCap(BANDS, rng=_Draws(1_000, 2_000))
     cap.observe(4_000_000)
-    cap.observe(12_499_999)
-    assert cap.bands() == ((10_000, 3_600_000),)
+    cap.observe(12_499_999)  # 20 % below is still under the maximum: drawn
+    assert cap.bands() == ((10_000, 9_999_999),)
     cap.observe(12_500_000)
     assert cap.bands() == BANDS
 

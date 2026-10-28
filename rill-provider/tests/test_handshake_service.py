@@ -406,6 +406,10 @@ def test_announced_and_admitted_amounts_follow_liquidity(
         asyncio.run(service.tick([relay]))
         assert identity.bands[-1] == ((1000, 765_000),)
         assert _admitted_bands(service, store, monkeypatch) == ((1000, 765_000),)
+        liquidity[0] = 1_000_000  # refilled: the cap rises at the next refresh
+        clock[0] += service._policy.announcement_refresh  # noqa: SLF001
+        asyncio.run(service.tick([relay]))
+        assert identity.bands[-1] == ((1000, 900_000),)
         liquidity[0] = 5_000_000  # covers every band even 10 % below
         clock[0] += service._policy.announcement_refresh  # noqa: SLF001
         asyncio.run(service.tick([relay]))

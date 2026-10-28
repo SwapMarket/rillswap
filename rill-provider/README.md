@@ -195,10 +195,13 @@ accepts at most what it can pay out, less a random margin from
 configured bands. Each announcement (every 30 minutes) checks the payout
 liquidity again: the largest single LND channel's sendable balance for BTC to
 LN and ERC20 to LN, or the funding wallet's trusted balance for LN to BTC. LN
-to ERC20 keeps its configured bands. The cap only drops when liquidity falls
-below it, with a fresh margin each time, and returns to the configured
-maximum once liquidity is at least `maximum / (1 - high margin)`, so keep more
-than that to reveal nothing about your balance. Below the smallest band, the
+to ERC20 keeps its configured bands. The configured maximum applies whenever
+liquidity is at least `maximum / (1 - high margin)`; keep more than that to
+reveal nothing about your balance. Below it, a fresh margin is drawn when
+liquidity falls under the announced maximum (swaps, or a wallet drained
+outside the provider) or grows past `cap / (1 - high margin)`; otherwise the
+cap stays. Changes wait for the next scheduled announcement, so balance
+changes are not published as they happen. Below the smallest band, the
 provider stops announcing until liquidity recovers. If the source fails, the
 last cap stays (the configured bands before any reading). The Docker template
 uses one band of 10,000 to 10,000,000 sat.

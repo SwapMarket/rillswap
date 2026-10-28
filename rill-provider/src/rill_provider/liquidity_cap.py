@@ -1,12 +1,14 @@
 """Announced amount bands that follow the provider's liquidity.
 
-The announced maximum is ``min(configured maximum, liquidity less a random
-margin)``, the margin drawn from a configured percent range (10-20 by default).
-The cap only moves down, and only once liquidity falls below it; each downward
-step draws a fresh margin, so consecutive caps do not reveal the ratio between
-the balances behind them. It returns to the configured bands once even the
-largest margin leaves them covered, so a provider holding more than its
-configured maximum never reveals changes to its liquidity.
+The announced maximum is the configured maximum whenever liquidity covers it,
+and otherwise liquidity less a random margin drawn from a configured percent
+range (10-20 by default). It is re-evaluated only when the caller samples
+liquidity (each scheduled announcement), in both directions: a fresh margin is
+drawn when liquidity no longer covers the cap, or when it has grown so far
+that the cap sits more than the largest margin below it. Otherwise the cap
+stays, so an unchanged balance is not resampled into revealing itself, and a
+provider holding more than ``maximum / (1 - largest margin)`` never reveals
+changes to its liquidity. The configured maximum is never exceeded.
 
 Pure state: the caller samples liquidity and publishes the bands.
 """
@@ -50,21 +52,19 @@ class LiquidityCap:
         low, high = check_margin_percent(margin_percent)
         self._configured = bands
         self._maximum = max(high for _, high in bands)
-        self._minimum = min(low for low, _ in bands)
         self._margin_bp = (low * 100, high * 100)
         self._rng: _Random = rng if rng is not None else random.SystemRandom()
         self._cap: int | None = None
 
     def observe(self, liquidity_sat: int) -> None:
-        """Lower the cap when liquidity no longer covers it; lift it when it covers all."""
+        """Re-evaluate the cap against one liquidity reading."""
         if type(liquidity_sat) is not int or liquidity_sat < 0:
             raise ValueError("liquidity must be a non-negative integer of satoshis")
         lowest, highest = self._margin_bp
-        if liquidity_sat * (BASIS_POINTS - highest) // BASIS_POINTS >= self._maximum:
-            self._cap = self._maximum
-        elif self._cap is None or liquidity_sat < self._cap or self._cap < self._minimum:
-            # A cap below every band serves nothing, so recovering from it is
-            # visible anyway; any other cap holds until liquidity drops below it.
+        floor = liquidity_sat * (BASIS_POINTS - highest) // BASIS_POINTS  # largest margin below
+        if floor >= self._maximum:
+            self._cap = self._maximum  # liquidity is not the bottleneck
+        elif self._cap is None or not floor <= self._cap <= liquidity_sat:
             margin = self._rng.randint(lowest, highest)
             drawn = liquidity_sat * (BASIS_POINTS - margin) // BASIS_POINTS
             self._cap = min(self._maximum, drawn)
