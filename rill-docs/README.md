@@ -1,7 +1,7 @@
 # RillSwap specifications
 
 Normative protocol specifications, schemas, test vectors and network
-definitions for RillSwap, plus the design document and release test matrix.
+definitions for RillSwap, plus the design document.
 
 | Path | Contents |
 |---|---|
@@ -10,13 +10,14 @@ definitions for RillSwap, plus the design document and release test matrix.
 | `schemas/` | JSON schemas for wire messages, advertisements and recovery files |
 | `vectors/` | Byte-level test vectors |
 | `networks/` | Versioned network identity definitions |
-| [`compatibility/TEST-MATRIX.md`](compatibility/TEST-MATRIX.md) | End-to-end and security acceptance matrix |
 | `proposals/` | BIP and NIP drafts (unassigned, not submitted) |
 | `images/` | Screenshots used by the READMEs |
 | [`SOURCES.md`](SOURCES.md) | External standards referenced by the specifications |
 
 Interoperability is defined by the versioned `specs/`, `schemas/` and
 `vectors/`. The proposal drafts summarize them for the BIP and NIP processes.
+Published versions are never rewritten; corrections receive a new version or
+an explicit erratum.
 
 | Spec | Topic |
 |---|---|

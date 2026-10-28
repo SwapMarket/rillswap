@@ -1,6 +1,6 @@
-# RS-009: Conformance and release profiles
+# RS-009: Conformance profiles
 
-Status: pre-release draft
+Status: draft
 
 Version: `0.1.0-pre.1`
 
@@ -42,8 +42,6 @@ native/WASM and real-backend tests establish those separately.
 
 ## 2. Test requirements
 
-All identifiers in [`compatibility/TEST-MATRIX.md`](../compatibility/TEST-MATRIX.md)
-are release requirements.
 Money-path integration tests use real pinned Bitcoin Core and LND processes;
 fake adapters do not satisfy those cases. Regtest block production is explicit
 and deterministic. Tests cover both spend paths, exact timeout boundaries,

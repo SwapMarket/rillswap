@@ -115,9 +115,8 @@ commands. To run your own provider, use the published
 | Signet, testnet4 | Supported test networks |
 | Mainnet | Enabled |
 
-See the [architecture](rill-docs/ARCHITECTURE.md) and
-[acceptance test matrix](rill-docs/compatibility/TEST-MATRIX.md) for protocol
-invariants and validation scenarios.
+See the [architecture](rill-docs/ARCHITECTURE.md) for the protocol design,
+state machines and security invariants.
 
 ## Development
 
