@@ -63,12 +63,12 @@ export function routeFor(fromId: string, toId: string): Route {
   return { from, to, profile, unavailable,
     title: `${from.name} in. ${to.name} out.`,
     tagline: profile === "ln-to-btc/v1"
-      ? "Pay a Lightning invoice, receive Bitcoin on-chain. No account. Your keys stay with you."
+      ? "Swap Lightning to on-chain Bitcoin with any provider on an open, permissionless market. No account. Your keys stay with you."
       : profile === "btc-to-ln/v1"
-        ? "Pay a Lightning invoice from your Bitcoin wallet. No account. Your keys stay with you."
+        ? "Swap on-chain Bitcoin to Lightning with any provider on an open, permissionless market. No account. Your keys stay with you."
         : profile === "erc20-to-ln/v1"
-          ? `Pay a Lightning invoice with ${from.symbol} from your EVM wallet. No account. Your keys stay with you.`
+          ? `Swap ${from.symbol} to Lightning with any provider on an open, permissionless market. No account. Your keys stay with you.`
           : profile === "ln-to-erc20/v1"
-            ? `Pay from any Lightning wallet, receive ${to.symbol} in your EVM wallet. No Lightning node connection needed.`
+            ? `Swap Lightning to ${to.symbol} with any provider on an open, permissionless market. Pay from any Lightning wallet.`
           : "This pair is shown for planning. It cannot be quoted yet." };
 }

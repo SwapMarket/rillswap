@@ -258,6 +258,16 @@ test("the header network indicator switches an unpublished network in place and 
   await expect(picker).toHaveValue("regtest");
 });
 
+test("the header links to the source code in a new tab, beside the network picker", async ({ page }) => {
+  await page.goto(SWAP);
+  const source = page.getByRole("link", { name: "RillSwap source code on GitHub" });
+  await expect(source).toHaveAttribute("href", "https://github.com/rillswap/rillswap");
+  await expect(source).toHaveAttribute("target", "_blank"); // never navigates away from a swap in progress
+  await expect(source).toHaveAttribute("rel", "noopener noreferrer");
+  await expect(page.locator("header #swap-toolbar")).toContainText("GitHub");
+  await expect(page.locator(".swap-intro")).toContainText("open, permissionless market");
+});
+
 test("the minimal swap card fits a mobile viewport", async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 812 });
   await page.goto(SWAP);

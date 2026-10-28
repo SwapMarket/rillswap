@@ -42,6 +42,7 @@ import { decryptRecoveryContainer } from "./recoveryKeys";
 const NETWORKS = { mainnet, signet, testnet4, regtest } as const;
 /** How often an idle, visible page reloads the provider directory. */
 const DIRECTORY_REFRESH_MS = 5 * 60_000;
+const SOURCE_CODE_URL = "https://github.com/rillswap/rillswap";
 
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, text = "", id?: string): HTMLElementTagNameMap[K] {
   const element = document.createElement(tag);
@@ -117,12 +118,18 @@ function mount(root: HTMLElement): void {
   for (const name of Object.keys(NETWORKS)) {
     badge.append(Object.assign(node("option", name === "mainnet" ? "Mainnet" : `${name} · test funds`), { value: name }));
   }
-  header.append(brand, badge);
+  // A new tab, so following the link never leaves a swap in progress.
+  const source = node("a", "GitHub", "swap-source");
+  Object.assign(source, { href: SOURCE_CODE_URL, target: "_blank", rel: "noopener noreferrer" });
+  source.setAttribute("aria-label", "RillSwap source code on GitHub");
+  const toolbar = node("div", "", "swap-toolbar");
+  toolbar.append(source, badge);
+  header.append(brand, toolbar);
   const intro = node("div");
   intro.className = "swap-intro";
   const heroTitle = node("h1");
   const heroTagline = node("p");
-  intro.append(node("p", "BITCOIN. WITHOUT THE DETOUR.", "swap-eyebrow"), heroTitle, heroTagline);
+  intro.append(node("p", "DECENTRALIZED LIGHTNING SWAP MARKET", "swap-eyebrow"), heroTitle, heroTagline);
   const card = node("section", "", "swap-card");
   const cardHead = node("div");
   cardHead.className = "card-heading";
@@ -467,7 +474,7 @@ function mount(root: HTMLElement): void {
   const log = node("pre", "", "swap-log");
   diagnostics.append(log);
   card.append(cardHead, form, tracking, progress, panel, privacy, diagnostics);
-  const footer = node("footer", "Provider-neutral · No account · Locally verified");
+  const footer = node("footer", "Permissionless · Non-custodial · Locally verified");
   root.replaceChildren(header, intro, card, footer, settings, providers);
   const setStatus = (text: string, step: number, state = "working"): void => {
     status.textContent = text;
