@@ -86,7 +86,11 @@ from rill_provider import _transport_pow as transport_pow
 from rill_provider._nip59_receive import _decode_gift_wrap_candidate
 from rill_provider._nip59_send import _wrap_envelope
 from rill_provider.core_tx_bytes import CooperativeClaimOutpoint, CooperativeFeePolicy
-from rill_provider.provider_identity import ADVERTISEMENT_TAG, ANNOUNCEMENT_KIND
+from rill_provider.provider_identity import (
+    ADVERTISEMENT_TAG,
+    ANNOUNCEMENT_KIND,
+    FUNDING_CONFIRMATIONS_EXTENSION,
+)
 
 from rill_cli.wallet_rpc import CooperativeClaimEvidence
 
@@ -236,17 +240,50 @@ def verify_announcement(  # noqa: PLR0913 - explicit trust inputs
         raise SwapError("announcement does not offer this swap now")
     _requires_epoch_binding(advertisement)
     _transport_work(advertisement)
+    announced_funding_confirmations(advertisement)
     return dict(advertisement)
 
 
 def _extensions(advertisement: dict[str, Any]) -> dict[str, Any]:
-    """Return signed extensions holding only requirements this client understands."""
+    """Return the signed extensions; RS-005 clients ignore keys they do not know.
+
+    A known key must still be well formed: its parser refuses the announcement.
+    """
     extensions = advertisement.get("extensions", {})
     if not isinstance(extensions, dict):
         raise SwapError("announcement extensions unsupported")
-    if not set(extensions) <= {HANDSHAKE_FEATURES_EXTENSION, transport_pow.TRANSPORT_POW_EXTENSION}:
-        raise SwapError("announcement handshake requirements unsupported")
     return extensions
+
+
+def announced_funding_confirmations(advertisement: dict[str, Any]) -> int | None:
+    """Return the RS-005 announced funding depth, or None when not announced.
+
+    None is unknown, never 0 or 1. Zero is only valid when every listed
+    profile is BTC to LN, where only the paying provider takes the risk.
+    """
+    extensions = _extensions(advertisement)
+    if FUNDING_CONFIRMATIONS_EXTENSION not in extensions:
+        return None
+    value = extensions[FUNDING_CONFIRMATIONS_EXTENSION]
+    depth = value.get("confirmations") if isinstance(value, dict) and len(value) == 1 else None
+    profiles = advertisement.get("profiles")
+    if (
+        type(depth) is not int
+        or not 0 <= depth <= MAX_EXACT_JSON_INTEGER
+        or not isinstance(profiles, list)
+        or (depth == 0 and any(profile != PROFILE for profile in profiles))
+    ):
+        raise SwapError("announcement funding confirmations unsupported")
+    return depth
+
+
+def require_announced_depth(offered: int, advertisement: dict[str, Any]) -> None:
+    """Refuse terms waiting more funding confirmations than announced (fewer is fine)."""
+    announced = announced_funding_confirmations(advertisement)
+    if announced is not None and offered > announced:
+        raise SwapError(
+            f"terms wait {offered} funding confirmations, more than the announced {announced}"
+        )
 
 
 def _requires_epoch_binding(advertisement: dict[str, Any]) -> bool:
@@ -1514,6 +1551,7 @@ async def run_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
         crypto=crypto,
         now=int(time.time()),
     )
+    require_announced_depth(terms.funding_confirmations, advertisement)
     economics = terms.economics
     report(
         f"terms: fund {economics.contract_amount_sat} sat, refund after block "

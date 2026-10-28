@@ -165,7 +165,9 @@ class NativeSdk:
             reverse, "time", Mock(time=lambda: initial["updated_at"], monotonic=self.now)
         )
         monkeypatch.setattr(reverse, "POLL_SECONDS", 0.001)
-        monkeypatch.setattr(reverse, "discover", AsyncMock())
+        # A provider that announced no funding depth unless a test sets one.
+        self.discover = AsyncMock(return_value={"profiles": ["ln-to-btc/v1"]})
+        monkeypatch.setattr(reverse, "discover", self.discover)
         monkeypatch.setattr(reverse, "_Session", lambda *_args, **_kwargs: self.session)
         monkeypatch.setattr(
             reverse,
@@ -265,6 +267,29 @@ def test_native_reverse_sdk_propagates_one_original_deadline_and_keeps_paid_dist
         assert fixture.contract_signatures == 1  # the one broadcast claim
         assert any("hold payment observed (IN_FLIGHT)" in report for report in fixture.reports)
         assert not any("hold invoice paid" in report for report in fixture.reports)
+
+    with Context(library_path=NATIVE_LIBRARY) as crypto:
+        asyncio.run(exercise(crypto))
+
+
+@NATIVE_ONLY
+@pytest.mark.native_crypto
+def test_native_reverse_terms_waiting_longer_than_announced_are_refused_before_paying(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def exercise(crypto: Context) -> None:
+        fixture = NativeSdk(crypto, tmp_path, monkeypatch)
+        signed = fixture.terms.funding_confirmations
+        fixture.discover.return_value = {
+            "profiles": ["ln-to-btc/v1"],
+            "extensions": {"rillswap/funding-confirmations": {"confirmations": signed - 1}},
+        }
+        with pytest.raises(SwapError, match=f"more than the announced {signed - 1}"):
+            await fixture.run()
+        fixture.payer.pay.assert_not_called()
+        assert fixture.documents == []  # nothing accepted, nothing to recover
+        assert fixture.broadcasts == []
 
     with Context(library_path=NATIVE_LIBRARY) as crypto:
         asyncio.run(exercise(crypto))

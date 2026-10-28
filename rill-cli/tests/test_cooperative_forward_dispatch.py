@@ -145,7 +145,9 @@ class Forward(Harness):
         self.session.reply_to = reply
         monkeypatch.setattr(live_swap, "_Session", lambda *_args, **_kwargs: self.session)
         monkeypatch.setattr(live_swap, "_handshake", handshake)
-        monkeypatch.setattr(live_swap, "discover", AsyncMock())
+        # A provider that announced no funding depth unless a test sets one.
+        self.discover = AsyncMock(return_value={"profiles": [live_swap.PROFILE]})
+        monkeypatch.setattr(live_swap, "discover", self.discover)
         monkeypatch.setattr(live_swap, "_check_offer", lambda *_args, **_kwargs: self.terms)
         scalars = iter((4, 6))
         monkeypatch.setattr(
@@ -326,6 +328,31 @@ def test_featured_forward_dispatch_uses_actual_owner_once(
                 for document in fixture.documents
             ) == (2 if failure in {"none", "reservation uncertain"} else 1)
             assert (tmp_path / "forward.age.paid").exists()
+        finally:
+            if hasattr(fixture, "provider_attempt"):
+                fixture.provider_attempt.close()
+
+    with Context(library_path=LIBRARY) as crypto:
+        asyncio.run(exercise(crypto))
+
+
+@pytest.mark.native_crypto
+@NATIVE
+def test_forward_terms_waiting_longer_than_announced_are_refused_before_funding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def exercise(crypto: Context) -> None:
+        fixture = Forward(crypto, tmp_path, monkeypatch)
+        signed = fixture.terms.funding_confirmations
+        fixture.discover.return_value = {
+            "profiles": [live_swap.PROFILE],
+            "extensions": {"rillswap/funding-confirmations": {"confirmations": signed - 1}},
+        }
+        try:
+            with pytest.raises(SwapError, match=f"more than the announced {signed - 1}"):
+                await fixture.run()
+            assert fixture.documents == []  # nothing accepted, nothing to recover
+            assert fixture.broadcasts == []
         finally:
             if hasattr(fixture, "provider_attempt"):
                 fixture.provider_attempt.close()

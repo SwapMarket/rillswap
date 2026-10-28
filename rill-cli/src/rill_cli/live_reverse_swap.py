@@ -82,6 +82,7 @@ from rill_cli.live_swap import (
     _scalar,
     _Session,
     discover,
+    require_announced_depth,
 )
 from rill_cli.refund_watcher import ChainView
 from rill_cli.wallet_rpc import HistoricalWalletOutput
@@ -1213,6 +1214,7 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
                 crypto=crypto,
                 now=int(time.time()),
             )
+            require_announced_depth(terms.funding_confirmations, advertisement)
             economics = terms.economics
             contract = offer.terms.contract_hash
             min_incoming = int(terms.timing_policy.model_dump()["min_incoming_htlc_expiry_height"])

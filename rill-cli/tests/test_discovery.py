@@ -112,13 +112,81 @@ def test_handshake_mode_requires_an_explicit_advertised_requirement() -> None:
     )
 
 
-def test_nostr_requirement_does_not_enable_unknown_extensions() -> None:
-    for extensions in (
-        {"test/data": "signed"},
+def test_unknown_extensions_are_ignored_and_enable_nothing() -> None:
+    # RS-005: a key this client does not know neither hides the provider nor
+    # changes what it requires; only the known requirement decides.
+    assert not live_swap._requires_epoch_binding(  # noqa: SLF001
+        {"extensions": {"test/data": "signed"}}
+    )
+    assert live_swap._requires_epoch_binding(  # noqa: SLF001
         {
-            live_swap.HANDSHAKE_FEATURES_EXTENSION: [live_swap.EPOCH_SESSION_FEATURE],
-            "test/data": "signed",
-        },
-    ):
-        with pytest.raises(live_swap.SwapError, match="handshake requirements"):
-            live_swap._requires_epoch_binding({"extensions": extensions})  # noqa: SLF001
+            "extensions": {
+                live_swap.HANDSHAKE_FEATURES_EXTENSION: [live_swap.EPOCH_SESSION_FEATURE],
+                "test/data": "signed",
+            }
+        }
+    )
+    assert live_swap.announced_funding_confirmations({"extensions": {"test/data": 1}}) is None
+
+
+DEPTH = live_swap.FUNDING_CONFIRMATIONS_EXTENSION
+
+
+@pytest.mark.parametrize(
+    ("value", "profiles", "depth"),
+    [
+        ({"confirmations": 0}, [live_swap.PROFILE], 0),
+        ({"confirmations": 1}, [live_swap.PROFILE, "ln-to-btc/v1"], 1),
+        ({"confirmations": 6}, ["ln-to-btc/v1"], 6),
+    ],
+)
+def test_announced_funding_confirmations_are_read_exactly(
+    value: object, profiles: list[str], depth: int
+) -> None:
+    advertisement = {"profiles": profiles, "extensions": {DEPTH: value}}
+    assert live_swap.announced_funding_confirmations(advertisement) == depth
+
+
+def test_an_unannounced_depth_is_unknown_not_zero_or_one() -> None:
+    assert live_swap.announced_funding_confirmations({"profiles": [live_swap.PROFILE]}) is None
+    assert (
+        live_swap.announced_funding_confirmations(
+            {"profiles": [live_swap.PROFILE], "extensions": {}}
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "profiles"),
+    [
+        (None, [live_swap.PROFILE]),
+        (1, [live_swap.PROFILE]),
+        ({}, [live_swap.PROFILE]),
+        ({"confirmations": -1}, [live_swap.PROFILE]),
+        ({"confirmations": True}, [live_swap.PROFILE]),
+        ({"confirmations": "1"}, [live_swap.PROFILE]),
+        ({"confirmations": 1.0}, [live_swap.PROFILE]),
+        ({"confirmations": 9_007_199_254_740_992}, [live_swap.PROFILE]),
+        ({"confirmations": 1, "more": 1}, [live_swap.PROFILE]),
+        # Zero is only for BTC to LN: there the paying provider alone takes the risk.
+        ({"confirmations": 0}, ["ln-to-btc/v1"]),
+        ({"confirmations": 0}, [live_swap.PROFILE, "ln-to-btc/v1"]),
+    ],
+)
+def test_a_malformed_announced_depth_refuses_the_announcement(
+    value: object, profiles: list[str]
+) -> None:
+    with pytest.raises(live_swap.SwapError, match="funding confirmations unsupported"):
+        live_swap.announced_funding_confirmations(
+            {"profiles": profiles, "extensions": {DEPTH: value}}
+        )
+
+
+def test_terms_may_wait_fewer_confirmations_than_announced_never_more() -> None:
+    announced = {"profiles": [live_swap.PROFILE], "extensions": {DEPTH: {"confirmations": 1}}}
+    live_swap.require_announced_depth(0, announced)
+    live_swap.require_announced_depth(1, announced)
+    live_swap.require_announced_depth(6, {"profiles": [live_swap.PROFILE]})  # nothing announced
+    with pytest.raises(live_swap.SwapError, match="more than the announced 1"):
+        live_swap.require_announced_depth(2, announced)
