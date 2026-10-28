@@ -31,6 +31,7 @@ from rill_provider.lnd_hold_invoice import LndHoldInvoices
 from rill_provider.lnd_invoice_decode import LndInvoiceDecoder
 from rill_provider.lnd_payment_observation import LndObservationError
 from rill_provider.lnd_payment_send import LndPaymentSender
+from rill_provider.notifications import AppriseSender, Notifier
 from rill_provider.operator_config import (
     OperatorConfig,
     OperatorConfigError,
@@ -56,9 +57,10 @@ if TYPE_CHECKING:
     from rill_crypto import Context
 
 REFUSED = 2
-# Client libraries that log every request at INFO (httpx: each Core RPC call).
-# They only speak up at WARNING unless --log-level DEBUG asks for everything.
-CHATTY_LIBRARY_LOGGERS = ("httpx", "httpcore", "urllib3", "web3")
+# Client libraries that log every request at INFO (httpx: each Core RPC call,
+# apprise: each notification). They only speak up at WARNING unless
+# --log-level DEBUG asks for everything (which can include notification URLs).
+CHATTY_LIBRARY_LOGGERS = ("httpx", "httpcore", "urllib3", "web3", "apprise")
 
 
 def _context(library: Path) -> Context:
@@ -421,6 +423,8 @@ async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
         expected_xonly_public_key=config.provider_identity_xonly,
         crypto=crypto,
     )
+    notifications = config.notifications
+    sender = None if notifications is None else AppriseSender(notifications.urls_file)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGINT, signal.SIGTERM):
@@ -451,7 +455,24 @@ async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
             liquidity=_liquidity(config),
             claim_fee=_claim_fee(config),
         )
-        await service.run(stop)
+        if notifications is None or sender is None:
+            await service.run(stop)
+            return
+        notifier = Notifier(
+            notifications,
+            sender,
+            store,
+            profile=config.handshake.profile,
+            network=config.network.name,
+            health=service.health,
+        )
+        notifier.start()
+        failed = True
+        try:
+            await service.run(stop)
+            failed = False
+        finally:
+            await notifier.close(failed=failed)  # while the store is still held
 
 
 def _parser() -> argparse.ArgumentParser:

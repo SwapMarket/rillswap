@@ -11,6 +11,7 @@ import os
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
+from unittest.mock import Mock
 
 import pytest
 from fake_relay import FakeRelay
@@ -20,13 +21,19 @@ from rill_core.wire.messages import Envelope, HandshakeAccept, HandshakeInit
 from rill_core.wire.quotes import QuoteOffer
 from test_live_session_store import Harness, _bytes
 
-from rill_provider.handshake_service import HandshakeService, ServicePolicy, _disposition_level
+from rill_provider.handshake_service import (
+    HandshakeService,
+    ServiceHealth,
+    ServicePolicy,
+    _disposition_level,
+)
 from rill_provider.live_session_store import (
     LiveSessionStore,
     LiveSessionStoreError,
     SessionExpiredError,
     StaleOwnerError,
 )
+from rill_provider.quote_policy import ClaimFeeRate
 from rill_provider.relay_client import RelayConnection
 
 if TYPE_CHECKING:
@@ -153,6 +160,7 @@ def test_native_handshake_through_relay_and_service(  # noqa: PLR0915 - one end-
                     advertisement = json.loads(announcement["content"])["advertisement"]
                     (epoch,) = advertisement["epoch_inbox_xonly_keys"]
                     assert advertisement["transport_endpoints"] == [url]
+                    assert service.health().relays_connected == 1  # the relays down alert
                     await relay.inject(
                         _wrap_envelope(
                             harness.init,
@@ -457,11 +465,13 @@ def test_liquidity_below_every_band_stops_announcing_and_admitting(
     with harness.acquire() as store:
         service, identity = _liquidity_service(store, harness, liquidity, clock)
         asyncio.run(service.tick([relay]))
+        assert service.health().announcing
         liquidity[0] = 1000  # 10 % below is under the smallest band
         clock[0] += refresh
         asyncio.run(service.tick([relay]))
         assert len(identity.bands) == 1  # nothing built or recorded
         assert _admitted_bands(service, store, monkeypatch) == ()
+        assert not service.health().announcing  # what the low liquidity alert watches
         service._state.republish = True  # noqa: SLF001 - a relay reconnects
         clock[0] += 60
         asyncio.run(service.tick([relay]))
@@ -472,6 +482,7 @@ def test_liquidity_below_every_band_stops_announcing_and_admitting(
         assert identity.bands[-1] == ((1000, 90_000),)
         assert len(relay.published) == 2
         assert _admitted_bands(service, store, monkeypatch) == ((1000, 90_000),)
+        assert service.health().announcing
 
 
 def test_relay_queue_loss_forces_one_replay_req_and_failed_req_retries(
@@ -1016,3 +1027,26 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: P
 def test_routine_relay_dispositions_log_at_debug(disposition: str, level: str) -> None:
     """Relay history replays after every resubscribe must not flood INFO."""
     assert logging.getLevelName(_disposition_level(disposition)) == level
+
+
+def test_health_reports_only_configured_quote_inputs_as_unavailable() -> None:
+    policy = Mock(amount_bands=((1000, 100_000),))
+    tip, fee = Mock(side_effect=OSError("Core down")), Mock(side_effect=OSError("Core down"))
+    service = HandshakeService(Mock(), Mock(), Mock(), policy, chain_tip=tip, claim_fee=fee)
+    assert service.health() == ServiceHealth(
+        relays_connected=0, announcing=True, tip_available=False, claim_fee_available=False
+    )  # before the first tick nothing is proven
+
+    async def refresh() -> None:
+        await service._refresh_tip()  # noqa: SLF001 - the per-tick snapshots
+        await service._refresh_claim_fee()  # noqa: SLF001
+
+    asyncio.run(refresh())
+    assert (service.health().tip_available, service.health().claim_fee_available) == (False, False)
+    tip.side_effect, tip.return_value = None, 850
+    fee.side_effect, fee.return_value = None, ClaimFeeRate(rate_sat_kvb=2000, floor_sat_kvb=1000)
+    asyncio.run(refresh())
+    assert (service.health().tip_available, service.health().claim_fee_available) == (True, True)
+    unconfigured = HandshakeService(Mock(), Mock(), Mock(), policy)
+    assert unconfigured.health().tip_available
+    assert unconfigured.health().claim_fee_available

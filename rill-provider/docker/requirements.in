@@ -1,8 +1,9 @@
-# Runtime dependencies of the provider image: rill-provider and the rill CLI.
+# Runtime dependencies of the provider image: rill-provider (with the optional
+# Apprise notifications) and the rill CLI.
 # The local packages are installed from source without dependencies; only
 # their third-party dependencies are locked, with hashes, in requirements.txt.
 # Regenerate it with ./lock.sh. Paths are relative to the repository root.
-./rill-provider
+./rill-provider[notifications]
 ./rill-cli
 ./rill-core/packages/core
 ./rill-crypto/python

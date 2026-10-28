@@ -136,6 +136,13 @@ network; the containers reach them through the hosts set in `.env`.
 
    A maker turns healthy once Core, LND and the Tor tunnel answer.
 
+5. Optionally, enable [notifications](#notifications) for a maker: write its
+   Apprise URLs to `makers/<profile>/notify.urls` (mode 0600, owned by the
+   container uid), add a `notifications` section with
+   `"urls_file": "notify.urls"` to its `provider.json`, and run
+   `docker compose up -d` again. Notifications leave through the maker's
+   network directly, not through Tor.
+
 Back up `./makers` (custody keys, identities, configs). Never back up,
 restore or copy `./stores`; `./credentials` can be recreated. For offline
 commands, stop the maker first and use the same mounts, for example
@@ -420,6 +427,65 @@ networks, set `relay_proxy` to a loopback Tor `HTTPTunnelPort` such as
 `allow_direct_relays` is enabled, which exposes your IP address to the
 relays. Regtest allows direct connections. Without `relay_proxy`, onion
 relays are skipped (one INFO log line) and are not announced.
+
+### Notifications
+
+The optional `notifications` section sends operator notifications through
+[Apprise](https://github.com/caronc/apprise) (Telegram, ntfy, email, Matrix,
+webhooks and many more). The development lock and the Docker image include
+it; other installs need the `rill-provider[notifications]` extra, or `serve`
+refuses to start.
+
+```json
+"notifications": {
+  "urls_file": "notify.urls",
+  "swap_confirmed": true,
+  "summary_time": "08:00"
+}
+```
+
+`urls_file` is an owner-only (0600) file with one
+[Apprise URL](https://github.com/caronc/apprise/wiki/URLBasics) per line;
+blank lines and lines starting with `#` are ignored. URLs carry service
+tokens, so they never go in the config. Every URL is checked at startup, and
+a refused one is reported by line number only.
+
+| Field | Default | Notifies |
+| --- | --- | --- |
+| `swap_request` | `false` | A client accepted terms (with the amount) |
+| `swap_confirmed` | `false` | A swap completed, with its revenue, costs and net |
+| `swap_failed` | `false` | A swap failed, was refunded or aborted |
+| `swap_lost` | `true` | A swap paid out without getting the funds back |
+| `daily_summary` | `true` | Requests, success rate, revenue, costs and net profit |
+| `summary_time` | `"00:00"` | When the daily summary is sent (`HH:MM`, UTC) |
+| `low_liquidity` | `true` | Liquidity is below every amount band (not announcing) |
+| `relays_down` | `true` | No relay is connected |
+| `quotes_paused` | `true` | The chain tip or claim fee estimate is unavailable |
+| `service_start_stop` | `false` | Serving started or stopped |
+| `alert_after_seconds` | `300` | How long a condition lasts before it is alerted (60 to 86400) |
+
+The three health conditions are alerted once after `alert_after_seconds` and
+cleared once on recovery. Events found in the same 15-second poll are combined
+into one notification.
+
+The daily summary covers the 24 hours before `summary_time` and is computed
+from the store's swap ledger (see
+[Persistent state and backups](#persistent-state-and-backups)): accepted
+requests and firm offers, swaps closed with their outcomes and success rate,
+revenue, mining and routing costs, losses, net profit (in sat, with msat
+precision) and EVM gas (in gwei, kept apart). If a closed swap has costs that
+were not recorded (accepted before the v18 upgrade, or not reported by a
+backend), the summary says so and the net profit is an upper bound.
+
+Notifications are best effort and never affect serving. Nothing about them is
+persisted: events that happen while the service is stopped are not sent one
+by one, but the next daily summary counts them. Failed deliveries are logged
+without the URL.
+
+Notifications connect directly to each service, not through `relay_proxy`, so
+the services see this host's IP address (use a self-hosted service such as
+ntfy or a webhook if that matters). `--log-level DEBUG` logs Apprise's
+requests, which can include the URLs and their tokens.
 
 ## Persistent state and backups
 

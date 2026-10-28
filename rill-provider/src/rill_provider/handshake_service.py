@@ -163,6 +163,19 @@ class ServicePolicy:
         return self.quote.funding_confirmations
 
 
+@dataclass(frozen=True, slots=True)
+class ServiceHealth:
+    """What clients can get from this service right now (for operator alerts).
+
+    A source that is not configured is never reported as unavailable.
+    """
+
+    relays_connected: int
+    announcing: bool  # liquidity covers at least one amount band
+    tip_available: bool  # quotes need the chain tip
+    claim_fee_available: bool  # LN to BTC quotes with an automatic claim reserve
+
+
 @dataclass(slots=True)
 class _State:
     subscribed: tuple[str, ...] = ()
@@ -254,6 +267,17 @@ class HandshakeService:
         # process, kept while its swap still awaits the first funding binding.
         self._fresh_featured_accepts: dict[str, str] = {}
         self._probe_supervision_needed = False
+        self._connected: dict[str, RelayConnection] = {}  # owned by run()
+
+    def health(self) -> ServiceHealth:
+        """Return the current health snapshot; no I/O, event-loop thread only."""
+        state = self._state
+        return ServiceHealth(
+            relays_connected=len(self._connected),
+            announcing=bool(state.bands),
+            tip_available=self._chain_tip is None or state.tip is not None,
+            claim_fee_available=self._claim_fee is None or state.claim_fee is not None,
+        )
 
     def _now(self) -> int:
         return int(self._clock())
@@ -1601,7 +1625,7 @@ class HandshakeService:
     async def run(self, stop: asyncio.Event, *, tick_seconds: float = 15.0) -> None:  # noqa: PLR0915 - one supervised loop owns every relay and duty
         """Serve until ``stop`` is set, reconnecting relays with backoff."""
         broadcasts, deadline_task = self._start_deadline_supervision(stop)
-        connected: dict[str, RelayConnection] = {}
+        connected = self._connected
         inbound: asyncio.Queue[bytes] = asyncio.Queue(1024)
 
         async def maintain(url: str) -> None:

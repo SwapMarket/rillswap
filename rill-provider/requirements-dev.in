@@ -1,4 +1,4 @@
--e .
+-e .[notifications]
 -e ../rill-core/packages/core
 -e ../rill-crypto/python
 pytest==9.1.1

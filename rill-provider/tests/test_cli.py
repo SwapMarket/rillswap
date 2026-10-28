@@ -17,6 +17,7 @@ import pytest
 from fake_relay import FakeRelay
 from pyrage import x25519  # type: ignore[import-untyped]
 from test_live_session_store import swaps_as_v9, without_v12_cooperation
+from test_notifications import serve_hook
 
 from rill_provider import cli
 from rill_provider.cli import REFUSED, main
@@ -223,6 +224,79 @@ def test_native_serve_announces_and_stops_on_sigterm(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
+)
+def test_native_serve_notifies_start_and_stop_through_apprise(tmp_path: Path) -> None:
+    unlock = x25519.Identity.generate()
+    config_path = _config(tmp_path, unlock)
+    created = subprocess.run(  # noqa: S603 - fixed argv
+        [
+            sys.executable,
+            "-m",
+            "rill_provider.cli",
+            "provision-identity",
+            "--out",
+            str(tmp_path / "id.age"),
+            "--recipient",
+            str(unlock.to_public()),
+            "--native-crypto-library",
+            os.environ["RILL_CRYPTO_LIBRARY"],
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    async def scenario(url: str, received: list[tuple[str, dict[str, Any]]]) -> None:
+        relay = FakeRelay()
+        relay_url = await relay.start()
+        urls = tmp_path / "notify.urls"
+        urls.write_text(f"# operator webhook\n{url}\n")
+        urls.chmod(0o600)
+        _config(
+            tmp_path,
+            unlock,
+            provider_identity_xonly=created.stdout.strip(),
+            relay_urls=[relay_url],
+            notifications={"urls_file": "notify.urls", "service_start_stop": True},
+        )
+        try:
+            assert main(["provision-store", "--config", str(config_path)]) == 0
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "rill_provider.cli",
+                "serve",
+                "--config",
+                str(config_path),
+                stderr=asyncio.subprocess.PIPE,
+            )
+            for _ in range(200):
+                if received:
+                    break
+                await asyncio.sleep(0.05)
+            if not received:
+                process.kill()
+                _, stderr = await process.communicate()
+                pytest.fail(f"no start notification: {stderr.decode()[-2000:]}")
+            process.send_signal(signal.SIGTERM)
+            _, stderr = await asyncio.wait_for(process.communicate(), 20)
+            assert process.returncode == 0
+            assert "SECRET" not in stderr.decode()
+        finally:
+            await relay.stop()
+
+    with serve_hook() as (url, received):
+        asyncio.run(scenario(url, received))
+    assert [(body["title"], body["message"]) for _path, body in received] == [
+        ("RillSwap btc-to-ln/v1 (regtest): service started", "Serving started."),
+        ("RillSwap btc-to-ln/v1 (regtest): service stopped", "Serving stopped."),
+    ]
+
+
 def test_bitcoin_core_cookie_resolves_and_quote_settings_reach_the_service(
     tmp_path: Path,
 ) -> None:
@@ -321,6 +395,7 @@ def test_client_libraries_only_log_requests_at_debug(level: str, library_level: 
             logger.setLevel(logging.NOTSET)
         cli._configure_logging(level)  # noqa: SLF001 - the entrypoint's logging setup
         assert "httpx" in cli.CHATTY_LIBRARY_LOGGERS
+        assert "apprise" in cli.CHATTY_LIBRARY_LOGGERS  # one INFO line per notification
         assert {logging.getLevelName(logger.level) for logger in loggers} == {library_level}
     finally:
         for logger, previous in zip(loggers, saved, strict=True):

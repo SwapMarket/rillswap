@@ -201,6 +201,28 @@ class PublicTerms(_Strict):
         return check_margin_percent(value)
 
 
+class NotificationSettings(_Strict):
+    """Optional operator notifications through Apprise (``rill-provider[notifications]``).
+
+    ``urls_file`` is an owner-only file with one Apprise URL per line (``#``
+    starts a comment): URLs carry service tokens, so they never live here.
+    Grace periods and the daily summary use ``alert_after_seconds`` and UTC.
+    """
+
+    urls_file: Path
+    swap_request: bool = False  # the client accepted signed terms
+    swap_confirmed: bool = False  # completed: claimed or settled
+    swap_failed: bool = False  # failed, refunded or aborted
+    swap_lost: bool = True  # paid out without getting the funds back
+    daily_summary: bool = True
+    summary_time: str = Field(default="00:00", pattern=r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
+    low_liquidity: bool = True  # liquidity below every amount band, not announcing
+    relays_down: bool = True  # no relay connected
+    quotes_paused: bool = True  # chain tip or claim fee estimate unavailable
+    service_start_stop: bool = False
+    alert_after_seconds: int = Field(default=300, ge=60, le=24 * 60 * 60)
+
+
 class OperatorConfig(_Strict):
     """One provider deployment; paths are resolved relative to the config file."""
 
@@ -239,6 +261,7 @@ class OperatorConfig(_Strict):
     # of new sessions; 0 is off. Clients that do not support it cannot see an
     # announcement requiring it, so enable it only once they do.
     transport_pow_bits: int = Field(default=0, ge=0, le=MAX_WORK_BITS)
+    notifications: NotificationSettings | None = None
 
     @field_validator("provider_destination_script")
     @classmethod
@@ -347,24 +370,36 @@ def load_config(path: Path) -> OperatorConfig:
         update["evm"] = config.evm.model_copy(
             update={"signer_key_file": _resolve(base, config.evm.signer_key_file)}
         )
+    if config.notifications is not None:
+        update["notifications"] = config.notifications.model_copy(
+            update={"urls_file": _resolve(base, config.notifications.urls_file)}
+        )
     return config.model_copy(update=update)
+
+
+def read_private_file(path: Path, label: str, *, max_bytes: int = MAX_IDENTITY_FILE_BYTES) -> bytes:
+    """Read up to ``max_bytes + 1`` bytes of an owner-only regular file, never a link.
+
+    Errors name ``label`` only, never the path or the content.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        raise OperatorConfigError(f"{label} unavailable") from None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+            raise OperatorConfigError(f"{label} must be a 0600 regular file")
+        if info.st_uid != os.geteuid():
+            raise OperatorConfigError(f"{label} must be owned by this user")
+        return os.read(fd, max_bytes + 1)
+    finally:
+        os.close(fd)
 
 
 def read_evm_signer_key(path: Path) -> str:
     """Read an owner-only file holding one hex EVM private key; refuse loose permissions."""
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError:
-        raise OperatorConfigError("EVM signer key file unavailable") from None
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
-            raise OperatorConfigError("EVM signer key file must be a 0600 regular file")
-        if info.st_uid != os.geteuid():
-            raise OperatorConfigError("EVM signer key file must be owned by this user")
-        data = os.read(fd, MAX_IDENTITY_FILE_BYTES + 1)
-    finally:
-        os.close(fd)
+    data = read_private_file(path, "EVM signer key file")
     key = data.decode("utf-8", "replace").strip().lower().removeprefix("0x")
     if len(key) != 64 or any(c not in "0123456789abcdef" for c in key):  # noqa: PLR2004
         raise OperatorConfigError("EVM signer key file must hold one 32-byte hex key")
@@ -373,19 +408,7 @@ def read_evm_signer_key(path: Path) -> str:
 
 def read_custody_identity(path: Path) -> str:
     """Read an owner-only age identity file; refuse group/other access or links."""
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError:
-        raise OperatorConfigError("custody identity file unavailable") from None
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
-            raise OperatorConfigError("custody identity file must be a 0600 regular file")
-        if info.st_uid != os.geteuid():
-            raise OperatorConfigError("custody identity file must be owned by this user")
-        data = os.read(fd, MAX_IDENTITY_FILE_BYTES + 1)
-    finally:
-        os.close(fd)
+    data = read_private_file(path, "custody identity file")
     if len(data) > MAX_IDENTITY_FILE_BYTES:
         raise OperatorConfigError("custody identity file too large")
     lines = [
