@@ -295,6 +295,7 @@ test("a signed price within the estimate still needs review when it waits more c
 
 test("with announced fees loaded and the address entered, a Lightning to Bitcoin swap continues directly", async ({ page }) => {
   await quotesWithinEstimate(page);
+  await page.addInitScript(() => { window.uiFixtureAnnouncedDepth = 2; }); // the depth every fixture offer signs
   await mockTip(page);
   await page.goto(PAGE);
   await page.getByRole("button", { name: "Switch direction" }).click();
@@ -310,3 +311,21 @@ test("with announced fees loaded and the address entered, a Lightning to Bitcoin
   await expect(page.locator("#swap-reverse-continue")).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => window.uiFixture.disposed)).toBe(1);
 });
+
+for (const [announced, shown] of [[null, "did not announce"], [3, "Payout after 3 confirmations"]] as const) {
+  test(`a Lightning to Bitcoin price within the estimate still needs review when the claim depth was ${announced === null ? "not announced" : "shown deeper"}`, async ({ page }) => {
+    await quotesWithinEstimate(page);
+    // Every fixture offer signs 2 confirmations: the depth at which the client reveals its preimage.
+    if (announced !== null) await page.addInitScript((depth) => { window.uiFixtureAnnouncedDepth = depth; }, announced);
+    await mockTip(page);
+    await page.goto(PAGE);
+    await page.getByRole("button", { name: "Switch direction" }).click();
+    await page.locator("#swap-receive-amount").fill("50000");
+    await expect(page.locator("#swap-estimate")).toContainText(shown);
+    await page.locator("#swap-receive-address").fill(scriptAddress(`0014${"11".repeat(20)}`, "regtest"));
+    await page.locator("#swap-start").click();
+    await expect(page.locator("#swap-reverse-continue")).toBeEnabled(); // no one-step swap
+    await expect(page.locator("#swap-quote-review")).toContainText("Payout after 2 confirmations (about 20 min)");
+    expect(await page.evaluate(() => window.uiFixture.disposed)).toBe(0);
+  });
+}

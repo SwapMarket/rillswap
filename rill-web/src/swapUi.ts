@@ -355,9 +355,14 @@ function mount(root: HTMLElement): void {
   const estimate = node("p", "", "swap-estimate");
   estimate.setAttribute("role", "status");
   // The directory entry the shown estimate names: a signed offer no worse on both price and depth may skip review.
+  // BTC to LN: a shallower depth only means the provider pays sooner. LN to BTC: the depth is when the client
+  // claims and so reveals its preimage, where shallower funding can still be double-spent; skipping review then
+  // needs exactly the depth the estimate showed.
   let estimatedTotal: bigint | null = null, estimatedDepth: number | null = null;
-  const withinEstimate = (price: bigint, depth: number | null): boolean => estimatedTotal !== null && price <= estimatedTotal &&
-    (estimatedDepth === null || (depth !== null && depth <= estimatedDepth));
+  const withinEstimate = (profile: "btc-to-ln/v1" | "ln-to-btc/v1", price: bigint, depth: number | null): boolean =>
+    estimatedTotal !== null && price <= estimatedTotal && (profile === "ln-to-btc/v1"
+      ? estimatedDepth !== null && depth === estimatedDepth
+      : estimatedDepth === null || (depth !== null && depth <= estimatedDepth));
   const updateEstimate = (): void => {
     estimatedTotal = null; estimatedDepth = null;
     const route = routeFor(fromAsset.value, toAsset.value);
@@ -1132,7 +1137,7 @@ function mount(root: HTMLElement): void {
         review.append(providers, chosen, node("p", "By continuing you accept the provider's signed terms.", "swap-reverse-consent"),
           refusal, continueSwap, done);
         // One-step swap: a signed price no worse than the shown estimate, with the address already entered, continues directly.
-        if (withinEstimate(quote.holdInvoiceSat, quote.fundingConfirmations) && receiveAddress.value.trim()) {
+        if (withinEstimate("ln-to-btc/v1", quote.holdInvoiceSat, quote.fundingConfirmations) && receiveAddress.value.trim()) {
           report(`signed price ${quote.holdInvoiceSat} sat is within the shown estimate ${estimatedTotal} sat; continuing`);
           if (continueWith()) return;
         }
@@ -1314,7 +1319,7 @@ function mount(root: HTMLElement): void {
         accept.type = "button";
         review.append(offers, node("p", "By continuing you accept the provider's signed terms.", "swap-quote-consent"), accept, cancel);
         // One-step swap: a signed price no worse than the shown estimate is accepted without a separate review.
-        const direct = withinEstimate(selected.prepared.quote.contractAmountSat, selected.prepared.quote.fundingConfirmations);
+        const direct = withinEstimate("btc-to-ln/v1", selected.prepared.quote.contractAmountSat, selected.prepared.quote.fundingConfirmations);
         if (direct) report(`signed price ${selected.prepared.quote.contractAmountSat} sat is within the shown estimate ${estimatedTotal} sat; continuing`);
         else { panel.replaceChildren(review); setStatus("Quote ready. Review before continuing", 1); }
         const accepted = direct ? selected : await new Promise<LocatedQuote | null>((resolve) => {
