@@ -101,24 +101,26 @@ as refund party. They MUST satisfy all of the following:
   max_incoming_htlc_expiry_height`.
 
 The user asks for an exact amount at its destination, so the claim pays `C`
-as its fee and `C` SHOULD be priced for the cooperative path to confirm in the
-next block or so without overpaying. Both sides use the economical two-block
-estimate of their own Bitcoin Core (`estimatesmartfee 2 ECONOMICAL`) or a
-mempool API's `fastestFee`, never below their node's relay and mempool minimum,
-and do not quote or request without one (regtest may use the node minimum):
+as its fee and `C` SHOULD be priced for either claim path to confirm in the
+next block or so. Both sides use the economical two-block estimate of their own
+Bitcoin Core (`estimatesmartfee 2 ECONOMICAL`) or a mempool API's `fastestFee`
+as the rate; their node's relay and mempool minimum is only a lower bound, never
+the rate itself. Neither side quotes or requests without an estimate (regtest
+may use the node minimum):
 - the client SHOULD request `min_claim_fee_reserve_sat` of at least the
-  cooperative (key-path) claim at that estimate and the script-path claim at
-  that minimum, and MUST NOT send the firm request when this exceeds its own
-  `max_claim_fee_sat`;
+  script-path claim, the larger one, at that rate, and MUST NOT send the firm
+  request when this exceeds its own `max_claim_fee_sat`;
 - unless its operator fixes `C`, the provider SHOULD quote the larger of the
-  same two amounts at its own estimate and the client's minimum. It answers
+  same amount at its own rate and the client's minimum. It answers
   `limits_unsatisfiable` when the client's minimum exceeds the provider's
   `max_claim_fee_sat`, since no claim could spend it, and
   `capacity_unavailable` when it has no estimate or its own reserve exceeds
   `max_claim_fee_sat`.
 
 The claim vsizes are 99 vB (key path) and 143 vB (script path) to a P2WPKH
-destination, and 111 vB and 155 vB to a P2TR destination.
+destination, and 111 vB and 155 vB to a P2TR destination. Pricing only the key
+path at the rate would leave the fallback, which pays the same `C`, at about
+70 % of the rate.
 
 The client MUST verify every term independently before `terms_accept`, and
 paying the hold invoice is what commits it: the client MUST pay with a final

@@ -614,9 +614,9 @@ def claim_vsizes(destination_script: bytes) -> tuple[int, int]:
 
     Returns ``(cooperative, unilateral)``: the key-path claim (one 64-byte
     signature) and the script-path claim (signature, preimage, 73-byte claim
-    script, control block), each one contract input and one output. Pricing
-    the claim reserve at the cooperative size means the same absolute fee
-    pays the larger script-path fallback at a lower rate.
+    script, control block), each one contract input and one output. Both
+    pay the same absolute fee (the reserve), so pricing it at the script-path
+    size keeps either claim at or above the rate.
     """
     _dust_threshold(destination_script)  # P2WPKH or P2TR only
     # version, input count, outpoint, empty scriptSig, sequence, output count,
