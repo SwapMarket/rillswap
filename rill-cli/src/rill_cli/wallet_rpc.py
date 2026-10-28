@@ -25,6 +25,7 @@ from rill_provider.core_tx_bytes import (
     CooperativeFeePolicy,
     CoreReadError,
     CoreTransactionReader,
+    CoreUnavailableError,
     NextBlockFee,
 )
 
@@ -46,6 +47,7 @@ MAX_BLOCK_HEIGHT = 499_999_999
 TAPROOT_SCRIPT_BYTES = 34
 MAX_ADDRESS_BYTES = 128
 HTTP_OK = 200
+COOPERATIVE_SAMPLE_ATTEMPTS = 3  # a block may arrive during one; each retake is as strict
 METHODS = frozenset(
     {
         "decodepsbt",
@@ -207,27 +209,38 @@ class WalletRpc:
         native-effect age, check confirmations/deadlines and the exact plan's
         fee, and recheck after durable reservation publication. The two reads
         are non-atomic; a matching tip does not freeze mempool or chain policy.
+
+        A block arriving during or between the reads only makes one sample
+        inconsistent, so up to ``COOPERATIVE_SAMPLE_ATTEMPTS`` samples are
+        taken, each as strict as the first, before reporting evidence
+        unavailable; any other refusal stops at once. The caller's elapsed
+        time bound covers every attempt.
         """
-        try:
-            outpoint = self._transactions.observe_cooperative_claim_outpoint(
-                binding, terms, keys=keys
-            )
-            policy = self._transactions.observe_cooperative_fee_policy(
-                terms.timing_policy.claim_confirmation_blocks,
-                allow_regtest_fixed_fee=allow_regtest_fixed_fee,
-            )
+        for _attempt in range(COOPERATIVE_SAMPLE_ATTEMPTS):
+            try:
+                outpoint = self._transactions.observe_cooperative_claim_outpoint(
+                    binding, terms, keys=keys
+                )
+                policy = self._transactions.observe_cooperative_fee_policy(
+                    terms.timing_policy.claim_confirmation_blocks,
+                    allow_regtest_fixed_fee=allow_regtest_fixed_fee,
+                )
+            except CoreUnavailableError:
+                continue  # transient, such as the tip moving within one read
+            except Exception:  # noqa: BLE001 - failed acquisition grants no signing evidence
+                raise WalletRpcError("cooperative Core evidence unavailable") from None
             if (
                 type(outpoint) is not CooperativeClaimOutpoint
                 or type(policy) is not CooperativeFeePolicy
                 or outpoint.network_identity != self._network
                 or policy.network_identity != self._network
                 or policy.confirmation_blocks != terms.timing_policy.claim_confirmation_blocks
-                or (outpoint.tip_hash, outpoint.tip_height) != (policy.tip_hash, policy.tip_height)
             ):
-                raise WalletRpcError("cooperative Core view changed")  # noqa: TRY301
-        except Exception:  # noqa: BLE001 - failed acquisition grants no signing evidence
-            raise WalletRpcError("cooperative Core evidence unavailable") from None
-        return CooperativeClaimEvidence(outpoint, policy)
+                raise WalletRpcError("cooperative Core evidence unavailable")
+            if (outpoint.tip_hash, outpoint.tip_height) == (policy.tip_hash, policy.tip_height):
+                return CooperativeClaimEvidence(outpoint, policy)
+            # The tip moved between the two reads: take both again.
+        raise WalletRpcError("cooperative Core evidence unavailable")
 
     def _call(  # noqa: PLR0912 - opt-in strict observation preserves legacy RPC responses
         self,
