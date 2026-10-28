@@ -182,14 +182,25 @@ longer funding confirmations select the unilateral fallback. Advanced holds the 
 latest swap backup, manual checks, and exact fallback export. Notifications are
 optional and request permission only when enabled; no service worker is installed.
 
+The invoice is a hold invoice. The provider locks the Bitcoin only after your
+payment is held at its node for that exact payment hash, so an unpaid invoice
+expires without locking anything. While the funding confirms, wallets without
+hold invoice support may show the payment as pending, or as failed after their
+own timeout, although it is still held. Do not pay again. After funding, the
+page keeps **Your Lightning invoice** (text, QR, wallet link and payment hash)
+for reference, and **Resume** shows it too.
+
 By default the claim waits for the funding confirmations the provider signed
 (at least 1). **Lightning to Bitcoin: claim after confirmations** in Settings
 claims earlier, down to 0 (straight from the mempool), and the provider still
 cooperates. The page shows a warning before you pay: the claim reveals the
 payment secret, so the provider can settle your Lightning payment and then
 double-spend its unconfirmed or shallow funding, keeping both. Only lower it
-for providers and amounts you are willing to lose. The choice applies to that
-swap's open page only; Resume and recovery wait for the signed depth. Claiming
+for providers and amounts you are willing to lose. Once the Bitcoin is locked,
+Advanced also offers **Claim now from the mempool (risky)** behind the same
+warning and a checkbox, on the open page and on Resume, for wallets that give
+up waiting. Neither choice is stored: Resume and recovery wait for the signed
+depth unless you choose again there. Claiming
 at 0 needs a chain API that reports mempool outputs, as Esplora and mempool
 do. The local dev chain API does not, so there the claim waits for the first
 confirmation.
@@ -220,6 +231,10 @@ spending wallet, and cloning it across devices can reuse addresses.
 
 Use **Your swaps** to resume a saved reverse swap without any file. Unknown claim
 submissions are watched, never submitted again; exact fallback export remains available.
+A swap whose invoice was shown resumes with that invoice, open while the payment
+is still unknown, so an interrupted payment can still be made once. Swaps saved
+by earlier versions keep only the payment hash. A tab still running an earlier
+version cannot list swaps saved with the invoice text; reload it.
 Otherwise use **Recover a swap**, select the original network, and open the newest
 backup or the bookmarked tracking link. On another device, enter the 12 words or
 choose the JSON/age key backup. This does not replace the current browser key or

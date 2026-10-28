@@ -32,6 +32,12 @@ the provider, the website or any RillSwap service.
   contract (hash-locked claim, time-locked refund); stablecoin swaps use the
   Boltz `ERC20Swap` hash-time-lock contract. A provider cannot take your funds
   without paying you, and if the swap fails you can refund after the timeout.
+- **Pay from any Lightning wallet.** Lightning to BTC swaps pay a hold invoice,
+  shown in the browser or by `rill swap ln-to-btc --pay-with external`. The
+  provider locks the Bitcoin only once your payment is held. Wallets without
+  hold invoice support may show it as pending or failed until your claim
+  settles it; the invoice stays visible, and you can choose to claim from the
+  mempool, accepting a double-spend risk.
 - **Private by default.** Bitcoin claims are cooperative MuSig2 key-path
   spends that look like ordinary Taproot payments, with a script-path
   fallback that never depends on the provider.

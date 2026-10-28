@@ -156,6 +156,16 @@ The risk is the client's alone, so a provider SHOULD cooperate on such a
 claim: its own exact contract output, unspent in its node's mempool, is enough
 evidence. Absent an explicit client choice, the signed depth applies.
 
+Funding only after `ACCEPTED` means an unpaid invoice locks no Bitcoin: to make
+the provider fund, a client must first lock at least `H` in matching held HTLCs
+until the swap resolves. It does not prevent a client from never claiming. From
+`ACCEPTED` until the claim, the payer's outgoing HTLC neither settles nor fails.
+Wallets without hold invoice support may show it as pending or, after their
+own timeout, as failed while it is still held. A client SHOULD tell the user
+not to pay again, SHOULD keep the invoice it showed until the swap resolves so
+an interrupted client can still pay it once, and MAY offer the explicit lower
+depth above after funding too, as a way to end that wait.
+
 Other provider notices are `observation` payloads and carry no authority:
 `hold_accepted`, `hold_settled`, `swap_aborted` (with a short `reason`, sent
 only when nothing was funded), `refund_broadcast`, and `refund_confirmed`

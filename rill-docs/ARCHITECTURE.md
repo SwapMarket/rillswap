@@ -297,7 +297,7 @@ funded but unclaimed -> REFUND_WAIT -> REFUND_PENDING
  -> REFUND_CONFIRMED -> HOLD_CANCELED -> REFUNDED
 ```
 
-The user creates a random 32-byte preimage and saves the secret and swap key in the recovery package before payment. The provider creates a hold invoice for its hash without learning the preimage. The user pays using an ordinary compatible LN wallet.
+The user creates a random 32-byte preimage and saves the secret and swap key in the recovery package before payment. The provider creates a hold invoice for its hash without learning the preimage. The user pays using an ordinary compatible LN wallet. Wallets without hold invoice support may report the held payment as pending or failed until the claim settles it, so clients keep the invoice visible and tell the user not to pay again (RS-004).
 
 The provider waits until the invoice is fully accepted and checks the actual amount and **every relevant accepted HTLC's expiry**, including MPP parts. It must have sufficient time to fund, allow a claim, and recover/refund before its incoming payment exposure expires. It then funds the verified contract and independently watches the chain.
 
