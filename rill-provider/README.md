@@ -428,6 +428,10 @@ networks, set `relay_proxy` to a loopback Tor `HTTPTunnelPort` such as
 relays. Regtest allows direct connections. Without `relay_proxy`, onion
 relays are skipped (one INFO log line) and are not announced.
 
+Failed relay connections log one warning per outage while retries continue
+with backoff. Once reconnection and subscription sending succeed, the provider
+logs `relay available` at INFO once. Each relay is tracked independently.
+
 ### Notifications
 
 The optional `notifications` section sends operator notifications through

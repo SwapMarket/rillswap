@@ -1645,20 +1645,28 @@ class HandshakeService:
 
         async def maintain(url: str) -> None:
             delay = 1.0
+            unavailable = False
             while not stop.is_set():
                 try:
                     async with RelayConnection(url, proxy=self._policy.relay_proxy) as connection:
                         connected[url] = connection
                         delay = 1.0
                         await self.subscribe(connection)
+                        if unavailable:
+                            LOG.info("relay available: %s", url)
+                            unavailable = False
                         await inbound.put(_RELAY_CONNECTED)
                         async for event in connection.events():
                             if self._has_work(event):  # drop floods before the queue
                                 await inbound.put(event)
                 except RelayError:
-                    LOG.warning("relay unavailable: %s", url)
+                    if not unavailable:
+                        LOG.warning("relay unavailable: %s", url)
+                    unavailable = True
                 except Exception:  # noqa: BLE001 - a hostile relay must not end reconnection
-                    LOG.warning("relay connection failed: %s", url)
+                    if not unavailable:
+                        LOG.warning("relay connection failed: %s", url)
+                    unavailable = True
                 finally:
                     connected.pop(url, None)
                 await asyncio.sleep(delay)
