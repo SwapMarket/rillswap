@@ -58,6 +58,14 @@ switch networks, and again every five minutes while the tab is visible and
 no swap is running; expired offers leave the list as soon as they expire.
 Nothing else connects until you start a swap.
 
+Starting a new swap checks this page for a changed application bundle. If a newer
+bundle is published, reload when prompted; no payment has been started. Unavailable
+checks proceed normally, and documentation-only changes do not prompt. This check
+does not interrupt existing swaps or recovery, and cannot detect deployments after
+submission or CDN caches still serving the old page. The crypto WASM still loads
+when needed; if it becomes unavailable, cooperation falls back to script-path claims.
+Tabs opened before this safeguard was deployed need a manual reload to gain it.
+
 ## Configuration
 
 Deployment defaults are set and validated at build time.

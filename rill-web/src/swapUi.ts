@@ -39,6 +39,7 @@ import { BrowserReverseJournal } from "./browserReverseJournal";
 import { resumeBrowserReverseExecution } from "./browserReverseRecovery";
 import { decryptRecoveryContainer } from "./recoveryKeys";
 import { requestSwapNotifications } from "./swap/notifications";
+import { pageModuleUrl, publishedVersion } from "./publishedVersion";
 
 const NETWORKS = { mainnet, signet, testnet4, regtest } as const;
 /** How often an idle, visible page reloads the provider directory. */
@@ -737,6 +738,21 @@ function mount(root: HTMLElement): void {
     updateNetwork();
   }
 
+  const runningModule = pageModuleUrl(document, location.href);
+  const stopForPublishedUpdate = async (signal: AbortSignal): Promise<boolean> => {
+    setStatus("Checking for updates", 0);
+    const version = await publishedVersion(location.href, runningModule, { signal });
+    signal.throwIfAborted();
+    if (version !== "updated") { setStatus("Finding available providers", 0); return false; }
+    const message = "RillSwap was updated since this page was opened. Reload to start your swap. No payment was started.";
+    const reload = node("button", "Reload", "swap-reload");
+    reload.type = "button";
+    reload.onclick = () => location.reload();
+    panel.replaceChildren(node("p", message, "swap-error"), reload);
+    report(`stopped: ${message}`);
+    return true;
+  };
+
   /** Stablecoin to Lightning: one asset per round, the wallet connected before any firm quote names its address. */
   const erc20Quote = (name: NetworkName, symbol: "USDC" | "USDT"): void => {
     let urls: readonly string[];
@@ -789,6 +805,7 @@ function mount(root: HTMLElement): void {
     setStatus("Finding available providers", 0);
     void (async () => {
       try {
+        if (await stopForPublishedUpdate(cancellation.signal)) return;
         const binding = invoiceBinding(invoice.value.trim(), name);
         const principal = BigInt(binding.amount_msat) / 1000n;
         const trusted = trustedEvmAsset(symbol, name, NETWORKS[name].deployment_namespace, __SWAP_DEFAULTS__);
@@ -918,6 +935,7 @@ function mount(root: HTMLElement): void {
     panel.replaceChildren(node("p", "Finding stablecoin providers..."), edit); setStatus("Finding available providers", 0);
     void (async () => {
       try {
+        if (await stopForPublishedUpdate(cancellation.signal)) return;
         const trusted = trustedEvmAsset(symbol, name, NETWORKS[name].deployment_namespace, __SWAP_DEFAULTS__);
         const directory = await discoverMarketplace(urls, NETWORKS[name], pinned || undefined, cancellation.signal, "ln-to-erc20/v1"); current();
         const selection = selectEvmAsset(directory.providers, trusted);
@@ -1061,6 +1079,7 @@ function mount(root: HTMLElement): void {
     setStatus("Finding available providers", 0);
     void (async () => {
       try {
+        if (await stopForPublishedUpdate(cancellation.signal)) return;
         const directory = await discoverMarketplace(urls, request.network, pinned || undefined, cancellation.signal, "ln-to-btc/v1");
         for (const warning of directory.warnings) report(warning);
         const mode = sortMode();
@@ -1247,6 +1266,7 @@ function mount(root: HTMLElement): void {
     setStatus("Finding available providers", 0);
     void (async () => {
       try {
+        if (await stopForPublishedUpdate(cancellation.signal)) return;
         let wallet: BrowserRecoveryWallet | undefined;
         let walletFingerprint: string | undefined;
         if (needsWallet) {
