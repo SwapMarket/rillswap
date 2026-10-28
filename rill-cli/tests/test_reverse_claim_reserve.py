@@ -35,27 +35,35 @@ def _limits(minimum: int = 0, rate: int = 0) -> reverse.ReverseSwapLimits:
     return reverse.ReverseSwapLimits(1000, minimum, 5000, 72, 432, 100, rate)
 
 
-def test_the_reserve_pays_the_key_path_claim_at_the_next_block_rate() -> None:
+def test_the_reserve_pays_the_script_path_claim_at_the_next_block_rate() -> None:
     assert claim_vsizes(P2WPKH) == (99, 143)
     assert claim_vsizes(P2TR) == (111, 155)
     busy = NextBlockFee(1000, 1000, 2500)
-    assert reverse.minimum_claim_fee_reserve_sat(P2WPKH, busy, _limits()) == 248  # 99 * 2.5
-    assert reverse.minimum_claim_fee_reserve_sat(P2TR, busy, _limits()) == 278  # 111 * 2.5
+    assert reverse.minimum_claim_fee_reserve_sat(P2WPKH, busy, _limits()) == 358  # 143 * 2.5
+    assert reverse.minimum_claim_fee_reserve_sat(P2TR, busy, _limits()) == 388  # 155 * 2.5
     assert (
         reverse.minimum_claim_fee_reserve_sat(P2TR, NextBlockFee(1000, 1000, 2001), _limits())
-        == 223
+        == 311
     )
+
+
+def test_a_low_relay_floor_never_prices_the_fallback_below_the_estimate() -> None:
+    # A signet node: 0.1 sat/vB estimate, 0.01 sat/vB floor. Pricing the key path
+    # at the estimate and the script path at the floor asked for 12 sat, so the
+    # 155 vB fallback paid 0.078 sat/vB and default-policy peers dropped it.
+    signet = NextBlockFee(10, 10, 100)
+    assert reverse.minimum_claim_fee_reserve_sat(P2TR, signet, _limits()) == 16
 
 
 def test_the_script_path_floor_user_rate_and_user_minimum_raise_it() -> None:
     quiet = NextBlockFee(1000, 1000, None)  # regtest without an estimate
-    # The 155 vB fallback must still meet this node's relay floor.
+    # Without an estimate (regtest), the node floor alone prices the 155 vB claim.
     assert reverse.minimum_claim_fee_reserve_sat(P2TR, quiet, _limits()) == 155
     assert (
         reverse.minimum_claim_fee_reserve_sat(P2TR, NextBlockFee(1000, 2000, 1000), _limits())
         == 310
     )
-    assert reverse.minimum_claim_fee_reserve_sat(P2TR, quiet, _limits(rate=3)) == 333
+    assert reverse.minimum_claim_fee_reserve_sat(P2TR, quiet, _limits(rate=3)) == 465
     assert reverse.minimum_claim_fee_reserve_sat(P2TR, quiet, _limits(minimum=500)) == 500
 
 
@@ -125,7 +133,7 @@ def test_native_the_request_asks_for_the_next_block_reserve_and_the_claim_pays_i
         request = fixture.session.send.call_args_list[0].args[0]
         assert request.message_type == "quote_request"
         assert request.payload["limits"]["min_claim_fee_reserve_sat"] == str(
-            -(-claim_vsizes(destination)[0] * 3000 // 1000)
+            -(-claim_vsizes(destination)[1] * 3000 // 1000)
         )
         # The signed fixture reserve (500 sat) is above its signed 400-sat
         # claim cap, so the claim pays the cap: exactly what it may spend.

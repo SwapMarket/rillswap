@@ -283,10 +283,11 @@ class HoldPayer(Protocol):
 class ReverseSwapLimits:
     """The user's ceilings for the firm offer and the payment.
 
-    The requested claim fee reserve is at least ``min_claim_fee_reserve_sat``,
-    the cooperative claim at the larger of Core's next-block estimate and
-    ``claim_fee_rate_sat_vb`` (an optional floor, 0 for none), and the
-    script-path claim at Core's relay floor. The claim pays exactly the signed
+    The requested claim fee reserve is at least ``min_claim_fee_reserve_sat``
+    and the larger script-path claim at Core's next-block estimate (never
+    below Core's relay and mempool floor) or ``claim_fee_rate_sat_vb`` (an
+    optional floor, 0 for none), whichever is higher, so the cooperative
+    claim pays at least that rate too. The claim pays exactly the signed
     reserve, so the destination receives exactly the nominal payout.
     """
 
@@ -319,15 +320,11 @@ def minimum_claim_fee_reserve_sat(
     if limits.claim_fee_rate_sat_vb < 0:
         raise SwapError("claim fee inputs unsupported")
     try:
-        cooperative, unilateral = claim_vsizes(destination)
+        _, unilateral = claim_vsizes(destination)  # the script path is the larger claim
     except ValidationError:
         raise SwapError("claim destination unsupported") from None
-    rate = max(fee.rate_sat_kvb, limits.claim_fee_rate_sat_vb * 1000)
-    return max(
-        limits.min_claim_fee_reserve_sat,
-        -(-cooperative * rate // 1000),
-        -(-unilateral * fee.floor_sat_kvb // 1000),
-    )
+    rate = max(fee.rate_sat_kvb, fee.floor_sat_kvb, limits.claim_fee_rate_sat_vb * 1000)
+    return max(limits.min_claim_fee_reserve_sat, -(-unilateral * rate // 1000))
 
 
 def _check_offer(  # noqa: PLR0913 - every binding checked explicitly

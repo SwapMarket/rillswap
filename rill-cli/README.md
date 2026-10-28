@@ -114,10 +114,11 @@ coins when no single one covers the amount and fee reserve.
 6. Wait for the required depth, then sign and broadcast the claim, bumping its
    fee within the signed limits only if it is still unconfirmed late.
 
-The requested claim fee reserve pays the cooperative (key-path) claim at that
-estimate, and at least your node's relay and mempool minimum for the larger
-script-path fallback. The claim pays exactly the signed reserve (or the signed
-claim fee cap if that is lower), so your wallet receives exactly `--payout-sat`.
+The requested claim fee reserve pays the larger script-path claim at that
+estimate (never below your node's relay and mempool minimum), so the
+cooperative claim pays at least that rate too. The claim pays exactly the
+signed reserve (or the signed claim fee cap if that is lower), so your wallet
+receives exactly `--payout-sat`.
 Without an estimate (outside regtest), or if that reserve exceeds
 `--max-claim-fee-sat`, the swap stops before requesting terms.
 
