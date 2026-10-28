@@ -122,6 +122,7 @@ jobs:
       - name: Build and test disconnected browser source
         run: |
           (cd src/vendor/rill-crypto && sha256sum -c SHA256SUMS)
+          bun run check:bolt11-vectors
           bun run build
           bun test unit
       - name: Install matching Chromium for pinned Playwright

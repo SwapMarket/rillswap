@@ -1,0 +1,2501 @@
+{
+  "description": "BOLT11 reader and InvoiceBinding admission cases shared by rill-payments/src/bolt11.ts and rill-core's rill_core.wire.bolt11. decoded and each binding hold either the result or {error}. testnet3 shares testnet4's currency.",
+  "source": "lightning/bolts 11-payment-encoding.md (master, fetched 2026-09-27); synthetic cases from rill-web/scripts/generate-bolt11-vectors.ts, signed with the public test keys 1 and 2",
+  "networks": [
+    "mainnet",
+    "testnet4",
+    "signet",
+    "regtest"
+  ],
+  "cases": [
+    {
+      "name": "spec: Please make a donation of any amount using payment_hash 0001020304050607080900010203040506070809000102030405060708090102 to me @03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+      "invoice": "lnbc1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdpl2pkx2ctnv5sxxmmwwd5kgetjypeh2ursdae8g6twvus8g6rfwvs8qun0dfjkxaq9qrsgq357wnc5r2ueh7ck6q93dj32dlqnls087fxdwk8qakdyafkq3yap9us6v52vjjsrvywa6rt52cm9r9zqt8r2t7mlcwspyetp5h2tztugp9lfyql",
+      "decoded": {
+        "currency": "bc",
+        "amount_msat": null,
+        "timestamp": 1496314658,
+        "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+        "payment_secret": "1111111111111111111111111111111111111111111111111111111111111111",
+        "payee": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+        "expiry_seconds": 3600,
+        "min_final_cltv_delta": 18,
+        "features": [
+          8,
+          14
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: amount must be a positive whole number of satoshis"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        }
+      }
+    },
+    {
+      "name": "spec: Please send $3 for a cup of coffee to the same peer, within one minute",
+      "invoice": "lnbc2500u1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5xysxxatsyp3k7enxv4jsxqzpu9qrsgquk0rl77nj30yxdy8j9vdx85fkpmdla2087ne0xh8nhedh8w27kyke0lp53ut353s06fv3qfegext0eh0ymjpf39tuven09sam30g4vgpfna3rh",
+      "decoded": {
+        "currency": "bc",
+        "amount_msat": "250000000",
+        "timestamp": 1496314658,
+        "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+        "payment_secret": "1111111111111111111111111111111111111111111111111111111111111111",
+        "payee": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+        "expiry_seconds": 60,
+        "min_final_cltv_delta": 18,
+        "features": [
+          8,
+          14
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "bolt11_sha256": "53553d4022efe9d00de74f7033bbf54d0a8d806e6dba2665b0f43abe0e8351fd",
+          "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+          "amount_msat": "250000000",
+          "payee_compressed_pubkey": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+          "created_at": 1496314658,
+          "expires_at": 1496314718,
+          "min_final_cltv_delta": 18
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        }
+      }
+    },
+    {
+      "name": "spec: Please send 0.0025 BTC for a cup of nonsense (ナンセンス 1杯) to the same peer, within one minute",
+      "invoice": "lnbc2500u1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdpquwpc4curk03c9wlrswe78q4eyqc7d8d0xqzpu9qrsgqhtjpauu9ur7fw2thcl4y9vfvh4m9wlfyz2gem29g5ghe2aak2pm3ps8fdhtceqsaagty2vph7utlgj48u0ged6a337aewvraedendscp573dxr",
+      "decoded": {
+        "currency": "bc",
+        "amount_msat": "250000000",
+        "timestamp": 1496314658,
+        "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+        "payment_secret": "1111111111111111111111111111111111111111111111111111111111111111",
+        "payee": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+        "expiry_seconds": 60,
+        "min_final_cltv_delta": 18,
+        "features": [
+          8,
+          14
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "bolt11_sha256": "17abe4a341974793738c744ca676dcedd759b7ab3f8daf46a620d6e39b563f7c",
+          "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+          "amount_msat": "250000000",
+          "payee_compressed_pubkey": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+          "created_at": 1496314658,
+          "expires_at": 1496314718,
+          "min_final_cltv_delta": 18
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        }
+      }
+    },
+    {
+      "name": "spec: Now send $24 for an entire list of things (hashed)",
+      "invoice": "lnbc20m1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqhp58yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqs9qrsgq7ea976txfraylvgzuxs8kgcw23ezlrszfnh8r6qtfpr6cxga50aj6txm9rxrydzd06dfeawfk6swupvz4erwnyutnjq7x39ymw6j38gp7ynn44",
+      "decoded": {
+        "currency": "bc",
+        "amount_msat": "2000000000",
+        "timestamp": 1496314658,
+        "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+        "payment_secret": "1111111111111111111111111111111111111111111111111111111111111111",
+        "payee": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+        "expiry_seconds": 3600,
+        "min_final_cltv_delta": 18,
+        "features": [
+          8,
+          14
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "bolt11_sha256": "85c32166dc5a739a971870cda82c75e43c0769fb1c49a355a33239b1e7d0315d",
+          "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+          "amount_msat": "2000000000",
+          "payee_compressed_pubkey": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+          "created_at": 1496314658,
+          "expires_at": 1496318258,
+          "min_final_cltv_delta": 18
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        }
+      }
+    },
+    {
+      "name": "spec: The same, on testnet, with a fallback address mk2QpYatsKicvFVuTAQLBryyccRXMUaGHP",
+      "invoice": "lntb20m1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygshp58yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqfpp3x9et2e20v6pu37c5d9vax37wxq72un989qrsgqdj545axuxtnfemtpwkc45hx9d2ft7x04mt8q7y6t0k2dge9e7h8kpy9p34ytyslj3yu569aalz2xdk8xkd7ltxqld94u8h2esmsmacgpghe9k8",
+      "decoded": {
+        "currency": "tb",
+        "amount_msat": "2000000000",
+        "timestamp": 1496314658,
+        "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+        "payment_secret": "1111111111111111111111111111111111111111111111111111111111111111",
+        "payee": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+        "expiry_seconds": 3600,
+        "min_final_cltv_delta": 18,
+        "features": [
+          8,
+          14
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "bolt11_sha256": "99caec8e60bdfe9a63ba014674c86c72c1b395dbc3550cb2c57de7c308df7cbc",
+          "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+          "amount_msat": "2000000000",
+          "payee_compressed_pubkey": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+          "created_at": 1496314658,
+          "expires_at": 1496318258,
+          "min_final_cltv_delta": 18
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        }
+      }
+    },
+    {
+      "name": "spec: On mainnet, with fallback (P2SH) address 3EktnHQD7RiAE6uzMj2ZifT9YgRrkSgzQX",
+      "invoice": "lnbc20m1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygshp58yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqfppj3a24vwu6r8ejrss3axul8rxldph2q7z99qrsgqz6qsgww34xlatfj6e3sngrwfy3ytkt29d2qttr8qz2mnedfqysuqypgqex4haa2h8fx3wnypranf3pdwyluftwe680jjcfp438u82xqphf75ym",
+      "decoded": {
+        "currency": "bc",
+        "amount_msat": "2000000000",
+        "timestamp": 1496314658,
+        "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+        "payment_secret": "1111111111111111111111111111111111111111111111111111111111111111",
+        "payee": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+        "expiry_seconds": 3600,
+        "min_final_cltv_delta": 18,
+        "features": [
+          8,
+          14
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "bolt11_sha256": "1fb1e0bbccbcec82420121b3e67b9f7830bad056dfe9b56eba1fd78f390c8396",
+          "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+          "amount_msat": "2000000000",
+          "payee_compressed_pubkey": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+          "created_at": 1496314658,
+          "expires_at": 1496318258,
+          "min_final_cltv_delta": 18
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        }
+      }
+    },
+    {
+      "name": "spec: On mainnet, with fallback (P2WPKH) address bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+      "invoice": "lnbc20m1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygshp58yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqfppqw508d6qejxtdg4y5r3zarvary0c5xw7k9qrsgqt29a0wturnys2hhxpner2e3plp6jyj8qx7548zr2z7ptgjjc7hljm98xhjym0dg52sdrvqamxdezkmqg4gdrvwwnf0kv2jdfnl4xatsqmrnsse",
+      "decoded": {
+        "currency": "bc",
+        "amount_msat": "2000000000",
+        "timestamp": 1496314658,
+        "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+        "payment_secret": "1111111111111111111111111111111111111111111111111111111111111111",
+        "payee": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+        "expiry_seconds": 3600,
+        "min_final_cltv_delta": 18,
+        "features": [
+          8,
+          14
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "bolt11_sha256": "b51bcc9971d7e8c7757be865866ffbbf2c1573340eb46f59b289f03a50d97c00",
+          "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+          "amount_msat": "2000000000",
+          "payee_compressed_pubkey": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+          "created_at": 1496314658,
+          "expires_at": 1496318258,
+          "min_final_cltv_delta": 18
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        }
+      }
+    },
+    {
+      "name": "spec: On mainnet, with fallback (P2WSH) address bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3",
+      "invoice": "lnbc20m1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygshp58yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqfp4qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q9qrsgq9vlvyj8cqvq6ggvpwd53jncp9nwc47xlrsnenq2zp70fq83qlgesn4u3uyf4tesfkkwwfg3qs54qe426hp3tz7z6sweqdjg05axsrjqp9yrrwc",
+      "decoded": {
+        "currency": "bc",
+        "amount_msat": "2000000000",
+        "timestamp": 1496314658,
+        "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+        "payment_secret": "1111111111111111111111111111111111111111111111111111111111111111",
+        "payee": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+        "expiry_seconds": 3600,
+        "min_final_cltv_delta": 18,
+        "features": [
+          8,
+          14
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "bolt11_sha256": "1d7d7c2c13cf03faf0c5a6f447b2dbee3930705dfec37be17e578458f690a99e",
+          "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+          "amount_msat": "2000000000",
+          "payee_compressed_pubkey": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+          "created_at": 1496314658,
+          "expires_at": 1496318258,
+          "min_final_cltv_delta": 18
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        }
+      }
+    },
+    {
+      "name": "spec: On mainnet, with fallback (P2TR) address bc1pptdvg0d2nj99568qn6ssdy4cygnwuxgw2ukmnwgwz7jpqjz2kszse2s3lm",
+      "invoice": "lnbc20m1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqhp58yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqsfp4pptdvg0d2nj99568qn6ssdy4cygnwuxgw2ukmnwgwz7jpqjz2kszs9qrsgqy606dznq28exnydt2r4c29y56xjtn3sk4mhgjtl4pg2y4ar3249rq4ajlmj9jy8zvlzw7cr8mggqzm842xfr0v72rswzq9xvr4hknfsqwmn6xd",
+      "decoded": {
+        "currency": "bc",
+        "amount_msat": "2000000000",
+        "timestamp": 1496314658,
+        "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+        "payment_secret": "1111111111111111111111111111111111111111111111111111111111111111",
+        "payee": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+        "expiry_seconds": 3600,
+        "min_final_cltv_delta": 18,
+        "features": [
+          8,
+          14
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "bolt11_sha256": "18a23d17f88f4e0711a4e42b26feedf541314e3457a9a58fe37080cb2ba8a289",
+          "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+          "amount_msat": "2000000000",
+          "payee_compressed_pubkey": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+          "created_at": 1496314658,
+          "expires_at": 1496318258,
+          "min_final_cltv_delta": 18
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        }
+      }
+    },
+    {
+      "name": "spec: Please send 0.00967878534 BTC for a list of items within one week, amount in pico-BTC",
+      "invoice": "lnbc9678785340p1pwmna7lpp5gc3xfm08u9qy06djf8dfflhugl6p7lgza6dsjxq454gxhj9t7a0sd8dgfkx7cmtwd68yetpd5s9xar0wfjn5gpc8qhrsdfq24f5ggrxdaezqsnvda3kkum5wfjkzmfqf3jkgem9wgsyuctwdus9xgrcyqcjcgpzgfskx6eqf9hzqnteypzxz7fzypfhg6trddjhygrcyqezcgpzfysywmm5ypxxjemgw3hxjmn8yptk7untd9hxwg3q2d6xjcmtv4ezq7pqxgsxzmnyyqcjqmt0wfjjq6t5v4khxsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygsxqyjw5qcqp2rzjq0gxwkzc8w6323m55m4jyxcjwmy7stt9hwkwe2qxmy8zpsgg7jcuwz87fcqqeuqqqyqqqqlgqqqqn3qq9q9qrsgqrvgkpnmps664wgkp43l22qsgdw4ve24aca4nymnxddlnp8vh9v2sdxlu5ywdxefsfvm0fq3sesf08uf6q9a2ke0hc9j6z6wlxg5z5kqpu2v9wz",
+      "decoded": {
+        "currency": "bc",
+        "amount_msat": "967878534",
+        "timestamp": 1572468703,
+        "payment_hash": "462264ede7e14047e9b249da94fefc47f41f7d02ee9b091815a5506bc8abf75f",
+        "payment_secret": "1111111111111111111111111111111111111111111111111111111111111111",
+        "payee": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+        "expiry_seconds": 604800,
+        "min_final_cltv_delta": 10,
+        "features": [
+          8,
+          14
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: amount must be a positive whole number of satoshis"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        }
+      }
+    },
+    {
+      "name": "spec: Please send $30 for coffee beans to the same peer, which supports features 8, 14 and 99, using secret 0x1111111111111111111111111111111111111111111111111111111111111111",
+      "invoice": "lnbc25m1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5vdhkven9v5sxyetpdeessp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygs9q5sqqqqqqqqqqqqqqqqsgq2a25dxl5hrntdtn6zvydt7d66hyzsyhqs4wdynavys42xgl6sgx9c4g7me86a27t07mdtfry458rtjr0v92cnmswpsjscgt2vcse3sgpz3uapa",
+      "decoded": {
+        "currency": "bc",
+        "amount_msat": "2500000000",
+        "timestamp": 1496314658,
+        "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+        "payment_secret": "1111111111111111111111111111111111111111111111111111111111111111",
+        "payee": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+        "expiry_seconds": 3600,
+        "min_final_cltv_delta": 18,
+        "features": [
+          8,
+          14,
+          99
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: feature bits unsupported"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        }
+      }
+    },
+    {
+      "name": "spec: Same, but all upper case.",
+      "invoice": "LNBC25M1PVJLUEZPP5QQQSYQCYQ5RQWZQFQQQSYQCYQ5RQWZQFQQQSYQCYQ5RQWZQFQYPQDQ5VDHKVEN9V5SXYETPDEESSP5ZYG3ZYG3ZYG3ZYG3ZYG3ZYG3ZYG3ZYG3ZYG3ZYG3ZYG3ZYG3ZYGS9Q5SQQQQQQQQQQQQQQQQSGQ2A25DXL5HRNTDTN6ZVYDT7D66HYZSYHQS4WDYNAVYS42XGL6SGX9C4G7ME86A27T07MDTFRY458RTJR0V92CNMSWPSJSCGT2VCSE3SGPZ3UAPA",
+      "decoded": {
+        "currency": "bc",
+        "amount_msat": "2500000000",
+        "timestamp": 1496314658,
+        "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+        "payment_secret": "1111111111111111111111111111111111111111111111111111111111111111",
+        "payee": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+        "expiry_seconds": 3600,
+        "min_final_cltv_delta": 18,
+        "features": [
+          8,
+          14,
+          99
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "testnet4": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "signet": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "regtest": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        }
+      }
+    },
+    {
+      "name": "spec: Same, but including fields which must be ignored.",
+      "invoice": "lnbc25m1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5vdhkven9v5sxyetpdeessp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygs9q5sqqqqqqqqqqqqqqqqsgq2qrqqqfppnqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqppnqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqpp4qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqhpnqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqhp4qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqspnqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsp4qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqnp5qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqnpkqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqz599y53s3ujmcfjp5xrdap68qxymkqphwsexhmhr8wdz5usdzkzrse33chw6dlp3jhuhge9ley7j2ayx36kawe7kmgg8sv5ugdyusdcqzn8z9x",
+      "decoded": {
+        "error": "Invoice refused: payment hash length invalid"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: payment hash length invalid"
+        },
+        "testnet4": {
+          "error": "Invoice refused: payment hash length invalid"
+        },
+        "signet": {
+          "error": "Invoice refused: payment hash length invalid"
+        },
+        "regtest": {
+          "error": "Invoice refused: payment hash length invalid"
+        }
+      }
+    },
+    {
+      "name": "spec: Please send 0.01 BTC with payment metadata 0x01fafaf0",
+      "invoice": "lnbc10m1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdp9wpshjmt9de6zqmt9w3skgct5vysxjmnnd9jx2mq8q8a04uqsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygs9q2gqqqqqqsgq7hf8he7ecf7n4ffphs6awl9t6676rrclv9ckg3d3ncn7fct63p6s365duk5wrk202cfy3aj5xnnp5gs3vrdvruverwwq7yzhkf5a3xqpd05wjc",
+      "decoded": {
+        "currency": "bc",
+        "amount_msat": "1000000000",
+        "timestamp": 1496314658,
+        "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+        "payment_secret": "1111111111111111111111111111111111111111111111111111111111111111",
+        "payee": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+        "expiry_seconds": 3600,
+        "min_final_cltv_delta": 18,
+        "features": [
+          8,
+          14,
+          48
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: feature bits unsupported"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        }
+      }
+    },
+    {
+      "name": "spec: Public-key recovery with high-S signature",
+      "invoice": "lnbc1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdpl2pkx2ctnv5sxxmmwwd5kgetjypeh2ursdae8g6twvus8g6rfwvs8qun0dfjkxaq9qrsgq357wnc5r2ueh7ck6q93dj32dlqnls087fxdwk8qakdyafkq3yap2r09nt4ndd0unm3z9u5t48y6ucv4r5sg7lk98c77ctvjczkspk5qprc90gx",
+      "decoded": {
+        "currency": "bc",
+        "amount_msat": null,
+        "timestamp": 1496314658,
+        "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+        "payment_secret": "1111111111111111111111111111111111111111111111111111111111111111",
+        "payee": "02d0139ce7427d6dfffd26a326c18be754ef1e64672b42694ba5b23ef6e6e7803d",
+        "expiry_seconds": 3600,
+        "min_final_cltv_delta": 18,
+        "features": [
+          8,
+          14
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: amount must be a positive whole number of satoshis"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        }
+      }
+    },
+    {
+      "name": "spec: Same, but adding invalid unknown feature 100",
+      "invoice": "lnbc25m1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5vdhkven9v5sxyetpdeessp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygs9q4psqqqqqqqqqqqqqqqqsgqtqyx5vggfcsll4wu246hz02kp85x4katwsk9639we5n5yngc3yhqkm35jnjw4len8vrnqnf5ejh0mzj9n3vz2px97evektfm2l6wqccp3y7372",
+      "decoded": {
+        "currency": "bc",
+        "amount_msat": "2500000000",
+        "timestamp": 1496314658,
+        "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+        "payment_secret": "1111111111111111111111111111111111111111111111111111111111111111",
+        "payee": "03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad",
+        "expiry_seconds": 3600,
+        "min_final_cltv_delta": 18,
+        "features": [
+          8,
+          14,
+          99,
+          100
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: feature bits unsupported"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        }
+      }
+    },
+    {
+      "name": "spec: Bech32 checksum is invalid.",
+      "invoice": "lnbc2500u1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdpquwpc4curk03c9wlrswe78q4eyqc7d8d0xqzpuyk0sg5g70me25alkluzd2x62aysf2pyy8edtjeevuv4p2d5p76r4zkmneet7uvyakky2zr4cusd45tftc9c5fh0nnqpnl2jfll544esqchsrnt",
+      "decoded": {
+        "error": "Invoice refused: bech32 invalid"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: bech32 invalid"
+        },
+        "testnet4": {
+          "error": "Invoice refused: bech32 invalid"
+        },
+        "signet": {
+          "error": "Invoice refused: bech32 invalid"
+        },
+        "regtest": {
+          "error": "Invoice refused: bech32 invalid"
+        }
+      }
+    },
+    {
+      "name": "spec: Malformed bech32 string (no 1)",
+      "invoice": "pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdpquwpc4curk03c9wlrswe78q4eyqc7d8d0xqzpuyk0sg5g70me25alkluzd2x62aysf2pyy8edtjeevuv4p2d5p76r4zkmneet7uvyakky2zr4cusd45tftc9c5fh0nnqpnl2jfll544esqchsrny",
+      "decoded": {
+        "error": "Invoice refused: bech32 invalid"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "testnet4": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "signet": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "regtest": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        }
+      }
+    },
+    {
+      "name": "spec: Malformed bech32 string (mixed case)",
+      "invoice": "LNBC2500u1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdpquwpc4curk03c9wlrswe78q4eyqc7d8d0xqzpuyk0sg5g70me25alkluzd2x62aysf2pyy8edtjeevuv4p2d5p76r4zkmneet7uvyakky2zr4cusd45tftc9c5fh0nnqpnl2jfll544esqchsrny",
+      "decoded": {
+        "error": "Invoice refused: bech32 invalid"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "testnet4": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "signet": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "regtest": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        }
+      }
+    },
+    {
+      "name": "spec: Signature is not recoverable.",
+      "invoice": "lnbc2500u1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5xysxxatsyp3k7enxv4jsxqzpusp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygs9qrsgqwgt7mcn5yqw3yx0w94pswkpq6j9uh6xfqqqtsk4tnarugeektd4hg5975x9am52rz4qskukxdmjemg92vvqz8nvmsye63r5ykel43pgz7zq0g2",
+      "decoded": {
+        "error": "Invoice refused: signature invalid"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: signature invalid"
+        },
+        "testnet4": {
+          "error": "Invoice refused: signature invalid"
+        },
+        "signet": {
+          "error": "Invoice refused: signature invalid"
+        },
+        "regtest": {
+          "error": "Invoice refused: signature invalid"
+        }
+      }
+    },
+    {
+      "name": "spec: String is too short.",
+      "invoice": "lnbc1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdpl2pkx2ctnv5sxxmmwwd5kgetjypeh2ursdae8g6na6hlh",
+      "decoded": {
+        "error": "Invoice refused: too short"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: too short"
+        },
+        "testnet4": {
+          "error": "Invoice refused: too short"
+        },
+        "signet": {
+          "error": "Invoice refused: too short"
+        },
+        "regtest": {
+          "error": "Invoice refused: too short"
+        }
+      }
+    },
+    {
+      "name": "spec: Invalid multiplier",
+      "invoice": "lnbc2500x1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5xysxxatsyp3k7enxv4jsxqzpusp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygs9qrsgqrrzc4cvfue4zp3hggxp47ag7xnrlr8vgcmkjxk3j5jqethnumgkpqp23z9jclu3v0a7e0aruz366e9wqdykw6dxhdzcjjhldxq0w6wgqcnu43j",
+      "decoded": {
+        "error": "Invoice refused: amount malformed"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: amount malformed"
+        },
+        "testnet4": {
+          "error": "Invoice refused: amount malformed"
+        },
+        "signet": {
+          "error": "Invoice refused: amount malformed"
+        },
+        "regtest": {
+          "error": "Invoice refused: amount malformed"
+        }
+      }
+    },
+    {
+      "name": "spec: Invalid sub-millisatoshi precision.",
+      "invoice": "lnbc2500000001p1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5xysxxatsyp3k7enxv4jsxqzpusp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygs9qrsgq0lzc236j96a95uv0m3umg28gclm5lqxtqqwk32uuk4k6673k6n5kfvx3d2h8s295fad45fdhmusm8sjudfhlf6dcsxmfvkeywmjdkxcp99202x",
+      "decoded": {
+        "error": "Invoice refused: sub-millisatoshi amount"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: sub-millisatoshi amount"
+        },
+        "testnet4": {
+          "error": "Invoice refused: sub-millisatoshi amount"
+        },
+        "signet": {
+          "error": "Invoice refused: sub-millisatoshi amount"
+        },
+        "regtest": {
+          "error": "Invoice refused: sub-millisatoshi amount"
+        }
+      }
+    },
+    {
+      "name": "spec: Missing required `s` field.",
+      "invoice": "lnbc20m1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqhp58yjmdan79s6qqdhdzgynm4zwqd5d7xmw5fk98klysy043l2ahrqs9qrsgq7ea976txfraylvgzuxs8kgcw23ezlrszfnh8r6qtfpr6cxga50aj6txm9rxrydzd06dfeawfk6swupvz4erwnyutnjq7x39ymw6j38gp49qdkj",
+      "decoded": {
+        "currency": "bc",
+        "amount_msat": "2000000000",
+        "timestamp": 1496314658,
+        "payment_hash": "0001020304050607080900010203040506070809000102030405060708090102",
+        "payment_secret": null,
+        "payee": "0212cfa0137a4bfa5b76de84c3a89ceff01c5f22d0dbf1360258000b8372a58e70",
+        "expiry_seconds": 3600,
+        "min_final_cltv_delta": 18,
+        "features": [
+          8,
+          14
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: payment secret, hash, or route form unsupported"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        }
+      }
+    },
+    {
+      "name": "spec: Non canonical signature (high-S) with 'n' field defined",
+      "invoice": "lnbc25m1p70xwfzpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdpl2pkx2ctnv5sxxmmwwd5kgetjypeh2ursdae8g6twvus8g6rfwvs8qun0dfjkxaqnp4q0n326hr8v9zprg8gsvezcch06gfaqqhde2aj730yg0durunfhv66sp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygs9qrsgqsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygsp5cfzp9ugllvk03rltd6hvndxj26ux6gcxc5azyxk060rj9tzghct5zvjlps76gx8wpq5yuu79688k8gnm2c0al6v608s96l0xzrrlqqwnzxmu",
+      "decoded": {
+        "error": "Invoice refused: duplicate binding field"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: duplicate binding field"
+        },
+        "testnet4": {
+          "error": "Invoice refused: duplicate binding field"
+        },
+        "signet": {
+          "error": "Invoice refused: duplicate binding field"
+        },
+        "regtest": {
+          "error": "Invoice refused: duplicate binding field"
+        }
+      }
+    },
+    {
+      "name": "regtest hold invoice",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqvdzxx8l42qfhf9lr7tjap7llhxlg8yetpjlc53ly5nj7lgk7pzxzcfwrtejgfakvsmpwg368mzua9vva48zgmp7reqw4w7hp583telcqus9yhf",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "bolt11_sha256": "b1b207b319521d952c13ca4f47b97f7f9ba2991d456eff64c6fdc478cb0eee70",
+          "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+          "amount_msat": "50000000",
+          "payee_compressed_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "created_at": 1700000000,
+          "expires_at": 1700007200,
+          "min_final_cltv_delta": 80
+        }
+      }
+    },
+    {
+      "name": "signet hold invoice",
+      "invoice": "lntbs500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqw7urfmseusm46yrswa3uc5zff8mage0yak0sz0rql3kkqcs7jnkyjmdj9k3jdr7338z4r9q6aaa9wr8h6jr5lg380gzj4kjan79a0sqpg6h4u4",
+      "decoded": {
+        "currency": "tbs",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "bolt11_sha256": "6014a4b31e8b2de42c01350206a97f0877b6fa27915b5b3a53fe68ee3a05d37f",
+          "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+          "amount_msat": "50000000",
+          "payee_compressed_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "created_at": 1700000000,
+          "expires_at": 1700007200,
+          "min_final_cltv_delta": 80
+        },
+        "regtest": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        }
+      }
+    },
+    {
+      "name": "testnet hold invoice",
+      "invoice": "lntb500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqu0uat0k0k65mekvnzge7pvcf9p4d6z4w7qkd9lsjeeqcgxkalfjrgus037jrzx3ed65g0tdqdeldjef29y2gcvfmz86wgucr6aph2dqqwclpqv",
+      "decoded": {
+        "currency": "tb",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "bolt11_sha256": "f0cdc87d1da876bdc202048da34e09b827790f0096442d6cda7b2e7abea64ca6",
+          "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+          "amount_msat": "50000000",
+          "payee_compressed_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "created_at": 1700000000,
+          "expires_at": 1700007200,
+          "min_final_cltv_delta": 80
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        }
+      }
+    },
+    {
+      "name": "mainnet hold invoice",
+      "invoice": "lnbc500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqa8wy2qcdv6k356ts8qd8h6j662yv8ywykrwj4cculuvmqzfkcx8r00qkujlzfqt3p7cfht8nur89dv0lezdcg5ce9ep2ag9q7lfq2psq3vzpcf",
+      "decoded": {
+        "currency": "bc",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "bolt11_sha256": "142fa00059954104cc8c57099d7f44de45dbfb304e4be3c57b93f17a9ee251c4",
+          "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+          "amount_msat": "50000000",
+          "payee_compressed_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "created_at": 1700000000,
+          "expires_at": 1700007200,
+          "min_final_cltv_delta": 80
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        }
+      }
+    },
+    {
+      "name": "amount in pico-bitcoin",
+      "invoice": "lnbcrt500000000p1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgq6cxtf0vla94s3rswzngm2aq4jqx6dzc8l4rq709p9wf30aqwllwq7mu2fkc0rw6gjhgv9ga9fl7e2j2032aa5xfltr34a2xyttvfqtgqdl8c29",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "bolt11_sha256": "02b4ba1d4e4afbce4c6d6de40ef9562f1c470839c538f33b1ce15e218ab9caa3",
+          "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+          "amount_msat": "50000000",
+          "payee_compressed_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "created_at": 1700000000,
+          "expires_at": 1700007200,
+          "min_final_cltv_delta": 80
+        }
+      }
+    },
+    {
+      "name": "amount of 100 millisatoshi",
+      "invoice": "lnbcrt1n1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqeda7xfyzyz295z34ynlvjdkfrs8swskv0e483fjgzlc92k96m9kh3t7jrkwlhzadsnrd0afqarqd02ahveq4h45paxulqjl2aagc02sqpl9ytr",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "100",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: amount must be a positive whole number of satoshis"
+        }
+      }
+    },
+    {
+      "name": "amount of one whole bitcoin",
+      "invoice": "lnbcrt11pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqdlqjvlkg3kus4qfaey38d6m7d7l0ug5xxraek5f9xvp34ld5ffsrqzp3pye5tgwlgax7wy3anjpvp8ywy34dnftgfwpeyqm8h9tegkqq888wcm",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "100000000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "bolt11_sha256": "cafc29d0993602a405fc09245e7871f42027ee332df8f1466662787a606c9b92",
+          "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+          "amount_msat": "100000000000",
+          "payee_compressed_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "created_at": 1700000000,
+          "expires_at": 1700007200,
+          "min_final_cltv_delta": 80
+        }
+      }
+    },
+    {
+      "name": "amount with a leading zero",
+      "invoice": "lnbcrt0500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgq0e9ukltn3g9tfmtup5a6cr2pp4thldpcy0a67vzf2w66fnpzngnqfclp75k6lhngk80l6fk06fanzs8fnwadhf4aqzpjatp8u6kgdxgqeqqu24",
+      "decoded": {
+        "error": "Invoice refused: amount malformed"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: amount malformed"
+        },
+        "testnet4": {
+          "error": "Invoice refused: amount malformed"
+        },
+        "signet": {
+          "error": "Invoice refused: amount malformed"
+        },
+        "regtest": {
+          "error": "Invoice refused: amount malformed"
+        }
+      }
+    },
+    {
+      "name": "amount with an unknown multiplier",
+      "invoice": "lnbcrt500x1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgq0safdlnrm2d5aqky6q55cfzlwmlxnqkl720lxda0tvq2hka42wwhgvnqaftje623nutn4wda6k9wnlmaln2kysrye6urwr5hypxawxcplht55z",
+      "decoded": {
+        "error": "Invoice refused: amount malformed"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: amount malformed"
+        },
+        "testnet4": {
+          "error": "Invoice refused: amount malformed"
+        },
+        "signet": {
+          "error": "Invoice refused: amount malformed"
+        },
+        "regtest": {
+          "error": "Invoice refused: amount malformed"
+        }
+      }
+    },
+    {
+      "name": "amount missing",
+      "invoice": "lnbcrt1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqazapqnvd58le7ltqk57n6hts7xpj33ga9zql96vtsnzfcrt5hfp5ahn573p4w92wpa657njl3ze0k4fapqrplv0k0krgpt2q93k4d5cqk254uu",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": null,
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: amount must be a positive whole number of satoshis"
+        }
+      }
+    },
+    {
+      "name": "unknown currency",
+      "invoice": "lnxy500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqwnx7plpd6037wl40lh0yzpsmcj2yvwg8s09e850ru9hpkw5kluthlrpxtxufg2hvdw64rqfahpmkclxekrrz44z9l5pl9rlk2zeud2spxfh3rv",
+      "decoded": {
+        "currency": "xy",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        }
+      }
+    },
+    {
+      "name": "prefix without ln",
+      "invoice": "bcrt500u1pj48ugppp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqz2sfnyplntsuppuuducx87c0wu87kflcaz8vytwrazu6p279x8p4lvvl5dc7eje2s794rag2dmvrxp46su3uylsff8l3qkmcvhcpfmgqxt4qc5",
+      "decoded": {
+        "error": "Invoice refused: prefix malformed"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "testnet4": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "signet": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "regtest": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        }
+      }
+    },
+    {
+      "name": "explicit payee with a low-S signature",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqnp4qfumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqtes7skm9ak3pvx6nt0802r9c7y06ezcvh0c9c57mhq4cczxwyltyk2jjf5pa8pkufcux4raylfz2frg8j2d6j6ree33wvkt04ks7awcadsqz77dts",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "bolt11_sha256": "52d28ab6c54b0f6df4e690d3a9ef20588cf44558e7792f828b32774ba436ac48",
+          "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+          "amount_msat": "50000000",
+          "payee_compressed_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "created_at": 1700000000,
+          "expires_at": 1700007200,
+          "min_final_cltv_delta": 80
+        }
+      }
+    },
+    {
+      "name": "explicit payee with a high-S signature",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqnp4qfumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqtes7skm9ak3pvx6nt0802r9c7y06ezcvh0c9c57mhq4cczxwyltyk2adkt7zc7frk8re2uzmqka4kuh4utppqe8ycnwezf34pammrvt9zcpp25rm6",
+      "decoded": {
+        "error": "Invoice refused: signature invalid"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: signature invalid"
+        },
+        "testnet4": {
+          "error": "Invoice refused: signature invalid"
+        },
+        "signet": {
+          "error": "Invoice refused: signature invalid"
+        },
+        "regtest": {
+          "error": "Invoice refused: signature invalid"
+        }
+      }
+    },
+    {
+      "name": "recovered payee with a high-S signature",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqvdzxx8l42qfhf9lr7tjap7llhxlg8yetpjlc53ly5nj7lgk7pzxd8k3u5xdhkzfn0y73hw9cyarzczg3xv3zrsxuww384cat9efcgsspj93ev0",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "bolt11_sha256": "6e95d5d8e70c3b1b2bea78897dfd2d49dc9d57f78afc5e1161919c7cb21ef090",
+          "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+          "amount_msat": "50000000",
+          "payee_compressed_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "created_at": 1700000000,
+          "expires_at": 1700007200,
+          "min_final_cltv_delta": 80
+        }
+      }
+    },
+    {
+      "name": "explicit payee of another key",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqnp4qtrqglu5g8kh6mfsg4qxa9wq0nv9cauwfwxw70984wkqnw2uwz0w2g8kalf08l2d6gqaekxsxlfexvla7e26y2zsaqrtvd532rsq2jn9p3jygjjt9n3jgwu4eyh9n64g9q679uj3ngs84zk3uqg5wh0kxh8sqsx47au",
+      "decoded": {
+        "error": "Invoice refused: signature invalid"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: signature invalid"
+        },
+        "testnet4": {
+          "error": "Invoice refused: signature invalid"
+        },
+        "signet": {
+          "error": "Invoice refused: signature invalid"
+        },
+        "regtest": {
+          "error": "Invoice refused: signature invalid"
+        }
+      }
+    },
+    {
+      "name": "explicit payee of 52 words",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqnp5qfumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqtefmczs84zpph8acvdsda88extsp48zk0k4p5w5rcecu2v6hpc20qsur3nl9hvqmhaczxn58kwsxss220sxq8sszau345zdf3lyaktqmgqm2qrk7",
+      "decoded": {
+        "error": "Invoice refused: fixed-length field invalid"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: fixed-length field invalid"
+        },
+        "testnet4": {
+          "error": "Invoice refused: fixed-length field invalid"
+        },
+        "signet": {
+          "error": "Invoice refused: fixed-length field invalid"
+        },
+        "regtest": {
+          "error": "Invoice refused: fixed-length field invalid"
+        }
+      }
+    },
+    {
+      "name": "duplicate explicit payee",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqnp4qfumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqtesnp4qfumuen7l8wthtz45p3ftn58pvrs9xlumvkuu2xet8egzkcklqtescrt0scawwp7kdmsphu4xqd72gxh7plsxknufc9aupd7k3fsh025y7vkx7ld2f2w6jvneugaz0sczgqd44v3ra5zn5yjhv9p3r9ze75qqslrs2q",
+      "decoded": {
+        "error": "Invoice refused: duplicate binding field"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: duplicate binding field"
+        },
+        "testnet4": {
+          "error": "Invoice refused: duplicate binding field"
+        },
+        "signet": {
+          "error": "Invoice refused: duplicate binding field"
+        },
+        "regtest": {
+          "error": "Invoice refused: duplicate binding field"
+        }
+      }
+    },
+    {
+      "name": "other recovery parity",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqvdzxx8l42qfhf9lr7tjap7llhxlg8yetpjlc53ly5nj7lgk7pzxzcfwrtejgfakvsmpwg368mzua9vva48zgmp7reqw4w7hp583telcppx332m",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "03f9e9f579d9740420e557adc495653b81d88b58a09451a8207da59e1e19ca1049",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "bolt11_sha256": "53f46379dad9836f2448a345f0b6342c7a94c7335f88a56864bb05674ed04f1f",
+          "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+          "amount_msat": "50000000",
+          "payee_compressed_pubkey": "03f9e9f579d9740420e557adc495653b81d88b58a09451a8207da59e1e19ca1049",
+          "created_at": 1700000000,
+          "expires_at": 1700007200,
+          "min_final_cltv_delta": 80
+        }
+      }
+    },
+    {
+      "name": "recovery id 4",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqvdzxx8l42qfhf9lr7tjap7llhxlg8yetpjlc53ly5nj7lgk7pzxzcfwrtejgfakvsmpwg368mzua9vva48zgmp7reqw4w7hp583telcyn68zcn",
+      "decoded": {
+        "error": "Invoice refused: signature invalid"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: signature invalid"
+        },
+        "testnet4": {
+          "error": "Invoice refused: signature invalid"
+        },
+        "signet": {
+          "error": "Invoice refused: signature invalid"
+        },
+        "regtest": {
+          "error": "Invoice refused: signature invalid"
+        }
+      }
+    },
+    {
+      "name": "zeroed signature",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqwu7yq",
+      "decoded": {
+        "error": "Invoice refused: signature invalid"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: signature invalid"
+        },
+        "testnet4": {
+          "error": "Invoice refused: signature invalid"
+        },
+        "signet": {
+          "error": "Invoice refused: signature invalid"
+        },
+        "regtest": {
+          "error": "Invoice refused: signature invalid"
+        }
+      }
+    },
+    {
+      "name": "optional feature pairs with AMP",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qxpqpqsqc9uaughycp8vvdfq7xsedzw289sfqn64pl439xtqep2jsvnzycpknfaxfg0dvnypvpnyqdhcq7r8c3a2vz9739xkd9zwzl8s45ssxkqp55d8tm",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          9,
+          15,
+          25
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "bolt11_sha256": "ebf1ead7b620ce689c323ac2deabd7551d349f9eb792b7440cd3dae29d52bd90",
+          "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+          "amount_msat": "50000000",
+          "payee_compressed_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "created_at": 1700000000,
+          "expires_at": 1700007200,
+          "min_final_cltv_delta": 80
+        }
+      }
+    },
+    {
+      "name": "features 8 and 9 together",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qrscqn38tth7f8qdf44cfuv08chnjkfsulp3dtakzwdxuq8gyqxv9gur4v23plnv6ex4yqpvw56rytl7wp6ezpgjy86t79wj40tnmg44jypsqp2a0dy",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          9,
+          14
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: feature bits unsupported"
+        }
+      }
+    },
+    {
+      "name": "feature 14 missing",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qzgq0hyrk6z68vh2d703clzcll6a9zfa6g9f6exgcgm00mnqr68szum5kjjgnlc6uhpxg375v6x7d0z8lg34v9kp5d93uylw9k0wthl8nvsp0c4kys",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: feature bits unsupported"
+        }
+      }
+    },
+    {
+      "name": "unknown odd feature 51",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qtzqqqqqqqsgqjs4dudqpt2jxjjh2kl9zeu20la5raz3n5w05kfdlzx2y2teu5thyxw99fd6g7sj7s450e5uq9mv6kj864fhpuskrmq79s56r0jqysjgpjd9tur",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          51
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: feature bits unsupported"
+        }
+      }
+    },
+    {
+      "name": "no feature field",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzsdnup4850zex6tts3lt9wr6sffw3l2uwf6yagsh2skhyc8xag9tek9k842wr23sl90pulvq0f7nwt4rysalary2jm8d0da7ajtc6jsxgqappne3",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: feature bits unsupported"
+        }
+      }
+    },
+    {
+      "name": "repeated feature field, last wins",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9q4pqqqqqqqqqqqqqqqqqsgq9qyysgqcmyfy3e29c7zv4lh93wmcxukn807aaw3enhz2vrls77wayk2rdtncfzmn24ju3wfuksa32gutrwnr9j549qyz9dk4alatqpgk22wrwsqhr03hw",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "bolt11_sha256": "d5f16df599a86d1bffd5575185b257fc7db8640d52df21dfff270d2856f88163",
+          "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+          "amount_msat": "50000000",
+          "payee_compressed_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "created_at": 1700000000,
+          "expires_at": 1700007200,
+          "min_final_cltv_delta": 80
+        }
+      }
+    },
+    {
+      "name": "duplicate payment secret",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfps2xeg488rphdnqa3w2n9uhk7zgyl0rm83q84lzagss8lmwcr5slmp7dlfsk0p2e942znzq5kcsevra2xjz0h9lfejvfyfs7ux02a360sp7lwtkp",
+      "decoded": {
+        "error": "Invoice refused: duplicate binding field"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: duplicate binding field"
+        },
+        "testnet4": {
+          "error": "Invoice refused: duplicate binding field"
+        },
+        "signet": {
+          "error": "Invoice refused: duplicate binding field"
+        },
+        "regtest": {
+          "error": "Invoice refused: duplicate binding field"
+        }
+      }
+    },
+    {
+      "name": "duplicate expiry",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqxqr8pqpyfcufsfzlqww2vsph9rjeyy39wc525t3dygkdqnz5clm0jzxm597p3f7wv3qv7yqtzwad5zyrvpgslvjrrdm78tdjmqll240ueddgqp76zf84",
+      "decoded": {
+        "error": "Invoice refused: duplicate binding field"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: duplicate binding field"
+        },
+        "testnet4": {
+          "error": "Invoice refused: duplicate binding field"
+        },
+        "signet": {
+          "error": "Invoice refused: duplicate binding field"
+        },
+        "regtest": {
+          "error": "Invoice refused: duplicate binding field"
+        }
+      }
+    },
+    {
+      "name": "duplicate final CLTV",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqcqzzsg9a8udex06wc5h264jmvxzazw34pmc80nad3lup4h5y865t4xux8ul7pre7tysmc9ukdzaelqyxl52vvp2k8a3tek8dz3j3h9ka2axsqw8aahl",
+      "decoded": {
+        "error": "Invoice refused: duplicate binding field"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: duplicate binding field"
+        },
+        "testnet4": {
+          "error": "Invoice refused: duplicate binding field"
+        },
+        "signet": {
+          "error": "Invoice refused: duplicate binding field"
+        },
+        "regtest": {
+          "error": "Invoice refused: duplicate binding field"
+        }
+      }
+    },
+    {
+      "name": "two payment hashes",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqpp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsduf8dgarq2cesrms2ng6e2kfluwvklhjfv3twz4jk9sf5tegqlsq9xy7pkyxvy4ecc8qwtq2zuqmn6yxzy0qe22902caecym2h4840gqh0xs9j",
+      "decoded": {
+        "error": "Invoice refused: multiple payment hashes"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: multiple payment hashes"
+        },
+        "testnet4": {
+          "error": "Invoice refused: multiple payment hashes"
+        },
+        "signet": {
+          "error": "Invoice refused: multiple payment hashes"
+        },
+        "regtest": {
+          "error": "Invoice refused: multiple payment hashes"
+        }
+      }
+    },
+    {
+      "name": "payment hash missing",
+      "invoice": "lnbcrt500u1pj48ugqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgq62lnx6gvzgcffhru6lu8qvl6ayhcftk6fp2c5q0c7eks7rf2f5ls8hccgdquwzyquz6p550qrp9zh7h2r4pshky2p8vge7f7z0lmkmgpsva24a",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": null,
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: payment secret, hash, or route form unsupported"
+        }
+      }
+    },
+    {
+      "name": "payment secret missing",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqr9l0weymd54jee57hc2k4sy82yzpendnfsmmesf49twqllqytjdjycvrga3yfcujp6xkncs62lf0j5fh60t2ajhxjajgs456h4e9drgqgq30a7",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": null,
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: payment secret, hash, or route form unsupported"
+        }
+      }
+    },
+    {
+      "name": "payment hash of 51 words",
+      "invoice": "lnbcrt500u1pj48ugqppnq6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqkteksp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqg9vvhfm7c9kfswjz57z0j64cr0tk58n09asr78dyh0se6etrgg3xd73xajwgj0mr6mrdyyzx2nn2f9nupw8ypf606kc00sk2x89k4fqp98ce70",
+      "decoded": {
+        "error": "Invoice refused: payment hash length invalid"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: payment hash length invalid"
+        },
+        "testnet4": {
+          "error": "Invoice refused: payment hash length invalid"
+        },
+        "signet": {
+          "error": "Invoice refused: payment hash length invalid"
+        },
+        "regtest": {
+          "error": "Invoice refused: payment hash length invalid"
+        }
+      }
+    },
+    {
+      "name": "payment secret of 53 words",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp4r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsqdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqkreez4ze7xlgha2n0eh32xflz4ulgk249pk9x6aqw34n7mc8md9jru30qumgv6dtaezxnzsfk5cq9k8vg7mejgghkkkyfqen0jk0p5qpwlgjf3",
+      "decoded": {
+        "error": "Invoice refused: fixed-length field invalid"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: fixed-length field invalid"
+        },
+        "testnet4": {
+          "error": "Invoice refused: fixed-length field invalid"
+        },
+        "signet": {
+          "error": "Invoice refused: fixed-length field invalid"
+        },
+        "regtest": {
+          "error": "Invoice refused: fixed-length field invalid"
+        }
+      }
+    },
+    {
+      "name": "description hash of 51 words",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpshpnq6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekxqr8pqcqzzs9qyysgq45zvmmk2fttjekkpfqc6w9ruv9vped784a73pjvlk7swyg0gwwgz4qs42sn8dxreqkkd0tm3tex6xcg3t28ameee4gwj0zs7lrlp5mgp0ajxrr",
+      "decoded": {
+        "error": "Invoice refused: fixed-length field invalid"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: fixed-length field invalid"
+        },
+        "testnet4": {
+          "error": "Invoice refused: fixed-length field invalid"
+        },
+        "signet": {
+          "error": "Invoice refused: fixed-length field invalid"
+        },
+        "regtest": {
+          "error": "Invoice refused: fixed-length field invalid"
+        }
+      }
+    },
+    {
+      "name": "description hash instead of description",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpshp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqxqr8pqcqzzs9qyysgqwr5lfdn2dz8zenc7kvcnq8txku4gwaqj9hnzhvukp9w5hm42wqe3rfltaasutrnkqpll76u0u2z59008k58e267v82af0q7r82jhxfcqgalptj",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "bolt11_sha256": "81325eb6dd52c22fa53b59536ad432dd9bf687346c45e72103029f101f64535f",
+          "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+          "amount_msat": "50000000",
+          "payee_compressed_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "created_at": 1700000000,
+          "expires_at": 1700007200,
+          "min_final_cltv_delta": 80
+        }
+      }
+    },
+    {
+      "name": "blinded path field",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgq5qrpzrcamvp4vh78exdt4fsedudnnzd5ys9eh0ckep294qc2fpc25dsp54wychkc5w5x4hw8jkmy8pr6wz09p424lzds5mg4umlql86sfdtegpqw3plw",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": true
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: payment secret, hash, or route form unsupported"
+        }
+      }
+    },
+    {
+      "name": "default expiry and final CLTV",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmj9qyysgqaamd2nlp9k7u6r40tjxruxxhk75gc6tdwgyanhc8utzye5equ40y8zx297dp5nz2ew2nkasppsvaew6x0xwqczh9aftxl08h7uh2pugpk972rc",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 3600,
+        "min_final_cltv_delta": 18,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "bolt11_sha256": "5c11ca794f945fbd47b8b5fbfb300ac96c2891e9c303b3b9e30a550d3ea3d805",
+          "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+          "amount_msat": "50000000",
+          "payee_compressed_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "created_at": 1700000000,
+          "expires_at": 1700003600,
+          "min_final_cltv_delta": 18
+        }
+      }
+    },
+    {
+      "name": "zero expiry",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqpqcqzzs9qyysgq8pmdwvhtzeyehqhwyucvh6vp3yyfdfsqax6564qssq96d9vjug3p3yl0nslg95n9yv3jl3gaypstkrfy65sfcx8c8gzasstkery92jgq7nnr3k",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 0,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: expiry or final CLTV unsupported"
+        }
+      }
+    },
+    {
+      "name": "zero final CLTV",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqpq9qyysgqzy5kzmc7mfsnnpf0wm6x2tl2ce9d3wt0xza6je2teh3wzege8kjpqz0wc6cztgnspm7409j5svnalfdgrjp3x052n9lha0dnht8lleqpgnru60",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 0,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "error": "Invoice refused: expiry or final CLTV unsupported"
+        }
+      }
+    },
+    {
+      "name": "empty expiry field",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqqcqzzs9qyysgqk5uzz6lp6lzmmq9x3jzezw6sgf8p6h2v6vgj8hfjhvqcrytp30yn5uawl8s83pksgp7d3lptzl2ztxw5pzfx3gavrx2cnj9476hfjxcqc6xj86",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 3600,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "bolt11_sha256": "39ea1e756f731a143116d20700e082c56741e2d6661ccfbb70b4c4972906e4b7",
+          "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+          "amount_msat": "50000000",
+          "payee_compressed_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "created_at": 1700000000,
+          "expires_at": 1700003600,
+          "min_final_cltv_delta": 80
+        }
+      }
+    },
+    {
+      "name": "expiry of ten words",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxq2pqqqqqqqqqcqzzs9qyysgq7vfktsa53tstv28jtw8adrykryr29yffeqqhxsxddhtfq5cqwlpz8pu8xwhnp0ur69c2rtma2zh452agw7e8knrt9xkgnntzrfxnz4squj0m9a",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 35184372088832,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "bolt11_sha256": "7f133bf1fdc6705c6fb5f4460768197c43742c71f409758bc2fb77b34a6b7257",
+          "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+          "amount_msat": "50000000",
+          "payee_compressed_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "created_at": 1700000000,
+          "expires_at": 35186072088832,
+          "min_final_cltv_delta": 80
+        }
+      }
+    },
+    {
+      "name": "final CLTV of eleven words",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqtqqqqqqqqqzs9qyysgqdz3w9hp8srl5n6f6wqu29g70wpfv7n32ln6fuwtfmans3s5270794f54mkjlygel6v4fmm4recnyqgyzdgvs75ueq00v2zlxvty6mncpe4p9xr",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 18,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "bolt11_sha256": "4a94252e052b7ce485f883b1d9e78047f15742ca5de004014dc72cedf19c498e",
+          "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+          "amount_msat": "50000000",
+          "payee_compressed_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "created_at": 1700000000,
+          "expires_at": 1700007200,
+          "min_final_cltv_delta": 18
+        }
+      }
+    },
+    {
+      "name": "unknown tags are ignored",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqzqrpzrlqqtf2tsqmu722t0dzpglfc7kchhywaj6nhktcxcewhcnmcwmeqc5mx78jlcj72m0k36studcc3tzmrm234xtxdqk8kh70jtnk7qgyy8lgpyv9jg0",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "bolt11_sha256": "75ec74c6ff57e0c5e63dc72711504c03ebb8435494eed60daca1ed20297f0fd1",
+          "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+          "amount_msat": "50000000",
+          "payee_compressed_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "created_at": 1700000000,
+          "expires_at": 1700007200,
+          "min_final_cltv_delta": 80
+        }
+      }
+    },
+    {
+      "name": "fallback address and route hint are ignored",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqfppqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqrzjqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdywzspmw0edd8y2tfxdpzemd33lmytxycu97ldjru5rjdpv30q5x6k0c9dzp37ne8gae7jmk3swakthr9crrkazuwkmnv73779xzvnsqcg6lqq",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "bolt11_sha256": "5d9020dcde35b2c001a53ba8bd6c7510d3035db648a1b5ab1aa1b670104e099f",
+          "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+          "amount_msat": "50000000",
+          "payee_compressed_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "created_at": 1700000000,
+          "expires_at": 1700007200,
+          "min_final_cltv_delta": 80
+        }
+      }
+    },
+    {
+      "name": "truncated tagged field header",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgq8qqm8u9t77c6nzw5ap9tch7as78ud0hjg88judy3q7jy9n0aclrnejwzqfydw5ucj7n4wjelrg8722pgn6mjmuw83zv957s54j4vgv4lgps46jad",
+      "decoded": {
+        "error": "Invoice refused: tagged field truncated"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: tagged field truncated"
+        },
+        "testnet4": {
+          "error": "Invoice refused: tagged field truncated"
+        },
+        "signet": {
+          "error": "Invoice refused: tagged field truncated"
+        },
+        "regtest": {
+          "error": "Invoice refused: tagged field truncated"
+        }
+      }
+    },
+    {
+      "name": "truncated tagged field value",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgq8pqpzafk2pfl3teh20rn7534a5w3vcqd922llvzq4rx9tkx5hphxwng2ypa4e5e2gclq67wpe3vrqt6283t9mnncgs68rme4eycjnz0w6qcqp2x08wy",
+      "decoded": {
+        "error": "Invoice refused: tagged field truncated"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: tagged field truncated"
+        },
+        "testnet4": {
+          "error": "Invoice refused: tagged field truncated"
+        },
+        "signet": {
+          "error": "Invoice refused: tagged field truncated"
+        },
+        "regtest": {
+          "error": "Invoice refused: tagged field truncated"
+        }
+      }
+    },
+    {
+      "name": "latest 35-bit timestamp",
+      "invoice": "lnbcrt500u1lllllllpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqe7te9tx2vlgh7kvts35hkj9y0zaycxckyaexgzjskakl9jlm0t0h5ud8mky86g20m0jg08wcygfx97hpg0uuaf4u9m40xekfttn393gphmln3t",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 34359738367,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "bolt11_sha256": "e35058730dbced2c2f329db5926db293d458feb4efea28788995c8e3830dac6c",
+          "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+          "amount_msat": "50000000",
+          "payee_compressed_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "created_at": 34359738367,
+          "expires_at": 34359745567,
+          "min_final_cltv_delta": 80
+        }
+      }
+    },
+    {
+      "name": "exactly 2048 characters",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqzllqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzhqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqpvduu0clhg5s7r4w3l8q6wqdl96jjvxx930ddcqeg9z2whljeuzkfg9598zptusv2en8c4xc7l6d0rx2yapkjqs9c9pee0m5t2l4uucqf3e5uj",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "testnet4": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "signet": {
+          "error": "Invoice refused: invoice is not for the selected network"
+        },
+        "regtest": {
+          "bolt11_sha256": "4c3967ccca306f40e2113a9188eb06926edb85d85c0ead224f5461487d26dc84",
+          "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+          "amount_msat": "50000000",
+          "payee_compressed_pubkey": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "created_at": 1700000000,
+          "expires_at": 1700007200,
+          "min_final_cltv_delta": 80
+        }
+      }
+    },
+    {
+      "name": "2049 characters",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqzllqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqzhpqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqx4s2wsavempa8m38uxcaa0npvwg6l6ed0fzs82a3d79j7r2xdx38wjhp7n7t4ru8h7thutpex74myrzwhr6mjxneqyg69n2gwna4c0sq2gygms",
+      "decoded": {
+        "error": "Invoice refused: length unsupported"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "testnet4": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "signet": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "regtest": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        }
+      }
+    },
+    {
+      "name": "upper case",
+      "invoice": "LNBCRT500U1PJ48UGQPP5Q6P58YF4F55GAMWCLZ2NWEXR529EJ6GD8AF347ZGR2K5AXQKTEKQSP5R9P96T3RHEVNV4JTK459LWKA72EKDE4AZL6VRVWNSMV5HHM6TFPSDQC2F5KCMZNWASHQGRKV43HGMMJXQR8PQCQZZS9QYYSGQVDZXX8L42QFHF9LR7TJAP7LLHXLG8YETPJLC53LY5NJ7LGK7PZXZCFWRTEJGFAKVSMPWG368MZUA9VVA48ZGMP7REQW4W7HP583TELCQUS9YHF",
+      "decoded": {
+        "currency": "bcrt",
+        "amount_msat": "50000000",
+        "timestamp": 1700000000,
+        "payment_hash": "06834391354d288eedd8f8953764c3a28b99690d3f531af8481aad4e98165e6c",
+        "payment_secret": "19425d2e23be5936564bb5685fbaddf2b366e6bd17f4c1b1d386d94bdf7a5a43",
+        "payee": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "expiry_seconds": 7200,
+        "min_final_cltv_delta": 80,
+        "features": [
+          8,
+          14,
+          17
+        ],
+        "blinded_paths": false
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "testnet4": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "signet": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "regtest": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        }
+      }
+    },
+    {
+      "name": "mixed case",
+      "invoice": "LNBCRT500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqvdzxx8l42qfhf9lr7tjap7llhxlg8yetpjlc53ly5nj7lgk7pzxzcfwrtejgfakvsmpwg368mzua9vva48zgmp7reqw4w7hp583telcqus9yhf",
+      "decoded": {
+        "error": "Invoice refused: bech32 invalid"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "testnet4": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "signet": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "regtest": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        }
+      }
+    },
+    {
+      "name": "non-ASCII character",
+      "invoice": "lnbcrt500u1pj48ugqpp5q6p58yf4f55gamwclz2nwexr529ej6gd8af347zgr2k5axqktekqsp5r9p96t3rhevnv4jtk459lwka72ekde4azl6vrvwnsmv5hhm6tfpsdqc2f5kcmznwashqgrkv43hgmmjxqr8pqcqzzs9qyysgqvdzxx8l42qfhf9lr7tjap7llhxlg8yetpjlc53ly5nj7lgk7pzxzcfwrtejgfakvsmpwg368mzua9vva48zgmp7reqw4w7hp583telcqus9yhé",
+      "decoded": {
+        "error": "Invoice refused: bech32 invalid"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "testnet4": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "signet": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "regtest": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        }
+      }
+    },
+    {
+      "name": "too short",
+      "invoice": "lnbcrt500u1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqkyhnkx",
+      "decoded": {
+        "error": "Invoice refused: too short"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: too short"
+        },
+        "testnet4": {
+          "error": "Invoice refused: too short"
+        },
+        "signet": {
+          "error": "Invoice refused: too short"
+        },
+        "regtest": {
+          "error": "Invoice refused: too short"
+        }
+      }
+    },
+    {
+      "name": "empty string",
+      "invoice": "",
+      "decoded": {
+        "error": "Invoice refused: length unsupported"
+      },
+      "bindings": {
+        "mainnet": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "testnet4": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "signet": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        },
+        "regtest": {
+          "error": "Invoice refused: not lowercase BOLT11"
+        }
+      }
+    }
+  ]
+}

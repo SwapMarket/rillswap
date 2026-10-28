@@ -30,6 +30,13 @@ def output_values(raw_transaction: bytes) -> tuple[int, ...]:
 Inspection reports facts about the bytes, not signature validity, ownership,
 confirmations or spendability. Unsupported input raises `ValidationError`.
 
+`rill_core.wire.bolt11.invoice_binding` decodes and admits a BOLT 11 invoice
+without a Lightning node, under the same rules as the browser decoder
+(`rill-payments/src/bolt11.ts`). Pass a `rill_crypto.Context` as `crypto` for
+the payee signature. Both decoders are checked against
+`rill-docs/vectors/bolt11/cases-v1.json`, which
+`bun run generate:bolt11-vectors` in `rill-web/` regenerates.
+
 Hosts (the CLI, provider and browser) own authenticated inputs, durable
 session state, chain observations and external actions. Claim transactions
 built here can contain a preimage, so do not log them. See the
