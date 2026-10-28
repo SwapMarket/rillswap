@@ -6,3 +6,6 @@ ruff==0.16.8
 mypy==2.3.1
 grpcio-tools==1.84.0
 types-grpcio==1.83.0.20260730
+# rill-cli runtime dependency: test_merchant_sdk_death_pinned runs rill_cli
+# from ../rill-cli/src with this environment.
+segno==1.6.6
