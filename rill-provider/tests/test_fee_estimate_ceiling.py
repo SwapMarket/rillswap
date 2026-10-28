@@ -7,6 +7,7 @@ relay and mempool floors and every strict cooperative check still apply.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -255,3 +256,28 @@ def test_operator_ceiling_reaches_the_settlement_reader(
 def test_operator_ceiling_is_optional() -> None:
     assert _bitcoin_core().max_fee_estimate_sat_vb is None
     assert _bitcoin_core(max_fee_estimate_sat_vb=2).max_fee_estimate_sat_vb == 2
+
+
+@pytest.mark.parametrize(
+    ("network", "ceiling", "warned"),
+    [("mainnet", 2, True), ("mainnet", None, False), ("signet", 2, False)],
+)
+def test_serve_warns_about_a_ceiling_only_on_mainnet(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    network: str,
+    ceiling: int | None,
+    warned: bool,  # noqa: FBT001
+) -> None:
+    # A warning, never a refusal: existing mainnet configs keep starting.
+    monkeypatch.setattr(cli, "require_supported_network", Mock())
+    config = SimpleNamespace(
+        network=SimpleNamespace(name=network),
+        provider_destination_script="00",
+        lnd=None,  # stops serving right after the warning
+        bitcoin_core=SimpleNamespace(max_fee_estimate_sat_vb=ceiling),
+    )
+    with caplog.at_level("WARNING", logger=cli.__name__), pytest.raises(cli.OperatorConfigError):
+        asyncio.run(cli._serve(config, Mock(), "unused"))  # type: ignore[arg-type]  # noqa: SLF001
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("caps Core's mainnet fee estimates at 2 sat/vB" in w for w in warnings) is warned

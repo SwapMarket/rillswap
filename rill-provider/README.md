@@ -298,7 +298,8 @@ With a cap, funding pays at most the cap (never the cap in place of a missing
 estimate), and claim, refund and cooperative fee checks use the capped
 estimate. Core's relay and mempool minimum fees, the signed caps and
 fee bumping are unchanged. On mainnet, leave it unset unless you understand
-that a low cap also lowers the starting fee of your claims and refunds. The
+that a low cap also lowers the starting fee of your claims and refunds;
+`serve` logs a warning at startup when it is set there. The
 signet example and signet makers created by `rill-provider-init` set 2
 sat/vB. Clients checking a cooperative claim against, or pricing a claim
 fee reserve from, their own Core need the same cap (`rill swap btc-to-ln` or

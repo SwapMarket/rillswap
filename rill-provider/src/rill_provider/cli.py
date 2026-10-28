@@ -342,11 +342,25 @@ def _invoice_decoder(config: OperatorConfig) -> Callable[[str], InvoiceBinding] 
     return decoder.decode
 
 
+def _warn_on_a_mainnet_fee_ceiling(config: OperatorConfig) -> None:
+    """Warn that a ceiling underprices mainnet fees; it is for skewed estimators like signet's."""
+    core = config.bitcoin_core
+    if config.network.name != "mainnet" or core is None or core.max_fee_estimate_sat_vb is None:
+        return
+    logging.getLogger(__name__).warning(
+        "bitcoin_core.max_fee_estimate_sat_vb caps Core's mainnet fee estimates at %d sat/vB: "
+        "in a fee spike, funding, claim fee reserves, claims and refunds start below the "
+        "next-block rate and may confirm late",
+        core.max_fee_estimate_sat_vb,
+    )
+
+
 async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
     try:
         require_supported_network(config.network)
     except ValidationError:
         raise OperatorConfigError("network is not supported for serving") from None
+    _warn_on_a_mainnet_fee_ceiling(config)
     lnd = config.lnd
     if (
         config.network.name != "regtest"
