@@ -145,10 +145,18 @@ def add_parser(categories: argparse._SubParsersAction[argparse.ArgumentParser]) 
 def run(args: argparse.Namespace, network: NetworkIdentity) -> str:
     """Query every relay and return the JSON listing; never moves funds."""
     from rill_crypto import Context  # noqa: PLC0415 - native library only when used
-    from rill_provider.relay_client import RelayConnection, require_relay_route  # noqa: PLC0415
+    from rill_provider.relay_client import (  # noqa: PLC0415
+        RelayConnection,
+        RelayError,
+        reachable_relays,
+        require_relay_route,
+    )
 
     proxy = require_relay_route(network, args.relay_proxy, allow_direct=args.allow_direct_relay)
-    urls = list(dict.fromkeys(args.relay))
+    # Onion relays are opportunistic: without the proxy they are skipped quietly.
+    urls = list(reachable_relays(dict.fromkeys(args.relay), proxy))
+    if not urls:
+        raise RelayError("onion relays need --relay-proxy, and no other relay is set")
     for url in urls:
         RelayConnection(url, proxy=proxy)  # refuse a bad route before any connection
 

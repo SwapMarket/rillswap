@@ -145,9 +145,11 @@ upgrade-triggered action or retroactive disclosure assumption.
 On public networks, discovery and swaps need either
 `--relay-proxy http://127.0.0.1:9080` (a local Tor `HTTPTunnelPort`) or
 `--allow-direct-relay` to accept exposing your IP address. Proxied relays
-must use `wss://`, and there is no direct fallback. Regtest allows direct
-connections. `providers list` accepts repeated `--relay` arguments; compare
-independent relays, since a relay can withhold announcements.
+must use `wss://`, except v3 onion relays (`ws://…onion`), which Tor encrypts
+and authenticates; onion relays need `--relay-proxy`. There is no direct
+fallback. Regtest allows direct connections. `providers list` accepts repeated
+`--relay` arguments and skips onion relays quietly when there is no proxy;
+compare independent relays, since a relay can withhold announcements.
 
 ## Recovery files
 

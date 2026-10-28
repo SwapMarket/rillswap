@@ -3,19 +3,28 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
+from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 import pytest
+from fake_relay import FakeRelay
 from rill_core.wire.types import NetworkIdentity
 
 from rill_provider.relay_client import (
     RelayConnection,
     RelayError,
+    is_onion_relay,
+    reachable_relays,
     relay_proxy,
     require_relay_route,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 NETWORKS = Path(__file__).parents[2] / "rill-docs" / "networks"
 PUBLIC = ("mainnet", "signet", "testnet4")
@@ -105,11 +114,122 @@ def test_proxy_receives_the_host_name_and_no_local_lookup_happens(
     assert "relay.example.invalid" not in lookups
 
 
+ONION = "ws://gnostr2jnapk72mnagq3cuykfon73temzp77hcbncn4silgt77boruid.onion"
+
+
+def test_onion_relays_are_recognized_strictly() -> None:
+    assert is_onion_relay(ONION)
+    assert is_onion_relay(ONION.replace("ws://", "wss://") + ":8443/path")
+    for url in ("ws://short.onion", "ws://relay.example.org.onion", "wss://relay.example", "x"):
+        assert not is_onion_relay(url)
+
+
+def test_onion_relays_need_the_proxy_and_are_skipped_without_it() -> None:
+    proxy = "http://127.0.0.1:9080"
+    with pytest.raises(RelayError, match="onion relay needs the relay proxy"):
+        RelayConnection(ONION)
+    RelayConnection(ONION, proxy=proxy)  # plain ws:// is tunneled only to an onion
+    relays = ("wss://relay.example/", ONION, "wss://other.example/")
+    assert reachable_relays(relays, None) == ("wss://relay.example/", "wss://other.example/")
+    assert reachable_relays(relays, proxy) == relays
+
+
+def test_the_service_policy_announces_onion_relays_only_with_the_proxy() -> None:
+    from rill_provider.operator_config import load_config  # noqa: PLC0415
+
+    example = Path(__file__).parents[1] / "examples" / "provider.signet.json"
+    config = load_config(example).model_copy(update={"relay_urls": ("wss://relay.example/", ONION)})
+    assert config.relay_proxy is not None
+    assert config.service_policy().relay_urls == ("wss://relay.example/", ONION)
+    direct = config.model_copy(update={"relay_proxy": None, "allow_direct_relays": True})
+    assert direct.service_policy().relay_urls == ("wss://relay.example/",)
+
+
+def _tunnel_proxy(
+    requests: list[bytes], target_port: int, reply: bytes
+) -> Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]]:
+    """A CONNECT proxy that records each request and pipes to a local port."""
+
+    async def pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        with suppress(ConnectionError):
+            while data := await reader.read(65536):
+                writer.write(data)
+                await writer.drain()
+        writer.close()
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        requests.append(await reader.readuntil(b"\r\n\r\n"))
+        writer.write(reply)
+        await writer.drain()
+        if not reply.startswith(b"HTTP/1.1 200"):
+            writer.close()
+            return
+        upstream_reader, upstream_writer = await asyncio.open_connection("127.0.0.1", target_port)
+        await asyncio.gather(pipe(reader, upstream_writer), pipe(upstream_reader, writer))
+
+    return handle
+
+
+def test_plain_ws_onion_relays_are_tunneled_through_the_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lookups: list[Any] = []
+    original = socket.getaddrinfo
+
+    def guarded(host: Any, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        lookups.append(host)
+        return original(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", guarded)
+
+    async def scenario() -> list[bytes]:
+        relay = FakeRelay()
+        relay_port = urlsplit(await relay.start()).port
+        assert relay_port is not None
+        requests: list[bytes] = []
+        established = b"HTTP/1.1 200 Connection established\r\n\r\n"
+        server = await asyncio.start_server(
+            _tunnel_proxy(requests, relay_port, established), "127.0.0.1", 0
+        )
+        proxy = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+        event = json.dumps({"id": "01" * 32, "kind": 1059, "tags": [], "content": "x"}).encode()
+        try:
+            async with RelayConnection(f"{ONION}/", proxy=proxy, open_timeout=5) as connection:
+                assert await connection.publish(event)
+        finally:
+            server.close()
+            await relay.stop()
+        return requests
+
+    requests = asyncio.run(scenario())
+    host = ONION.removeprefix("ws://")
+    assert requests == [f"CONNECT {host}:80 HTTP/1.1\r\nHost: {host}:80\r\n\r\n".encode()]
+    assert host not in lookups
+
+
+def test_a_refused_onion_tunnel_is_an_unavailable_relay() -> None:
+    async def scenario() -> list[bytes]:
+        requests: list[bytes] = []
+        forbidden = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n"
+        server = await asyncio.start_server(_tunnel_proxy(requests, 9, forbidden), "127.0.0.1", 0)
+        proxy = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+        try:
+            with pytest.raises(RelayError, match="relay unavailable"):
+                async with RelayConnection(f"{ONION}:8080/", proxy=proxy, open_timeout=5):
+                    pass
+        finally:
+            server.close()
+        return requests
+
+    assert asyncio.run(scenario())[0].startswith(f"CONNECT {ONION[5:]}:8080 ".encode())
+
+
 @pytest.mark.parametrize(
     ("proxy", "allow_direct", "relays", "refusal"),
     [
         (None, False, ("wss://relay.example/",), "need a relay proxy"),
         ("http://127.0.0.1:9080", False, ("ws://relay.example/",), "wss://"),
+        (None, True, (ONION,), "onion relays need the relay proxy"),
     ],
 )
 def test_serving_refuses_an_unsafe_relay_route_at_startup(

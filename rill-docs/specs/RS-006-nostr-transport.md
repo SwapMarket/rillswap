@@ -113,7 +113,11 @@ and fail closed. No automatic clearnet fallback is permitted. On public
 networks a native client or provider without a configured proxy MUST refuse
 to connect unless the user explicitly accepts direct relay connections;
 regtest may connect directly. The reference implementation uses a loopback
-HTTP CONNECT proxy, so proxied relays must use `wss://`. Browser applications cannot promise
+HTTP CONNECT proxy, so proxied relays must use `wss://`, except v3 onion
+relays, which Tor encrypts and authenticates end to end and may use plain
+`ws://`. Onion relays are opportunistic: a client or provider that cannot
+reach onion services skips them without reporting a failure, and a provider
+announces only the relays it can reach. Browser applications cannot promise
 arbitrary SOCKS and must accurately disclose the chosen browser/network mode.
 
 Relays can observe recipient tags, subscriptions, source addresses, timing,

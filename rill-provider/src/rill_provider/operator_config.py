@@ -33,6 +33,7 @@ from rill_provider.live_session_store import (
     AuthorityDeclaration,
 )
 from rill_provider.quote_policy import MAX_WIRE_INTEGER, QuoteSchedule
+from rill_provider.relay_client import reachable_relays
 
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_IDENTITY_FILE_BYTES = 4096
@@ -258,7 +259,7 @@ class OperatorConfig(_Strict):
             base_fee_sat=t.base_fee_sat,
             proportional_millionths=t.proportional_millionths,
             slot=t.slot,
-            relay_urls=self.relay_urls,
+            relay_urls=reachable_relays(self.relay_urls, self.relay_proxy),
             relay_proxy=self.relay_proxy,
             epoch_period=self.epoch_period,
             announcement_lifetime=self.announcement_lifetime,

@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import importlib.util
 import json
+import re
 import stat
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -105,6 +106,15 @@ def test_bitcoin_maker_config_passes_the_provider_schema(tmp_path: Path, profile
     assert config.lnd.port == init.LND_PORT
     assert config.lnd.payment_macaroon is not None
     assert (config.lnd.invoices_macaroon is not None) is (profile == "ln-to-btc")
+
+
+def test_default_relays_match_the_web_app_and_are_all_served(tmp_path: Path) -> None:
+    web = Path(__file__).parents[2] / "rill-web" / "src" / "swap" / "publicRelays.ts"
+    assert tuple(re.findall(r'"(wss?://[^"]+)"', web.read_text())) == init.DEFAULT_RELAYS
+    config = load_config(_write(tmp_path, _config("btc-to-ln")))
+    # The setup always configures the Tor proxy, so the onion relays are announced too.
+    assert config.service_policy().relay_urls == init.DEFAULT_RELAYS
+    assert any(url.startswith("ws://") for url in init.DEFAULT_RELAYS)
 
 
 @pytest.mark.parametrize(("network", "ceiling"), [("signet", 2), ("mainnet", None)])

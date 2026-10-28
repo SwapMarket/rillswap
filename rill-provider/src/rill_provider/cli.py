@@ -40,7 +40,12 @@ from rill_provider.operator_config import (
 )
 from rill_provider.payment_reconciliation import reconcile_payment
 from rill_provider.provider_identity import ProviderIdentity, ProviderIdentityError
-from rill_provider.relay_client import RelayConnection, RelayError, require_relay_route
+from rill_provider.relay_client import (
+    RelayConnection,
+    RelayError,
+    reachable_relays,
+    require_relay_route,
+)
 from rill_provider.settlement_engine import EngineSettings, SettlementEngine
 
 if TYPE_CHECKING:
@@ -327,10 +332,19 @@ async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
         proxy = require_relay_route(
             config.network, config.relay_proxy, allow_direct=config.allow_direct_relays
         )
-        for url in config.relay_urls:  # refuse at startup, not in the reconnect loop
+        # Onion relays are opportunistic: without the proxy they are skipped, so
+        # they are neither connected nor announced (service_policy drops them too).
+        relays = reachable_relays(config.relay_urls, proxy)
+        for url in relays:  # refuse at startup, not in the reconnect loop
             RelayConnection(url, proxy=proxy)
     except RelayError as error:
         raise OperatorConfigError(str(error)) from None
+    if not relays:
+        raise OperatorConfigError("onion relays need the relay proxy, and no other relay is set")
+    if len(relays) < len(config.relay_urls):
+        logging.getLogger(__name__).info(
+            "no relay proxy: skipping %d onion relays", len(config.relay_urls) - len(relays)
+        )
     identity = ProviderIdentity.load(
         config.identity_file,
         custody_identity=custody,

@@ -33,8 +33,21 @@ LND_PORT = 10009
 RELAY_PROXY = "http://127.0.0.1:9080"
 SIGNET_FEE_ESTIMATE_CEILING_SAT_VB = 2
 CREDENTIALS = "/rill/credentials"
-# The relays the web app queries by default (rill-web/src/swap/config.ts).
-DEFAULT_RELAYS = ("wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net")
+# The relays the web app queries by default (rill-web/src/swap/publicRelays.ts):
+# all serve gift wraps without AUTH, keep announcements and accept Tor exits.
+# The onion relays are reached through the relay proxy (Tor).
+DEFAULT_RELAYS = (
+    "wss://relay.primal.net",
+    "wss://relay.snort.social",
+    "wss://nostr.oxtr.dev",
+    "wss://relay.ditto.pub",
+    "wss://nostr.bitcoiner.social",
+    "wss://nostr.azzamo.net",
+    "wss://relay.angor.io",
+    "wss://nostr.stakey.net",
+    "ws://oxtrdevav64z64yb7x6rjg4ntzqjhedm5b5zjqulugknhzr46ny2qbad.onion",
+    "ws://gnostr2jnapk72mnagq3cuykfon73temzp77hcbncn4silgt77boruid.onion",
+)
 PROFILES = ("btc-to-ln", "ln-to-btc", "erc20-to-ln", "ln-to-erc20")
 BITCOIN_PROFILES = ("btc-to-ln", "ln-to-btc")
 SCRIPT = re.compile(r"^(0014[0-9a-f]{40}|5120[0-9a-f]{64})$")  # P2WPKH or P2TR

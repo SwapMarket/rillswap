@@ -8,12 +8,17 @@ Relay routing fails closed. On public networks a connection must go through a
 local HTTP CONNECT proxy (Tor's ``HTTPTunnelPort``) unless direct connections
 are explicitly allowed; there is never a silent fallback to a direct socket.
 The proxy receives the relay host name, so no local DNS lookup reveals it.
+
+Plain ``ws://`` is tunneled only to a v3 onion relay, which Tor encrypts and
+authenticates end to end. Onion relays are reachable only through the proxy.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import re
+import socket
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Self
 from urllib.parse import urlsplit
@@ -21,17 +26,39 @@ from urllib.parse import urlsplit
 import aiohttp
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Iterable
 
+    from aiohttp.client_proto import ResponseHandler
+    from aiohttp.client_reqrep import ClientRequest
+    from aiohttp.tracing import Trace
     from rill_core.wire.types import NetworkIdentity
 
 MAX_FRAME_BYTES = 256 * 1024  # a 128 KiB event plus relay framing
 MAX_QUEUED_EVENTS = 1024
 SUBSCRIPTION_ID = "rill-provider"
+OPEN_TIMEOUT = 10.0
+ONION_OPEN_TIMEOUT = 60.0  # building a rendezvous circuit often takes tens of seconds
+MAX_TUNNEL_REPLY = 8 * 1024
+_ONION_HOST = re.compile(r"[a-z2-7]{56}\.onion")
 
 
 class RelayError(RuntimeError):
     """The relay connection is unavailable; nothing about peers is implied."""
+
+
+def is_onion_relay(url: str) -> bool:
+    """Whether ``url`` is a ws:// or wss:// relay on a v3 onion service."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return False
+    return parts.scheme in ("ws", "wss") and host is not None and bool(_ONION_HOST.fullmatch(host))
+
+
+def reachable_relays(urls: Iterable[str], proxy: str | None) -> tuple[str, ...]:
+    """Drop onion relays when there is no proxy to reach them; keep the order."""
+    return tuple(url for url in urls if proxy is not None or not is_onion_relay(url))
 
 
 def relay_proxy(proxy: str | None) -> str | None:
@@ -83,19 +110,90 @@ def _event_json(event: object) -> bytes | None:
         return None  # e.g. lone surrogates from a hostile relay
 
 
+class _OnionTunnel(aiohttp.BaseConnector):
+    """Open plain ws:// onion sockets through the CONNECT proxy.
+
+    aiohttp only tunnels TLS targets with CONNECT and would forward a plain
+    request in cleartext, so this connector opens the tunnel itself and hands
+    the established socket to aiohttp, like ``aiohttp.UnixConnector`` does.
+    """
+
+    def __init__(self, proxy: str) -> None:
+        super().__init__(force_close=True)
+        parts = urlsplit(proxy)  # relay_proxy checked the host and port
+        self._proxy_address = (parts.hostname or "", parts.port or 0)
+
+    async def _create_connection(
+        self,
+        req: ClientRequest,
+        traces: list[Trace],
+        timeout: aiohttp.ClientTimeout,  # noqa: ASYNC109 - aiohttp's connector signature
+    ) -> ResponseHandler:
+        del traces, timeout  # the session's connect timeout bounds the whole call
+        target = f"{req.url.host}:{req.url.port or 80}"
+        sock = await _open_tunnel(self._loop, self._proxy_address, target)
+        try:
+            _, protocol = await self._loop.create_connection(self._factory, sock=sock)
+        except BaseException:
+            sock.close()
+            raise
+        return protocol
+
+
+async def _open_tunnel(
+    loop: asyncio.AbstractEventLoop, proxy: tuple[str, int], target: str
+) -> socket.socket:
+    """Return a non-blocking socket tunneled to ``target`` by the CONNECT proxy."""
+    sock = socket.socket(socket.AF_INET6 if ":" in proxy[0] else socket.AF_INET)
+    try:
+        sock.setblocking(False)  # noqa: FBT003 - socket API
+        await loop.sock_connect(sock, proxy)
+        await loop.sock_sendall(
+            sock, f"CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n".encode()
+        )
+        reply = await _tunnel_reply(loop, sock)
+    except OSError as error:
+        sock.close()
+        raise aiohttp.ClientConnectionError("relay proxy unavailable") from error
+    except BaseException:
+        sock.close()
+        raise
+    if not re.match(rb"HTTP/1\.[01] 200[ \r]", reply):
+        sock.close()
+        raise aiohttp.ClientConnectionError("relay proxy refused the tunnel")
+    return sock
+
+
+async def _tunnel_reply(loop: asyncio.AbstractEventLoop, sock: socket.socket) -> bytes:
+    """Read the proxy's reply one byte at a time, so no relay byte is consumed."""
+    reply = b""
+    while not reply.endswith(b"\r\n\r\n"):
+        byte = await loop.sock_recv(sock, 1)
+        if not byte or len(reply) >= MAX_TUNNEL_REPLY:
+            raise aiohttp.ClientConnectionError("relay proxy closed the tunnel")
+        reply += byte
+    return reply
+
+
 class RelayConnection:
     """One WebSocket to one relay, owned by one task."""
 
-    def __init__(self, url: str, *, open_timeout: float = 10.0, proxy: str | None = None) -> None:
+    def __init__(
+        self, url: str, *, open_timeout: float | None = None, proxy: str | None = None
+    ) -> None:
         """Prepare, but do not open, a connection to ``url``."""
         if not url.startswith(("wss://", "ws://")):
             raise RelayError("relay URL must be ws:// or wss://")
         self._proxy = relay_proxy(proxy)
-        if self._proxy is not None and not url.startswith("wss://"):
-            # aiohttp only tunnels TLS targets with CONNECT; a plain ws:// request
-            # would be forwarded in cleartext rather than tunneled.
-            raise RelayError("a proxied relay must use wss://")
+        self._onion = is_onion_relay(url)
+        if self._onion and self._proxy is None:
+            raise RelayError("an onion relay needs the relay proxy")
+        if self._proxy is not None and not url.startswith("wss://") and not self._onion:
+            # Only an onion service authenticates and encrypts a plain ws:// target.
+            raise RelayError("a proxied relay must use wss:// (ws:// only for an onion relay)")
         self.url = url
+        if open_timeout is None:
+            open_timeout = ONION_OPEN_TIMEOUT if self._onion else OPEN_TIMEOUT
         self._open_timeout = open_timeout
         self._session: aiohttp.ClientSession | None = None
         self._socket: aiohttp.ClientWebSocketResponse | None = None
@@ -107,11 +205,19 @@ class RelayConnection:
     async def __aenter__(self) -> Self:
         """Open the socket and start reading frames."""
         timeout = aiohttp.ClientTimeout(total=None, connect=self._open_timeout)
+        tunnel = (
+            _OnionTunnel(self._proxy)
+            if self._proxy is not None and self._onion and self.url.startswith("ws://")
+            else None
+        )
         # trust_env=False: environment proxies never silently reroute or bypass.
-        self._session = aiohttp.ClientSession(timeout=timeout, trust_env=False)
+        self._session = aiohttp.ClientSession(timeout=timeout, trust_env=False, connector=tunnel)
         try:
             self._socket = await self._session.ws_connect(
-                self.url, max_msg_size=MAX_FRAME_BYTES, heartbeat=30.0, proxy=self._proxy
+                self.url,
+                max_msg_size=MAX_FRAME_BYTES,
+                heartbeat=30.0,
+                proxy=None if tunnel is not None else self._proxy,
             )
         except (aiohttp.ClientError, TimeoutError):
             await self._session.close()

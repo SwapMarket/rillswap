@@ -120,6 +120,25 @@ def test_cli_reports_when_no_relay_answers(
     assert capsys.readouterr().err == "Provider listing failed.\n"
 
 
+ONION = "ws://gnostr2jnapk72mnagq3cuykfon73temzp77hcbncn4silgt77boruid.onion/"
+
+
+def test_onion_relays_are_skipped_quietly_without_a_proxy(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    argv = [
+        "providers", "list", "--network", str(NETWORKS / "signet.json"),
+        "--crypto-library", str(tmp_path / "missing.so"), "--allow-direct-relay",
+        "--relay", ONION,
+    ]  # fmt: skip
+    assert main.main(argv) == 5
+    assert "onion relays need --relay-proxy" in capsys.readouterr().err
+    # With another relay the onion is dropped before any route check, so the
+    # listing gets as far as loading the (missing) native library.
+    assert main.main([*argv, "--relay", "ws://127.0.0.1:9/"]) == 2
+    assert capsys.readouterr().err == "Provider listing failed.\n"
+
+
 @pytest.mark.native_crypto
 @NATIVE
 def test_native_directory_lists_anyone_on_the_selected_network(tmp_path: Path) -> None:

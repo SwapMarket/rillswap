@@ -276,12 +276,16 @@ profile uses hold invoices. Core and LND connections use `127.0.0.1`.
 
 ### Relays and Tor
 
-Use relays that accept your announcements and that clients can reach.
-Proxied relays must use `wss://`. On public Bitcoin networks, set
-`relay_proxy` to a loopback Tor `HTTPTunnelPort` such as
+Use relays that accept your announcements (kind 39417), serve gift wraps
+(kind 1059) without NIP-42 AUTH, and accept connections from Tor. The Docker
+setup defaults to the same relays as the web app, including two onion relays.
+Proxied relays must use `wss://`, except v3 onion relays, which may use plain
+`ws://` because Tor encrypts and authenticates them. On public Bitcoin
+networks, set `relay_proxy` to a loopback Tor `HTTPTunnelPort` such as
 `http://127.0.0.1:9080`. Direct connections are refused unless
 `allow_direct_relays` is enabled, which exposes your IP address to the
-relays. Regtest allows direct connections.
+relays. Regtest allows direct connections. Without `relay_proxy`, onion
+relays are skipped (one INFO log line) and are not announced.
 
 ## Persistent state and backups
 
