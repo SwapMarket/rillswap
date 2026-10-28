@@ -248,11 +248,11 @@ provider logs a warning and lets Core pick the inputs, at the same rate.
 The contract holds the payout plus a claim fee reserve. The client's claim
 pays exactly the reserve as its fee, so the destination receives exactly the
 requested amount. Unless `quote.claim_fee_reserve_sat` is set, the provider
-prices the reserve for each quote: the cooperative (key-path) claim to the
-client's destination at the same next-block rate it funds with, raised if
-needed so the larger script-path claim still pays the node's relay and mempool
-minimum, and never below the client's requested minimum. Indicative quotes
-assume a P2TR destination. Fees are sampled once per tick (15 seconds), never
+prices the reserve for each quote: the larger script-path claim to the
+client's destination at the same next-block rate it funds with (the node's
+relay and mempool minimum is only a lower bound), so the cooperative claim
+pays at least that rate too, and never below the client's requested minimum.
+Indicative quotes assume a P2TR destination. Fees are sampled once per tick (15 seconds), never
 per request. Without a sample, or when the reserve would exceed
 `quote.max_claim_fee_sat`, LN to BTC quotes answer `capacity_unavailable`. A
 client asking for a minimum reserve above `quote.max_claim_fee_sat` gets

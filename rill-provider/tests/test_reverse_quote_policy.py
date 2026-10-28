@@ -220,27 +220,27 @@ def _automatic(payload: dict[str, Any], hold_sat: int | None = None, **changes: 
     )
 
 
-def test_automatic_indicative_reserve_pays_a_p2tr_cooperative_claim_at_the_next_block_rate() -> (
+def test_automatic_indicative_reserve_pays_a_p2tr_script_path_claim_at_the_next_block_rate() -> (
     None
 ):
     answer = _automatic(INDICATIVE)
     assert answer.message_type == "quote_offer", answer.payload
     offer = parse_model_json(ReverseQuoteOffer, canonicalize(answer.payload))
-    # 111 vB P2TR key-path claim at 2 sat/vB; 155 vB script path at 0.1 sat/vB is 16.
-    assert offer.economics.claim_fee_reserve_sat == "222"
-    assert offer.economics.contract_amount_sat == "100222"
-    assert offer.economics.hold_invoice_sat == "100422"
+    # 155 vB P2TR script-path claim at 2 sat/vB; the 111 vB key path then pays more.
+    assert offer.economics.claim_fee_reserve_sat == "310"
+    assert offer.economics.contract_amount_sat == "100310"
+    assert offer.economics.hold_invoice_sat == "100510"
     assert _error(_automatic(INDICATIVE, claim_fee=None)) == "capacity_unavailable"
 
 
 def test_automatic_firm_reserve_is_exactly_the_destination_claim_fee() -> None:
-    # P2WPKH destination: 99 vB key-path claim at 2 sat/vB is 198, above the client's 150.
-    answer = _automatic(AUTOMATIC_FIRM, hold_sat=100_000 + 198 + 200)
+    # P2WPKH destination: 143 vB script-path claim at 2 sat/vB is 286, above the client's 150.
+    answer = _automatic(AUTOMATIC_FIRM, hold_sat=100_000 + 286 + 200)
     assert answer.message_type == "terms_offer", answer.payload
     offer = parse_model_json(TermsOfferPayload, canonicalize(answer.payload))
     economics = offer.terms.contract_terms.economics
-    assert (economics.claim_fee_reserve_sat, economics.contract_amount_sat) == ("198", "100198")
-    hold = HOLD.model_copy(update={"amount_msat": "100398000"})
+    assert (economics.claim_fee_reserve_sat, economics.contract_amount_sat) == ("286", "100286")
+    hold = HOLD.model_copy(update={"amount_msat": "100486000"})
     check_reverse_terms_offer(
         _firm_request(AUTOMATIC_FIRM), offer, handshake_hash=HANDSHAKE, invoice_binding=hold
     )
@@ -248,17 +248,18 @@ def test_automatic_firm_reserve_is_exactly_the_destination_claim_fee() -> None:
         hold_invoice_msat(
             _with(schedule=AUTOMATIC, claim_fee=NEXT_BLOCK), _firm_request(AUTOMATIC_FIRM)
         )
-        == 100_398_000
+        == 100_486_000
     )
 
 
 @pytest.mark.parametrize(
     ("fee", "minimum", "reserve"),
     [
-        (ClaimFeeRate(2_000, 100), "150", 198),  # the cooperative claim at the rate
-        (ClaimFeeRate(1_000, 1_000), "100", 143),  # script path kept at the node floor
+        (ClaimFeeRate(2_000, 100), "150", 286),  # the script-path claim at the rate
+        (ClaimFeeRate(100, 10), "0", 15),  # 0.1 sat/vB estimate, 0.01 floor: not the floor's 2
+        (ClaimFeeRate(500, 1_000), "100", 143),  # the node floor is only a lower bound
         (ClaimFeeRate(1_000, 100), "300", 300),  # the client's minimum
-        (ClaimFeeRate(1_001, 100), "0", 100),  # rounded up to whole sats
+        (ClaimFeeRate(1_001, 100), "0", 144),  # rounded up to whole sats
     ],
 )
 def test_automatic_reserve_is_the_largest_requirement(
@@ -270,8 +271,8 @@ def test_automatic_reserve_is_the_largest_requirement(
 
 
 def test_automatic_reserve_never_exceeds_the_signed_claim_cap() -> None:
-    # 99 vB at 4.05 sat/vB is 401 sats, over max_claim_fee_sat 400: fees too high now.
-    expensive = ClaimFeeRate(4_050, 100)
+    # 143 vB at 2.8 sat/vB is 401 sats, over max_claim_fee_sat 400: fees too high now.
+    expensive = ClaimFeeRate(2_800, 100)
     terms = _with(schedule=AUTOMATIC, claim_fee=expensive)
     assert reverse_claim_fee_reserve(terms, _firm_request(AUTOMATIC_FIRM)) is None
     assert hold_invoice_msat(terms, _firm_request(AUTOMATIC_FIRM)) is None

@@ -145,9 +145,9 @@ class FirmSigner:
 class ClaimFeeRate:
     """Next-block fee evidence for pricing the LN to BTC claim, in sat/kvB.
 
-    ``rate_sat_kvb`` pays the cooperative claim; ``floor_sat_kvb`` (the
-    node's relay and mempool minimum) is the least the script-path claim,
-    paying the same fee, may fall to.
+    ``rate_sat_kvb`` is the next-block estimate both claim paths must pay;
+    ``floor_sat_kvb`` (the node's relay and mempool minimum) only bounds it
+    from below.
     """
 
     rate_sat_kvb: int
@@ -357,11 +357,12 @@ def reverse_claim_fee_reserve(
 
     A configured reserve is used as is. Otherwise the client's claim pays
     exactly ``C``, so the destination receives exactly the nominal payout:
-    ``C`` pays the cooperative (key-path) claim at this tick's next-block
-    rate, keeps the larger script-path claim at or above the node floor, and
-    honors the client's minimum. Indicative quotes size a P2TR destination,
-    the larger claim. A reserve above ``max_claim_fee_sat`` could not be
-    spent as signed, so it is not quoted.
+    ``C`` pays the larger script-path claim at this tick's next-block rate
+    (the node floor only as a lower bound), so the cooperative (key-path)
+    claim pays at least that rate too, and honors the client's minimum.
+    Indicative quotes size a P2TR destination, the larger claim. A reserve
+    above ``max_claim_fee_sat`` could not be spent as signed, so it is not
+    quoted.
     """
     schedule = terms.schedule
     if schedule.claim_fee_reserve_sat is not None:
@@ -375,12 +376,11 @@ def reverse_claim_fee_reserve(
         else bytes.fromhex(request.client_destination_script)
     )
     try:
-        cooperative, unilateral = claim_vsizes(destination)
+        _, unilateral = claim_vsizes(destination)  # the script path is the larger claim
     except ValidationError:
         return None
     reserve = max(
-        -(-cooperative * fee.rate_sat_kvb // 1000),
-        -(-unilateral * fee.floor_sat_kvb // 1000),
+        -(-unilateral * max(fee.rate_sat_kvb, fee.floor_sat_kvb) // 1000),
         0 if request is None else int(request.limits.min_claim_fee_reserve_sat),
     )
     return reserve if reserve <= schedule.max_claim_fee_sat else None

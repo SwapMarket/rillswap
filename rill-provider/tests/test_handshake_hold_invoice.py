@@ -294,9 +294,9 @@ def test_automatic_reserve_prices_the_hold_from_this_ticks_fee_sample(
         return ClaimFeeRate(rate_sat_kvb=6_000, floor_sat_kvb=100)
 
     hold, seen = _answer_automatic(monkeypatch, claim_fee)
-    # P2WPKH destination: 99 vB at 6 sat/vB is 594, over the client's 500 minimum.
+    # P2WPKH destination: the 143 vB script path at 6 sat/vB is 858, over the client's 500.
     hold.add.assert_called_once_with(
-        HASH, value_msat=(100_000 + 594 + 200) * 1000, expiry_seconds=3_600, cltv_expiry_delta=185
+        HASH, value_msat=(100_000 + 858 + 200) * 1000, expiry_seconds=3_600, cltv_expiry_delta=185
     )
     assert [terms.claim_fee for terms in seen] == [ClaimFeeRate(6_000, 100)]
     assert len(samples) == 1  # requests never trigger fee RPC
