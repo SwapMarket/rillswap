@@ -1,14 +1,15 @@
 # RillSwap
 
-**Open, non-custodial swaps between on-chain assets and Lightning. No account.
-Your keys stay with you.**
+**A decentralized, permissionless market for Lightning swaps. Non-custodial,
+no account, verified on your device.**
 
-RillSwap is a provider-neutral atomic swap protocol and reference
-implementation. You swap on-chain Bitcoin or ERC20 stablecoins for Lightning
-payments (and back) with any provider that announces itself on Nostr. Your
-client verifies every contract, transaction and signature locally, and keeps
-an encrypted recovery file so a failed swap can be refunded or claimed
-without the provider, the website or any RillSwap service.
+RillSwap is an open atomic swap protocol and reference implementation. Anyone
+can run a provider and join the market by publishing offers on Nostr, with no
+registration or approval. You swap on-chain Bitcoin or ERC20 stablecoins for
+Lightning payments (and back) with whichever provider you choose. Your client
+verifies every contract, transaction and signature locally, and keeps an
+encrypted recovery file so a failed swap can be refunded or claimed without
+the provider, the website or any RillSwap service.
 
 <table>
   <tr>
