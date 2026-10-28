@@ -18,8 +18,8 @@ const fixture = (): ReturnType<typeof reverseCase> & { expectedNetwork: { name: 
 /** Shown invoice text for seeded external-wallet payments; Resume never decodes it, the journal binds it by hash. */
 const INVOICE = "lnbcrt511u1savedinvoicefixture";
 
-/** Without `bolt11`, the record is as saved before the shown invoice text was kept. */
-async function seedFunded(page: Page, paymentUnknown = false, bolt11?: string): Promise<void> {
+/** The seeded external-wallet payment keeps its shown invoice text, as every saved record does. */
+async function seedFunded(page: Page, paymentUnknown = false, bolt11 = INVOICE): Promise<void> {
   await page.goto(PAGE);
   const recipient = await page.evaluate(async () => {
     const wallet = await window.uiFixture.wallet.open();
@@ -28,12 +28,12 @@ async function seedFunded(page: Page, paymentUnknown = false, bolt11?: string): 
   const data = fixture(), terms = { ...data.record, funding_history: [] };
   const termsFile = Array.from(await encryptCanonicalRecoveryForRecipient(new TextEncoder().encode(canonicalize(terms)!), recipient));
   const fundedFile = Array.from(await encryptCanonicalRecoveryForRecipient(new TextEncoder().encode(canonicalize(data.record)!), recipient));
-  const shown = bolt11 === undefined ? null : { bolt11, sha256: createHash("sha256").update(bolt11).digest("hex") };
+  const shown = { bolt11, sha256: createHash("sha256").update(bolt11).digest("hex") };
   await page.evaluate(async ({ data, termsFile, fundedFile, paymentUnknown, shown }) => {
     const url = "/test-only/browserReverseJournal.js", { BrowserReverseJournal } = await import(url) as typeof Journal;
     const t = data.record.contract_terms, v = data.record.verification_context;
     // The synthetic signed binding hashes no real text; Resume checks only its payment hash against the journal.
-    const binding = shown ? { ...t.invoice_binding, bolt11_sha256: shown.sha256 } : t.invoice_binding;
+    const binding = { ...t.invoice_binding, bolt11_sha256: shown.sha256 };
     const journal = await BrowserReverseJournal.open();
     try {
       let record = await journal.createFresh({ networkIdentity: data.expectedNetwork, sessionId: v.handshake_init.session_id,
@@ -44,7 +44,7 @@ async function seedFunded(page: Page, paymentUnknown = false, bolt11?: string): 
           limits: { max_success_fee_sat: t.economics.success_fee_sat, min_claim_fee_reserve_sat: t.economics.claim_fee_reserve_sat,
             max_claim_fee_sat: t.max_claim_fee_sat, min_refund_lock_height: t.refund_lock_height, max_incoming_htlc_expiry_height: 300 }, extensions: {} } }, Uint8Array.from(termsFile));
       record = await journal.saveTerms(record, Uint8Array.from(termsFile));
-      record = await journal.exposeInvoice(record, binding, Uint8Array.from(termsFile), shown?.bolt11);
+      record = await journal.exposeInvoice(record, binding, Uint8Array.from(termsFile), shown.bolt11);
       if (!paymentUnknown) await journal.saveFunding(record, Uint8Array.from(fundedFile));
     } finally { journal.close(); }
   }, { data, termsFile, fundedFile, paymentUnknown, shown });
@@ -93,12 +93,10 @@ test("a funded reverse swap resumes and automatically claims using only browser 
   await page.locator("#swap-reverse-advanced summary").click();
   await expect(page.locator("#swap-reverse-backups a")).toHaveCount(1);
   await expect(page.locator("#swap-reverse-backups a")).toHaveText("Download swap backup");
-  // Saved before the shown invoice text was kept: Resume still loads it and shows the payment hash.
   await expect(page.locator("#swap-reverse-payment-notes")).toContainText("Your claim lets the provider settle this payment");
   await page.locator("#swap-reverse-payment-details summary").click();
   await expect(page.locator("#swap-reverse-payment-hash")).toHaveText(fixture().record.contract_terms.invoice_binding.payment_hash);
-  await expect(page.locator("#swap-reverse-payment-details")).toContainText("saved before the invoice text was kept");
-  await expect(page.locator("#swap-reverse-payment-invoice")).toHaveCount(0);
+  await expect(page.locator("#swap-reverse-payment-invoice")).toHaveText(INVOICE);
 });
 
 test("a funded external-wallet swap shows its invoice on Resume and claims from the mempool only by explicit choice", async ({ page }) => {

@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import canonicalize from "canonicalize";
 import type { BrowserReverseJournal, ReverseIntentContext, ReverseClaimIntent, ReverseJournalRecord } from "../src/browserReverseJournal";
 import type { BoundedHoldPlan } from "../src/swap/browserHoldPayer";
 import mainnet from "../src/networks/mainnet.json" with { type: "json" };
@@ -8,6 +9,10 @@ import mainnet from "../src/networks/mainnet.json" with { type: "json" };
 declare global { interface Window { BrowserReverseJournal: typeof BrowserReverseJournal; reverseJournalReady: boolean } }
 const draft = (): { context: ReverseIntentContext; plan: BoundedHoldPlan; claim: ReverseClaimIntent } =>
   JSON.parse(readFileSync(new URL("../tmp/preview/test-only/reverse-journal-draft.json", import.meta.url), "utf8"));
+/** Shown invoice text for external-wallet exposures; the journal binds it to `bolt11_sha256`. */
+const SHOWN = "lnbcrt511u1externalwalletfixture";
+const sha256Hex = (text: string): string => createHash("sha256").update(text).digest("hex");
+const shownBinding = () => ({ ...draft().plan.invoiceBinding, bolt11_sha256: sha256Hex(SHOWN) });
 async function ready(page: Page) { await page.goto("http://127.0.0.1:18765/test-only/reverse-journal.html"); await page.waitForFunction(() => window.reverseJournalReady); }
 async function prepare(page: Page, context = draft().context): Promise<ReverseJournalRecord> {
   return page.evaluate(async (context) => {
@@ -76,15 +81,15 @@ test("an invoice shown for an external wallet is one UNKNOWN payment per hash, r
   await ready(page); const first = await prepare(page);
   const secondPage = await context.newPage(); await ready(secondPage);
   const second = await prepare(secondPage, { ...draft().context, sessionId: "d".repeat(64) });
-  const expose = (tab: Page, record: ReverseJournalRecord) => tab.evaluate(async ({ record, binding }) => {
+  const expose = (tab: Page, record: ReverseJournalRecord) => tab.evaluate(async ({ record, binding, bolt11 }) => {
     const journal = await window.BrowserReverseJournal.open();
-    try { return await journal.exposeInvoice(record, binding, new TextEncoder().encode("age-encryption.org/v1\n" + "public-cipher-placeholder".repeat(4))); }
+    try { return await journal.exposeInvoice(record, binding, new TextEncoder().encode("age-encryption.org/v1\n" + "public-cipher-placeholder".repeat(4)), bolt11); }
     catch { return null; } finally { journal.close(); }
-  }, { record, binding: draft().plan.invoiceBinding });
+  }, { record, binding: shownBinding(), bolt11: SHOWN });
   const outcomes = await Promise.all([expose(page, first), expose(secondPage, second)]);
   expect(outcomes.filter(Boolean)).toHaveLength(1);
   const winner = outcomes.find(Boolean)!; expect(winner.stage).toBe("payment-unknown");
-  expect(winner.payment).toEqual({ state: "external-wallet", paymentHash: draft().context.request.payment_hash, invoiceBinding: draft().plan.invoiceBinding });
+  expect(winner.payment).toEqual({ state: "external-wallet", paymentHash: draft().context.request.payment_hash, invoiceBinding: shownBinding(), bolt11: SHOWN });
   // A node dispatch for the same hash is a different payer and is not blocked by storage; the execution object refuses it instead.
   await page.reload(); await page.waitForFunction(() => window.reverseJournalReady);
   const restored = await page.evaluate(async ({ context, cipher }) => {
@@ -93,11 +98,11 @@ test("an invoice shown for an external wallet is one UNKNOWN payment per hash, r
     finally { journal.close(); }
   }, { context: winner.context, cipher: "age-encryption.org/v1\n" + "public-cipher-placeholder".repeat(4) });
   expect(restored.stage).toBe("funded"); expect(restored.payment).toEqual(winner.payment);
-  const wrongHash = await page.evaluate(async ({ record, binding }) => {
+  const wrongHash = await page.evaluate(async ({ record, binding, bolt11 }) => {
     const journal = await window.BrowserReverseJournal.open();
-    try { await journal.exposeInvoice(record, { ...binding, payment_hash: "e".repeat(64) }, new TextEncoder().encode("age-encryption.org/v1\n" + "public-cipher-placeholder".repeat(4))); return false; }
+    try { await journal.exposeInvoice(record, { ...binding, payment_hash: "e".repeat(64) }, new TextEncoder().encode("age-encryption.org/v1\n" + "public-cipher-placeholder".repeat(4)), bolt11); return false; }
     catch { return true; } finally { journal.close(); }
-  }, { record: outcomes[0] ? second : first, binding: draft().plan.invoiceBinding });
+  }, { record: outcomes[0] ? second : first, binding: shownBinding(), bolt11: SHOWN });
   expect(wrongHash).toBe(true);
 });
 
@@ -124,6 +129,38 @@ test("the shown invoice text is kept only when it hashes to the signed binding, 
     try { return { record: await journal.get(context.networkIdentity, context.sessionId), list: await journal.list() }; } finally { journal.close(); }
   }, shown!.context);
   expect(restored.record).toEqual(shown); expect(restored.list).toEqual([shown]);
+});
+
+test("an external-wallet record without the shown invoice text is refused unchanged, never treated as absent", async ({ page }) => {
+  await ready(page); const record = await prepare(page);
+  const shown = await page.evaluate(async ({ record, binding, bolt11 }) => {
+    const journal = await window.BrowserReverseJournal.open();
+    try { return await journal.exposeInvoice(record, binding, new TextEncoder().encode("age-encryption.org/v1\n" + "public-cipher-placeholder".repeat(4)), bolt11); } finally { journal.close(); }
+  }, { record, binding: shownBinding(), bolt11: SHOWN });
+  // Rebuild the record as written before the text was kept, with both digests recomputed,
+  // so only the missing text differs from a record the journal accepts.
+  const seal = (payment: unknown) => {
+    const fields = { id: shown.id, context: shown.context, stage: shown.stage, snapshots: shown.snapshots, payment, claim: shown.claim };
+    return { ...fields, digest: sha256Hex(canonicalize(fields)!) };
+  };
+  expect(seal(shown.payment).digest).toBe(shown.digest);
+  const { bolt11: _dropped, ...payment } = shown.payment as { readonly bolt11: string };
+  const hashOnly = seal(payment);
+  const result = await page.evaluate(async ({ hashOnly, paymentDigest }) => {
+    const raw = await new Promise<IDBDatabase>((resolve) => { const request = indexedDB.open("rillswap-reverse-execution"); request.onsuccess = () => resolve(request.result); });
+    const elections = await new Promise<{ id: string; digest: string }[]>((resolve) => {
+      const request = raw.transaction("payments").objectStore("payments").getAll(); request.onsuccess = () => resolve(request.result); });
+    await new Promise<void>((resolve) => { const tx = raw.transaction(["sessions", "payments"], "readwrite");
+      tx.objectStore("sessions").put(hashOnly); tx.objectStore("payments").put({ ...elections[0], digest: paymentDigest }); tx.oncomplete = () => resolve(); });
+    const reader = await window.BrowserReverseJournal.open(), refused = { get: false, list: false };
+    try { await reader.get(hashOnly.context.networkIdentity, hashOnly.context.sessionId); } catch { refused.get = true; }
+    try { await reader.list(); } catch { refused.list = true; } finally { reader.close(); }
+    const after = await new Promise<unknown>((resolve) => { const request = raw.transaction("sessions").objectStore("sessions").get(hashOnly.id); request.onsuccess = () => resolve(request.result); });
+    raw.close();
+    return { originalElectionDigests: elections.map((entry) => entry.digest), refused, after };
+  }, { hashOnly, paymentDigest: sha256Hex(canonicalize(payment)!) });
+  expect(result.originalElectionDigests).toEqual([sha256Hex(canonicalize(shown.payment)!)]);
+  expect(result.refused).toEqual({ get: true, list: true }); expect(result.after).toEqual(hashOnly);
 });
 
 test("funding preserves UNKNOWN and precedes the immutable fallback, whose exposure has one winner", async ({ page, context }) => {

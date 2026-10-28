@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import type * as ClaimActions from "../src/swap/reverseClaim";
 import type { BrowserReverseJournal, ReverseIntentContext } from "../src/browserReverseJournal";
 import type { NetworkName } from "../src/swap/config";
@@ -12,6 +13,9 @@ declare global { interface Window {
   finishCooperation: () => Promise<void>;
 } }
 const API = "http://127.0.0.1:8091/api", BROADCAST = "http://127.0.0.1:8092/api";
+/** Shown invoice text; the journal binds it to the exposure by `bolt11_sha256`. */
+const INVOICE = "lnbcrt511u1claimfixtureinvoice";
+const SHOWN = { bolt11: INVOICE, sha256: createHash("sha256").update(INVOICE).digest("hex") };
 interface Fixture { plaintext: string; fundingTxHex: string; expectedNetwork: { name: NetworkName; genesis_hash: string }; record: ReverseFixtureRecord }
 const fixture = (): Fixture => JSON.parse(readFileSync(new URL("../tmp/preview/test-only/reverse-recovery.json", import.meta.url), "utf8"));
 
@@ -37,7 +41,7 @@ for (const [published, crossedCutoff] of [[false, false], [false, true], [true, 
     await page.exposeFunction("finishCooperation", () => { if (crossedCutoff) tip = 219; });
     await page.goto("http://127.0.0.1:18765/test-only/reverse-claim.html");
     await page.waitForFunction(() => window.reverseClaimReady);
-    const prepared = await page.evaluate(async ({ data, api }) => {
+    const prepared = await page.evaluate(async ({ data, api, shown }) => {
       const journal = await window.BrowserReverseJournal.open(), doc = data.record, terms = doc.contract_terms, verification = doc.verification_context;
       const context: ReverseIntentContext = { networkIdentity: data.expectedNetwork, sessionId: verification.handshake_init.session_id,
         clientSessionKey: verification.client_session_xonly_key, providerSessionKey: verification.provider_session_xonly_key,
@@ -50,12 +54,13 @@ for (const [published, crossedCutoff] of [[false, false], [false, true], [true, 
       const cipher = new TextEncoder().encode("age-encryption.org/v1\n" + "public-test-only-placeholder".repeat(4));
       try {
         const fresh = await journal.createFresh(context, cipher), saved = await journal.saveTerms(fresh, cipher);
-        const paid = await journal.exposeInvoice(saved, terms.invoice_binding, cipher), funded = await journal.saveFunding(paid, cipher);
+        const paid = await journal.exposeInvoice(saved, { ...terms.invoice_binding, bolt11_sha256: shown.sha256 }, cipher, shown.bolt11);
+        const funded = await journal.saveFunding(paid, cipher);
         const claim = await window.reverseClaimActions.prepareJournaledReverseClaim({ plaintext: new TextEncoder().encode(data.plaintext),
           record: funded, journal, network: data.expectedNetwork, assertCurrent: () => {} }, api, 100n, async () => cipher, () => {});
         return { context, plaintext: Array.from(claim.plaintext), record: claim.record };
       } finally { journal.close(); }
-    }, { data, api: API });
+    }, { data, api: API, shown: SHOWN });
     acceptedTxid = prepared.record.claim!.txid;
     const result = await page.evaluate(async ({ prepared, network, api, broadcast, published }) => {
       const journal = await window.BrowserReverseJournal.open(); let electionStage = "", outcome = "";

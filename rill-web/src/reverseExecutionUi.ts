@@ -81,19 +81,17 @@ function view(root: HTMLElement, e: ClaimExecution, options: ReverseProgressOpti
   return { screen, payment, advanced, message, fee, backup };
 }
 
-/** The invoice shown for an external wallet, with its payment hash; older saved swaps kept only the hash. */
+/** The invoice shown for an external wallet, with its payment hash. */
 function paymentDetails(e: ClaimExecution, open: boolean): { notes: HTMLParagraphElement; details: HTMLDetailsElement } | null {
   const intent = e.record.payment;
   if (intent?.state !== "external-wallet") return null;
   const details = node("details", "", "swap-reverse-payment-details");
   details.append(node("summary", "Your Lightning invoice"), node("p", `${BigInt(e.terms.economics.hold_invoice_sat).toLocaleString()} sat, payment hash:`),
     node("pre", intent.paymentHash, "swap-reverse-payment-hash"));
-  if (intent.bolt11 !== undefined) {
-    const bolt11 = intent.bolt11, link = node("a", "Open in your wallet", "swap-reverse-payment-uri"); link.href = `lightning:${bolt11}`;
-    details.append(qrSvg(`lightning:${bolt11}`, "QR code of the Lightning invoice", "swap-reverse-payment-qr"), node("pre", bolt11, "swap-reverse-payment-invoice"), link);
-    const copy = button(details, "Copy invoice", "swap-reverse-payment-copy");
-    copy.onclick = () => { void navigator.clipboard?.writeText(bolt11).then(() => { copy.textContent = "Copied"; }, () => {}); };
-  } else details.append(node("p", "This swap was saved before the invoice text was kept. Your wallet lists the payment under this payment hash."));
+  const bolt11 = intent.bolt11, link = node("a", "Open in your wallet", "swap-reverse-payment-uri"); link.href = `lightning:${bolt11}`;
+  details.append(qrSvg(`lightning:${bolt11}`, "QR code of the Lightning invoice", "swap-reverse-payment-qr"), node("pre", bolt11, "swap-reverse-payment-invoice"), link);
+  const copy = button(details, "Copy invoice", "swap-reverse-payment-copy");
+  copy.onclick = () => { void navigator.clipboard?.writeText(bolt11).then(() => { copy.textContent = "Copied"; }, () => {}); };
   details.open = open;
   return { notes: node("p", "", "swap-reverse-payment-notes"), details };
 }
