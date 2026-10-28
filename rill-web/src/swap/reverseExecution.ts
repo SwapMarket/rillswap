@@ -48,8 +48,8 @@ export interface ReverseExecutionConfiguration {
   readonly cooperation?: Cosigner;
   /**
    * Claim after this many confirmations of the provider's funding (0: from the mempool) when
-   * below the signed depth; absent waits for the signed depth. This session only: Resume and
-   * recovery wait for the signed depth.
+   * below the signed depth; absent waits for the signed depth. This session only (never
+   * stored): Resume and recovery wait for the signed depth unless lowered there again.
    */
   readonly claimConfirmations?: number;
   /** Fixed, secret-free swap log lines (why the cooperative claim did or did not happen). */
@@ -65,6 +65,12 @@ export interface PreparedReverseExecution {
   readonly claimFeeSat: string | null;
   /** Funding confirmations this session claims at: the client's lower choice or the signed depth. */
   readonly claimDepth: number;
+  /**
+   * Claim at fewer confirmations from now on (0: from the mempool), for this session only, while
+   * the claim is not yet exposed (stage funded or claim-ready). Only ever lowers; the caller owns
+   * the user's explicit acceptance of the double-spend risk.
+   */
+  lowerClaimDepth(depth: number): void;
   accept(acknowledgeRecovery: () => void): Promise<void>;
   planPayment(payer: BrowserHoldPayer, endpoint: string, feeLimitSat: bigint, approve: () => void): Promise<BoundedHoldPlan>;
   pay(payer: BrowserHoldPayer, plan: BoundedHoldPlan, endpoint: string, approve: () => void): Promise<HoldPaymentStatus>;
@@ -131,7 +137,7 @@ export async function prepareReverseExecution(session: Session, handshake: Hands
     const { terms, holdInvoice } = checkReverseTermsOffer(answer.payload, { request: firm, transcript, envelopeContractHash: answer.contract_hash,
       identity: request.identity, network, now: seconds(), handshakeInit: init, handshakeAccept: accept, decodeInvoice: (value) => invoiceBinding(value, name) });
     const deadlineAt = Math.min(initialDeadline, terms.terms_expiry, terms.invoice_binding.expires_at);
-    const claimDepth = effectiveClaimDepth(terms.funding_confirmations, config.claimConfirmations);
+    let claimDepth = effectiveClaimDepth(terms.funding_confirmations, config.claimConfirmations);
     const live = (): void => { current(); require(seconds() < deadlineAt); };
     const acceptance = { contract_hash: answer.contract_hash!, handshake_hash: transcript, session_id: session.sessionId,
       client_session_xonly_key: session.key, provider_session_xonly_key: session.providerKey! };
@@ -145,7 +151,12 @@ export async function prepareReverseExecution(session: Session, handshake: Hands
       network: network as { name: NetworkName; genesis_hash: string }, assertCurrent: () => { current(); approve(); }, claimDepth });
     const freeze = (value: unknown): void => { if (value !== null && typeof value === "object") { for (const child of Object.values(value)) freeze(child); Object.freeze(value); } };
     freeze(terms);
-    return Object.freeze({ terms, deadlineAt, claimDepth, get recoveryFile() { return Uint8Array.from(recoveryFile); }, get record() { return record; }, dispose,
+    return Object.freeze({ terms, deadlineAt, get claimDepth() { return claimDepth; },
+      lowerClaimDepth(depth: number): void {
+        current(); require((record.stage === "funded" || record.stage === "claim-ready") && !exposing && Number.isSafeInteger(depth) && depth >= 0 && depth < claimDepth);
+        claimDepth = depth;
+      },
+      get recoveryFile() { return Uint8Array.from(recoveryFile); }, get record() { return record; }, dispose,
       get claimFeeSat() { return inspectReverseRecoveryPlaintext(document!, network).fallbackFeeSat; },
       get funding() {
         const binding = parts.funding[0]?.binding as RecoveryFundingBinding | undefined;
@@ -183,7 +194,7 @@ export async function prepareReverseExecution(session: Session, handshake: Hands
       async exposeInvoice(approve: () => void): Promise<{ readonly bolt11: string; readonly expiresAt: number }> {
         require(accepted && !paying && record.stage === "terms-ready"); live(); approve(); paying = true;
         const file = await encrypt(document!); live(); approve();
-        record = await config.journal.exposeInvoice(record, terms.invoice_binding, file); live();
+        record = await config.journal.exposeInvoice(record, terms.invoice_binding, file, holdInvoice); live();
         return { bolt11: holdInvoice, expiresAt: terms.invoice_binding.expires_at };
       },
       async receiveFunding(timeoutMs = 30000): Promise<Uint8Array> {

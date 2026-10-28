@@ -31,11 +31,16 @@ interface Snapshot { readonly stage: typeof SNAPSHOT_STAGES[number]; readonly ci
 /**
  * Either the browser dispatched one exact route through a pinned node, or it showed the
  * invoice for an external wallet to pay. Both are UNKNOWN payments from that moment on.
+ * The shown invoice text is kept so Resume can show it again; records written before
+ * it was kept have no `bolt11` and still load.
  */
 type PaymentIntent =
   | { readonly state: "submission-unknown"; readonly endpoint: string; readonly plan: BoundedHoldPlan }
-  | { readonly state: "external-wallet"; readonly paymentHash: string; readonly invoiceBinding: InvoiceBinding };
+  | { readonly state: "external-wallet"; readonly paymentHash: string; readonly invoiceBinding: InvoiceBinding; readonly bolt11?: string };
 const BINDING_KEYS = ["bolt11_sha256", "payment_hash", "amount_msat", "payee_compressed_pubkey", "created_at", "expires_at", "min_final_cltv_delta"];
+const EXTERNAL_KEYS = ["state", "paymentHash", "invoiceBinding"];
+/** The browser decoder's own bounds: lower-case bech32, at most 2048 characters. */
+const BOLT11 = /^ln[0-9a-z]{1,2046}$/;
 export interface ReverseClaimIntent {
   readonly fundingTxid: string;
   readonly fundingVout: number;
@@ -115,10 +120,13 @@ function recordSnapshot(value: unknown): ReverseJournalRecord {
     const verified = snapshot(SNAPSHOT_STAGES[index]!, bytes); require(verified.digest === s.digest);
   }
   if (length >= 2 && (o.payment as { state?: unknown } | null)?.state === "external-wallet") {
-    const payment = object(o.payment, ["state", "paymentHash", "invoiceBinding"]);
+    const shown = Object.hasOwn(o.payment as object, "bolt11");
+    const payment = object(o.payment, shown ? [...EXTERNAL_KEYS, "bolt11"] : EXTERNAL_KEYS);
     require(payment.paymentHash === context.request.payment_hash);
     const binding = object(payment.invoiceBinding, BINDING_KEYS);
     require(binding.payment_hash === context.request.payment_hash);
+    if (shown) require(typeof payment.bolt11 === "string" && BOLT11.test(payment.bolt11) &&
+      bytesToHex(sha256(encoder.encode(payment.bolt11))) === binding.bolt11_sha256);
   } else if (length >= 2) {
     const payment = object(o.payment, ["state", "endpoint", "plan"]), plan = object(payment.plan, ["nodeIdentity", "networkIdentity", "paymentHash", "invoiceBinding", "route", "feeMsat", "limits"]);
     validateStoredHoldPlan(plan as unknown as BoundedHoldPlan);
@@ -258,10 +266,14 @@ export class BrowserReverseJournal {
     const next = seal({ ...old, stage: "payment-unknown", payment, snapshots: [...old.snapshots, snapshot("payment-unknown", ciphertext)] });
     return this.#write(old, next, { store: "payments", previous: null, entry: this.#paymentElection(next) });
   }
-  /** Invoice shown for an external wallet: the payment is UNKNOWN from now on, exactly like a dispatched route. */
-  async exposeInvoice(expected: ReverseJournalRecord, invoiceBinding: InvoiceBinding, ciphertext: Uint8Array): Promise<ReverseJournalRecord> {
+  /**
+   * Invoice shown for an external wallet: the payment is UNKNOWN from now on, exactly like a dispatched route.
+   * `bolt11`, the shown text, must match the binding's `bolt11_sha256`.
+   */
+  async exposeInvoice(expected: ReverseJournalRecord, invoiceBinding: InvoiceBinding, ciphertext: Uint8Array, bolt11?: string): Promise<ReverseJournalRecord> {
     const old = recordSnapshot(expected); require(old.stage === "terms-ready");
-    const payment = structuredClone({ state: "external-wallet" as const, paymentHash: old.context.request.payment_hash, invoiceBinding });
+    const payment = structuredClone({ state: "external-wallet" as const, paymentHash: old.context.request.payment_hash, invoiceBinding,
+      ...(bolt11 !== undefined ? { bolt11 } : {}) });
     const next = seal({ ...old, stage: "payment-unknown", payment, snapshots: [...old.snapshots, snapshot("payment-unknown", ciphertext)] });
     return this.#write(old, next, { store: "payments", previous: null, entry: this.#paymentElection(next) });
   }

@@ -689,7 +689,7 @@ function mount(root: HTMLElement): void {
               current(); showTracking("Lightning to Bitcoin swap");
               steps.replaceChildren(...["Review", "Pay", "Locking", "Claim", "Done"].map((label) => node("li", label)));
               mountResumedReverseExecution(panel, execution, { network: { ...NETWORKS[name], name }, chainApi: api, broadcastApi: broadcast,
-                assertCurrent: current, status: (message, step) => setStatus(message, step),
+                assertCurrent: current, status: (message, step) => setStatus(message, step), report,
                 download: offerDownload, saved: (file) => { publishLink(file, name); void refreshSavedRecoveries(); } });
             })().catch(() => {
               row.append(node("p", "Could not resume this saved swap. Keep any backups; no payment was retried."));

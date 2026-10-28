@@ -82,27 +82,66 @@ test("the reverse flow shows one step at a time and automatically claims after t
   await expect(page.locator("#swap-status")).toContainText("Pay the invoice from your Lightning wallet");
   await expect(page.locator("#swap-reverse-message")).toContainText("Waiting for the provider to lock the Bitcoin");
   await expect(page.locator("#swap-reverse-funding")).toBeDisabled(); // the page is already listening
+  await expect(page.locator("#swap-reverse-payment")).toBeHidden(); // the pay screen itself shows the invoice
   await expect.poll(() => page.evaluate(() => window.uiFixture.reverseEvents!.filter((event) => event === "receive").length), { timeout: 10000 }).toBeGreaterThan(1);
   expect(await page.evaluate(() => window.uiFixture.reverseEvents!.slice(0, 2))).toEqual(["accept", "expose"]);
   await page.evaluate(() => { window.uiFixture.reverseFunded = true; });
   await expect(page.locator("#swap-reverse-funding-status")).toContainText("0 of 2", { timeout: 10000 });
   await expect(page.locator("#swap-reverse-invoice")).toHaveCount(0);
+  // A wallet without hold invoice support may report the held payment as failed: the invoice stays reachable, with guidance.
+  await expect(page.locator("#swap-reverse-payment-notes")).toContainText("so it holds your payment");
+  await expect(page.locator("#swap-reverse-payment-notes")).toContainText("Do not pay again");
+  await expect(page.locator("#swap-reverse-payment-invoice")).toBeHidden();
+  await page.locator("#swap-reverse-payment-details summary").click();
+  await expect(page.locator("#swap-reverse-payment-invoice")).toHaveText("lnbcrt510010n1fixture");
+  await expect(page.locator("#swap-reverse-payment-uri")).toHaveAttribute("href", "lightning:lnbcrt510010n1fixture");
+  await expect(page.locator("#swap-reverse-payment-qr")).toBeVisible();
+  await expect(page.locator("#swap-reverse-payment-hash")).toHaveText("c".repeat(64));
   await expect(page.locator('#swap-reverse-steps a')).toHaveAttribute("href", `http://127.0.0.1:8091/tx/${"b".repeat(64)}`);
   await page.locator("#swap-reverse-advanced summary").click();
   await expect(page.locator('#swap-reverse-backups a')).toHaveCount(1);
   await expect(page.locator('#swap-reverse-backups a')).toHaveText("Download swap backup");
   await expect(page.locator("#swap-reverse-claim-fee")).toHaveValue("500"); // min(reserve, max claim fee)
+  // Claiming earlier is offered, but only behind its own explicit consent.
+  await expect(page.locator("#swap-reverse-claim-now-controls")).toBeVisible();
+  await expect(page.locator("#swap-reverse-claim-now")).toBeDisabled();
   expect(await page.evaluate(() => window.uiFixture.reverseEvents)).not.toContain("prepare");
   await page.evaluate(() => { window.uiFixture.reverseDepth = 2; });
   await page.locator("#swap-reverse-funding").click();
   await expect(page.locator("#swap-status")).toContainText("Claim accepted:");
   await expect(page.locator('#swap-reverse-steps a')).toHaveAttribute("href", `http://127.0.0.1:8091/tx/${"a".repeat(64)}`);
   expect(await page.evaluate(() => window.uiFixture.reverseEvents!.filter((e) => e === "broadcast"))).toHaveLength(1);
+  await expect(page.locator("#swap-reverse-claim-now-controls")).toBeHidden();
+  await expect(page.locator("#swap-reverse-payment-notes")).toContainText("Your claim lets the provider settle this payment");
+  expect(await page.evaluate(() => window.uiFixture.reverseEvents)).not.toContain("lower-0");
   await page.evaluate(() => { window.uiFixture.reverseClaimConfirmed = true; });
   await page.locator("#swap-reverse-funding").click();
   await expect(page.locator("#swap-reverse-steps h2")).toHaveText("Bitcoin received");
   expect(await page.evaluate(() => window.uiFixture.reverseEvents!.filter((e) => e === "broadcast"))).toHaveLength(1);
   expect(await page.evaluate(() => window.uiFixture.reverseEvents)).not.toContain("plan");
+});
+
+test("after funding, an explicitly accepted risk claims from the mempool without waiting for the signed depth", async ({ page }) => {
+  await mountedExecution(page);
+  await page.evaluate(() => { window.uiFixture.reverseFunded = true; });
+  await page.locator("#swap-reverse-accept").click();
+  await expect(page.locator("#swap-reverse-funding-status")).toContainText("0 of 2", { timeout: 10000 });
+  await expect(page.locator("#swap-reverse-payment-notes")).toContainText("Advanced can claim now from the mempool");
+  await page.locator("#swap-reverse-advanced summary").click();
+  await expect(page.locator("#swap-reverse-claim-now-warning")).toContainText("unconfirmed funding, below the provider's signed 2");
+  await expect(page.locator("#swap-reverse-claim-now-warning")).toContainText("double-spend");
+  await page.locator("#swap-reverse-claim-now").click({ force: true }); // disabled: no effect without consent
+  expect(await page.evaluate(() => window.uiFixture.reverseEvents)).not.toContain("lower-0");
+  await page.locator("#swap-reverse-claim-now-consent").check();
+  await page.locator("#swap-reverse-claim-now").click();
+  await expect(page.locator("#swap-status")).toContainText("Claim accepted:", { timeout: 10000 });
+  const events = await page.evaluate(() => window.uiFixture.reverseEvents!);
+  expect(events.filter((event) => event === "lower-0")).toHaveLength(1);
+  expect(events.filter((event) => event === "broadcast")).toHaveLength(1);
+  expect(events.indexOf("lower-0")).toBeLessThan(events.indexOf("prepare"));
+  await expect(page.locator("#swap-log")).toContainText("warning: Claiming on unconfirmed funding, below the provider's signed 2");
+  await expect(page.locator("#swap-log")).toContainText("claim now: claiming from the mempool by your choice");
+  await expect(page.locator("#swap-reverse-claim-now-controls")).toBeHidden();
 });
 
 test("an uncertain automatic claim is watched but never submitted again", async ({ page }) => {

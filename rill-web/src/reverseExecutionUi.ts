@@ -34,6 +34,8 @@ interface ReverseProgressOptions {
   readonly status: (message: string, step: number) => void;
   readonly download: (root: HTMLElement, file: Uint8Array, name: string) => void;
   readonly saved?: (file: Uint8Array) => void;
+  /** The swap log: fixed, secret-free lines such as why the claim was not cooperative. */
+  readonly report?: (line: string) => void;
 }
 export interface ReverseExecutionUiOptions extends ReverseProgressOptions {
   readonly prepared: PreparedReverseQuote;
@@ -42,10 +44,11 @@ export interface ReverseExecutionUiOptions extends ReverseProgressOptions {
   readonly nodeApi: string;
   /** Claim below the signed funding depth (0: from the mempool); absent waits for the signed depth. */
   readonly claimConfirmations?: number;
-  /** The swap log: fixed, secret-free lines such as why the claim was not cooperative. */
-  readonly report?: (line: string) => void;
 }
-type ClaimExecution = Pick<PreparedReverseExecution, "terms" | "record" | "recoveryFile" | "claimFeeSat" | "claimDepth" | "funding" | "fundingDepth" | "receiveFunding" | "prepareClaim" | "exposeClaim" | "dispose">;
+type ClaimExecution = Pick<PreparedReverseExecution, "terms" | "record" | "recoveryFile" | "claimFeeSat" | "claimDepth" | "lowerClaimDepth" | "funding" | "fundingDepth" | "receiveFunding" | "prepareClaim" | "exposeClaim" | "dispose">;
+
+/** Wallets without hold invoice support may give up on a payment that is still held (as the CLI says). */
+const DO_NOT_PAY_AGAIN = "Until the claim settles it, your wallet may show the payment as pending, or as failed after a timeout; this is normal. Do not pay again.";
 
 /** The double-spend risk of claiming below the signed depth, or null at the signed depth. */
 export function earlyClaimWarning(depth: number, signed: number): string | null {
@@ -59,6 +62,8 @@ export function earlyClaimWarning(depth: number, signed: number): string | null 
 function view(root: HTMLElement, e: ClaimExecution, options: ReverseProgressOptions) {
   const screen = node("section", "", "swap-reverse-steps"), advanced = node("details", "", "swap-reverse-advanced");
   const message = node("p", "", "swap-reverse-message"), backups = node("div", "", "swap-reverse-backups");
+  // The shown invoice stays reachable after funding, while the wallet may still report it as pending or failed.
+  const payment = node("section", "", "swap-reverse-payment"); payment.hidden = true;
   advanced.append(node("summary", "Advanced"));
   const maximum = BigInt(e.terms.economics.claim_fee_reserve_sat) < BigInt(e.terms.max_claim_fee_sat)
     ? e.terms.economics.claim_fee_reserve_sat : e.terms.max_claim_fee_sat;
@@ -80,8 +85,37 @@ function view(root: HTMLElement, e: ClaimExecution, options: ReverseProgressOpti
       notifications.textContent = granted ? "Notifications enabled" : "Notifications unavailable";
     });
   };
-  root.replaceChildren(screen, advanced, message);
-  return { screen, advanced, message, fee, backup };
+  root.replaceChildren(screen, payment, advanced, message);
+  return { screen, payment, advanced, message, fee, backup };
+}
+
+/** The invoice shown for an external wallet, with its payment hash; older saved swaps kept only the hash. */
+function paymentDetails(e: ClaimExecution, open: boolean): { notes: HTMLParagraphElement; details: HTMLDetailsElement } | null {
+  const intent = e.record.payment;
+  if (intent?.state !== "external-wallet") return null;
+  const details = node("details", "", "swap-reverse-payment-details");
+  details.append(node("summary", "Your Lightning invoice"), node("p", `${BigInt(e.terms.economics.hold_invoice_sat).toLocaleString()} sat, payment hash:`),
+    node("pre", intent.paymentHash, "swap-reverse-payment-hash"));
+  if (intent.bolt11 !== undefined) {
+    const bolt11 = intent.bolt11, link = node("a", "Open in your wallet", "swap-reverse-payment-uri"); link.href = `lightning:${bolt11}`;
+    details.append(qrSvg(`lightning:${bolt11}`, "QR code of the Lightning invoice", "swap-reverse-payment-qr"), node("pre", bolt11, "swap-reverse-payment-invoice"), link);
+    const copy = button(details, "Copy invoice", "swap-reverse-payment-copy");
+    copy.onclick = () => { void navigator.clipboard?.writeText(bolt11).then(() => { copy.textContent = "Copied"; }, () => {}); };
+  } else details.append(node("p", "This swap was saved before the invoice text was kept. Your wallet lists the payment under this payment hash."));
+  details.open = open;
+  return { notes: node("p", "", "swap-reverse-payment-notes"), details };
+}
+
+/** `claimNowOffered`: Advanced offers the explicit mempool claim. */
+function paymentNotes(e: ClaimExecution, claimNowOffered: boolean): string {
+  const stage = e.record.stage;
+  if (stage === "payment-unknown") {
+    const expires = new Date(e.terms.invoice_binding.expires_at * 1000).toLocaleString();
+    return `If your wallet has not sent this payment, pay it once before ${expires}. If it did, do not pay again: the provider locks the Bitcoin once it holds your payment.`;
+  }
+  if (stage === "claim-unknown" || stage === "accepted") return "Your claim lets the provider settle this payment. Do not pay again.";
+  return `The provider locked the Bitcoin, so it holds your payment. ${DO_NOT_PAY_AGAIN}` +
+    (claimNowOffered ? " If your wallet gives up waiting, Advanced can claim now from the mempool, at a double-spend risk." : "");
 }
 
 async function claimConfirmed(api: string, txid: string, network: ReverseProgressOptions["network"], signal: AbortSignal): Promise<boolean> {
@@ -94,14 +128,41 @@ async function claimConfirmed(api: string, txid: string, network: ReverseProgres
   return await get(`block-height/${inclusion.block_height}`, 64) === inclusion.block_hash;
 }
 
-/** Only this driver advances a paid live or explicitly resumed swap. UNKNOWN stages are read-only. */
+/**
+ * Only this driver advances a paid live or explicitly resumed swap. UNKNOWN stages are read-only.
+ * `resumed`: no live payment screen shows the invoice, so it is shown before funding too.
+ */
 function drive(v: ReturnType<typeof view>, e: ClaimExecution, options: ReverseProgressOptions, signal: AbortSignal,
-  settlement?: () => Promise<string | null>): void {
+  flow: { readonly settlement?: () => Promise<string | null>; readonly resumed?: boolean } = {}): void {
+  const { settlement, resumed = false } = flow;
   const api = validateMempoolApi(options.chainApi, options.network.name), broadcastApi = validateMempoolApi(options.broadcastApi, options.network.name);
   const current = (): void => { signal.throwIfAborted(); options.assertCurrent(); };
   let busy = false, terminal = false, notifiedConfirmation = false;
   const check = button(v.advanced, "Check now", "swap-reverse-funding");
   const exported = button(v.advanced, "Download exact signed fallback", "swap-reverse-export"); exported.hidden = true;
+  // After funding, an explicit, risk-accepted earlier claim for wallets that give up on a held payment.
+  const signed = e.terms.funding_confirmations, claimNowWarning = earlyClaimWarning(0, signed) ?? "";
+  const claimNow = node("section", "", "swap-reverse-claim-now-controls"), consent = node("input", "", "swap-reverse-claim-now-consent");
+  const consentLabel = node("label", " I accept this risk for this swap"), claimNowButton = node("button", "Claim now from the mempool (risky)", "swap-reverse-claim-now");
+  consent.type = "checkbox"; consentLabel.prepend(consent); claimNowButton.type = "button"; claimNowButton.disabled = true; claimNow.hidden = true;
+  claimNow.append(node("p", claimNowWarning, "swap-reverse-claim-now-warning"), consentLabel, claimNowButton); v.advanced.append(claimNow);
+  consent.onchange = () => { claimNowButton.disabled = !consent.checked; };
+  let payment: ReturnType<typeof paymentDetails> = null;
+  const refresh = (): void => {
+    const stage = e.record.stage, offered = !terminal && (stage === "funded" || stage === "claim-ready") && e.claimDepth > 0;
+    claimNow.hidden = !offered;
+    if (!resumed && stage === "payment-unknown") return; // the live payment screen still shows the invoice
+    payment ??= paymentDetails(e, resumed && stage === "payment-unknown");
+    if (payment === null) return;
+    if (v.payment.hidden) { v.payment.replaceChildren(payment.notes, payment.details); v.payment.hidden = false; }
+    payment.notes.textContent = paymentNotes(e, offered);
+  };
+  claimNowButton.onclick = () => {
+    if (!consent.checked || signal.aborted) return;
+    try { current(); e.lowerClaimDepth(0); } catch { if (!signal.aborted) v.message.textContent = "The claim can no longer be moved earlier."; return; }
+    options.report?.(`warning: ${claimNowWarning}`); options.report?.("claim now: claiming from the mempool by your choice");
+    consent.checked = false; claimNowButton.disabled = true; refresh(); void advance();
+  };
   const showClaim = (txid: string): void => {
     v.screen.replaceChildren(node("h2", "Confirming your claim"), node("p", e.record.stage === "claim-unknown"
       ? "Not confirmed yet. You can download the signed fallback below and broadcast it manually." : "Your Bitcoin is on its way."),
@@ -112,10 +173,11 @@ function drive(v: ReturnType<typeof view>, e: ClaimExecution, options: ReversePr
     if (busy || terminal || signal.aborted) return;
     busy = true; check.disabled = true;
     try {
-      current();
+      current(); refresh();
       if (e.record.stage === "payment-unknown") {
         try { const file = await e.receiveFunding(10000); current(); v.backup(file); v.message.textContent = ""; notifySwap("Bitcoin is locked. Waiting for confirmations."); }
         catch { current(); v.message.textContent = "Waiting for the provider to lock the Bitcoin. Do not pay again."; return; }
+        refresh();
       }
       if (e.record.stage === "funded") {
         v.screen.replaceChildren(node("h2", "Locking Bitcoin"), node("p", "Checking confirmations...", "swap-reverse-funding-status"));
@@ -164,7 +226,7 @@ function drive(v: ReturnType<typeof view>, e: ClaimExecution, options: ReversePr
         v.message.textContent = "Waiting for fresh Bitcoin funding data. Your saved fallback is kept.";
       } else if (!signal.aborted) { v.message.textContent = "Swap paused. Open it from Your swaps to inspect the saved state; uncertain payments and claims are never retried.";
         notifySwap("Your swap needs attention."); terminal = true; }
-    } finally { busy = false; check.disabled = signal.aborted; }
+    } finally { busy = false; check.disabled = signal.aborted; if (!signal.aborted) refresh(); }
   };
   check.onclick = () => { void advance(); };
   exported.onclick = () => {
@@ -192,7 +254,7 @@ export function mountResumedReverseExecution(root: HTMLElement, execution: Claim
   const cancellation = new AbortController(), v = view(root, execution, options); v.backup(execution.recoveryFile);
   const stopped = (): void => { cancellation.abort(); execution.dispose(); window.removeEventListener("pagehide", stopped); };
   window.addEventListener("pagehide", stopped, { once: true });
-  drive(v, execution, options, cancellation.signal); return stopped;
+  drive(v, execution, options, cancellation.signal, { resumed: true }); return stopped;
 }
 
 /** The signed price review authorizes the bounded automatic claim, not any new Lightning payment. */
@@ -223,7 +285,7 @@ export async function mountReverseExecution(root: HTMLElement, options: ReverseE
     const nodeControls = node("section"); v.advanced.append(nodeControls);
     const afterPayment = (settlement?: () => Promise<string | null>): void => {
       nodeControls.remove(); v.message.textContent = "Waiting for the provider to lock the Bitcoin.";
-      drive(v, e, options, cancellation.signal, settlement);
+      drive(v, e, options, cancellation.signal, settlement ? { settlement } : {});
     };
     accept.onclick = () => {
       accept.disabled = true;

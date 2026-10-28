@@ -114,6 +114,42 @@ test("without the choice, unconfirmed funding is never claimed", async () => {
   } finally { sign.mockRestore(); transport.mockRestore(); e.dispose(); }
 });
 
+test("after funding, an explicit choice lowers the claim depth and claims from the mempool", async () => {
+  const f = await executionFixture(), e = await f.prepare(), transport = spyOn(globalThis, "fetch").mockImplementation(f.fetch);
+  try {
+    await e.accept(f.assertCurrent); await e.exposeInvoice(f.assertCurrent);
+    expect(() => e.lowerClaimDepth(0)).toThrow(); // no funding to claim yet
+    await e.receiveFunding(); f.unconfirmed = true;
+    await expect(e.fundingDepth(API)).rejects.toBeInstanceOf(RecoveryFundingUnavailableError);
+    for (const depth of [1, 2, -1, 0.5, Number.NaN]) expect(() => e.lowerClaimDepth(depth)).toThrow(); // only ever lower
+    expect(e.claimDepth).toBe(1);
+    f.approved = false; expect(() => e.lowerClaimDepth(0)).toThrow(); f.approved = true; // a stale selection
+    e.lowerClaimDepth(0); expect(e.claimDepth).toBe(0);
+    expect(await e.fundingDepth(API)).toBe(0);
+    const prepared = await e.prepareClaim(API, 100n, f.assertCurrent);
+    const result = await e.exposeClaim(API, BROADCAST, "broadcast", f.assertCurrent);
+    expect(result).toMatchObject({ outcome: "accepted", txid: prepared.claim.txid }); expect(f.posts).toBe(1);
+  } finally { transport.mockRestore(); e.dispose(); }
+});
+
+test("a prepared claim waiting on funding can be lowered, but not once exposed", async () => {
+  const f = await executionFixture(), e = await f.prepare(), transport = spyOn(globalThis, "fetch").mockImplementation(f.fetch);
+  try {
+    await e.accept(f.assertCurrent); await e.exposeInvoice(f.assertCurrent); await e.receiveFunding();
+    await e.prepareClaim(API, 100n, f.assertCurrent);
+    f.unconfirmed = true; // as after a reorg, or a Resume of a claim prepared at a lower depth
+    await expect(e.exposeClaim(API, BROADCAST, "broadcast", f.assertCurrent)).rejects.toThrow(); expect(f.posts).toBe(0);
+    e.lowerClaimDepth(0);
+    expect((await e.exposeClaim(API, BROADCAST, "broadcast", f.assertCurrent)).outcome).toBe("accepted"); expect(f.posts).toBe(1);
+  } finally { transport.mockRestore(); e.dispose(); }
+  const g = await executionFixture(), exposed = await g.prepare(), chain = spyOn(globalThis, "fetch").mockImplementation(g.fetch);
+  try {
+    await exposed.accept(g.assertCurrent); await exposed.exposeInvoice(g.assertCurrent); await exposed.receiveFunding();
+    await exposed.prepareClaim(API, 100n, g.assertCurrent); await exposed.exposeClaim(API, BROADCAST, "broadcast", g.assertCurrent);
+    expect(() => exposed.lowerClaimDepth(0)).toThrow();
+  } finally { chain.mockRestore(); exposed.dispose(); }
+});
+
 test("a choice above the signed depth waits for the signed depth", async () => {
   const f = await executionFixture(), e = await f.prepare({ claimConfirmations: 6 });
   try { expect(e.claimDepth).toBe(1); } finally { e.dispose(); }

@@ -85,25 +85,35 @@ export const quoteReverseProviders = async (_providers: unknown[], request: unkn
         (window.uiFixture.reverseClaimFeeRates ??= []).push(configuration.claimFeeRateSatKvb);
         (window.uiFixture.reverseClaimConfirmations ??= []).push(configuration.claimConfirmations ?? null);
         window.uiFixture.reverseEvents = [];
-        const events = window.uiFixture.reverseEvents, record: { stage: string; claim?: { txid: string } } = { stage: "terms-ready" };
+        const events = window.uiFixture.reverseEvents;
+        const record: { stage: string; claim?: { txid: string }; payment: { state: string; paymentHash: string; bolt11?: string } | null } = { stage: "terms-ready", payment: null };
         const expiresAt = Math.floor(Date.now() / 1000) + 1800;
+        // As the real execution: a lower client choice, never above the signed 2.
+        let claimDepth = Math.min(configuration.claimConfirmations ?? 2, 2);
         return {
           terms: { economics: { hold_invoice_sat: String(51_000 + Number(id)), nominal_payout_sat: "50000", success_fee_sat: "500", claim_fee_reserve_sat: "500" },
             funding_confirmations: 2, refund_lock_height: 400, max_claim_fee_sat: "800", client_destination_script: "0014" + "11".repeat(20),
             invoice_binding: { expires_at: expiresAt } },
           recoveryFile: new Uint8Array([8, 8, 8]), record,
-          // As the real execution: a lower client choice, never above the signed 2.
-          claimDepth: Math.min(configuration.claimConfirmations ?? 2, 2),
+          get claimDepth() { return claimDepth; },
+          lowerClaimDepth: (depth: number) => {
+            if (!["funded", "claim-ready"].includes(record.stage) || depth >= claimDepth) throw new Error("fixture refuses");
+            events.push(`lower-${depth}`); claimDepth = depth;
+          },
           get claimFeeSat() { return record.claim ? "500" : null; },
           get funding() { return record.stage === "terms-ready" || record.stage === "payment-unknown" ? null : { txid: "b".repeat(64), vout: 0 }; },
           fundingDepth: async () => { events.push("depth"); return window.uiFixture.reverseDepth ?? 0; },
           accept: async () => { events.push("accept"); },
-          exposeInvoice: async () => { events.push("expose"); record.stage = "payment-unknown"; return { bolt11: "lnbcrt510010n1fixture", expiresAt }; },
+          exposeInvoice: async () => {
+            events.push("expose"); record.stage = "payment-unknown";
+            record.payment = { state: "external-wallet", paymentHash: "c".repeat(64), bolt11: "lnbcrt510010n1fixture" };
+            return { bolt11: "lnbcrt510010n1fixture", expiresAt };
+          },
           planPayment: async () => {
             events.push("plan"); if (!window.uiFixture.reverseNodePayment) throw new Error("fixture has no node");
             return { feeMsat: "1000", limits: { maxExpiryHeight: 500 }, paymentHash: "c".repeat(64), invoiceBinding: { amount_msat: "51006000" } };
           },
-          pay: async () => { events.push("pay"); record.stage = "payment-unknown"; return "IN_FLIGHT"; },
+          pay: async () => { events.push("pay"); record.stage = "payment-unknown"; record.payment = { state: "submission-unknown", paymentHash: "c".repeat(64) }; return "IN_FLIGHT"; },
           receiveFunding: async () => {
             events.push("receive");
             if (!window.uiFixture.reverseFunded) { await new Promise((resolve) => setTimeout(resolve, 200)); throw new Error("no funding yet"); }

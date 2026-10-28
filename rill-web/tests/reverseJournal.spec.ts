@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import type { BrowserReverseJournal, ReverseIntentContext, ReverseClaimIntent, ReverseJournalRecord } from "../src/browserReverseJournal";
 import type { BoundedHoldPlan } from "../src/swap/browserHoldPayer";
 import mainnet from "../src/networks/mainnet.json" with { type: "json" };
@@ -98,6 +99,31 @@ test("an invoice shown for an external wallet is one UNKNOWN payment per hash, r
     catch { return true; } finally { journal.close(); }
   }, { record: outcomes[0] ? second : first, binding: draft().plan.invoiceBinding });
   expect(wrongHash).toBe(true);
+});
+
+test("the shown invoice text is kept only when it hashes to the signed binding, and survives a reload", async ({ page }) => {
+  await ready(page); const record = await prepare(page);
+  const invoice = "lnbcrt511u1journalinvoicefixture", hash = (text: string) => createHash("sha256").update(text).digest("hex");
+  const expose = (bolt11: string, bolt11Sha256: string) => page.evaluate(async ({ record, binding, bolt11 }) => {
+    const journal = await window.BrowserReverseJournal.open();
+    try { return await journal.exposeInvoice(record, binding, new TextEncoder().encode("age-encryption.org/v1\n" + "public-cipher-placeholder".repeat(4)), bolt11); }
+    catch { return null; } finally { journal.close(); }
+  }, { record, binding: { ...draft().plan.invoiceBinding, bolt11_sha256: bolt11Sha256 }, bolt11 });
+  // Each refused text hashes to its binding, so only the format rule refuses it.
+  const long = "ln" + "q".repeat(2047), upper = invoice.toUpperCase();
+  for (const [text, bound] of [[invoice + "x", hash(invoice)], [upper, hash(upper)], [long, hash(long)], ["", hash("")]] as const) {
+    expect(await expose(text, bound)).toBeNull();
+  }
+  const shown = await expose(invoice, hash(invoice));
+  expect(shown!.stage).toBe("payment-unknown");
+  expect(shown!.payment).toEqual({ state: "external-wallet", paymentHash: draft().context.request.payment_hash,
+    invoiceBinding: { ...draft().plan.invoiceBinding, bolt11_sha256: hash(invoice) }, bolt11: invoice });
+  await page.reload(); await page.waitForFunction(() => window.reverseJournalReady);
+  const restored = await page.evaluate(async (context) => {
+    const journal = await window.BrowserReverseJournal.open();
+    try { return { record: await journal.get(context.networkIdentity, context.sessionId), list: await journal.list() }; } finally { journal.close(); }
+  }, shown!.context);
+  expect(restored.record).toEqual(shown); expect(restored.list).toEqual([shown]);
 });
 
 test("funding preserves UNKNOWN and precedes the immutable fallback, whose exposure has one winner", async ({ page, context }) => {

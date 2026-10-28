@@ -5,7 +5,8 @@ import { inspectReverseRecoveryPlaintext } from "../src/recoveryInspection";
 import { parseTransaction } from "../src/swap/transaction";
 import { minimumClaimFeeReserveSat } from "../src/swap/reverseExecution";
 import { FRESH_READ_ATTEMPTS } from "../src/swap/reverseClaim";
-import { hexToBytes } from "@noble/hashes/utils.js";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 
 const API = "http://127.0.0.1:8091/api", BROADCAST = "http://127.0.0.1:8092/api", NODE = "http://127.0.0.1:8093";
 async function paidFixture() {
@@ -57,6 +58,14 @@ test("the default path exposes the authenticated invoice after acceptance, journ
   await expect(e.exposeInvoice(f.assertCurrent)).rejects.toThrow(); // shown once
   await expect(e.planPayment(f.payer, NODE, 10n, f.assertCurrent)).rejects.toThrow(); expect(f.events).not.toContain("plan");
   const file = await e.receiveFunding(); expect(f.events.slice(-1)).toEqual(["funded"]); expect(file.length).toBeGreaterThan(0); e.dispose();
+});
+test("the shown invoice text is journaled with its exposure, so Resume can show it again", async () => {
+  const f = await executionFixture(), e = await f.prepare(); await e.accept(f.assertCurrent);
+  const exposure = await e.exposeInvoice(f.assertCurrent);
+  expect(f.record.payment?.state === "external-wallet" && f.record.payment.bolt11).toBe(exposure.bolt11);
+  // The journal refuses text that does not hash to the signed binding; this is that text.
+  expect(bytesToHex(sha256(new TextEncoder().encode(exposure.bolt11)))).toBe(f.terms.invoice_binding.bolt11_sha256);
+  e.dispose();
 });
 test("a storage refusal while exposing the invoice keeps it private", async () => {
   const f = await executionFixture(), e = await f.prepare(); await e.accept(f.assertCurrent); f.fail = "payment-unknown";
