@@ -3,9 +3,11 @@
 Every consequential step is recorded before its external effect:
 
 - ``FUNDING_SEEN``: the exact bound output must have ``funding_confirmations``
-  on our own node, and the signed ``max_outgoing_htlc_expiry_height`` must
-  still leave the invoice's final CLTV. Then ``PAYING`` is recorded (or
-  ``FAILED`` with a ``payment_failed`` observation).
+  on our own node (with 0, be unspent in its mempool view; the provider takes
+  the client's double-spend risk), and the signed
+  ``max_outgoing_htlc_expiry_height`` must still leave the invoice's final
+  CLTV. Then ``PAYING`` is recorded (or ``FAILED`` with a ``payment_failed``
+  observation).
 - ``PAYING``: reconcile first. An affirmative ``UNSENT`` grant plus fresh
   funding permits read-only route preparation. Commit the exact request and
   consume the grant before sending once. The route's absolute expiry cannot
@@ -80,7 +82,12 @@ if TYPE_CHECKING:
     from rill_core.settlement.taproot import TaprootKeyOperations
     from rill_core.wire.messages import ContractTerms, FundingBinding, InvoiceBinding
 
-    from rill_provider.core_tx_bytes import CandidateFundingOutpoint, FundedOutput, SpendScan
+    from rill_provider.core_tx_bytes import (
+        CandidateFundingOutpoint,
+        FundedOutput,
+        MempoolFundingOutpoint,
+        SpendScan,
+    )
     from rill_provider.live_session_store import (
         ClaimAttempt,
         LiveSessionStore,
@@ -104,6 +111,12 @@ class ChainBackend(Protocol):
         self, binding: FundingBinding, terms: ContractTerms, *, keys: TaprootKeyOperations
     ) -> CandidateFundingOutpoint:
         """Return the exact bound output's confirmations or raise."""
+        ...
+
+    def observe_mempool_outpoint(
+        self, binding: FundingBinding, terms: ContractTerms, *, keys: TaprootKeyOperations
+    ) -> MempoolFundingOutpoint:
+        """Return the exact output, unspent counting the mempool, at any depth, or raise."""
         ...
 
     def observe_cooperative_claim_outpoint(
@@ -1112,13 +1125,11 @@ class SettlementEngine:
         if item.state == "FUNDING_SEEN":
             if item.blocked or not self._new_exposure_allowed:
                 return item.state
-            seen = await asyncio.to_thread(
-                self._chain.observe_candidate_outpoint, binding, terms, keys=self._crypto
-            )
-            if seen.chain_only_confirmations < terms.funding_confirmations:
+            funded_tip = await self._funded_tip(binding, terms)
+            if funded_tip is None:
                 return item.state
             if (
-                seen.tip_height + invoice.min_final_cltv_delta >= expiry_height
+                funded_tip + invoice.min_final_cltv_delta >= expiry_height
                 or now >= invoice.expires_at
             ):
                 return self._move(item, "FAILED", now, observation={"kind": "payment_failed"})
@@ -1362,10 +1373,7 @@ class SettlementEngine:
         # payment against a stale confirmation or newly blocked session.
         if item.blocked or item.payment_dispatch != "UNSENT" or not self._new_exposure_allowed:
             return outcome
-        seen = await asyncio.to_thread(
-            self._chain.observe_candidate_outpoint, binding, terms, keys=self._crypto
-        )
-        if seen.chain_only_confirmations < terms.funding_confirmations:
+        if await self._funded_tip(binding, terms) is None:
             return outcome
         if now >= invoice.expires_at or (
             hashlib.sha256(item.invoice.encode("ascii")).hexdigest() != invoice.bolt11_sha256
@@ -1394,6 +1402,25 @@ class SettlementEngine:
             return outcome
         return await asyncio.to_thread(self._lightning.send, payment)
 
+    async def _funded_tip(self, binding: FundingBinding, terms: ContractTerms) -> int | None:
+        """Return the sampled tip once the funding meets the signed depth, else None.
+
+        Zero-confirmation terms pay on the output being unspent in the node's
+        mempool view: the provider announced that it accepts the client's
+        double-spend risk. Every other depth needs confirmed chain evidence.
+        """
+        if terms.funding_confirmations == 0:
+            mempool = await asyncio.to_thread(
+                self._chain.observe_mempool_outpoint, binding, terms, keys=self._crypto
+            )
+            return mempool.tip_height
+        seen = await asyncio.to_thread(
+            self._chain.observe_candidate_outpoint, binding, terms, keys=self._crypto
+        )
+        if seen.chain_only_confirmations < terms.funding_confirmations:
+            return None
+        return seen.tip_height
+
     async def _maybe_lost(
         self,
         item: SettlementItem,
@@ -1415,7 +1442,9 @@ class SettlementEngine:
             funding_depth = await asyncio.to_thread(self._chain.confirmations, binding.funding_txid)
         except CoreTransactionUnknownError:
             funding_depth = 0
-        if funding_depth < terms.funding_confirmations or tip <= terms.refund_lock_height:
+        # Paying from the mempool (0) still needs a mined funding to call it lost.
+        required = max(1, terms.funding_confirmations)
+        if funding_depth < required or tip <= terms.refund_lock_height:
             LOG.warning("contract output missing while funding is unconfirmed; waiting")
             if item.outpoint_spent_height is not None:
                 self._store.observe_outpoint_spent(item.session_id, None)

@@ -433,6 +433,25 @@ def test_a_missing_output_is_not_a_refund_while_funding_is_unconfirmed_or_early(
     assert (store.spent, store.moves) == ([None], [])  # an old anchor is dropped
 
 
+def test_zero_conf_terms_still_need_a_mined_funding_before_a_loss_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Paying from the mempool never makes a missing output a refund: the funding
+    # may have been double-spent or not yet mined, which proves nothing.
+    zero = TERMS.model_copy(update={"funding_confirmations": 0})
+    item = replace(ITEM, state="CLAIMING")
+    engine, store, _chain = _lost_engine(
+        monkeypatch, 1105, unspent=False, depths={}, funding_depth=0
+    )
+    assert asyncio.run(engine._claiming(item, zero, BINDING, 1500)) == "CLAIMING"  # noqa: SLF001
+    assert (store.spent, store.moves) == ([], [])
+    engine, store, _chain = _lost_engine(
+        monkeypatch, 1105, unspent=False, depths={}, funding_depth=1
+    )
+    assert asyncio.run(engine._claiming(item, zero, BINDING, 1500)) == "CLAIMING"  # noqa: SLF001
+    assert (store.spent, store.moves) == ([ANCHOR], [])  # mined once: the wait may start
+
+
 def test_an_anchor_that_left_the_active_chain_restarts_the_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

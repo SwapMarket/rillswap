@@ -202,6 +202,38 @@ def test_conflict_before_dispatch_commit_prevents_send(monkeypatch: pytest.Monke
     lightning.send.assert_not_called()
 
 
+ZERO_CONF = TERMS.model_copy(update={"funding_confirmations": 0})
+
+
+def test_zero_conf_restart_sends_on_a_fresh_mempool_sample_only() -> None:
+    engine, chain, lightning = _backends(PaymentOutcome("UNKNOWN"))
+    chain.observe_candidate_outpoint.side_effect = AssertionError("confirmed sampler used")
+    result = asyncio.run(engine._pay(ITEM, ZERO_CONF, BINDING, 1070, DOCUMENT["created_at"]))  # noqa: SLF001
+    assert result == PaymentOutcome("IN_FLIGHT")
+    chain.observe_mempool_outpoint.assert_called_once_with(BINDING, ZERO_CONF, keys=engine._crypto)  # noqa: SLF001
+    lightning.send.assert_called_once()
+
+
+def test_zero_conf_never_sends_when_the_mempool_sample_fails() -> None:
+    engine, chain, lightning = _backends(PaymentOutcome("UNKNOWN"))
+    chain.observe_mempool_outpoint.side_effect = ValueError("output spent in the mempool")
+    with pytest.raises(ValueError, match="spent in the mempool"):
+        asyncio.run(engine._pay(ITEM, ZERO_CONF, BINDING, 1070, DOCUMENT["created_at"]))  # noqa: SLF001
+    lightning.send.assert_not_called()
+
+
+def test_funded_tip_uses_mempool_evidence_only_for_zero_conf_terms() -> None:
+    engine, chain, _ = _backends(PaymentOutcome("UNKNOWN"))
+    chain.observe_mempool_outpoint.return_value.tip_height = 990
+    chain.observe_candidate_outpoint.return_value.tip_height = 991
+    assert asyncio.run(engine._funded_tip(BINDING, ZERO_CONF)) == 990  # noqa: SLF001
+    assert TERMS.funding_confirmations == 2  # the sampler reports exactly 2
+    assert asyncio.run(engine._funded_tip(BINDING, TERMS)) == 991  # noqa: SLF001
+    chain.observe_candidate_outpoint.return_value.chain_only_confirmations = 1
+    assert asyncio.run(engine._funded_tip(BINDING, TERMS)) is None  # noqa: SLF001
+    chain.observe_mempool_outpoint.assert_called_once()
+
+
 @pytest.mark.parametrize("pending", [False, True])
 def test_exposure_release_asks_the_tip_only_when_a_terminal_swap_holds_capacity(
     pending: bool,  # noqa: FBT001

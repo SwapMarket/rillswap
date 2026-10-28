@@ -171,6 +171,22 @@ class CandidateFundingOutpoint:
 
 
 @dataclass(frozen=True, slots=True)
+class MempoolFundingOutpoint:
+    """Named-tip sample of the contract output, unspent in Core's mempool view.
+
+    Evidence only for terms that pay at zero confirmations: Core knows the
+    exact funding transaction and nothing in its mempool spends the output.
+    The funder can still double-spend an unconfirmed transaction.
+    """
+
+    network_identity: NetworkIdentity
+    static_match: FundingBindingTransactionMatch
+    tip_hash: str
+    tip_height: int
+    confirmations: int  # 0 while only in the mempool
+
+
+@dataclass(frozen=True, slots=True)
 class CooperativeClaimOutpoint:
     """One named-tip confirmed UTXO sample with mempool spends considered.
 
@@ -902,6 +918,51 @@ class CoreTransactionReader:
             inclusion_hash,
         )
 
+    def observe_mempool_outpoint(
+        self,
+        binding: FundingBinding,
+        terms: ContractTerms,
+        *,
+        keys: TaprootKeyOperations,
+    ) -> MempoolFundingOutpoint:
+        """Sample the output as unspent counting mempool transactions, at any depth.
+
+        Only zero-confirmation BTC to LN terms may act on this: the provider
+        accepts that the client can still double-spend the funding. Unknown or
+        unstable facts fail closed exactly like the confirmed sampler.
+        """
+        if terms.profile_id != "btc-to-ln/v1" or terms.funding_confirmations != 0:
+            raise ValueError("mempool funding evidence is only for zero-confirmation BTC to LN")
+        if not isinstance(binding, FundingBinding):
+            raise TypeError("a parsed binding is required")
+        if not isinstance(terms.network_identity, NetworkIdentity) or (
+            terms.network_identity != self._network
+        ):
+            raise ValueError("binding terms and configured full network identity differ")
+        try:
+            with self._client() as client:
+                tip_hash, tip_height = _chain_tip(
+                    self._rpc(client, "getblockchaininfo", [], 1), self._network
+                )
+                if self._rpc(client, "getblockhash", [0], 2) != self._network.genesis_hash:
+                    raise CoreProtocolError("Core genesis differs from configuration")
+                raw = _transaction_bytes(
+                    self._rpc(client, "getrawtransaction", [binding.funding_txid, False], 3)
+                )
+                match = check_funding_binding_transaction(raw, binding, terms, keys=keys)
+                output = self._rpc(
+                    client, "gettxout", [binding.funding_txid, binding.contract_vout, True], 4
+                )
+                confirmations = _checked_outpoint(output, binding, tip_height, minimum=0)
+                end_hash, end_height = _chain_tip(
+                    self._rpc(client, "getblockchaininfo", [], 5), self._network
+                )
+        except httpx.HTTPError:
+            raise CoreUnavailableError("Core RPC transport unavailable") from None
+        if tip_hash != end_hash or tip_height != end_height or output["bestblock"] != tip_hash:
+            raise CoreUnavailableError("Core chain view changed; no current outpoint proof")
+        return MempoolFundingOutpoint(self._network, match, tip_hash, tip_height, confirmations)
+
     def observe_cooperative_claim_outpoint(
         self,
         binding: FundingBinding,
@@ -1615,7 +1676,9 @@ def _transaction_bytes(raw_hex: object) -> bytes:
     return bytes.fromhex(raw_hex)
 
 
-def _checked_outpoint(output: object, binding: FundingBinding, tip_height: int) -> int:
+def _checked_outpoint(
+    output: object, binding: FundingBinding, tip_height: int, *, minimum: int = 1
+) -> int:
     if output is None:
         raise CoreUnavailableError("contract outpoint unavailable; not proof of absence")
     count = output.get("confirmations") if isinstance(output, dict) else None
@@ -1623,7 +1686,7 @@ def _checked_outpoint(output: object, binding: FundingBinding, tip_height: int) 
         not isinstance(output, dict)
         or isinstance(count, bool)
         or not isinstance(count, int)
-        or not 1 <= count <= tip_height
+        or not minimum <= count <= tip_height
         or not _hash(output.get("bestblock"))
         or output.get("coinbase") is not False
         or not isinstance(output.get("scriptPubKey"), dict)

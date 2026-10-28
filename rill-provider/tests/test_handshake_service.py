@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import os
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -668,8 +669,9 @@ def test_native_sequence_reuse_conflicts_whatever_the_label(
 
 @pytest.mark.native_crypto
 @NATIVE
+@pytest.mark.parametrize("funding_depth", [2, 0])
 def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: PLR0915
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, funding_depth: int
 ) -> None:
     from rill_core.settlement.taproot import reconstruct_taproot_contract  # noqa: PLC0415
     from rill_core.settlement.unilateral import (  # noqa: PLC0415
@@ -710,7 +712,7 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: P
         slot="s",
         relay_urls=("ws://r/",),
         provider_destination_script=CONTRACT["provider_destination_script"],
-        quote=FIRM_SCHEDULE,
+        quote=replace(FIRM_SCHEDULE, funding_confirmations=funding_depth),
     )
     decoded: list[str] = []
 
@@ -889,6 +891,12 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: P
         chain.observe_candidate_outpoint = lambda _b, _t, *, keys: SimpleNamespace(  # noqa: ARG005
             chain_only_confirmations=chain.depth, tip_height=850
         )
+        mempool_samples: list[int] = []
+        # Zero-confirmation terms pay on the output being unspent in the mempool.
+        chain.observe_mempool_outpoint = lambda _b, t, *, keys: (  # noqa: ARG005
+            mempool_samples.append(t.funding_confirmations)
+            or SimpleNamespace(confirmations=0, tip_height=850)
+        )
         chain.broadcast = lambda raw, txid: chain.broadcasts.append((raw, txid)) or txid
         chain.confirmations = lambda _txid: chain.claim_depth
         chain.outpoint_unspent = lambda _txid, _vout: True
@@ -919,9 +927,15 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: P
         lightning = SimpleNamespace(track=track, prepare=prepare, send=send)
         engine = SettlementEngine(store, chain, lightning, crypto)
         later = BINDING.created_at + 10
-        assert asyncio.run(engine.tick(later)) == {}  # one confirmation is not enough
-        chain.depth = 2
+        assert terms.funding_confirmations == funding_depth  # signed as configured
+        if funding_depth:
+            assert asyncio.run(engine.tick(later)) == {}  # one confirmation is not enough
+            chain.depth = 2
+        else:
+            chain.depth = 0  # unconfirmed: only the mempool sample may authorize payment
         progressed = asyncio.run(engine.tick(later))
+        # Both payment gates (FUNDING_SEEN and the PAYING re-check) sampled the mempool.
+        assert mempool_samples == ([] if funding_depth else [0, 0])
         (session_id,) = progressed
         assert progressed == {session_id: "CLAIMING"}, (progressed, sent)
         assert store.settlement_work()[0].state == "CLAIMING"

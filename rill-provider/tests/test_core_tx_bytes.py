@@ -670,6 +670,76 @@ def test_candidate_is_a_named_tip_utxo_sample_not_lineage_authority(
     assert len(requests) == 7
 
 
+@pytest.mark.parametrize("depth", [0, 3])
+def test_zero_conf_sample_accepts_an_unspent_mempool_output_at_any_depth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, depth: int
+) -> None:
+    terms, binding, network = _context()
+    terms = terms.model_copy(update={"funding_confirmations": 0})
+    match = FundingBindingTransactionMatch(
+        binding.funding_txid,
+        binding.contract_vout,
+        binding.lineage_anchor_txid,
+        binding.lineage_anchor_vout,
+    )
+    monkeypatch.setattr(core_tx_bytes, "check_funding_binding_transaction", lambda *_a, **_k: match)
+    requests: list[dict[str, Any]] = []
+    change = "zero-confirms" if depth == 0 else "none"
+    with _server(
+        lambda payload: _candidate_reply(payload, binding, change=change), requests
+    ) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        result = reader.observe_mempool_outpoint(binding, terms, keys=None)  # type: ignore[arg-type]
+    assert type(result) is core_tx_bytes.MempoolFundingOutpoint
+    assert (result.static_match, result.tip_hash, result.tip_height) == (match, "aa" * 32, 105)
+    assert result.confirmations == depth
+    assert [request["method"] for request in requests] == [
+        "getblockchaininfo",
+        "getblockhash",
+        "getrawtransaction",
+        "gettxout",
+        "getblockchaininfo",
+    ]
+    # Mempool spends count: a double-spend or our own claim hides the output.
+    assert requests[3]["params"] == [binding.funding_txid, binding.contract_vout, True]
+
+
+@pytest.mark.parametrize(
+    ("change", "error"),
+    [
+        ("null", core_tx_bytes.CoreUnavailableError),
+        ("mempool-spend", core_tx_bytes.CoreUnavailableError),
+        ("negative-confirms", core_tx_bytes.CoreProtocolError),
+        ("coinbase", core_tx_bytes.CoreProtocolError),
+        ("wrong-genesis", core_tx_bytes.CoreProtocolError),
+    ],
+)
+def test_zero_conf_sample_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str, error: type[Exception]
+) -> None:
+    terms, binding, network = _context()
+    terms = terms.model_copy(update={"funding_confirmations": 0})
+    match = FundingBindingTransactionMatch(
+        binding.funding_txid,
+        binding.contract_vout,
+        binding.lineage_anchor_txid,
+        binding.lineage_anchor_vout,
+    )
+    monkeypatch.setattr(core_tx_bytes, "check_funding_binding_transaction", lambda *_a, **_k: match)
+    with _server(lambda payload: _candidate_reply(payload, binding, change=change), []) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        with pytest.raises(error):
+            reader.observe_mempool_outpoint(binding, terms, keys=None)  # type: ignore[arg-type]
+
+
+def test_zero_conf_sample_is_refused_for_terms_that_need_confirmations(tmp_path: Path) -> None:
+    terms, binding, network = _context()
+    assert terms.funding_confirmations > 0
+    reader = CoreTransactionReader(port=9, cookie_path=_cookie(tmp_path), network=network)
+    with pytest.raises(ValueError, match="only for zero-confirmation"):
+        reader.observe_mempool_outpoint(binding, terms, keys=None)  # type: ignore[arg-type]
+
+
 def test_cooperative_claim_sample_considers_mempool_without_granting_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
