@@ -204,7 +204,9 @@ class HandshakeService:
         self._readiness_ready: dict[str, ReadinessChallenge] = {}
         self._readiness_issued: set[str] = set()
         self._readiness_closed = False
-        self._fresh_featured_accepts: dict[str, tuple[str, float]] = {}
+        # session -> contract digest of a featured acceptance answered by this
+        # process, kept while its swap still awaits the first funding binding.
+        self._fresh_featured_accepts: dict[str, str] = {}
         self._probe_supervision_needed = False
 
     def _now(self) -> int:
@@ -417,6 +419,26 @@ class HandshakeService:
             return await self._prepare_ready_echo(challenge)
         return "readiness-admitted"
 
+    def _expire_fresh_accepts(self) -> None:
+        """Forget acceptances whose swap no longer awaits its first binding.
+
+        The funding window, not the pre-acceptance handshake timeout, bounds
+        them: a browser binds only after its deposit confirms, often more than
+        ten minutes after accepting. The store ends that window (bound,
+        closed unfunded, or aborted); entries never outlive their ACCEPTED row.
+        """
+        if not self._fresh_featured_accepts:
+            return
+        try:
+            awaiting = {session_id for session_id, _ in self._store.unfunded_swaps()}
+        except StaleOwnerError:
+            raise
+        except LiveSessionStoreError:
+            return  # keep entries; registration rechecks the store
+        for session_id in tuple(self._fresh_featured_accepts):
+            if session_id not in awaiting:
+                del self._fresh_featured_accepts[session_id]
+
     def _expire_readiness(self) -> None:
         now = self._deadline_now()
         for session_id, challenge in tuple(self._readiness_probes.items()):
@@ -507,12 +529,10 @@ class HandshakeService:
         """Install the current filter on one (re)connected relay."""
         await relay.subscribe(self._filters())
 
-    async def tick(self, relays: Sequence[Relay]) -> None:  # noqa: PLR0912 - one periodic duty per branch
+    async def tick(self, relays: Sequence[Relay]) -> None:
         """Rotate epochs, refresh the announcement, resubscribe, retry the outbox."""
         self._expire_readiness()
-        for session_id, (_, expires) in tuple(self._fresh_featured_accepts.items()):
-            if time.monotonic() >= expires:
-                del self._fresh_featured_accepts[session_id]
+        self._expire_fresh_accepts()
         policy, state, now = self._policy, self._state, self._now()
         epochs = self._store.rotate_epochs(
             now=now,
@@ -1248,17 +1268,11 @@ class HandshakeService:
             digest = request.contract_hash
             if digest is not None and request.message_type == "terms_accept":
                 if self._store.admitted_featured_claim(request.session_id, digest):
-                    self._fresh_featured_accepts[request.session_id] = (
-                        digest,
-                        time.monotonic() + policy.handshake_timeout,
-                    )
+                    self._fresh_featured_accepts[request.session_id] = digest
             elif digest is not None and request.message_type == "funding_binding":
                 fresh = self._fresh_featured_accepts.pop(request.session_id, None)
-                if (
-                    fresh is not None
-                    and fresh[0] == digest
-                    and time.monotonic() < fresh[1]
-                    and self._settlement.register_new_featured_session(request.session_id, digest)
+                if fresh == digest and self._settlement.register_new_featured_session(
+                    request.session_id, digest
                 ):
                     self._probe_supervision_needed = True
         # A replay re-sends the recorded answer (RS-001 stable replay).

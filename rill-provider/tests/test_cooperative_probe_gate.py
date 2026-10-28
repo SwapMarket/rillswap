@@ -363,16 +363,16 @@ def test_supervisor_recovers_due_probe_while_settlement_tick_is_hung(
     asyncio.run(scenario())
 
 
-def test_service_requires_first_accept_and_first_binding_under_same_owner(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def scenario() -> None:
+class _FeaturedService:
+    """A forward-profile service whose store answers every request with an ack."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import rill_provider.handshake_service as service_module  # noqa: PLC0415 - request policy mock
 
-        session, digest = "aa" * 32, "bb" * 32
-        store, settlement = Mock(), Mock()
-        store.admitted_featured_claim.return_value = True
-        settlement.register_new_featured_session.return_value = True
+        self.session, self.digest = "aa" * 32, "bb" * 32
+        self.store, self.settlement = Mock(), Mock()
+        self.store.admitted_featured_claim.return_value = True
+        self.settlement.register_new_featured_session.return_value = True
         policy = Mock(
             relay_urls=(),
             amount_bands=(),
@@ -382,41 +382,51 @@ def test_service_requires_first_accept_and_first_binding_under_same_owner(
             profile="btc-to-ln/v1",
             handshake_timeout=600,
         )
-        service = HandshakeService(store, Mock(), Mock(), policy, settlement=settlement)
-        monkeypatch.setattr(service, "_decode_invoice", AsyncMock(return_value=None))
-        monkeypatch.setattr(service, "_route_ready", AsyncMock(side_effect=lambda _d, t: t))
-        monkeypatch.setattr(service, "_open_hold", AsyncMock(return_value=None))
-        monkeypatch.setattr(service, "_send_pending", AsyncMock(return_value=None))
+        self.service = HandshakeService(
+            self.store, Mock(), Mock(), policy, settlement=self.settlement
+        )
+        monkeypatch.setattr(self.service, "_decode_invoice", AsyncMock(return_value=None))
+        monkeypatch.setattr(self.service, "_route_ready", AsyncMock(side_effect=lambda _d, t: t))
+        monkeypatch.setattr(self.service, "_open_hold", AsyncMock(return_value=None))
+        monkeypatch.setattr(self.service, "_send_pending", AsyncMock(return_value=None))
         monkeypatch.setattr(
             service_module, "answer_client_request", lambda *_args: Answer("ack", {})
         )
         context = Mock()
-        replay = [False]
+        self.replay = [False]
 
         def respond(document: bytes, *, responder: object, **_kwargs: object) -> RequestAnswer:
             from rill_core.wire.messages import Envelope  # noqa: PLC0415 - fixture parse
 
             request = Envelope.model_validate_json(document, strict=True)
-            if not replay[0]:
+            if not self.replay[0]:
                 responder(request, (), context)  # type: ignore[operator]
-            return RequestAnswer(session, request.message_id, "cc" * 32, replay[0])
+            return RequestAnswer(self.session, request.message_id, "cc" * 32, self.replay[0])
 
-        store.answer_request.side_effect = respond
+        self.store.answer_request.side_effect = respond
         from test_live_session_store import _envelopes  # noqa: PLC0415 - signed structural fixture
 
         _, envelopes = _envelopes()
-        template = envelopes[2]
+        self._template = envelopes[2]
 
-        def request(kind: str, *, contract: str = digest) -> bytes:
-            message = template | {
-                "message_type": kind,
-                "session_id": session,
-                "contract_hash": contract,
-                "message_id": ("dd" if kind == "terms_accept" else "ee") * 32,
-                "payload": {},
-            }
-            return canonicalize(message)
+    def request(self, kind: str, *, contract: str | None = None) -> bytes:
+        message = self._template | {
+            "message_type": kind,
+            "session_id": self.session,
+            "contract_hash": self.digest if contract is None else contract,
+            "message_id": ("dd" if kind == "terms_accept" else "ee") * 32,
+            "payload": {},
+        }
+        return canonicalize(message)
 
+
+def test_service_requires_first_accept_and_first_binding_under_same_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        fixture = _FeaturedService(monkeypatch)
+        service, settlement, request = fixture.service, fixture.settlement, fixture.request
+        session, digest, replay = fixture.session, fixture.digest, fixture.replay
         replay[0] = True
         assert await service._answer(request("terms_accept"), [], 1000) == "request-replay"  # noqa: SLF001
         replay[0] = False
@@ -434,5 +444,53 @@ def test_service_requires_first_accept_and_first_binding_under_same_owner(
         assert await service._answer(request("funding_binding"), [], 1000) == "request-answered"  # noqa: SLF001
         settlement.register_new_featured_session.assert_called_once_with(session, digest)
         assert service._probe_supervision_needed  # noqa: SLF001 - deadline supervisor gate
+
+    asyncio.run(scenario())
+
+
+class _AnHourLater:
+    """The handshake module's clock, an hour (six handshake timeouts) ahead."""
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(time, name)
+
+    @staticmethod
+    def monotonic() -> float:
+        return time.monotonic() + 3600
+
+
+def test_a_binding_after_a_slow_deposit_confirmation_keeps_cooperation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A browser binds only once its deposit confirms, often past the handshake timeout."""
+
+    async def scenario() -> None:
+        import rill_provider.handshake_service as service_module  # noqa: PLC0415 - module clock
+
+        fixture = _FeaturedService(monkeypatch)
+        service, store, settlement = fixture.service, fixture.store, fixture.settlement
+        session, digest, request = fixture.session, fixture.digest, fixture.request
+        store.unfunded_swaps.return_value = [(session, b"offer")]
+        assert await service._answer(request("terms_accept"), [], 1000) == "request-answered"  # noqa: SLF001
+        monkeypatch.setattr(service_module, "time", _AnHourLater())
+        service._expire_fresh_accepts()  # noqa: SLF001 - the tick's duty: still awaiting funding
+        assert await service._answer(request("funding_binding"), [], 1000) == "request-answered"  # noqa: SLF001
+        settlement.register_new_featured_session.assert_called_once_with(session, digest)
+
+        # The acceptance lives exactly as long as the swap awaits its first binding.
+        settlement.register_new_featured_session.reset_mock()
+        assert await service._answer(request("terms_accept"), [], 1000) == "request-answered"  # noqa: SLF001
+        store.unfunded_swaps.side_effect = live.LiveSessionStoreError("swap listing refused")
+        service._expire_fresh_accepts()  # noqa: SLF001 - unknown store state forgets nothing
+        assert service._fresh_featured_accepts == {session: digest}  # noqa: SLF001
+        store.unfunded_swaps.side_effect = live.StaleOwnerError("ownership lost")
+        with pytest.raises(live.StaleOwnerError):  # lost ownership is fatal, never swallowed
+            service._expire_fresh_accepts()  # noqa: SLF001
+        store.unfunded_swaps.side_effect = None
+        store.unfunded_swaps.return_value = []  # closed unfunded (or aborted)
+        service._expire_fresh_accepts()  # noqa: SLF001
+        assert service._fresh_featured_accepts == {}  # noqa: SLF001
+        assert await service._answer(request("funding_binding"), [], 1000) == "request-answered"  # noqa: SLF001
+        settlement.register_new_featured_session.assert_not_called()
 
     asyncio.run(scenario())
