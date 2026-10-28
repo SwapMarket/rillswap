@@ -16,7 +16,7 @@ without the provider, the website or any RillSwap service.
     <td width="50%"><img src="rill-docs/images/checkout-methods.png" alt="RillPay checkout dialog offering Lightning, Bitcoin, USDC, USDT and Monero"></td>
   </tr>
   <tr>
-    <td align="center">Swap app: pay a Lightning invoice with on-chain BTC</td>
+    <td align="center">Swap app: BTC to Lightning with any provider on the open market</td>
     <td align="center">RillPay merchant checkout (local demo shop, test assets)</td>
   </tr>
 </table>
