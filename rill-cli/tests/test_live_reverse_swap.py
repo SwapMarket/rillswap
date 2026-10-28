@@ -26,8 +26,8 @@ from rill_provider.quote_policy import ClaimFeeRate
 from test_live_swap import NATIVE, NETWORK, PROVIDER_TESTS, TIP, FakeWallet
 
 from rill_cli.age_container import X25519Credentials, verify_export_ciphertext
-from rill_cli.live_reverse_swap import ReverseSwapLimits, run_reverse_swap
-from rill_cli.swap_command import _write_recovery_snapshot
+from rill_cli.live_reverse_swap import ReverseSwapLimits, ReverseSwapOutcome, run_reverse_swap
+from rill_cli.swap_command import _reverse_report, _write_recovery_snapshot
 from rill_cli.wallet_rpc import ConfirmedOutput
 
 if TYPE_CHECKING:
@@ -462,6 +462,8 @@ def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(  # noqa:
     # The claim pays exactly the reserve: the destination receives exactly D.
     (paid,) = inspect_transaction_outputs(chain.claims[0]).outputs
     assert paid.value_sat == PAYOUT
+    assert outcome.claim_fee_sat == 155
+    assert outcome.payout_sat - outcome.claim_fee_sat == paid.value_sat
     assert set(chain.provider_broadcasts) == {outcome.funding_txid}  # idempotent rebroadcast
     # The hold was settled with the preimage revealed by the claim witness.
     initial = json.loads(recoveries[0])
@@ -484,3 +486,10 @@ def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(  # noqa:
     timing = initial["contract_terms"]["timing_policy"]
     assert payment["min_final_expiry_height"] == timing["min_incoming_htlc_expiry_height"]
     assert payment["fee_limit_sat"] == 100
+
+
+def test_reverse_report_states_the_amount_received_and_the_claim_fee() -> None:
+    outcome = ReverseSwapOutcome("session", "contract", "funding", "claim", 50016, 16)
+    assert _reverse_report(outcome) == (
+        "Received 50000 sat (claim fee 16 sat). claim claim (funding funding, contract contract)"
+    )

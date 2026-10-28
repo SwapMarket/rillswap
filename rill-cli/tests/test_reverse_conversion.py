@@ -200,7 +200,9 @@ def test_owner_durably_invokes_checkpoints_dispatches_and_never_completes(
             else "FAILED"
         )
         assert harness.pay(kwargs["payer"]) == "IN_FLIGHT"
-        return ReverseSwapOutcome("session", PACKAGE["contract_hash"], "e" * 64, "f" * 64, 100500)
+        return ReverseSwapOutcome(
+            "session", PACKAGE["contract_hash"], "e" * 64, "f" * 64, 100500, 500
+        )
 
     monkeypatch.setattr(module, "run_reverse_swap", runner)
     outcome = asyncio.run(

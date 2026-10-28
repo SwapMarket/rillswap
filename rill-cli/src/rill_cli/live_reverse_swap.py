@@ -302,13 +302,18 @@ class ReverseSwapLimits:
 
 @dataclass(frozen=True, slots=True)
 class ReverseSwapOutcome:
-    """A claimed swap: the claim transaction pays the client's destination."""
+    """A claimed swap: the claim transaction pays the client's destination.
+
+    ``payout_sat`` is the contract value; the destination receives it less
+    ``claim_fee_sat``, the fee of the confirmed claim transaction.
+    """
 
     session_id: str
     contract_hash: str
     funding_txid: str
     claim_txid: str
     payout_sat: int
+    claim_fee_sat: int
 
 
 def minimum_claim_fee_reserve_sat(
@@ -1401,10 +1406,12 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
             if outcome != "claim_confirmed" or claim_txid is None:
                 raise SwapError("the contract was spent by another transaction; " + _UNRESOLVED)
             report(f"claim {claim_txid} confirmed")
+            # No recorded txids are passed, so the confirmed claim is one of our
+            # attempts; its fee is what the destination did not receive.
+            selected = [attempt for attempt in watcher.attempts if attempt.txid == claim_txid]
+            if len(selected) != 1:
+                raise SwapError("the confirmed claim is unresolved; " + _UNRESOLVED)
             if settlement_observer is not None:
-                selected = [attempt for attempt in watcher.attempts if attempt.txid == claim_txid]
-                if len(selected) != 1:
-                    raise SwapError("selected claim settlement is unresolved; " + _UNRESOLVED)
                 await _await_claim_settlement(
                     lifetime,
                     settlement_observer,
@@ -1417,7 +1424,12 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
                 )
                 lifetime.check()
             return ReverseSwapOutcome(
-                session.session_id, contract, binding.funding_txid, claim_txid, value
+                session.session_id,
+                contract,
+                binding.funding_txid,
+                claim_txid,
+                value,
+                selected[0].fee_sat,
             )
     except TimeoutError:
         raise SwapError("original reverse settlement lifetime expired; " + _UNRESOLVED) from None

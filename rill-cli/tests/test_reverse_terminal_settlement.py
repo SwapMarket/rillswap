@@ -477,27 +477,38 @@ def test_native_sdk_explicit_terminal_mode_uses_original_claim_and_lifetime(  # 
             else (result.claim_txid == sdk.claim_txid)
         )
         assert sdk.wallet.observe_historical_wallet_output.call_count == 3
-        assert len(dataclasses.fields(result)) == 5
+        assert len(dataclasses.fields(result)) == 6
         assert len(sdk.bounds) == 1
         assert len(sdk.broadcasts) == (2 if older else 1)
+        authorization = UnilateralAuthorization.from_terms(
+            sdk.terms,
+            FundingOutput(
+                bytes.fromhex(sdk.binding.funding_txid),
+                sdk.binding.contract_vout,
+                int(sdk.binding.contract_value_sat),
+                bytes.fromhex(sdk.binding.contract_script_pubkey),
+            ),
+            "claim",
+            keys=crypto,
+        )
         if older:
-            authorization = UnilateralAuthorization.from_terms(
-                sdk.terms,
-                FundingOutput(
-                    bytes.fromhex(sdk.binding.funding_txid),
-                    sdk.binding.contract_vout,
-                    int(sdk.binding.contract_value_sat),
-                    bytes.fromhex(sdk.binding.contract_script_pubkey),
-                ),
-                "claim",
-                keys=crypto,
-            )
             first, second = [
                 validate_unilateral_spend(raw, authorization, verifier=crypto)
                 for raw in sdk.broadcasts
             ]
             assert first.txid == result.claim_txid != second.txid
             assert first.fee_sat < second.fee_sat
+            # The older, cheaper claim confirmed: its fee is reported, not the bump's.
+            assert result.claim_fee_sat == first.fee_sat
+        else:
+            validator = (
+                validate_cooperative_claim
+                if claim_path == "cooperative"
+                else validate_unilateral_spend
+            )
+            (only,) = sdk.broadcasts
+            checked = validator(only, authorization, verifier=crypto)
+            assert (checked.txid, checked.fee_sat) == (result.claim_txid, result.claim_fee_sat)
         assert any("signed settlement depth 3" in line for line in sdk.reports)
 
     with Context(library_path=NATIVE_LIBRARY) as crypto:

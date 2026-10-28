@@ -26,7 +26,7 @@ from rill_cli.age_container import (
     verify_export_ciphertext,
 )
 from rill_cli.hold_payment import LndHoldPayer
-from rill_cli.live_reverse_swap import ReverseSwapLimits, run_reverse_swap
+from rill_cli.live_reverse_swap import ReverseSwapLimits, ReverseSwapOutcome, run_reverse_swap
 from rill_cli.live_swap import SwapError, SwapLimits, SwapOutcome, run_swap
 from rill_cli.publication import publish_new_ciphertext
 from rill_cli.wallet_rpc import WalletRpc
@@ -159,6 +159,15 @@ def _forward_report(outcome: SwapOutcome) -> str:
             "do not retry payment or signing."
         )
     return result
+
+
+def _reverse_report(outcome: ReverseSwapOutcome) -> str:
+    """Report what the destination received, not the gross contract value."""
+    return (
+        f"Received {outcome.payout_sat - outcome.claim_fee_sat} sat "
+        f"(claim fee {outcome.claim_fee_sat} sat). claim {outcome.claim_txid} "
+        f"(funding {outcome.funding_txid}, contract {outcome.contract_hash})"
+    )
 
 
 def _funded_path(path: Path) -> Path:
@@ -379,7 +388,4 @@ async def _reverse(  # noqa: PLR0913, PLR0917 - explicit already-built handles
             settle_timeout=args.settle_timeout,
             report=_report,
         )
-    return (
-        f"Claimed {outcome.payout_sat} sat. claim {outcome.claim_txid} "
-        f"(funding {outcome.funding_txid}, contract {outcome.contract_hash})"
-    )
+    return _reverse_report(outcome)

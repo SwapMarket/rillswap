@@ -204,7 +204,7 @@ def test_default_sdk_keywords_unchanged_and_opt_in_adds_only_original_capture(
     async def sdk(*_args: object, **kwargs: object) -> object:
         seen.append(kwargs)
         return HELPERS.ReverseSwapOutcome(
-            "session", HELPERS.PACKAGE["contract_hash"], "e" * 64, "f" * 64, 100500
+            "session", HELPERS.PACKAGE["contract_hash"], "e" * 64, "f" * 64, 100500, 500
         )
 
     reader = Mock()

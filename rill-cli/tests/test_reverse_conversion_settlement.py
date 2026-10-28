@@ -61,7 +61,9 @@ def test_explicit_settlement_uses_same_wallet_sdk_and_original_dispatch(
     retain_funding_inclusion: bool,
 ) -> None:
     monkeypatch.setattr(module, "CoreTransactionReader", Mock())
-    outcome = ReverseSwapOutcome("session", PACKAGE["contract_hash"], "e" * 64, "f" * 64, 100500)
+    outcome = ReverseSwapOutcome(
+        "session", PACKAGE["contract_hash"], "e" * 64, "f" * 64, 100500, 500
+    )
     observed = object()  # Identity forwarding only, never admitted as chain evidence.
     harness.wallet.observe_historical_wallet_output.return_value = observed
     captured: list[dict[str, Any]] = []
@@ -111,7 +113,9 @@ def test_default_preserves_exact_sdk_keyword_shape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: list[dict[str, Any]] = []
-    outcome = ReverseSwapOutcome("session", PACKAGE["contract_hash"], "e" * 64, "f" * 64, 100500)
+    outcome = ReverseSwapOutcome(
+        "session", PACKAGE["contract_hash"], "e" * 64, "f" * 64, 100500, 500
+    )
 
     async def runner(_connection: object, **kwargs: Any) -> ReverseSwapOutcome:  # noqa: ANN401 - exact synthetic boundary keywords
         captured.append(kwargs)
@@ -152,7 +156,9 @@ def test_nonboolean_mode_refuses_before_consuming_the_original_right(
 
     # Correcting locally rejected input retains the SAME original live right;
     # this is not a retry of an invoked SDK or restored ownership after reopen.
-    outcome = ReverseSwapOutcome("session", PACKAGE["contract_hash"], "e" * 64, "f" * 64, 100500)
+    outcome = ReverseSwapOutcome(
+        "session", PACKAGE["contract_hash"], "e" * 64, "f" * 64, 100500, 500
+    )
 
     async def runner(_connection: object, **kwargs: Any) -> ReverseSwapOutcome:  # noqa: ANN401 - synthetic SDK boundary
         _dispatch(harness, kwargs["payer"])
