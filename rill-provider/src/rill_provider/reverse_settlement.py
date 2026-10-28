@@ -37,6 +37,7 @@ from rill_provider.core_tx_bytes import (
     MAX_SPEND_SCAN_BLOCKS,
     CooperativeClaimOutpoint,
     CooperativeFeePolicy,
+    CoreRpcError,
     ReverseSpendCheckpoint,
 )
 from rill_provider.live_session_store import (
@@ -152,9 +153,14 @@ class ReverseChainBackend(Protocol):
         """Active chain height."""
 
     def observe_cooperative_claim_outpoint(
-        self, binding: FundingBinding, terms: ContractTerms, *, keys: TaprootKeyOperations
+        self,
+        binding: FundingBinding,
+        terms: ContractTerms,
+        *,
+        keys: TaprootKeyOperations,
+        allow_unconfirmed: bool = False,
     ) -> CooperativeClaimOutpoint:
-        """Read the named confirmed unspent output using public-only key results."""
+        """Read the named unspent output using public-only key results."""
 
     def observe_cooperative_fee_policy(
         self, target_blocks: int, *, allow_regtest_fixed_fee: bool = False
@@ -334,11 +340,13 @@ class ReverseSettlement:
     async def _catch_up_funding(self, document: bytes, now: int) -> None:
         """Run this swap's own funding depth step before admitting its proposal.
 
-        The client proposes as soon as its node sees the signed depth, which
+        The client proposes as soon as its node sees the depth it chose, which
         usually precedes the next periodic settlement pass here. Only the
         provider's own Core observation can move FUNDING_SENT to FUNDED; the
-        proposal merely selects which retained session to check first. Any
-        failure leaves the state unchanged and admission then refuses.
+        proposal merely selects which retained session to check first. A
+        client may claim before the signed depth (its own double-spend risk),
+        so admission accepts FUNDING_SENT too; any failure here leaves the
+        state unchanged.
         """
         try:
             session_id = Envelope.model_validate_json(document, strict=True).session_id
@@ -347,7 +355,7 @@ class ReverseSettlement:
                 await self._advance_logged(work[0], now)
         except (asyncio.CancelledError, StaleOwnerError):
             raise
-        except Exception:  # noqa: BLE001 - admission still requires FUNDED
+        except Exception:  # noqa: BLE001 - admission rechecks its own evidence
             LOG.debug("funding catch-up before a reverse proposal did not complete")
 
     async def _advance_logged(self, item: SettlementItem, now: int) -> None:
@@ -411,7 +419,11 @@ class ReverseSettlement:
                             )
                         completed = True
                         return
-                    if len(work) != 1 or work[0].state != "FUNDED" or work[0].preimage is None:
+                    if (
+                        len(work) != 1
+                        or work[0].state not in ("FUNDING_SENT", "FUNDED")
+                        or work[0].preimage is None
+                    ):
                         raise LiveSessionStoreError("reverse original repayment work refused")
                     binding = self._store._reverse_repayment_binding(session_id)  # noqa: SLF001 - same-operation bound-only classification
                     if binding is None or binding != context.terms.invoice_binding:
@@ -488,6 +500,7 @@ class ReverseSettlement:
                             context.binding,
                             context.terms,
                             keys=keys,
+                            allow_unconfirmed=True,
                         )
                     )
                     operation.check()
@@ -615,6 +628,7 @@ class ReverseSettlement:
                         context.binding,
                         context.terms,
                         keys=keys,
+                        allow_unconfirmed=True,
                     )
                 )
                 operation.check()
@@ -671,7 +685,12 @@ class ReverseSettlement:
         return await self._check_operation().worker(partial(function, *args, **kwargs))
 
     async def _step(self, item: SettlementItem, now: int) -> str:
-        if item.preimage is not None and item.state not in {"FUNDED", "REFUNDING", "SETTLED"}:
+        if item.preimage is not None and item.state not in {
+            "FUNDING_SENT",
+            "FUNDED",
+            "REFUNDING",
+            "SETTLED",
+        }:
             raise LiveSessionStoreError("reverse settlement intent in an unexpected state")
         terms = offered_terms(Envelope.model_validate_json(item.terms_offer, strict=True))
         if terms.profile_id != "ln-to-btc/v1":
@@ -803,9 +822,37 @@ class ReverseSettlement:
         return state
 
     async def _funding_sent(self, item: SettlementItem, terms: ContractTerms, now: int) -> str:
-        """Keep the funding broadcast; move to FUNDED at the signed depth."""
+        """Keep the funding broadcast; move to FUNDED at the signed depth.
+
+        A client may claim before that depth, even from the mempool, taking
+        the double-spend risk itself. Recorded debt (a cooperative proposal) or
+        a claim witness already in the mempool settles the hold right away; a
+        claim that confirmed unseen is found by the FUNDED scan, which starts
+        at the funding block.
+        """
+        if item.preimage is not None:
+            # Affirmatively recorded intent: no rebroadcast or depth gate first.
+            return await self._settle_claim(item, terms, now, item.preimage)
         txid, raw = _funding(item)
-        await self._worker(self._chain.broadcast, raw, txid)
+        try:
+            await self._worker(self._chain.broadcast, raw, txid)
+        except CoreRpcError:
+            # Core refuses to relay a confirmed transaction whose outputs an
+            # early claim already spent; only a confirmed copy excuses that.
+            if await self._worker(self._chain.confirmations, txid) < 1:
+                raise
+        tip = await self._worker(self._chain.tip_height)
+        mempool = await self._worker(  # an empty block range: the mempool only
+            self._chain.find_spender,
+            txid,
+            int(item.funding_vout or 0),
+            from_height=tip + 1,
+            to_height=tip,
+        )
+        if mempool.spender is not None:
+            preimage = _preimage_in(mempool.spender.witness, terms.invoice_binding.payment_hash)
+            if preimage is not None:
+                return await self._settle_claim(item, terms, now, preimage)
         depth = await self._worker(self._chain.confirmations, txid)
         if depth < terms.funding_confirmations:
             return item.state

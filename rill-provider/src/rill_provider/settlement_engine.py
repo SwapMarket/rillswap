@@ -120,9 +120,14 @@ class ChainBackend(Protocol):
         ...
 
     def observe_cooperative_claim_outpoint(
-        self, binding: FundingBinding, terms: ContractTerms, *, keys: TaprootKeyOperations
+        self,
+        binding: FundingBinding,
+        terms: ContractTerms,
+        *,
+        keys: TaprootKeyOperations,
+        allow_unconfirmed: bool = False,
     ) -> CooperativeClaimOutpoint:
-        """Sample the exact confirmed outpoint with mempool spends considered."""
+        """Sample the exact outpoint with mempool spends considered (confirmed by default)."""
         ...
 
     def observe_cooperative_fee_policy(

@@ -218,6 +218,10 @@ def test_each_missing_or_mismatched_admission_fact_refuses_without_debt(  # noqa
         async with store.reverse_operations.operation() as operation:
             _prepare(reserved, operation, funded=fault != "not funded")
             terms, core, invoice = _facts(reserved)
+            if fault == "not funded":
+                # FUNDING_SENT admits an early claim; a swap before its funding
+                # grant has nothing to claim.
+                store._connection.execute("UPDATE swaps SET state='LN_HELD'")
             if fault == "core network":
                 core = replace(
                     core,
@@ -377,21 +381,59 @@ def test_every_multipart_htlc_must_cover_the_resolution_margin(
     asyncio.run(exercise())
 
 
-def test_positive_consistent_depth_below_signed_requirement_refuses(
-    reserved: ReservationCase,
+@pytest.mark.parametrize("funded", [True, False])
+@pytest.mark.parametrize("below", ["one block", "mempool"])
+def test_any_consistent_depth_below_signed_requirement_admits_debt(
+    reserved: ReservationCase, below: str, *, funded: bool
+) -> None:
+    """A client may claim early: it alone risks the provider's double-spend."""
+
+    async def exercise() -> None:
+        store = reserved.store
+        async with store.reverse_operations.operation() as operation:
+            _prepare(reserved, operation, funded=funded)
+            terms, core, invoice = _facts(reserved)
+            assert terms.funding_confirmations > 1
+            if below == "mempool":
+                core = replace(
+                    core, confirmations=0, inclusion_height=None, inclusion_block_hash=None
+                )
+            else:
+                depth = terms.funding_confirmations - 1
+                core = replace(
+                    core,
+                    confirmations=depth,
+                    inclusion_height=core.tip_height - depth + 1,
+                    inclusion_block_hash=core.tip_hash if depth == 1 else core.inclusion_block_hash,
+                )
+            _commit(reserved, operation, core, invoice)
+            assert store._connection.execute("SELECT state,preimage FROM swaps").fetchone() == (
+                "FUNDED" if funded else "FUNDING_SENT",
+                "52" * 32,
+            )
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["inclusion height", "inclusion hash", "both"],
+)
+def test_mempool_sample_naming_an_inclusion_block_refuses(
+    reserved: ReservationCase, fault: str
 ) -> None:
     async def exercise() -> None:
         store = reserved.store
         async with store.reverse_operations.operation() as operation:
-            _prepare(reserved, operation)
-            terms, core, invoice = _facts(reserved)
-            assert terms.funding_confirmations > 1
-            depth = terms.funding_confirmations - 1
+            _prepare(reserved, operation, funded=False)
+            _, core, invoice = _facts(reserved)
             core = replace(
                 core,
-                confirmations=depth,
-                inclusion_height=core.tip_height - depth + 1,
-                inclusion_block_hash=core.tip_hash if depth == 1 else core.inclusion_block_hash,
+                confirmations=0,
+                inclusion_height=None if fault == "inclusion hash" else core.inclusion_height,
+                inclusion_block_hash=None
+                if fault == "inclusion height"
+                else core.inclusion_block_hash,
             )
             with pytest.raises(live.LiveSessionStoreError):
                 _commit(reserved, operation, core, invoice)

@@ -77,9 +77,14 @@ def test_fresh_acquisition_uses_original_clock_gate_and_public_worker_snapshot(
                 return native.musig_output_key(user, provider, tweak)
 
         def observe_core(
-            binding: FundingBinding, retained: ContractTerms, *, keys: object
+            binding: FundingBinding,
+            retained: ContractTerms,
+            *,
+            keys: object,
+            allow_unconfirmed: bool,
         ) -> object:
             assert threading.get_ident() != owner_thread
+            assert allow_unconfirmed is True  # the client may claim before the signed depth
             assert retained == terms
             assert binding.funding_txid == core.funding_txid
             assert type(keys) is _ReversePublicKeySnapshot

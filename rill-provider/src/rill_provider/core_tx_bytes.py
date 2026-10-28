@@ -188,11 +188,13 @@ class MempoolFundingOutpoint:
 
 @dataclass(frozen=True, slots=True)
 class CooperativeClaimOutpoint:
-    """One named-tip confirmed UTXO sample with mempool spends considered.
+    """One named-tip UTXO sample with mempool spends considered.
 
     This is read-only evidence, not spending authority. A mempool spend may
     arrive immediately after the sample. It carries neither a signing time
-    nor fee-policy or Lightning authorization.
+    nor fee-policy or Lightning authorization. Only a sample that explicitly
+    allowed unconfirmed funding has zero confirmations; it then names no
+    inclusion block (both inclusion fields are ``None``), never an invented one.
     """
 
     network_identity: NetworkIdentity
@@ -204,8 +206,8 @@ class CooperativeClaimOutpoint:
     tip_hash: str
     tip_height: int
     confirmations: int
-    inclusion_height: int
-    inclusion_block_hash: str
+    inclusion_height: int | None
+    inclusion_block_hash: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -908,6 +910,8 @@ class CoreTransactionReader:
         match, tip_hash, tip_height, confirmations, inclusion_height, inclusion_hash = (
             self._observe_outpoint(binding, terms, keys=keys, include_mempool=False)
         )
+        if inclusion_height is None or inclusion_hash is None:
+            raise CoreProtocolError("Core chain-only outpoint lacks its inclusion block")
         return CandidateFundingOutpoint(
             self._network,
             match,
@@ -969,6 +973,7 @@ class CoreTransactionReader:
         terms: ContractTerms,
         *,
         keys: TaprootKeyOperations,
+        allow_unconfirmed: bool = False,
     ) -> CooperativeClaimOutpoint:
         """Sample one confirmed outpoint, including known mempool spends.
 
@@ -976,9 +981,22 @@ class CoreTransactionReader:
         permission. Future runtime must independently bound total elapsed
         acquisition time, establish fee/payment/deadline policy, and ensure
         unilateral fallback. No chain-only fallback is attempted on failure.
+
+        ``allow_unconfirmed`` also accepts the exact output while its
+        transaction is only in the mempool (zero confirmations, no inclusion
+        block). Only the provider's own LN to BTC funding uses it: a client
+        claiming that early takes the double-spend risk itself.
         """
+        if allow_unconfirmed and terms.profile_id != "ln-to-btc/v1":
+            raise ValueError("unconfirmed cooperative evidence is only for LN to BTC funding")
         match, tip_hash, tip_height, confirmations, inclusion_height, inclusion_hash = (
-            self._observe_outpoint(binding, terms, keys=keys, include_mempool=True)
+            self._observe_outpoint(
+                binding,
+                terms,
+                keys=keys,
+                include_mempool=True,
+                minimum=0 if allow_unconfirmed else 1,
+            )
         )
         return CooperativeClaimOutpoint(
             self._network,
@@ -1001,8 +1019,13 @@ class CoreTransactionReader:
         *,
         keys: TaprootKeyOperations,
         include_mempool: bool,
-    ) -> tuple[FundingBindingTransactionMatch, str, int, int, int, str]:
-        """One read-only Core session, identical checks for either fixed RPC mode."""
+        minimum: int = 1,
+    ) -> tuple[FundingBindingTransactionMatch, str, int, int, int | None, str | None]:
+        """One read-only Core session, identical checks for either fixed RPC mode.
+
+        A zero-confirmation sample (only with ``minimum=0``) has no inclusion
+        block to name or to compare block-qualified bytes against.
+        """
         if not isinstance(binding, FundingBinding):
             raise TypeError("a parsed binding is required")
         if not isinstance(terms.network_identity, NetworkIdentity) or (
@@ -1032,23 +1055,28 @@ class CoreTransactionReader:
                     [binding.funding_txid, binding.contract_vout, include_mempool],
                     4,
                 )
-                confirmations = _checked_outpoint(output, binding, tip_height)
-                inclusion_height = tip_height - confirmations + 1
-                inclusion_hash = self._rpc(client, "getblockhash", [inclusion_height], 5)
-                if not _hash(inclusion_hash) or (
-                    inclusion_height == tip_height and inclusion_hash != tip_hash
-                ):
-                    raise CoreProtocolError("Core inclusion-height block differs from sampled tip")
-                block_raw = _transaction_bytes(
-                    self._rpc(
-                        client,
-                        "getrawtransaction",
-                        [binding.funding_txid, False, inclusion_hash],
-                        6,
+                confirmations = _checked_outpoint(output, binding, tip_height, minimum=minimum)
+                inclusion_height: int | None = None
+                inclusion_hash: str | None = None
+                if confirmations > 0:
+                    inclusion_height = tip_height - confirmations + 1
+                    inclusion_hash = self._rpc(client, "getblockhash", [inclusion_height], 5)
+                    if not _hash(inclusion_hash) or (
+                        inclusion_height == tip_height and inclusion_hash != tip_hash
+                    ):
+                        raise CoreProtocolError(
+                            "Core inclusion-height block differs from sampled tip"
+                        )
+                    block_raw = _transaction_bytes(
+                        self._rpc(
+                            client,
+                            "getrawtransaction",
+                            [binding.funding_txid, False, inclusion_hash],
+                            6,
+                        )
                     )
-                )
-                if block_raw != raw:
-                    raise CoreProtocolError("Core block-qualified transaction bytes differ")
+                    if block_raw != raw:
+                        raise CoreProtocolError("Core block-qualified transaction bytes differ")
                 end_hash, end_height = _chain_tip(
                     self._rpc(client, "getblockchaininfo", [], 7), self._network
                 )

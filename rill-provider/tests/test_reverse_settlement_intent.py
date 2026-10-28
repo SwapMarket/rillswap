@@ -31,6 +31,8 @@ def _funded(store: object, harness: object, state: str = "FUNDED") -> str:
     _advance(
         store, harness, session, from_state="LN_HELD", to_state="FUNDING_SENT", funding=FUNDING
     )
+    if state == "FUNDING_SENT":  # a client may claim before the signed depth
+        return session
     _advance(store, harness, session, from_state="FUNDING_SENT", to_state="FUNDED")
     if state == "REFUNDING":
         _advance(store, harness, session, from_state="FUNDED", to_state="REFUNDING", refund=REFUND)
@@ -97,7 +99,7 @@ def test_invalid_intent_is_not_recorded(harness: object, failure: str) -> None:
 @pytest.mark.parametrize(
     "failure", ["rpc fails", "rpc fails then succeeds", "commit after rpc fails"]
 )
-@pytest.mark.parametrize("state", ["FUNDED", "REFUNDING"])
+@pytest.mark.parametrize("state", ["FUNDING_SENT", "FUNDED", "REFUNDING"])
 def test_restart_settles_recorded_debt_without_core_or_a_retained_witness(
     harness: object,
     monkeypatch: pytest.MonkeyPatch,
@@ -204,7 +206,7 @@ def test_unexpected_state_with_a_preimage_is_quarantined_before_any_backend_effe
             session, from_state="FUNDED", preimage=PREIMAGE, now=2001
         )
         store._connection.execute(  # noqa: SLF001 - unreachable repaired state has no authority
-            "UPDATE swaps SET state='FUNDING_SENT' WHERE session_id=?", (session,)
+            "UPDATE swaps SET state='LN_HELD' WHERE session_id=?", (session,)
         )
         (item,) = store.settlement_work()
         with pytest.raises(LiveSessionStoreError, match="unexpected state"):

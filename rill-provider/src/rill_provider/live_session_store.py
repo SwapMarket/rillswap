@@ -3845,10 +3845,18 @@ class LiveSessionStore:
             if (
                 row is None
                 or not self._matches_reverse_negotiation(outer.session_id, row[3], row[:5])
-                or (purpose == "acquisition" and (row[6] != "FUNDED" or row[7] is not None))
+                # A client may claim before the provider's own funding reaches
+                # the signed depth: FUNDING_SENT cooperates like FUNDED.
+                or (
+                    purpose == "acquisition"
+                    and (row[6] not in ("FUNDING_SENT", "FUNDED") or row[7] is not None)
+                )
                 or (
                     purpose == "repayment"
-                    and (row[6] not in ("FUNDED", "SETTLED") or row[7] != payload.payment_preimage)
+                    and (
+                        row[6] not in ("FUNDING_SENT", "FUNDED", "SETTLED")
+                        or row[7] != payload.payment_preimage
+                    )
                 )
                 or (
                     purpose == "paid-signing"
@@ -3955,18 +3963,7 @@ class LiveSessionStore:
                 or core.funding_value_sat != int(binding.contract_value_sat)
                 or type(core.funding_script_pubkey) is not bytes
                 or core.funding_script_pubkey != bytes.fromhex(binding.contract_script_pubkey)
-                or type(core.tip_height) is not int
-                or type(core.confirmations) is not int
-                or type(core.inclusion_height) is not int
-                or not 0 < core.inclusion_height <= core.tip_height < terms.refund_lock_height
-                or core.confirmations != core.tip_height - core.inclusion_height + 1
-                or core.confirmations < terms.funding_confirmations
-                or not re.fullmatch("[0-9a-f]{64}", core.tip_hash)
-                or not re.fullmatch("[0-9a-f]{64}", core.inclusion_block_hash)
-                or (
-                    core.inclusion_height == core.tip_height
-                    and core.inclusion_block_hash != core.tip_hash
-                )
+                or _reverse_funding_sample_refused(core, terms)
                 or type(invoice) is not BoundHoldInvoiceObservation
                 or invoice.network != terms.network_identity
                 or invoice.payment_hash != terms.invoice_binding.payment_hash
@@ -6078,7 +6075,8 @@ class LiveSessionStore:
         Trusted runtime must bracket the complete Own-Core/Own-LND acquisition
         under this same operation using the original window's clock dependency.
         Typed observations themselves carry no provenance or authority. First
-        release admits only an exact live original-owner reservation in FUNDED,
+        release admits only an exact live original-owner reservation in
+        FUNDING_SENT or FUNDED (a client may claim before the signed depth),
         with no potentially issued refund. Historical knowledge cannot bootstrap
         this path. Existing debt continues through ordinary repayment instead.
 
@@ -6135,7 +6133,7 @@ class LiveSessionStore:
                         contract_digest,
                         (accept_bytes, transcript, blocked, contract_digest, accepted_bytes),
                     )
-                    or state != "FUNDED"
+                    or state not in ("FUNDING_SENT", "FUNDED")
                     or retained is not None
                     or refund_txid is not None
                     or refund_raw is not None
@@ -6194,18 +6192,7 @@ class LiveSessionStore:
                     or core.funding_value_sat != binding["funding_value_sat"]
                     or type(core.funding_script_pubkey) is not bytes
                     or core.funding_script_pubkey.hex() != binding["funding_script_pubkey"]
-                    or type(core.tip_height) is not int
-                    or type(core.confirmations) is not int
-                    or type(core.inclusion_height) is not int
-                    or not 0 < core.inclusion_height <= core.tip_height < terms.refund_lock_height
-                    or core.confirmations != core.tip_height - core.inclusion_height + 1
-                    or core.confirmations < terms.funding_confirmations
-                    or not re.fullmatch("[0-9a-f]{64}", core.tip_hash)
-                    or not re.fullmatch("[0-9a-f]{64}", core.inclusion_block_hash)
-                    or (
-                        core.inclusion_height == core.tip_height
-                        and core.inclusion_block_hash != core.tip_hash
-                    )
+                    or _reverse_funding_sample_refused(core, terms)
                 ):
                     raise LiveSessionStoreError("reverse proposal debt Core evidence refused")  # noqa: TRY301
                 minimum_htlc_expiry = (
@@ -6240,7 +6227,8 @@ class LiveSessionStore:
                 candidate.window.check(tip_height=core.tip_height)
                 connection.execute(
                     "UPDATE swaps SET preimage=?,updated_at=MAX(updated_at,?) "
-                    "WHERE session_id=? AND state='FUNDED' AND preimage IS NULL",
+                    "WHERE session_id=? AND state IN ('FUNDING_SENT','FUNDED') "
+                    "AND preimage IS NULL",
                     (payload.payment_preimage, now, outer.session_id),
                 )
                 self.reverse_operations.check(operation)
@@ -6270,7 +6258,11 @@ class LiveSessionStore:
         fresh proposal debt now has its own separately authenticated boundary.
         Missing knowledge never manufactures an obligation or starts recovery work.
         """
-        if from_state not in {"FUNDED", "REFUNDING"} or type(now) is not int or now < 0:
+        if (
+            from_state not in {"FUNDING_SENT", "FUNDED", "REFUNDING"}
+            or type(now) is not int
+            or now < 0
+        ):
             raise LiveSessionStoreError("reverse settlement intent context invalid")
         try:
             with self._write() as connection:
@@ -8692,6 +8684,34 @@ def _release_evm_terminal(  # noqa: PLR0913 - explicit terminal evidence
             "WHERE payment_hash=? AND session_id=? AND state IN (?, ?)",
             (evidence, payment_hash, session_id, *allowed),
         ).rowcount
+    )
+
+
+def _reverse_funding_sample_refused(core: CooperativeClaimOutpoint, terms: ContractTerms) -> bool:
+    """Whether a reverse cooperative Core sample is malformed, at any funding depth.
+
+    The provider funded this output itself, so a client claiming before the
+    signed ``funding_confirmations`` (even from the mempool) risks only its own
+    claim. Depth therefore never refuses; a confirmed sample must still name
+    its consistent inclusion block, and a mempool sample must name none.
+    """
+    if (
+        type(core.tip_height) is not int
+        or type(core.confirmations) is not int
+        or type(core.tip_hash) is not str
+        or not re.fullmatch("[0-9a-f]{64}", core.tip_hash)
+        or not 0 < core.tip_height < terms.refund_lock_height
+    ):
+        return True
+    if core.confirmations == 0:
+        return core.inclusion_height is not None or core.inclusion_block_hash is not None
+    return (
+        type(core.inclusion_height) is not int
+        or not 0 < core.inclusion_height <= core.tip_height
+        or core.confirmations != core.tip_height - core.inclusion_height + 1
+        or type(core.inclusion_block_hash) is not str
+        or not re.fullmatch("[0-9a-f]{64}", core.inclusion_block_hash)
+        or (core.inclusion_height == core.tip_height and core.inclusion_block_hash != core.tip_hash)
     )
 
 

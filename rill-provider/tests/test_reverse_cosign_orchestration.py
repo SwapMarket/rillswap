@@ -22,7 +22,7 @@ from test_reverse_proposal_reservation import NativeSigner
 from test_reverse_proposal_reservation import reserved as reserved  # noqa: PLC0414 - fixture
 
 from rill_provider import reverse_settlement
-from rill_provider.core_tx_bytes import ReverseSpendCheckpoint
+from rill_provider.core_tx_bytes import ReverseSpendCheckpoint, SpendScan
 from rill_provider.handshake_service import HandshakeService, ServicePolicy
 from rill_provider.live_session_store import LiveSessionStoreError, StaleOwnerError
 from rill_provider.lnd_hold_invoice import HoldInvoiceStatus
@@ -63,46 +63,51 @@ async def _cosign(engine: ReverseSettlement, reserved: ReservationCase) -> bytes
 
 @pytest.mark.native_crypto
 @native_marks[1]
-@pytest.mark.parametrize("confirmed", [True, False])
+@pytest.mark.parametrize("depth", ["signed", "below", "mempool"])
 def test_proposal_first_runs_the_providers_own_funding_depth_step(
     reserved: ReservationCase,
-    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    *,
-    confirmed: bool,
+    depth: str,
 ) -> None:
-    """A client whose node saw the depth first must not race the periodic pass."""
+    """A client whose node saw its chosen depth first must not race the periodic pass.
+
+    The client may claim before the signed depth, even from the mempool: it
+    alone risks a provider double-spend, so the provider cooperates and
+    settles straight from FUNDING_SENT.
+    """
 
     async def exercise() -> None:
         terms, core, invoice = _facts(reserved)
         chain, hold = _backends(reserved)
         hold.observe_bound_invoice.return_value = invoice
-        depth = terms.funding_confirmations - (0 if confirmed else 1)
-        chain.confirmations.return_value = depth
+        observed = {
+            "signed": terms.funding_confirmations,
+            "below": terms.funding_confirmations - 1,
+            "mempool": 0,
+        }[depth]
+        if depth == "mempool":
+            chain.observe_cooperative_claim_outpoint.return_value = replace(
+                core, confirmations=0, inclusion_height=None, inclusion_block_hash=None
+            )
+        chain.confirmations.return_value = observed
         chain.funding_scan_boundary.return_value = (core.inclusion_height - 1, "ab" * 32)
         chain.tip_height.return_value = core.tip_height
+        chain.find_spender.return_value = SpendScan(None, core.tip_height)
         store = reserved.store
         engine = ReverseSettlement(store, chain, hold, reserved.origin.crypto.crypto)
-        if confirmed:
-            assert await _cosign(engine, reserved) is not None
-        else:
-            monkeypatch.setattr(
-                reserved.origin.crypto.crypto,
-                "musig_begin",
-                Mock(side_effect=AssertionError("no nonce before the provider's own depth")),
-            )
-            with pytest.raises(LiveSessionStoreError):
-                await _cosign(engine, reserved)
-            ((state,),) = store._connection.execute(
-                "SELECT state FROM swaps WHERE session_id=?", (reserved.origin.session_id,)
-            ).fetchall()
-            assert state == "FUNDING_SENT"
+        assert await _cosign(engine, reserved) is not None
+        ((state,),) = store._connection.execute(
+            "SELECT state FROM swaps WHERE session_id=?", (reserved.origin.session_id,)
+        ).fetchall()
+        assert state == "SETTLED"
         chain.confirmations.assert_called()
+        assert chain.observe_cooperative_claim_outpoint.call_args.kwargs["allow_unconfirmed"]
 
     with caplog.at_level("INFO", logger="rill_provider.reverse_settlement"):
         asyncio.run(exercise())
-    moved = f"swap {reserved.origin.session_id[:16]} moved to FUNDED"
-    assert (moved in caplog.messages) is confirmed
+    prefix = f"swap {reserved.origin.session_id[:16]} moved to"
+    assert (f"{prefix} FUNDED" in caplog.messages) is (depth == "signed")
+    assert f"{prefix} SETTLED" in caplog.messages
 
 
 @pytest.mark.native_crypto

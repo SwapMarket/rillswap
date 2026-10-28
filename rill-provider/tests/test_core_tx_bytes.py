@@ -787,6 +787,62 @@ def test_cooperative_claim_sample_considers_mempool_without_granting_authority(
     assert requests[3]["params"] == [binding.funding_txid, binding.contract_vout, True]
 
 
+@pytest.mark.parametrize("depth", [0, 3])
+def test_reverse_cooperative_sample_accepts_the_provider_funding_from_the_mempool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, depth: int
+) -> None:
+    """An LN to BTC client may claim early; a mempool sample names no block."""
+    terms, binding, network = _context()
+    terms = terms.model_copy(update={"profile_id": "ln-to-btc/v1"})
+    match = FundingBindingTransactionMatch(
+        binding.funding_txid,
+        binding.contract_vout,
+        binding.lineage_anchor_txid,
+        binding.lineage_anchor_vout,
+    )
+    monkeypatch.setattr(core_tx_bytes, "check_funding_binding_transaction", lambda *_a, **_k: match)
+    requests: list[dict[str, Any]] = []
+    change = "zero-confirms" if depth == 0 else "none"
+    with _server(
+        lambda payload: _candidate_reply(payload, binding, change=change), requests
+    ) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        result = reader.observe_cooperative_claim_outpoint(
+            binding,
+            terms,
+            keys=None,  # type: ignore[arg-type]
+            allow_unconfirmed=True,
+        )
+    assert result.confirmations == depth
+    if depth == 0:
+        assert (result.inclusion_height, result.inclusion_block_hash) == (None, None)
+        # No inclusion block exists to name or to read block-qualified bytes from.
+        assert [request["method"] for request in requests] == [
+            "getblockchaininfo",
+            "getblockhash",
+            "getrawtransaction",
+            "gettxout",
+            "getblockchaininfo",
+        ]
+    else:
+        assert (result.inclusion_height, result.inclusion_block_hash) == (103, "cc" * 32)
+        assert len(requests) == 7
+    assert requests[3]["params"] == [binding.funding_txid, binding.contract_vout, True]
+
+
+def test_unconfirmed_cooperative_sample_is_only_for_ln_to_btc_funding(tmp_path: Path) -> None:
+    terms, binding, network = _context()
+    assert terms.profile_id != "ln-to-btc/v1"
+    reader = CoreTransactionReader(port=9, cookie_path=_cookie(tmp_path), network=network)
+    with pytest.raises(ValueError, match="only for LN to BTC"):
+        reader.observe_cooperative_claim_outpoint(
+            binding,
+            terms,
+            keys=None,  # type: ignore[arg-type]
+            allow_unconfirmed=True,
+        )
+
+
 def test_cooperative_sample_never_falls_back_to_chain_only_after_mempool_spend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

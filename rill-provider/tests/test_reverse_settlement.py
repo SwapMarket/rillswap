@@ -209,6 +209,76 @@ def test_funding_sent_rebroadcasts_and_confirms_at_depth(backends: Any) -> None:
     )  # inclusion block 1010
 
 
+def test_funding_sent_settles_an_early_mempool_claim_before_the_depth(backends: Any) -> None:  # noqa: ANN401
+    """A client may claim before the signed depth: its witness pays the provider at once."""
+    engine, store, chain, hold = backends
+    item = _item("FUNDING_SENT", funding_txid="51" * 32, funding_vout=0, funding_tx=b"funding-raw")
+    witness = (b"\x77" * 64, bytes.fromhex(PREIMAGE), b"\x51", b"\xc0" + b"\x00" * 32)
+    chain.find_spender.return_value = SpendScan(SpendObservation("61" * 32, witness, None), 1000)
+    assert _run(engine, item) == "SETTLED"
+    # An empty block range asks Core's mempool only.
+    chain.find_spender.assert_called_once_with("51" * 32, 0, from_height=1001, to_height=1000)
+    chain.confirmations.assert_not_called()
+    store.record_reverse_settlement_preimage.assert_called_once_with(
+        "11" * 32, from_state="FUNDING_SENT", preimage=PREIMAGE, now=NOW
+    )
+    hold.settle.assert_called_once_with(PREIMAGE)
+    moved = _moved(store, "SETTLED")
+    assert (moved["from_state"], moved["preimage"]) == ("FUNDING_SENT", PREIMAGE)
+
+
+def test_funding_sent_ignores_a_mempool_spend_without_the_preimage(backends: Any) -> None:  # noqa: ANN401
+    engine, store, chain, hold = backends
+    item = _item("FUNDING_SENT", funding_txid="51" * 32, funding_vout=0, funding_tx=b"funding-raw")
+    chain.find_spender.return_value = SpendScan(
+        SpendObservation("61" * 32, (b"\x77" * 64,), None), 1000
+    )
+    chain.confirmations.return_value = 0
+    assert _run(engine, item) == "FUNDING_SENT"
+    hold.settle.assert_not_called()
+    store.advance_reverse_swap.assert_not_called()
+
+
+def test_funding_sent_repays_recorded_early_debt_before_any_chain_call(backends: Any) -> None:  # noqa: ANN401
+    """Cooperative proposal debt admitted below the depth settles straight from FUNDING_SENT."""
+    engine, store, chain, hold = backends
+    item = _item(
+        "FUNDING_SENT",
+        funding_txid="51" * 32,
+        funding_vout=0,
+        funding_tx=b"funding-raw",
+        preimage=PREIMAGE,
+    )
+    assert _run(engine, item) == "SETTLED"
+    chain.broadcast.assert_not_called()
+    chain.find_spender.assert_not_called()
+    chain.confirmations.assert_not_called()
+    hold.settle.assert_called_once_with(PREIMAGE)
+    assert _moved(store, "SETTLED")["from_state"] == "FUNDING_SENT"
+
+
+@pytest.mark.parametrize(("depth", "tolerated"), [(1, True), (0, False)])
+def test_funding_sent_tolerates_a_refused_rebroadcast_only_once_confirmed(
+    backends: Any,  # noqa: ANN401
+    depth: int,
+    *,
+    tolerated: bool,
+) -> None:
+    """Core refuses a confirmed funding whose outputs an early claim already spent."""
+    engine, store, chain, _hold = backends
+    item = _item("FUNDING_SENT", funding_txid="51" * 32, funding_vout=0, funding_tx=b"funding-raw")
+    chain.broadcast.side_effect = reverse.CoreRpcError(-25)
+    chain.confirmations.return_value = depth
+    if tolerated:
+        assert _run(engine, item) == "FUNDING_SENT"  # depth 1 is still below the signed 2
+        chain.find_spender.assert_called_once()
+    else:
+        with pytest.raises(reverse.CoreRpcError):
+            _run(engine, item)
+        chain.find_spender.assert_not_called()
+    store.advance_reverse_swap.assert_not_called()
+
+
 def _funded_item(state: str = "FUNDED", **changes: Any) -> SettlementItem:  # noqa: ANN401
     return _item(
         state,
