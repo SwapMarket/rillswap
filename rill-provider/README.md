@@ -140,8 +140,9 @@ network; the containers reach them through the hosts set in `.env`.
    Apprise URLs to `makers/<profile>/notify.urls` (mode 0600, owned by the
    container uid), add a `notifications` section with
    `"urls_file": "notify.urls"` to its `provider.json`, and run
-   `docker compose up -d` again. Notifications leave through the maker's
-   network directly, not through Tor.
+   `docker compose up -d` again. Notifications go through the shared Tor
+   client, so only HTTP services work (onion URLs too); add
+   `"use_tor": false` for a service on your LAN.
 
 Back up `./makers` (custody keys, identities, configs). Never back up,
 restore or copy `./stores`; `./credentials` can be recreated. For offline
@@ -473,6 +474,7 @@ a refused one is reported by line number only.
 | `quotes_paused` | `true` | The chain tip or claim fee estimate is unavailable |
 | `service_start_stop` | `false` | Serving started or stopped |
 | `alert_after_seconds` | `300` | How long a condition lasts before it is alerted (60 to 86400) |
+| `use_tor` | `true` | Send through `relay_proxy` (Tor) when it is set; `false` connects directly |
 
 The three health conditions are alerted once after `alert_after_seconds` and
 cleared once on recovery. Events found in the same 15-second poll are combined
@@ -492,10 +494,23 @@ persisted: events that happen while the service is stopped are not sent one
 by one, but the next daily summary counts them. Failed deliveries are logged
 without the URL.
 
-Notifications connect directly to each service, not through `relay_proxy`, so
-the services see this host's IP address (use a self-hosted service such as
-ntfy or a webhook if that matters). `--log-level DEBUG` logs Apprise's
-requests, which can include the URLs and their tokens.
+When `relay_proxy` is set and `use_tor` is on (the default), every
+notification goes through Tor and never falls back to a direct connection:
+Tor resolves the service name, onion URLs work (for example a Gotify or ntfy
+onion service), and HTTPS is still verified against the service's name. Each
+connection runs on its own circuit, apart from the relay connections. Only
+HTTP services work this way: email, IRC, MQTT, syslog and other plugins that
+do not use HTTP are refused (logged as connections outside Tor refused), not
+sent around Tor. Services on your LAN cannot be reached through Tor (logged
+as unreachable through Tor). For those, or for non-HTTP services, set
+`"use_tor": false`; they then see this host's address.
+Without `relay_proxy`, notifications connect directly. One INFO line at
+startup states which route is used.
+
+Apprise runs in a separate process, which receives the URLs over a pipe and
+logs nothing, so no log level shows them. In Tor mode that process refuses
+every connection, name lookup, datagram and new process that does not go
+through the proxy.
 
 ## Persistent state and backups
 

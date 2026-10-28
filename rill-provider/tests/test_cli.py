@@ -244,6 +244,7 @@ def test_native_serve_notifies_start_and_stop_through_apprise(tmp_path: Path) ->
             _, stderr = await asyncio.wait_for(process.communicate(), 20)
             assert process.returncode == 0
             assert "SECRET" not in stderr.decode()
+            assert "notifications go directly, not through Tor: no relay_proxy" in stderr.decode()
         finally:
             await relay.stop()
 
@@ -353,7 +354,6 @@ def test_client_libraries_only_log_requests_at_debug(level: str, library_level: 
             logger.setLevel(logging.NOTSET)
         cli._configure_logging(level)  # noqa: SLF001 - the entrypoint's logging setup
         assert "httpx" in cli.CHATTY_LIBRARY_LOGGERS
-        assert "apprise" in cli.CHATTY_LIBRARY_LOGGERS  # one INFO line per notification
         assert {logging.getLevelName(logger.level) for logger in loggers} == {library_level}
     finally:
         for logger, previous in zip(loggers, saved, strict=True):

@@ -3,11 +3,12 @@
 The notifier follows the swap ledger (store schema v18) from where it stood
 when serving started, watches the service health snapshot, and sends a daily
 summary computed from the durable ledger. It only reads the store, on the
-event-loop thread; delivery runs in a worker thread with a timeout, at most
-once per poll (several events are combined). Failures are logged, never with
-the URLs (they carry service tokens), and never affect serving. Nothing is
-persisted: events while the service is down are not sent one by one, but the
-next daily summary still counts them.
+event-loop thread; delivery runs in an Apprise child process with a timeout
+(``notification_worker``), through Tor when ``use_tor`` is on and a relay
+proxy is set, at most once per poll (several events are combined). Failures
+are logged, never with the URLs (they carry service tokens), and never affect
+serving. Nothing is persisted: events while the service is down are not sent
+one by one, but the next daily summary still counts them.
 """
 
 from __future__ import annotations
@@ -20,7 +21,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Protocol
+from urllib.parse import urlsplit
 
+from rill_provider.notification_worker import AppriseWorker, WorkerError
 from rill_provider.operator_config import OperatorConfigError, read_private_file
 from rill_provider.swap_accounting import (
     ABORTED,
@@ -37,7 +40,7 @@ from rill_provider.swap_accounting import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from rill_provider.handshake_service import ServiceHealth
@@ -46,8 +49,7 @@ if TYPE_CHECKING:
 
 LOG = logging.getLogger(__name__)
 MAX_URLS_FILE_BYTES = 16 * 1024
-SEND_TIMEOUT_SECONDS = 20
-CLOSE_TIMEOUT_SECONDS = 10.0
+CLOSE_TIMEOUT_SECONDS = 30.0  # the last events at shutdown, within Compose's 1m grace
 POLL_SECONDS = 15.0
 MAX_EVENTS_PER_POLL = 256
 DAY_SECONDS = 24 * 60 * 60
@@ -55,68 +57,66 @@ OUTCOME_ORDER = (COMPLETED, FAILED, REFUNDED, ABORTED, LOST)
 
 
 class Sender(Protocol):
-    """Blocking delivery to every configured service; True when all accepted it."""
+    """Delivery to every configured service; True when all accepted it."""
 
-    def send(self, title: str, body: str, *, warning: bool) -> bool:
+    async def send(self, title: str, body: str, *, warning: bool) -> bool:
         """Deliver one notification."""
         ...
 
 
-@contextlib.contextmanager
-def _quiet_apprise() -> Iterator[None]:
-    """Silence Apprise while it parses URLs: its parse errors echo them, tokens included."""
-    logger = logging.getLogger("apprise")
-    disabled, logger.disabled = logger.disabled, True
+def read_urls(urls_file: Path) -> list[tuple[int, str]]:
+    """Return the numbered URL lines of an owner-only file, never echoing them."""
+    data = read_private_file(urls_file, "notification URLs file", max_bytes=MAX_URLS_FILE_BYTES)
+    if len(data) > MAX_URLS_FILE_BYTES:
+        raise OperatorConfigError("notification URLs file too large")
     try:
-        yield
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise OperatorConfigError("notification URLs file must be UTF-8 text") from None
+    urls = [
+        (number, line.strip())
+        for number, line in enumerate(text.splitlines(), start=1)
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    if not urls:
+        raise OperatorConfigError("notification URLs file holds no URL")
+    return urls
+
+
+@contextlib.asynccontextmanager
+async def notification_sender(
+    settings: NotificationSettings | None, relay_proxy: str | None
+) -> AsyncIterator[AppriseWorker | None]:
+    """Run the Apprise worker for ``settings`` (None: no notifications), then stop it.
+
+    The worker checks every URL before this yields; a refusal names only the
+    line. Delivery goes through ``relay_proxy`` (a checked loopback Tor
+    tunnel) when ``use_tor`` is on and the proxy is set, and directly otherwise.
+    """
+    if settings is None:
+        yield None
+        return
+    urls = read_urls(settings.urls_file)
+    proxy = None
+    if settings.use_tor and relay_proxy is not None:
+        parts = urlsplit(relay_proxy)
+        proxy = (parts.hostname or "", parts.port or 0)
+    worker = AppriseWorker(urls, proxy)
+    try:
+        try:
+            await worker.start()
+        except WorkerError as error:
+            raise OperatorConfigError(str(error)) from None
+        except TimeoutError:
+            raise OperatorConfigError("notification worker did not start") from None
+        if proxy is not None:
+            LOG.info("notifications go through Tor (relay_proxy)")
+        else:
+            reason = "no relay_proxy" if settings.use_tor else "use_tor is off"
+            LOG.info("notifications go directly, not through Tor: %s", reason)
+        yield worker
     finally:
-        logger.disabled = disabled
-
-
-class AppriseSender:
-    """Delivers to the URLs of an owner-only file, each accepted by Apprise at startup."""
-
-    def __init__(self, urls_file: Path) -> None:
-        """Read and check every URL; refuse the file naming only the offending line."""
-        try:
-            import apprise  # noqa: PLC0415 - optional extra, imported only when configured
-        except ImportError:
-            raise OperatorConfigError(
-                "notifications need the apprise package: install rill-provider[notifications]"
-            ) from None
-        data = read_private_file(urls_file, "notification URLs file", max_bytes=MAX_URLS_FILE_BYTES)
-        if len(data) > MAX_URLS_FILE_BYTES:
-            raise OperatorConfigError("notification URLs file too large")
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError:
-            raise OperatorConfigError("notification URLs file must be UTF-8 text") from None
-        # Memory storage: Apprise writes nothing (the image's root is read-only).
-        asset = apprise.AppriseAsset(storage_mode="memory", service_timeout=SEND_TIMEOUT_SECONDS)
-        self._apprise = apprise.Apprise(asset=asset)
-        self._types = (apprise.NotifyType.INFO, apprise.NotifyType.WARNING)
-        self._format = apprise.NotifyFormat.TEXT
-        with _quiet_apprise():
-            for number, line in enumerate(text.splitlines(), start=1):
-                url = line.strip()
-                if not url or url.startswith("#"):
-                    continue
-                service = apprise.Apprise.instantiate(url, asset=asset)
-                if service is None or not self._apprise.add(service):
-                    raise OperatorConfigError(f"notification URL refused (line {number})")
-        if not len(self._apprise):
-            raise OperatorConfigError("notification URLs file holds no URL")
-
-    def send(self, title: str, body: str, *, warning: bool) -> bool:
-        """Deliver to every service, bounded by ``SEND_TIMEOUT_SECONDS`` overall."""
-        result = self._apprise.notify(
-            body,
-            title=title,
-            notify_type=self._types[warning],
-            body_format=self._format,
-            timeout=SEND_TIMEOUT_SECONDS,
-        )
-        return bool(result)
+        await worker.close()
 
 
 @dataclass(frozen=True)
@@ -245,11 +245,8 @@ class Notifier:
                 warning=any(item.warning for item in messages),
             )
         try:
-            delivered = await asyncio.to_thread(
-                self._sender.send,
-                f"{self._prefix}: {message.title}",
-                message.body,
-                warning=message.warning,
+            delivered = await self._sender.send(
+                f"{self._prefix}: {message.title}", message.body, warning=message.warning
             )
         except Exception as error:  # noqa: BLE001 - never echo URLs or payloads
             LOG.warning("notification not delivered: %s", type(error).__name__)

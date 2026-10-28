@@ -207,9 +207,13 @@ class NotificationSettings(_Strict):
     ``urls_file`` is an owner-only file with one Apprise URL per line (``#``
     starts a comment): URLs carry service tokens, so they never live here.
     Grace periods and the daily summary use ``alert_after_seconds`` and UTC.
+    With ``use_tor`` (the default) and ``relay_proxy`` set, every service is
+    reached through Tor and only HTTP services work; turn it off for services
+    on the LAN, which then see this host's address.
     """
 
     urls_file: Path
+    use_tor: bool = True
     swap_request: bool = False  # the client accepted signed terms
     swap_confirmed: bool = False  # completed: claimed or settled
     swap_failed: bool = False  # failed, refunded or aborted

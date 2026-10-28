@@ -31,7 +31,7 @@ from rill_provider.lnd_hold_invoice import LndHoldInvoices
 from rill_provider.lnd_invoice_decode import LndInvoiceDecoder
 from rill_provider.lnd_payment_observation import LndObservationError
 from rill_provider.lnd_payment_send import LndPaymentSender
-from rill_provider.notifications import AppriseSender, Notifier
+from rill_provider.notifications import Notifier, notification_sender
 from rill_provider.operator_config import (
     OperatorConfig,
     OperatorConfigError,
@@ -57,10 +57,10 @@ if TYPE_CHECKING:
     from rill_crypto import Context
 
 REFUSED = 2
-# Client libraries that log every request at INFO (httpx: each Core RPC call,
-# apprise: each notification). They only speak up at WARNING unless
-# --log-level DEBUG asks for everything (which can include notification URLs).
-CHATTY_LIBRARY_LOGGERS = ("httpx", "httpcore", "urllib3", "web3", "apprise")
+# Client libraries that log every request at INFO (httpx: each Core RPC call).
+# They only speak up at WARNING unless --log-level DEBUG asks for everything.
+# Apprise runs in its own process, which logs nothing (notification_worker).
+CHATTY_LIBRARY_LOGGERS = ("httpx", "httpcore", "urllib3", "web3")
 
 
 def _context(library: Path) -> Context:
@@ -409,55 +409,55 @@ async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
         crypto=crypto,
     )
     notifications = config.notifications
-    sender = None if notifications is None else AppriseSender(notifications.urls_file)
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for signum in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(signum, stop.set)
-    with LiveSessionStore.acquire(
-        config.store_path,
-        config.network,
-        config.provider_identity_xonly,
-        config.handshake_policy(),
-        crypto=crypto,
-        custody_identity=custody,
-        public_keys=crypto,
-        max_sessions=config.max_sessions,
-        max_tombstones=config.max_tombstones,
-        max_active_reservations=config.max_active_reservations,
-        new_sessions_per_minute=config.new_sessions_per_minute,
-    ) as store:
-        service = HandshakeService(
-            store,
-            identity,
-            crypto,
-            config.service_policy(),
-            chain_tip=_chain_tip(config),
-            invoice_decoder=_invoice_decoder(config),
-            settlement=_settlement(config, store, crypto),
-            hold_invoices=_hold_invoices(config),
-            evm_settlement=_evm_settlement(config, store, crypto),
-            liquidity=_liquidity(config),
-            claim_fee=_claim_fee(config),
-        )
-        if notifications is None or sender is None:
-            await service.run(stop)
-            return
-        notifier = Notifier(
-            notifications,
-            sender,
-            store,
-            profile=config.handshake.profile,
-            network=config.network.name,
-            health=service.health,
-        )
-        notifier.start()
-        failed = True
-        try:
-            await service.run(stop)
-            failed = False
-        finally:
-            await notifier.close(failed=failed)  # while the store is still held
+    async with notification_sender(notifications, proxy) as sender:  # closed after the last events
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(signum, stop.set)
+        with LiveSessionStore.acquire(
+            config.store_path,
+            config.network,
+            config.provider_identity_xonly,
+            config.handshake_policy(),
+            crypto=crypto,
+            custody_identity=custody,
+            public_keys=crypto,
+            max_sessions=config.max_sessions,
+            max_tombstones=config.max_tombstones,
+            max_active_reservations=config.max_active_reservations,
+            new_sessions_per_minute=config.new_sessions_per_minute,
+        ) as store:
+            service = HandshakeService(
+                store,
+                identity,
+                crypto,
+                config.service_policy(),
+                chain_tip=_chain_tip(config),
+                invoice_decoder=_invoice_decoder(config),
+                settlement=_settlement(config, store, crypto),
+                hold_invoices=_hold_invoices(config),
+                evm_settlement=_evm_settlement(config, store, crypto),
+                liquidity=_liquidity(config),
+                claim_fee=_claim_fee(config),
+            )
+            if notifications is None or sender is None:
+                await service.run(stop)
+                return
+            notifier = Notifier(
+                notifications,
+                sender,
+                store,
+                profile=config.handshake.profile,
+                network=config.network.name,
+                health=service.health,
+            )
+            notifier.start()
+            failed = True
+            try:
+                await service.run(stop)
+                failed = False
+            finally:
+                await notifier.close(failed=failed)  # while the store is still held
 
 
 def _parser() -> argparse.ArgumentParser:

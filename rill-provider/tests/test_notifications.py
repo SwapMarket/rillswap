@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
-import sys
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -16,7 +16,13 @@ import pytest
 
 from rill_provider import notifications
 from rill_provider.handshake_service import ServiceHealth
-from rill_provider.notifications import AppriseSender, Notifier, next_summary_at, summary_text
+from rill_provider.notifications import (
+    Notifier,
+    next_summary_at,
+    notification_sender,
+    read_urls,
+    summary_text,
+)
 from rill_provider.operator_config import NotificationSettings, OperatorConfigError, load_config
 from rill_provider.swap_accounting import TERMINAL_KINDS, LedgerEntry, summarize, swap_result
 
@@ -208,7 +214,7 @@ class Sender:
         self.sent: list[tuple[str, str, bool]] = []
         self.result: bool | BaseException = True
 
-    def send(self, title: str, body: str, *, warning: bool) -> bool:
+    async def send(self, title: str, body: str, *, warning: bool) -> bool:
         self.sent.append((title, body, warning))
         if isinstance(self.result, BaseException):
             raise self.result
@@ -456,17 +462,14 @@ def test_close_never_waits_longer_than_its_bound(
 ) -> None:
     ledger, clocks = Ledger(), Clocks()
     notifier, sender = _notifier(ledger, clocks, service_start_stop=True)
-    release = threading.Event()
-    sender.send = lambda *_a, **_k: release.wait(5)  # type: ignore[method-assign]
+
+    async def stuck(*_args: object, **_kwargs: object) -> bool:
+        await asyncio.Event().wait()
+        return True
+
+    sender.send = stuck  # type: ignore[method-assign]
     monkeypatch.setattr(notifications, "CLOSE_TIMEOUT_SECONDS", 0.05)
-
-    async def scenario() -> None:
-        try:
-            await asyncio.wait_for(notifier.close(failed=False), 2)
-        finally:
-            release.set()  # let the stuck delivery thread end before the loop closes
-
-    asyncio.run(scenario())
+    asyncio.run(asyncio.wait_for(notifier.close(failed=False), 2))
     assert "last notification not delivered before shutdown" in caplog.messages
 
 
@@ -500,15 +503,6 @@ def serve_hook() -> Iterator[tuple[str, list[tuple[str, dict[str, Any]]]]]:
 def hook() -> Iterator[tuple[str, list[tuple[str, dict[str, Any]]]]]:
     with serve_hook() as served:
         yield served
-    # Apprise delivers from process-wide pools whose idle workers outlive the
-    # call; stop them so later tests that fork run single-threaded.
-    from apprise import apprise as dispatch  # noqa: PLC0415 - optional extra
-
-    for name in ("_coordinator_executor", "_shared_executor"):
-        pool = getattr(dispatch, name)
-        if pool is not None:
-            pool.shutdown(wait=True)
-            setattr(dispatch, name, None)
 
 
 def _urls(tmp_path: Path, text: str | bytes, mode: int = 0o600, name: str = "notify") -> Path:
@@ -518,15 +512,19 @@ def _urls(tmp_path: Path, text: str | bytes, mode: int = 0o600, name: str = "not
     return path
 
 
+async def _check(path: Path) -> None:
+    async with notification_sender(NotificationSettings(urls_file=path), None):
+        pass
+
+
 def test_urls_file_is_private_and_each_url_is_checked_without_echoing_it(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG)
     good = "json://127.0.0.1:9/hook"
     with pytest.raises(OperatorConfigError, match=r"^notification URL refused \(line 3\)$"):
-        AppriseSender(_urls(tmp_path, f"# webhook\n\ntgram://SECRET\n{good}\n"))
+        asyncio.run(_check(_urls(tmp_path, f"# webhook\n\ntgram://SECRET\n{good}\n")))
     assert not any("SECRET" in message for message in caplog.messages)
-    assert logging.getLogger("apprise").disabled is False
     link = tmp_path / "link.urls"
     link.symlink_to(_urls(tmp_path, good, name="target"))
     cases = [
@@ -539,16 +537,22 @@ def test_urls_file_is_private_and_each_url_is_checked_without_echoing_it(
     ]
     for path, message in cases:
         with pytest.raises(OperatorConfigError, match=message):
-            AppriseSender(path)
-    AppriseSender(_urls(tmp_path, f"  {good}  \n# another\n{good}/second\n"))
+            asyncio.run(_check(path))
+    accepted = _urls(tmp_path, f"  {good}  \n# another\n{good}/second\n")
+    assert read_urls(accepted) == [(1, good), (3, f"{good}/second")]
+    asyncio.run(_check(accepted))
 
 
 def test_notifications_without_the_extra_refuse_to_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setitem(sys.modules, "apprise", None)  # not installed
+    missing = tmp_path / "site" / "apprise"  # shadows the installed package in the worker
+    missing.mkdir(parents=True)
+    (missing / "__init__.py").write_text("raise ImportError('not installed')\n")
+    path = os.pathsep.join([str(missing.parent), os.environ.get("PYTHONPATH", "")])
+    monkeypatch.setenv("PYTHONPATH", path)
     with pytest.raises(OperatorConfigError, match=r"install rill-provider\[notifications\]"):
-        AppriseSender(_urls(tmp_path, "json://127.0.0.1:9/hook"))
+        asyncio.run(_check(_urls(tmp_path, "json://127.0.0.1:9/hook")))
 
 
 def test_settings_defaults_and_config_resolution(tmp_path: Path) -> None:
@@ -567,6 +571,7 @@ def test_settings_defaults_and_config_resolution(tmp_path: Path) -> None:
         "quotes_paused": True,
         "service_start_stop": False,
         "alert_after_seconds": 300,
+        "use_tor": True,
     }
     assert load_config(_config(tmp_path)).notifications is None
     config = load_config(_config(tmp_path, notifications={"urls_file": "notify.urls"}))
@@ -596,20 +601,28 @@ def test_real_store_events_and_summary_reach_an_apprise_endpoint(
     harness = Harness(tmp_path, monkeypatch)
     harness.provision()
     wall = [1000.0]
+    settings = NotificationSettings(urls_file=urls, swap_confirmed=True)
+
+    async def scenario() -> str:
+        async with notification_sender(settings, None) as sender:
+            assert sender is not None
+            notifier = Notifier(
+                settings,
+                sender,
+                store,
+                profile="btc-to-ln/v1",
+                network="regtest",
+                health=lambda: HEALTHY,
+                clock=lambda: wall[0],
+            )
+            session = _claimed_swap(store, harness)  # 1.234 sat routing, 300 sat claim
+            await notifier.poll()
+            wall[0] = DAY  # the first midnight after the swap
+            await notifier.poll()
+        return session
+
     with harness.acquire() as store:
-        notifier = Notifier(
-            NotificationSettings(urls_file=urls, swap_confirmed=True),
-            AppriseSender(urls),
-            store,
-            profile="btc-to-ln/v1",
-            network="regtest",
-            health=lambda: HEALTHY,
-            clock=lambda: wall[0],
-        )
-        session = _claimed_swap(store, harness)  # 1.234 sat routing, 300 sat claim
-        asyncio.run(notifier.poll())
-        wall[0] = DAY  # the first midnight after the swap
-        asyncio.run(notifier.poll())
+        session = asyncio.run(scenario())
     assert [(path, body["title"], body["type"]) for path, body in received] == [
         ("/hook/SECRET", "RillSwap btc-to-ln/v1 (regtest): swap completed", "info"),
         ("/hook/SECRET", "RillSwap btc-to-ln/v1 (regtest): daily summary", "info"),
