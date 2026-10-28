@@ -306,7 +306,7 @@ class ReverseSettlement:
             # Repayment of the admitted debt; a concurrent settlement pass may
             # already have done it, which the paid evidence below rechecks.
             try:
-                await self.advance(work[0], now)
+                await self._advance_logged(work[0], now)
             except _BoundInvoiceSyncBeforeSubmissionError:
                 await self._repay_original_unsynced_debt(document, now)
         async with self._store.reverse_operations.operation() as operation:
@@ -344,11 +344,21 @@ class ReverseSettlement:
             session_id = Envelope.model_validate_json(document, strict=True).session_id
             work = self._store.settlement_work(session_id=session_id)
             if len(work) == 1 and work[0].state == "FUNDING_SENT":
-                await self.advance(work[0], now)
+                await self._advance_logged(work[0], now)
         except (asyncio.CancelledError, StaleOwnerError):
             raise
         except Exception:  # noqa: BLE001 - admission still requires FUNDED
             LOG.debug("funding catch-up before a reverse proposal did not complete")
+
+    async def _advance_logged(self, item: SettlementItem, now: int) -> None:
+        """Step a swap for a proposal and log a move as the periodic pass does.
+
+        A cooperative claim usually funds and settles the swap here, so without
+        this the operator log stopped at FUNDING_SENT or FUNDED.
+        """
+        moved = await self.advance(item, now)
+        if moved != item.state:
+            LOG.info("swap %s moved to %s", item.session_id[:16], moved)
 
     async def advance(self, item: SettlementItem, now: int) -> str:
         """Reload after serialization, never execute a queued stale snapshot."""

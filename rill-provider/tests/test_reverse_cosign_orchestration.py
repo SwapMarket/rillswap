@@ -65,7 +65,11 @@ async def _cosign(engine: ReverseSettlement, reserved: ReservationCase) -> bytes
 @native_marks[1]
 @pytest.mark.parametrize("confirmed", [True, False])
 def test_proposal_first_runs_the_providers_own_funding_depth_step(
-    reserved: ReservationCase, monkeypatch: pytest.MonkeyPatch, *, confirmed: bool
+    reserved: ReservationCase,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    *,
+    confirmed: bool,
 ) -> None:
     """A client whose node saw the depth first must not race the periodic pass."""
 
@@ -95,7 +99,10 @@ def test_proposal_first_runs_the_providers_own_funding_depth_step(
             assert state == "FUNDING_SENT"
         chain.confirmations.assert_called()
 
-    asyncio.run(exercise())
+    with caplog.at_level("INFO", logger="rill_provider.reverse_settlement"):
+        asyncio.run(exercise())
+    moved = f"swap {reserved.origin.session_id[:16]} moved to FUNDED"
+    assert (moved in caplog.messages) is confirmed
 
 
 @pytest.mark.native_crypto
@@ -145,7 +152,7 @@ def test_persistent_tip_disagreement_refuses_without_a_nonce(
 @pytest.mark.native_crypto
 @native_marks[1]
 def test_proposal_is_repaid_then_cosigned_once_and_replayed_exactly(
-    reserved: ReservationCase, monkeypatch: pytest.MonkeyPatch
+    reserved: ReservationCase, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     async def exercise() -> None:
         engine, _, hold = _funded_engine(reserved)
@@ -182,7 +189,11 @@ def test_proposal_is_repaid_then_cosigned_once_and_replayed_exactly(
         assert len(begins) == 1
         hold.settle_bound_invoice.assert_called_once()
 
-    asyncio.run(exercise())
+    with caplog.at_level("INFO", logger="rill_provider.reverse_settlement"):
+        asyncio.run(exercise())
+    # The operator sees the settlement the proposal caused, once, not only at the next pass.
+    moved = f"swap {reserved.origin.session_id[:16]} moved to SETTLED"
+    assert caplog.messages.count(moved) == 1
 
 
 @pytest.mark.native_crypto
