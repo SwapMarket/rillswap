@@ -181,6 +181,20 @@ def test_a_spent_output_ends_with_our_confirmed_refund_or_someone_elses_spend(
     assert (outcome["outcome"], outcome["confirmations"]) == ("refund_confirmed", 1)
 
 
+@pytest.mark.parametrize("depth", [0, -1, -6])
+def test_an_unconfirmed_or_conflicted_refund_is_not_reported_confirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, depth: int
+) -> None:
+    world = _World()
+    watcher = _watcher(tmp_path, world, monkeypatch)
+    watcher.step()
+    world.view = ChainView(LOCK + 2, unspent_on_chain=False)
+    world.depths[watcher.attempts[0].txid] = depth  # Core reports conflicts as negative
+    outcome = watcher.step()
+    assert outcome is not None
+    assert outcome["outcome"] == "outpoint_spent_elsewhere"
+
+
 def test_rejected_replacement_is_kept_and_rebroadcast(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

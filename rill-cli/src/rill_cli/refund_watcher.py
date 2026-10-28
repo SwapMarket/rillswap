@@ -216,7 +216,8 @@ class RefundWatcher:
         if view is None or not view.unspent_on_chain:
             for attempt in reversed(self.attempts):
                 depth = self._confirmations(attempt.txid)
-                if depth:
+                # A negative depth is a conflicted transaction, not our refund.
+                if depth is not None and depth > 0:
                     return self._outcome(
                         "refund_confirmed", refund_txid=attempt.txid, confirmations=depth
                     )
