@@ -431,6 +431,13 @@ Failed relay connections log one warning per outage while retries continue
 with backoff. Once reconnection and subscription sending succeed, the provider
 logs `relay available` at INFO once. Each relay is tracked independently.
 
+Each relay connection attempt runs on its own Tor circuit: the CONNECT
+request carries a fresh random `X-Tor-Stream-Isolation` value, which Tor's
+default `IsolateSOCKSAuth` treats like a SOCKS user name. Connections to
+different relays, and reconnects, never share a circuit, so one slow or
+censoring exit cannot cut every relay at once. This needs no torrc change;
+only `NoIsolateSOCKSAuth` on the `HTTPTunnelPort` turns it off.
+
 ### Notifications
 
 The optional `notifications` section sends operator notifications through

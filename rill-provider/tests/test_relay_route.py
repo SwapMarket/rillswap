@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import socket
 from contextlib import suppress
 from pathlib import Path
@@ -146,13 +147,20 @@ def test_the_service_policy_announces_onion_relays_only_with_the_proxy() -> None
 
 
 def _tunnel_proxy(
-    requests: list[bytes], target_port: int, reply: bytes
+    requests: list[bytes], target_port: int, reply: bytes, upstream: list[bytes] | None = None
 ) -> Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]]:
-    """A CONNECT proxy that records each request and pipes to a local port."""
+    """A CONNECT proxy that records each request and pipes to a local port.
 
-    async def pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    ``upstream`` records what the client sends through the tunnel.
+    """
+
+    async def pipe(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter, record: list[bytes] | None
+    ) -> None:
         with suppress(ConnectionError):
             while data := await reader.read(65536):
+                if record is not None:
+                    record.append(data)
                 writer.write(data)
                 await writer.drain()
         writer.close()
@@ -165,7 +173,9 @@ def _tunnel_proxy(
             writer.close()
             return
         upstream_reader, upstream_writer = await asyncio.open_connection("127.0.0.1", target_port)
-        await asyncio.gather(pipe(reader, upstream_writer), pipe(upstream_reader, writer))
+        await asyncio.gather(
+            pipe(reader, upstream_writer, upstream), pipe(upstream_reader, writer, None)
+        )
 
     return handle
 
@@ -182,6 +192,8 @@ def test_plain_ws_onion_relays_are_tunneled_through_the_proxy(
 
     monkeypatch.setattr(socket, "getaddrinfo", guarded)
 
+    upstream: list[bytes] = []
+
     async def scenario() -> list[bytes]:
         relay = FakeRelay()
         relay_port = urlsplit(await relay.start()).port
@@ -189,7 +201,7 @@ def test_plain_ws_onion_relays_are_tunneled_through_the_proxy(
         requests: list[bytes] = []
         established = b"HTTP/1.1 200 Connection established\r\n\r\n"
         server = await asyncio.start_server(
-            _tunnel_proxy(requests, relay_port, established), "127.0.0.1", 0
+            _tunnel_proxy(requests, relay_port, established, upstream), "127.0.0.1", 0
         )
         proxy = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
         event = json.dumps({"id": "01" * 32, "kind": 1059, "tags": [], "content": "x"}).encode()
@@ -203,7 +215,14 @@ def test_plain_ws_onion_relays_are_tunneled_through_the_proxy(
 
     requests = asyncio.run(scenario())
     host = ONION.removeprefix("ws://")
-    assert requests == [f"CONNECT {host}:80 HTTP/1.1\r\nHost: {host}:80\r\n\r\n".encode()]
+    assert len(requests) == 1
+    assert re.fullmatch(
+        rf"CONNECT {host}:80 HTTP/1\.1\r\nHost: {host}:80\r\n"
+        r"X-Tor-Stream-Isolation: [0-9a-f]{32}\r\n\r\n".encode(),
+        requests[0],
+    )
+    assert upstream[0].startswith(b"GET / HTTP/1.1\r\n")
+    assert b"x-tor-stream-isolation" not in b"".join(upstream).lower()  # only Tor sees the key
     assert host not in lookups
 
 
@@ -288,3 +307,33 @@ def test_ln_to_btc_firm_offers_refuse_to_start_without_hold_invoices() -> None:
     )
     with pytest.raises(OperatorConfigError, match="invoices_macaroon"):
         asyncio.run(cli._serve(config, None, ""))  # type: ignore[arg-type]  # noqa: SLF001
+
+
+def _isolation(request: bytes) -> str:
+    found = re.search(rb"\r\nX-Tor-Stream-Isolation: ([0-9a-f]{32})\r\n", request)
+    assert found is not None, request
+    return found.group(1).decode()
+
+
+def test_every_relay_connection_attempt_gets_its_own_tor_circuit() -> None:
+    async def scenario() -> list[bytes]:
+        requests: list[bytes] = []
+        forbidden = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n"
+        server = await asyncio.start_server(_tunnel_proxy(requests, 9, forbidden), "127.0.0.1", 0)
+        proxy = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+        try:
+            for url in ("wss://relay.example.invalid/",) * 2 + (ONION,) * 2:
+                with pytest.raises(RelayError, match="relay unavailable"):
+                    async with RelayConnection(url, proxy=proxy, open_timeout=5):
+                        pass
+        finally:
+            server.close()
+            await server.wait_closed()
+        return requests
+
+    requests = asyncio.run(scenario())
+    assert len(requests) == 4  # one CONNECT per attempt
+    assert requests[0].startswith(b"CONNECT relay.example.invalid:443 HTTP/1.1\r\n")
+    assert requests[2].startswith(f"CONNECT {ONION[5:]}:80 HTTP/1.1\r\n".encode())
+    keys = [_isolation(request) for request in requests]
+    assert len(set(keys)) == len(keys)  # reconnects and other relays never share a circuit
