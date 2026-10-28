@@ -980,10 +980,20 @@ def shop(method: str, path: str, body: dict[str, Any] | None = None) -> dict[str
     return response.json()
 
 
+def new_shop_order(rail: str) -> dict[str, Any]:
+    """Order stickers once the merchant's LND has caught up with the chain tip.
+
+    The merchant refuses Lightning intents while its LND trails a new block,
+    which is likely right after a swap's claim has just confirmed.
+    """
+    wait_lnd_synced([Lnd("merchant")])
+    return shop("POST", "/api/orders", {"productId": "stickers", "rail": rail})
+
+
 def cmd_shop_smoke(_: argparse.Namespace) -> None:
     """Buy from the demo shop over Lightning and via a btc-to-ln swap."""
     for rail in ("lightning", "btc-swap"):
-        order = shop("POST", "/api/orders", {"productId": "stickers", "rail": rail})
+        order = new_shop_order(rail)
         log(f"shop order {order['id']} ({rail}, {order['amountSat']} sat)")
         if rail == "lightning":
             result = Lnd("user").pay(order["invoice"])
@@ -1028,7 +1038,7 @@ def cmd_pay_xmr(args: argparse.Namespace) -> None:
 def cmd_xmr_smoke(_: argparse.Namespace) -> None:
     """Buy from the demo shop with Monero: one payment, then one split in two transactions."""
     for parts in (1, 2):
-        order = shop("POST", "/api/orders", {"productId": "stickers", "rail": "monero"})
+        order = new_shop_order("monero")
         log(f"shop order {order['id']} (monero, {order['amountLabel']}, {parts} tx)")
         cmd_pay_xmr(argparse.Namespace(order=order["id"], parts=parts))
         accepted = wait_for(

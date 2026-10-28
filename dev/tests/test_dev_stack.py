@@ -107,6 +107,24 @@ def test_has_channel_counts_open_and_pending_local_initiator():
     assert not devtool.has_channel(FakeLnd([], remote_pending), remote)
 
 
+def test_shop_orders_wait_for_the_merchant_lnd_to_reach_the_tip(monkeypatch) -> None:
+    devtool = load_devtool()
+    calls = []
+    monkeypatch.setattr(devtool, "Lnd", lambda node: f"lnd-{node}")
+    monkeypatch.setattr(devtool, "wait_lnd_synced", lambda nodes: calls.append(("sync", nodes)))
+
+    def shop(method, path, body):
+        calls.append((method, path, body))
+        return {"id": "o"}
+
+    monkeypatch.setattr(devtool, "shop", shop)
+    assert devtool.new_shop_order("lightning") == {"id": "o"}
+    assert calls == [
+        ("sync", ["lnd-merchant"]),  # a just-confirmed claim leaves its LND a block behind
+        ("POST", "/api/orders", {"productId": "stickers", "rail": "lightning"}),
+    ]
+
+
 def compose_service(name: str) -> str:
     match = re.search(rf"^  {name}:\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)", COMPOSE, re.M | re.S)
     assert match, name
