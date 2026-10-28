@@ -645,8 +645,9 @@ class HandshakeService:
         for result in results:
             if isinstance(result, StaleOwnerError):
                 raise result
+        pending = {entry.message_id for entry in self._store.pending_outbox()}  # one read per tick
         for message_id in list(state.attempts):
-            if message_id not in {entry.message_id for entry in self._store.pending_outbox()}:
+            if message_id not in pending:
                 del state.attempts[message_id]
 
     async def _send_fresh_outbox(self, relays: Sequence[Relay]) -> None:

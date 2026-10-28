@@ -328,6 +328,35 @@ def test_announcements_are_durably_ordered_cached_and_sessions_expire(
         assert len(up.published) == published
 
 
+def test_a_tick_reads_the_outbox_a_bounded_number_of_times_however_many_attempts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, monkeypatch)
+    harness.provision()
+    policy = ServicePolicy(
+        network=harness.network,
+        profiles=("btc-to-ln/v1",),
+        amount_bands=((1000, 2000),),
+        base_fee_sat=1,
+        proportional_millionths=1,
+        slot="s",
+        relay_urls=("ws://fake/",),
+        handshake_timeout=100,
+    )
+    with harness.acquire() as store:
+        store.reserve(harness.init, now=9_000)
+        service = HandshakeService(store, _Identity(), object(), policy, clock=lambda: 10_000.0)  # type: ignore[arg-type]
+        down = _Relay(accept=False)
+        asyncio.run(service.tick([down]))
+        stale = {f"{index:064x}": 1 for index in range(200)}  # delivered since their last attempt
+        service._state.attempts.update(stale)  # noqa: SLF001
+        reads = Mock(wraps=store.pending_outbox)
+        monkeypatch.setattr(store, "pending_outbox", reads)
+        asyncio.run(service.tick([down]))
+        assert reads.call_count <= 2  # due selection and pruning, not one per attempt
+        assert not stale.keys() & service._state.attempts.keys()  # noqa: SLF001
+
+
 class _BandsIdentity(_Identity):
     def __init__(self) -> None:
         super().__init__()
