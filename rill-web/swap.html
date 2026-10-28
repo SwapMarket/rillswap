@@ -5,11 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="referrer" content="no-referrer" />
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self' wss: ws://*.onion:* ws://127.0.0.1:* ws://localhost:* __CHAIN_API_ORIGINS__; img-src 'self' data:; font-src 'none'; base-uri 'none'; form-action 'none'" />
-    <title>RillSwap: pay a Lightning invoice with on-chain BTC (experimental)</title>
+    <title>RillSwap: decentralized, permissionless Lightning swaps</title>
+    <meta name="description" content="A decentralized, permissionless Lightning swap market. Swap on-chain Bitcoin and Lightning with any provider on Nostr. Non-custodial, no account." />
+    <meta name="theme-color" content="#101719" />
+    <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   </head>
   <body>
     <div id="swap"></div>
-    <noscript>The swap client needs JavaScript.</noscript>
+    <noscript>
+      <h1>RillSwap: decentralized, permissionless Lightning swaps</h1>
+      <p>Swap on-chain Bitcoin and Lightning with any provider that announces itself on Nostr. Your browser verifies every contract, and an encrypted recovery file lets you refund or claim without the provider. The swap app needs JavaScript.</p>
+      <p><a href="https://github.com/rillswap/rillswap">Source code and documentation on GitHub</a></p>
+    </noscript>
     <script type="module" src="/src/swapUi.ts"></script>
   </body>
 </html>

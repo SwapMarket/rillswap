@@ -273,7 +273,16 @@ deploy. Set the repository's Pages source to **GitHub Actions**.
 
 - `/`: the mainnet app, with swaps enabled
 - `/signet/`: the signet swap app
-- `diagnostic.html` in each: the disconnected preview
+- `diagnostic.html` in each: the disconnected preview, marked `noindex`
+- `sitemap.xml` and `robots.txt` at the root (crawlers read `robots.txt`
+  only at a domain root, so it applies once the site has its own domain)
+
+Each app page gets its own title and description, a canonical URL, Open Graph
+and Twitter card tags pointing at `social-card.png`, and JSON-LD
+`WebApplication` data linking the source repository. These absolute URLs
+default to `https://rillswap.github.io/rillswap/`; a fork or custom domain
+sets `RILLSWAP_SITE_URL` (ending in `/`) when running `bun run build:pages`.
+The icons and social card live in `public/`.
 
 The network indicator in the header is a picker: choosing mainnet or signet
 opens the other build, and any other network reconfigures the current page

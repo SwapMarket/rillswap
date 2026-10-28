@@ -426,6 +426,7 @@ services:
       - ../rill-web/src:/src/rill-web/src:ro
       - ../rill-web/index.html:/src/rill-web/index.html:ro
       - ../rill-web/swap.html:/src/rill-web/swap.html:ro
+      - ../rill-web/public:/src/rill-web/public:ro
       - ../rill-web/vite.config.ts:/src/rill-web/vite.config.ts:ro
       - ../rill-web/tsconfig.json:/src/rill-web/tsconfig.json:ro
     ports:

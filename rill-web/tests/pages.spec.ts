@@ -13,14 +13,14 @@ for (const prefix of ["", "repository/"]) {
     await page.goto(base);
     await directorySettled(page);
     await expect(page.locator("#swap-start")).toBeEnabled();
-    const deployments = page.getByRole("navigation", { name: "Deployment network" });
-    await expect(deployments).toHaveCSS("text-align", "center");
-    await expect(deployments).toHaveCSS("padding-top", "16px");
+    // The header picker is the only network switch; the footer repeats no deployment links.
+    await expect(page.getByRole("navigation", { name: "Deployment network" })).toHaveCount(0);
+    const picker = page.getByRole("combobox", { name: "Switch network" });
     await page.locator("#swap-settings-toggle").click();
     await expect(page.locator("#swap-network")).toHaveValue("mainnet");
     await expect(page.locator("#swap-chain-api")).toHaveValue("https://mempool.space/api");
     await page.locator("#swap-settings-close").click();
-    await page.getByRole("navigation", { name: "Deployment network" }).getByRole("link", { name: "Signet", exact: true }).click();
+    await picker.selectOption("signet");
     await expect(page).toHaveURL(`${base}signet/`);
     await directorySettled(page);
     await expect(page.locator("#swap-start")).toBeEnabled();
@@ -29,7 +29,7 @@ for (const prefix of ["", "repository/"]) {
     await expect(page.locator("#swap-chain-api")).toHaveValue("https://mempool.space/signet/api");
     await expect(page.locator("#swap-broadcast-api")).toHaveValue("https://mempool.space/signet/api");
     await page.locator("#swap-settings-close").click();
-    await page.getByRole("navigation", { name: "Deployment network" }).getByRole("link", { name: "Mainnet", exact: true }).click();
+    await picker.selectOption("mainnet");
     await expect(page).toHaveURL(base);
     await directorySettled(page);
     await expect(page.locator("#swap-start")).toBeEnabled();
@@ -37,6 +37,35 @@ for (const prefix of ["", "repository/"]) {
     expect([...new Set(sockets)].sort()).toEqual([...MAINNET_RELAYS].sort());
     expect(requests.some((url) => url.includes(`${prefix}signet/assets/`))).toBe(true);
     for (const url of requests) expect(new URL(url).host).toBe("127.0.0.1:18866");
+  });
+
+  test(`each deployment has its own title, description, canonical address and social card under /${prefix}`, async ({ page, request }) => {
+    const base = `http://127.0.0.1:18866/${prefix}`, site = "https://rillswap.github.io/rillswap/";
+    const meta = (selector: string, attribute = "content") => page.locator(selector).getAttribute(attribute);
+    for (const [path, url, title] of [
+      ["", site, "RillSwap: decentralized, permissionless Lightning swaps"],
+      ["signet/", `${site}signet/`, "RillSwap Signet: try Lightning swaps with test coins"],
+    ] as const) {
+      await page.goto(`${base}${path}`);
+      await expect(page).toHaveTitle(title);
+      expect(await meta('meta[name="description"]')).toMatch(/permissionless|decentralized/);
+      expect(await meta('link[rel="canonical"]', "href")).toBe(url);
+      expect(await meta('meta[property="og:url"]')).toBe(url);
+      expect(await meta('meta[property="og:title"]')).toBe(title);
+      expect(await meta('meta[property="og:image"]')).toBe(`${site}social-card.png`);
+      expect(await meta('meta[name="twitter:card"]')).toBe("summary_large_image");
+      const data = JSON.parse((await page.locator('script[type="application/ld+json"]').textContent())!);
+      expect(data).toMatchObject({ "@type": "WebApplication", name: "RillSwap", url, sameAs: ["https://github.com/rillswap/rillswap"] });
+      for (const asset of ["favicon.png", "apple-touch-icon.png", "social-card.png"]) {
+        expect((await request.get(`${base}${path}${asset}`)).ok()).toBe(true);
+      }
+      await expect(page.locator('meta[name="robots"]')).toHaveCount(0);
+      await page.goto(`${base}${path}diagnostic.html`);
+      expect(await meta('meta[name="robots"]')).toBe("noindex");
+    }
+    const sitemap = await (await request.get(`${base}sitemap.xml`)).text();
+    expect(sitemap).toContain(`<loc>${site}</loc>`); expect(sitemap).toContain(`<loc>${site}signet/</loc>`);
+    expect(await (await request.get(`${base}robots.txt`)).text()).toContain(`Sitemap: ${site}sitemap.xml`);
   });
 
   test(`the header network indicator opens the published sibling build under /${prefix}`, async ({ page }) => {
