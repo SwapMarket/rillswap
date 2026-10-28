@@ -162,6 +162,69 @@ def test_nip44_temporary_secret_and_output_cleanup_on_all_paths(
         assert native.bytes(outputs[-1], 32) == b"\x00" * 32
 
 
+# BOLT 11 "donation" and "high-S" examples: SHA256 of the signed data, both signatures.
+BOLT11_DIGEST = bytes.fromhex("6daf4d488be41ce7cbb487cab1ef2975e5efcea879b20d421f0ef86b07cbb987")
+BOLT11_LOW_S = bytes.fromhex(
+    "8d3ce9e28357337f62da0162d9454df827f83cfe499aeb1c1db349d4d8112742"
+    "5e434ca29929406c23bba1ae8ac6ca32880b38d4bf6ff874024cac34ba9625f1"
+)
+BOLT11_HIGH_S = bytes.fromhex(
+    "8d3ce9e28357337f62da0162d9454df827f83cfe499aeb1c1db349d4d8112742"
+    "a1bcb35d66d6bf93dc445e51753935cc32a3a411efd8a7c7bd85b25815a01b50"
+)
+BOLT11_PAYEE = bytes.fromhex("03e7156ae33b0a208d0744199163177e909e80176e55d97a2f221ede0f934dd9ad")
+
+
+def test_ecdsa_recovery_and_verification_follow_bolt11_reader_rules() -> None:
+    with Context(library_path=LIBRARY, context_random=b"\x11" * 32) as context:
+        assert context.ecdsa_recover(BOLT11_DIGEST, BOLT11_LOW_S, 1) == BOLT11_PAYEE
+        context.ecdsa_verify(BOLT11_PAYEE, BOLT11_DIGEST, BOLT11_LOW_S)
+        # Recovery accepts high S (BOLT 11 without `n`); an explicit payee requires low S.
+        assert len(context.ecdsa_recover(BOLT11_DIGEST, BOLT11_HIGH_S, 1)) == 33
+        with pytest.raises(CryptoError, match="invalid signature"):
+            context.ecdsa_verify(BOLT11_PAYEE, BOLT11_DIGEST, BOLT11_HIGH_S)
+        assert context.ecdsa_recover(BOLT11_DIGEST, BOLT11_LOW_S, 0) != BOLT11_PAYEE
+        with pytest.raises(CryptoError, match="invalid signature"):
+            context.ecdsa_verify(BOLT11_PAYEE, b"\x00" * 32, BOLT11_LOW_S)
+        with pytest.raises(CryptoError, match="invalid public key"):
+            context.ecdsa_verify(b"\x04" + BOLT11_PAYEE[1:], BOLT11_DIGEST, BOLT11_LOW_S)
+        with pytest.raises(CryptoError, match="invalid signature"):
+            context.ecdsa_recover(BOLT11_DIGEST, b"\xff" * 64, 1)
+        for recovery_id in (-1, 4, True):
+            with pytest.raises(ValueError, match="recovery_id"):
+                context.ecdsa_recover(BOLT11_DIGEST, BOLT11_LOW_S, recovery_id)
+        with pytest.raises(ValueError, match="signature"):
+            context.ecdsa_recover(BOLT11_DIGEST, BOLT11_LOW_S[:63], 1)
+        with pytest.raises(ValueError, match="public_key"):
+            context.ecdsa_verify(BOLT11_PAYEE[:32], BOLT11_DIGEST, BOLT11_LOW_S)
+
+
+def test_optional_ecdsa_symbols_are_checked_only_when_requested(tmp_path: Path) -> None:
+    compiler = shutil.which("cc")
+    if compiler is None:
+        pytest.skip("C compiler is unavailable")
+    library = tmp_path / "librill_crypto_previous.so"
+    code = (
+        "#include <stdint.h>\n"
+        "uint32_t rill_crypto_abi_version(void) { return 1u; }\n"
+        "void *rill_crypto_context_create(const unsigned char *seed) { "
+        "(void)seed; return (void *)1; }\n"
+        "void rill_crypto_context_destroy(void *context) { (void)context; }\n"
+        "int rill_musig_internal_key(void) { return 0; }\n"
+    )
+    subprocess.run(  # noqa: S603 - fixed synthetic ABI fixture
+        [compiler, "-shared", "-fPIC", "-x", "c", "-o", str(library), "-"],
+        input=code,
+        text=True,
+        check=True,
+    )
+    with Context(library_path=library) as previous:
+        with pytest.raises(RuntimeError, match="lacks optional rill_ecdsa_recover_compressed"):
+            previous.ecdsa_recover(BOLT11_DIGEST, BOLT11_LOW_S, 1)
+        with pytest.raises(RuntimeError, match="lacks optional rill_ecdsa_verify"):
+            previous.ecdsa_verify(BOLT11_PAYEE, BOLT11_DIGEST, BOLT11_LOW_S)
+
+
 def test_pinned_bip340_verify_vectors_match_wasm_cases() -> None:
     """Native and WASM exercise the exact same official BIP340 fixtures."""
     fixtures = json.loads(

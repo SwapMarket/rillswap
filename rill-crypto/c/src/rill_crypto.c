@@ -8,6 +8,7 @@
 #include "secp256k1_ecdh.h"
 #include "secp256k1_extrakeys.h"
 #include "secp256k1_musig.h"
+#include "secp256k1_recovery.h"
 #include "secp256k1_schnorrsig.h"
 
 struct rill_crypto_context {
@@ -312,6 +313,67 @@ rill_crypto_status rill_schnorr_verify(
     }
     if (secp256k1_schnorrsig_verify(
             context->secp, signature64, message32, 32u, &public_key) != 1) {
+        return RILL_CRYPTO_INVALID_SIGNATURE;
+    }
+    return RILL_CRYPTO_OK;
+}
+
+rill_crypto_status rill_ecdsa_recover_compressed(
+    const rill_crypto_context *context,
+    const unsigned char message32[32],
+    const unsigned char signature64[64],
+    int recovery_id,
+    unsigned char output33[33]
+) {
+    secp256k1_ecdsa_recoverable_signature signature;
+    secp256k1_pubkey public_key;
+    size_t output_length = 33u;
+    if (output33 == NULL) {
+        return RILL_CRYPTO_INVALID_ARGUMENT;
+    }
+    rill_wipe(output33, 33u);
+    if (!rill_context_valid(context) || message32 == NULL || signature64 == NULL ||
+        recovery_id < 0 || recovery_id > 3) {
+        return RILL_CRYPTO_INVALID_ARGUMENT;
+    }
+    if (secp256k1_ecdsa_recoverable_signature_parse_compact(
+            context->secp, &signature, signature64, recovery_id) != 1 ||
+        secp256k1_ecdsa_recover(context->secp, &public_key, &signature, message32) != 1) {
+        return RILL_CRYPTO_INVALID_SIGNATURE;
+    }
+    if (secp256k1_ec_pubkey_serialize(
+            context->secp,
+            output33,
+            &output_length,
+            &public_key,
+            SECP256K1_EC_COMPRESSED) != 1 || output_length != 33u) {
+        rill_wipe(output33, 33u);
+        return RILL_CRYPTO_INTERNAL_ERROR;
+    }
+    return RILL_CRYPTO_OK;
+}
+
+rill_crypto_status rill_ecdsa_verify(
+    const rill_crypto_context *context,
+    const unsigned char public_key33[33],
+    const unsigned char message32[32],
+    const unsigned char signature64[64]
+) {
+    secp256k1_ecdsa_signature signature;
+    secp256k1_pubkey public_key;
+    if (!rill_context_valid(context) || public_key33 == NULL || message32 == NULL ||
+        signature64 == NULL) {
+        return RILL_CRYPTO_INVALID_ARGUMENT;
+    }
+    if (public_key33[0] != 0x02u && public_key33[0] != 0x03u) {
+        return RILL_CRYPTO_INVALID_PUBLIC_KEY;
+    }
+    if (secp256k1_ec_pubkey_parse(context->secp, &public_key, public_key33, 33u) != 1) {
+        return RILL_CRYPTO_INVALID_PUBLIC_KEY;
+    }
+    /* Parsing rejects R or S at or above the group order; verify rejects high S. */
+    if (secp256k1_ecdsa_signature_parse_compact(context->secp, &signature, signature64) != 1 ||
+        secp256k1_ecdsa_verify(context->secp, &signature, message32, &public_key) != 1) {
         return RILL_CRYPTO_INVALID_SIGNATURE;
     }
     return RILL_CRYPTO_OK;

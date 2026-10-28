@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 _ABI_VERSION: Final = 1
 _OK: Final = 0
 _ATTEMPT_TOKEN: Final = object()
+_RECOVERY_IDS: Final = frozenset({0, 1, 2, 3})
 _STATUS_NAMES: Final = {
     1: "invalid argument",
     2: "invalid secret key",
@@ -51,6 +52,14 @@ int rill_schnorr_sign(
 );
 int rill_schnorr_verify(
     const rill_crypto_context *, const unsigned char[32],
+    const unsigned char[32], const unsigned char[64]
+);
+int rill_ecdsa_recover_compressed(
+    const rill_crypto_context *, const unsigned char[32],
+    const unsigned char[64], int, unsigned char[33]
+);
+int rill_ecdsa_verify(
+    const rill_crypto_context *, const unsigned char[33],
     const unsigned char[32], const unsigned char[64]
 );
 int rill_musig_internal_key(
@@ -96,6 +105,8 @@ class _Lib(Protocol):
     def rill_nip44_shared_x(self, *args: Any) -> int: ...
     def rill_schnorr_sign(self, *args: Any) -> int: ...
     def rill_schnorr_verify(self, *args: Any) -> int: ...
+    def rill_ecdsa_recover_compressed(self, *args: Any) -> int: ...
+    def rill_ecdsa_verify(self, *args: Any) -> int: ...
     def rill_musig_internal_key(self, *args: Any) -> int: ...
     def rill_musig_output_key(self, *args: Any) -> int: ...
     def rill_musig_begin(self, *args: Any) -> int: ...
@@ -329,6 +340,53 @@ class Context:
                     self._native.input(signature, 64, "signature"),
                 ),
             )
+
+    def ecdsa_recover(self, message: bytes, signature: bytes, recovery_id: int) -> bytes:
+        """Recover the compressed key of a compact ECDSA signature (BOLT 11 payee).
+
+        High-S and low-S signatures are both accepted, as BOLT 11 requires for
+        recovery. This optional ABI-1 symbol is required only for this operation.
+        """
+        with self._operation():
+            recover = self._optional("rill_ecdsa_recover_compressed")
+            if type(recovery_id) is not int or recovery_id not in _RECOVERY_IDS:
+                raise ValueError("recovery_id must be 0, 1, 2 or 3")
+            output = self._native.output(33)
+            _check(
+                recover(
+                    self._pointer,
+                    self._native.input(message, 32, "message"),
+                    self._native.input(signature, 64, "signature"),
+                    recovery_id,
+                    output,
+                ),
+            )
+            return self._native.bytes(output, 33)
+
+    def ecdsa_verify(self, public_key: bytes, message: bytes, signature: bytes) -> None:
+        """Verify a low-S compact ECDSA signature or raise `CryptoError`.
+
+        This optional ABI-1 symbol is required only for this operation.
+        """
+        with self._operation():
+            verify = self._optional("rill_ecdsa_verify")
+            _check(
+                verify(
+                    self._pointer,
+                    self._native.input(public_key, 33, "public_key"),
+                    self._native.input(message, 32, "message"),
+                    self._native.input(signature, 64, "signature"),
+                ),
+            )
+
+    def _optional(self, name: str) -> Any:
+        try:
+            return getattr(self._native.lib, name)
+        except AttributeError:
+            raise RuntimeError(
+                f"native rill-crypto library lacks optional {name}; "
+                "install a matching native library"
+            ) from None
 
     def musig_output_key(
         self,

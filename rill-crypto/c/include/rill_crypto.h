@@ -95,6 +95,31 @@ RILL_API rill_crypto_status rill_schnorr_verify(
 );
 
 /*
+ * BOLT 11 payee authentication over a compact ECDSA signature (R || S) of a
+ * 32-byte digest. Preserves ABI 1: older libraries simply lack these optional
+ * symbols.
+ *
+ * Recovery takes the invoice's recovery id (0 to 3), accepts high-S and low-S
+ * signatures as BOLT 11 requires without an `n` field, and returns the
+ * compressed public key. Non-null output is zeroed on every failure.
+ */
+RILL_API rill_crypto_status rill_ecdsa_recover_compressed(
+    const rill_crypto_context *context,
+    const unsigned char message32[32],
+    const unsigned char signature64[64],
+    int recovery_id,
+    unsigned char compressed_public_key33[33]
+);
+
+/* Verification against an explicit payee requires the low-S form (BOLT 11). */
+RILL_API rill_crypto_status rill_ecdsa_verify(
+    const rill_crypto_context *context,
+    const unsigned char compressed_public_key33[33],
+    const unsigned char message32[32],
+    const unsigned char signature64[64]
+);
+
+/*
  * Public keys are aggregated in the exact user, provider order. Parity is the
  * parity of the untweaked full BIP327 aggregate point (zero even, one odd).
  */

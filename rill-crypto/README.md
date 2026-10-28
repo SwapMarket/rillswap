@@ -41,6 +41,11 @@ import createRillCrypto from "./tmp/wasm/rill_crypto_wasm.mjs";
 const wasm = await createRillCrypto();
 ```
 
+The native library also recovers and verifies compact ECDSA signatures
+(`Context.ecdsa_recover`, `Context.ecdsa_verify`) for authenticating BOLT 11
+invoice payees in Python. The WASM module does not export them; the browser
+decodes invoices with `@noble/curves`.
+
 `wasm/schnorr_verify.ts` provides `createSchnorrVerifier(wasm)` for BIP340
 verification; call `destroy()` when finished. Consumers are responsible for
 loading the artifacts and verifying their integrity.

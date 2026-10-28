@@ -10,7 +10,8 @@
   "modules": [
     "extrakeys",
     "schnorrsig",
-    "musig"
+    "musig",
+    "recovery"
   ],
   "notes": "MuSig API is experimental upstream. RillSwap pins this exact source and exposes only its own versioned C ABI."
 }

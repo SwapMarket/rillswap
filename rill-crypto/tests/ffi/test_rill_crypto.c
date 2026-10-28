@@ -26,6 +26,90 @@ static void fill(unsigned char *buffer, size_t length, unsigned char value) {
     }
 }
 
+/* BOLT 11 "donation" example: SHA256 of its signed data, signature, recovery id 1. */
+static void test_bolt11_ecdsa(const rill_crypto_context *context) {
+    const unsigned char digest[32] = {
+        0x6d, 0xaf, 0x4d, 0x48, 0x8b, 0xe4, 0x1c, 0xe7,
+        0xcb, 0xb4, 0x87, 0xca, 0xb1, 0xef, 0x29, 0x75,
+        0xe5, 0xef, 0xce, 0xa8, 0x79, 0xb2, 0x0d, 0x42,
+        0x1f, 0x0e, 0xf8, 0x6b, 0x07, 0xcb, 0xb9, 0x87
+    };
+    const unsigned char signature[64] = {
+        0x8d, 0x3c, 0xe9, 0xe2, 0x83, 0x57, 0x33, 0x7f,
+        0x62, 0xda, 0x01, 0x62, 0xd9, 0x45, 0x4d, 0xf8,
+        0x27, 0xf8, 0x3c, 0xfe, 0x49, 0x9a, 0xeb, 0x1c,
+        0x1d, 0xb3, 0x49, 0xd4, 0xd8, 0x11, 0x27, 0x42,
+        0x5e, 0x43, 0x4c, 0xa2, 0x99, 0x29, 0x40, 0x6c,
+        0x23, 0xbb, 0xa1, 0xae, 0x8a, 0xc6, 0xca, 0x32,
+        0x88, 0x0b, 0x38, 0xd4, 0xbf, 0x6f, 0xf8, 0x74,
+        0x02, 0x4c, 0xac, 0x34, 0xba, 0x96, 0x25, 0xf1
+    };
+    const unsigned char payee[33] = {
+        0x03, 0xe7, 0x15, 0x6a, 0xe3, 0x3b, 0x0a, 0x20,
+        0x8d, 0x07, 0x44, 0x19, 0x91, 0x63, 0x17, 0x7e,
+        0x90, 0x9e, 0x80, 0x17, 0x6e, 0x55, 0xd9, 0x7a,
+        0x2f, 0x22, 0x1e, 0xde, 0x0f, 0x93, 0x4d, 0xd9,
+        0xad
+    };
+    unsigned char high_s[64];
+    unsigned char recovered[33];
+    unsigned char zero[33] = {0};
+    unsigned int borrow = 0u;
+    size_t index;
+    /* secp256k1 group order n, to build the high-S twin n - s. */
+    const unsigned char order[32] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+        0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b,
+        0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36, 0x41, 0x41
+    };
+
+    assert(rill_ecdsa_recover_compressed(context, digest, signature, 1, recovered) ==
+           RILL_CRYPTO_OK);
+    assert(memcmp(recovered, payee, 33u) == 0);
+    assert(rill_ecdsa_verify(context, payee, digest, signature) == RILL_CRYPTO_OK);
+
+    memcpy(high_s, signature, 32u);
+    for (index = 32u; index-- > 0u;) {
+        unsigned int value = (unsigned int)order[index] - signature[32u + index] - borrow;
+        high_s[32u + index] = (unsigned char)(value & 0xffu);
+        borrow = (value >> 8) & 1u;
+    }
+    /* Recovery accepts high S; verification against a known key does not. */
+    assert(rill_ecdsa_recover_compressed(context, digest, high_s, 1, recovered) ==
+           RILL_CRYPTO_OK);
+    assert(rill_ecdsa_verify(context, payee, digest, high_s) ==
+           RILL_CRYPTO_INVALID_SIGNATURE);
+
+    memset(recovered, 0x55, sizeof(recovered));
+    assert(rill_ecdsa_recover_compressed(context, digest, signature, 4, recovered) ==
+           RILL_CRYPTO_INVALID_ARGUMENT);
+    assert(memcmp(recovered, zero, 33u) == 0);
+    assert(rill_ecdsa_recover_compressed(context, digest, signature, -1, recovered) ==
+           RILL_CRYPTO_INVALID_ARGUMENT);
+    assert(rill_ecdsa_recover_compressed(NULL, digest, signature, 1, recovered) ==
+           RILL_CRYPTO_INVALID_ARGUMENT);
+    {
+        unsigned char overflow[64];
+        memcpy(overflow, order, 32u); /* R equal to the group order */
+        memcpy(&overflow[32], &signature[32], 32u);
+        assert(rill_ecdsa_recover_compressed(context, digest, overflow, 1, recovered) ==
+               RILL_CRYPTO_INVALID_SIGNATURE);
+        assert(memcmp(recovered, zero, 33u) == 0);
+        assert(rill_ecdsa_verify(context, payee, digest, overflow) ==
+               RILL_CRYPTO_INVALID_SIGNATURE);
+    }
+    assert(rill_ecdsa_verify(context, zero, digest, signature) == RILL_CRYPTO_INVALID_PUBLIC_KEY);
+    assert(rill_ecdsa_verify(context, payee, digest, NULL) == RILL_CRYPTO_INVALID_ARGUMENT);
+    {
+        unsigned char other[32];
+        memcpy(other, digest, 32u);
+        other[0] ^= 1u;
+        assert(rill_ecdsa_verify(context, payee, other, signature) ==
+               RILL_CRYPTO_INVALID_SIGNATURE);
+    }
+}
+
 int main(void) {
     unsigned char context_random[32];
     unsigned char user_secret[32] = {0};
@@ -255,6 +339,7 @@ int main(void) {
 
     rill_musig_attempt_destroy(user_attempt);
     rill_musig_attempt_destroy(provider_attempt);
+    test_bolt11_ecdsa(context);
     rill_crypto_context_destroy(context);
     return 0;
 }
