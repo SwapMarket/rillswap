@@ -165,7 +165,6 @@ rill-provider`. Third-party dependencies are hash-locked in
 | `serve` | Run the provider until SIGINT or SIGTERM |
 | `inspect-swaps` | Inspect retained swap state offline |
 | `reconcile-payment` | Track one `PAYING` swap without sending another payment |
-| `migrate-store` | Explicitly upgrade a v5 to v7 store offline |
 
 Use `rill-provider <command> --help` for arguments. All commands except
 `provision-identity` require `--config`. Refused operations exit with status
@@ -478,8 +477,8 @@ from the store's swap ledger (see
 requests and firm offers, swaps closed with their outcomes and success rate,
 revenue, mining and routing costs, losses, net profit (in sat, with msat
 precision) and EVM gas (in gwei, kept apart). If a closed swap has costs that
-were not recorded (accepted before the v18 upgrade, or not reported by a
-backend), the summary says so and the net profit is an upper bound.
+were not recorded (not reported by a backend), the summary says so and the
+net profit is an upper bound.
 
 Notifications are best effort and never affect serving. Nothing about them is
 persisted: events that happen while the service is stopped are not sent one
@@ -493,22 +492,14 @@ requests, which can include the URLs and their tokens.
 
 ## Persistent state and backups
 
-Store format 18 automatically upgrades exact recognized v8 to v17 schemas after
-custody and authoritative-file verification. Earlier v5 to v7 stores still need
-the explicit migration command. A deployed hash-only v15 EVM table is converted
-only when all transaction hashes are NULL; a height-only v10 table is converted
-only when all spent heights are NULL. Other evidence-bearing historical variants
-remain unchanged and require operator recovery. NULL permits lossless storage
-conversion, not a payment retry or a conclusion that no funds were committed.
-Both version markers advance atomically. No RPC, rescan, or new dispatch is
-performed by this compatibility upgrade; older binaries must not reopen it.
+The store uses schema v19 and opens only a store of exactly that version (see
+[Upgrades](#upgrades)).
 
-From v18 the store keeps an append-only swap ledger: each firm offer,
-acceptance and outcome, and every realized cost (Lightning routing fee, claim,
-funding and refund mining fees, EVM gas), written in the same transaction as
-the swap event. The upgrade adds it empty. Swaps accepted before the upgrade
-have no ledger rows, so reports list them as having unrecorded costs instead of
-counting those costs as zero.
+The store keeps an append-only swap ledger: each firm offer, acceptance and
+outcome, and every realized cost (Lightning routing fee, claim, funding and
+refund mining fees, EVM gas), written in the same transaction as the swap
+event. A cost no backend reported is listed as unrecorded instead of being
+counted as zero.
 
 Reverse spent-output scans retain a block-hash anchor and an immutable replay
 floor, checking parent continuity in batches of at most 12 blocks. Above-floor
@@ -517,11 +508,9 @@ pauses automatic refund resolution for operator recovery, which can leave funds
 and the held payment pending. Scan backlog also blocks refund-based cancellation.
 An already recorded preimage still settles without chain access.
 
-Upgrading adds empty scan storage only. Legacy swaps without anchors accept
-history through their old cursor (or the current tip if no cursor exists), without
-automatically replaying it. This does not recover claims missed before anchoring;
-those need explicit operator investigation. Missing metadata is not permission
-for a full historical scan, a new funding attempt, or a payment retry.
+Every funded reverse swap commits its anchor in the same transaction as its
+funding. A swap without one is refused for operator recovery: missing metadata
+is not permission for a full historical scan, a refund, or a payment retry.
 
 The live store is the authoritative swap state, not a cache. Its database and
 owner-lock file belong to one host and one service.
@@ -546,17 +535,22 @@ and cancellation after a completed worker may still require operator inspection.
 
 ### Upgrades
 
-Stop the service before installing a new version. Current stores use schema
-v18. Stores v8 to v17 upgrade automatically when opened, including by the
-inspection commands. Stores v5 to v7 need an explicit offline migration:
+Stop the service before installing a new version. Stores are never upgraded in
+place. A store of any other schema version (including v18 and earlier) is
+refused with its contents unchanged, with
+`live session store version unsupported (found N, requires 19); recreate it with
+provision-store`. (If the old process crashed, SQLite may still fold its
+committed write-ahead log into the database file; nothing is lost.) An older
+release also refuses a newer store.
 
-```sh
-rill-provider migrate-store --config tmp/signet/provider.json
-```
-
-Then restart `serve`. Stores v1 to v4 are not supported and are refused. Migration
-does not reconcile restored snapshots or grant old payments new retry
-authority. Do not assume an older release can reopen an upgraded store.
+To move to a release with a new schema, let every in-flight swap finish on the
+old release and confirm it with that release's `inspect-swaps` (the new one
+cannot open the old store), stop it, keep the old store for your records, and
+create a new store with `provision-store` at a new `store_path`. Lightning hold
+invoices of unfinished reverse swaps would otherwise stay in LND. The new store
+does not know the payment hashes the old one used; LND still refuses to pay an
+already paid payment hash or to create a second invoice for an existing one. The handshake policy is part of
+the store: changing it also needs a new store.
 
 ## Operations and recovery
 
@@ -576,7 +570,7 @@ rill-provider inspect-swaps --config tmp/signet/provider.json --after NEXT_AFTER
 
 The output is redacted JSON with `action_authority: "none"`. Page with
 `next_after`; `--limit` accepts 1 to 1000. Inspection does not contact Core,
-LND or relays, but opening an older supported store can upgrade its schema.
+LND or relays, and never changes the store's schema.
 An empty page does not prove that no external payment exists.
 
 ### Reconcile an ambiguous payment

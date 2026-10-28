@@ -78,7 +78,7 @@ def test_pagination_is_stable_and_does_not_hide_missing_session_rows(harness: Ha
             connection.execute(
                 "INSERT INTO swaps SELECT ?, ?, terms_offer, terms_accept, state, "
                 "funding_binding, preimage, claim_txid, claim_tx, updated_at, NULL, NULL, "
-                "NULL, NULL, NULL, NULL, NULL, NULL FROM swaps WHERE session_id=?",
+                "NULL, NULL, NULL, NULL, NULL FROM swaps WHERE session_id=?",
                 (sid, f"{index + 100:064x}", session),
             )
         after = None
@@ -141,7 +141,7 @@ def test_offline_cli_never_starts_backends_or_exposes_sensitive_payloads(
     with sqlite3.connect(database) as connection:
         connection.execute(
             "INSERT INTO swaps VALUES (?, ?, ?, ?, 'PAYING', NULL, ?, NULL, NULL, 1, NULL, NULL, "
-            "NULL, NULL, NULL, NULL, NULL, NULL)",
+            "NULL, NULL, NULL, NULL, NULL)",
             ("11" * 32, "22" * 32, secret.encode(), secret.encode(), secret),
         )
 

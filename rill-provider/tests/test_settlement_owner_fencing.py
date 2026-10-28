@@ -29,16 +29,7 @@ def test_fenced_swap_step_stops_tick_before_other_swaps_or_cleanup() -> None:
         asyncio.run(engine.tick(1000))
     engine._advance.assert_awaited_once()  # type: ignore[attr-defined]  # noqa: SLF001
     store.unfunded_swaps.assert_not_called()
-    store.unreleased_claims.assert_not_called()
-
-
-def test_fenced_claim_release_is_never_logged_as_one_retryable_swap() -> None:
-    engine, store, chain = _engine()
-    store.unreleased_claims.return_value = [("aa" * 32, "bb" * 32, 1)]
-    chain.confirmations.return_value = 1
-    store.release_claim.side_effect = StaleOwnerError("ownership lost")
-    with pytest.raises(StaleOwnerError, match="ownership lost"):
-        asyncio.run(engine._release_claims())  # noqa: SLF001 - isolate cleanup's catch
+    store.expirable_exposure_pending.assert_not_called()
 
 
 def test_fenced_exposure_release_is_never_retried_on_a_stale_handle() -> None:
@@ -62,7 +53,6 @@ def test_a_deferred_swap_is_named_with_its_error_class_only(
         side_effect=[CoreUnavailableError("backend detail stays private"), "PAYING"]
     )
     engine._close_unfunded = AsyncMock(return_value=[])  # type: ignore[method-assign]  # noqa: SLF001
-    engine._release_claims = AsyncMock()  # type: ignore[method-assign]  # noqa: SLF001
     engine._release_expired = AsyncMock()  # type: ignore[method-assign]  # noqa: SLF001
     with caplog.at_level("WARNING", logger="rill_provider.settlement_engine"):
         assert asyncio.run(engine.tick(1000)) == {"bb" * 32: "PAYING"}

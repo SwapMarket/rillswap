@@ -178,65 +178,6 @@ class PinnedCrypto:
             raise ValueError("signature not permitted")
 
 
-def swaps_as_v9(connection: sqlite3.Connection) -> None:
-    """Rebuild ``swaps`` as v9 (no LOST state, no spent height) for legacy fixtures."""
-    connection.execute("ALTER TABLE swaps RENAME TO swaps_v10")
-    connection.execute(live.SWAPS_V9_SCHEMA)
-    connection.execute(
-        "INSERT INTO swaps SELECT session_id, contract_hash, terms_offer, terms_accept, state, "
-        "funding_binding, preimage, claim_txid, claim_tx, updated_at FROM swaps_v10"
-    )
-    connection.execute("DROP TABLE swaps_v10")
-
-
-def without_v12_cooperation(connection: sqlite3.Connection) -> None:
-    """Restore an exact prior-release fixture, never discard signing evidence."""
-    without_v13_arbitration(connection)
-    assert connection.execute("SELECT count(*) FROM cooperation_attempts").fetchone() == (0,)
-    connection.execute("DROP TABLE cooperation_attempts")
-
-
-def without_v13_arbitration(connection: sqlite3.Connection) -> None:
-    """Restore exact v12 (or earlier), only if no arbitration history exists."""
-    without_v14_preimage_evidence(connection)
-    assert connection.execute("SELECT count(*) FROM claim_arbitration").fetchone() == (0,)
-    connection.execute("DROP TABLE claim_arbitration")
-
-
-def without_v15_evm_swaps(connection: sqlite3.Connection) -> None:
-    """Restore exact v14 (or earlier), only if no EVM swap exists."""
-    without_v17_spend_scans(connection)
-    assert connection.execute("SELECT count(*) FROM evm_swaps").fetchone() == (0,)
-    connection.execute("DROP TABLE evm_swaps")
-
-
-def without_v18_ledger(connection: sqlite3.Connection) -> None:
-    """Restore exact v17 (or earlier): drop the accounting a v17 store never had.
-
-    Unlike the protocol evidence of older tables, ledger rows are accounting
-    only; dropping them leaves exactly the swaps an upgrading v17 store holds.
-    """
-    if connection.execute("SELECT 1 FROM sqlite_master WHERE name='swap_ledger'").fetchone():
-        connection.execute("DROP TABLE swap_ledger")
-
-
-def without_v17_spend_scans(connection: sqlite3.Connection) -> None:
-    """Restore pre-anchor fixtures without discarding any retained cursor."""
-    without_v18_ledger(connection)
-    if connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE name='reverse_spend_scans'"
-    ).fetchone():
-        assert connection.execute("SELECT count(*) FROM reverse_spend_scans").fetchone() == (0,)
-        connection.execute("DROP TABLE reverse_spend_scans")
-
-
-def without_v14_preimage_evidence(connection: sqlite3.Connection) -> None:
-    """Restore exact v13 (or earlier), without discarding retained knowledge."""
-    without_v15_evm_swaps(connection)
-    assert connection.execute("SELECT count(*) FROM reverse_preimage_evidence").fetchone() == (0,)
-    connection.execute("DROP TABLE reverse_preimage_evidence")
-
-
 class Harness:
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self.source, self.envelopes = _envelopes()
@@ -1141,6 +1082,30 @@ def test_schema_v2_store_is_refused_unchanged(harness: Harness) -> None:
     with pytest.raises(LiveSessionStoreError, match="version unsupported"):
         harness.acquire()
     assert harness.path.read_bytes() == before
+
+
+@pytest.mark.parametrize("version", [live.SCHEMA_VERSION - 1, 5])
+def test_older_store_is_refused_unchanged_with_no_upgrade_path(
+    harness: Harness, version: int
+) -> None:
+    harness.provision()
+    with harness.acquire() as store:
+        store.reserve(harness.init)
+    with sqlite3.connect(harness.path) as connection:
+        connection.execute("UPDATE meta SET schema_version=?", (version,))
+        connection.execute(f"PRAGMA user_version={version}")
+    connection.close()
+    files = sorted(harness.path.parent.iterdir())
+    before = [file.read_bytes() for file in files]
+    expected = (
+        rf"version unsupported \(found {version}, requires {live.SCHEMA_VERSION}\); "
+        "recreate it with provision-store"
+    )
+    for _ in range(2):  # refusal is stable: nothing was half-migrated
+        with pytest.raises(LiveSessionStoreError, match=expected):
+            harness.acquire()
+    assert sorted(harness.path.parent.iterdir()) == files
+    assert [file.read_bytes() for file in files] == before
 
 
 @pytest.mark.native_crypto

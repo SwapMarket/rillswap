@@ -1,4 +1,4 @@
-"""Historical upgrades grant storage capability, never implicit nonce permission."""
+"""Cooperation burns: table constraints and new-owner reconciliation."""
 
 from __future__ import annotations
 
@@ -6,9 +6,7 @@ import sqlite3
 from typing import TYPE_CHECKING
 
 import pytest
-from test_live_session_store import Harness, without_v12_cooperation
-
-from rill_provider import live_session_store as live
+from test_live_session_store import Harness
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -21,82 +19,7 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
     return ready
 
 
-def _as_v11(path: Path) -> None:
-    """Rebuild the exact previous release schema, including both version markers."""
-    with sqlite3.connect(path) as connection:
-        without_v12_cooperation(connection)
-        connection.execute("UPDATE meta SET schema_version=11")
-        connection.execute("PRAGMA user_version=11")
-
-
-def test_existing_sessions_survive_additive_upgrade_without_new_signing_grants(
-    harness: Harness,
-) -> None:
-    with harness.acquire() as store:
-        reserved = store.reserve(harness.init, now=1000)
-        original = store._connection.execute(  # noqa: SLF001 - exact prior signed admission
-            "SELECT * FROM sessions WHERE session_id=?", (reserved.session_id,)
-        ).fetchone()
-    _as_v11(harness.path)
-    with harness.acquire() as store:
-        connection = store._connection  # noqa: SLF001 - exact upgrade evidence
-        assert connection.execute("PRAGMA user_version").fetchone() == (18,)
-        assert connection.execute("SELECT schema_version FROM meta").fetchone() == (18,)
-        assert connection.execute("SELECT * FROM cooperation_attempts").fetchall() == []
-        assert connection.execute("SELECT * FROM claim_arbitration").fetchall() == []
-        assert (
-            connection.execute(
-                "SELECT * FROM sessions WHERE session_id=?", (reserved.session_id,)
-            ).fetchone()
-            == original
-        )
-    with harness.acquire() as store:
-        assert (
-            store._connection.execute(  # noqa: SLF001
-                "SELECT * FROM cooperation_attempts"
-            ).fetchall()
-            == []
-        )
-
-
-def test_interrupted_upgrade_keeps_exact_v11_then_retries_once(
-    harness: Harness, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _as_v11(harness.path)
-    original_upgrade = live._upgrade_v11  # noqa: SLF001 - inject fault before commit
-
-    def interrupt(connection: sqlite3.Connection) -> None:
-        original_upgrade(connection)
-        raise OSError("interrupted before durable commit")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(live, "_upgrade_v11", interrupt)
-        with pytest.raises(live.LiveSessionStoreError, match="store unavailable"):
-            harness.acquire()
-    with sqlite3.connect(harness.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (11,)
-        assert connection.execute("SELECT schema_version FROM meta").fetchone() == (11,)
-        assert (
-            connection.execute(
-                "SELECT name FROM sqlite_master WHERE name='cooperation_attempts'"
-            ).fetchall()
-            == []
-        )
-    with harness.acquire():
-        pass
-
-
-def test_partial_v11_schema_is_not_taken_as_an_upgrade_marker(harness: Harness) -> None:
-    _as_v11(harness.path)
-    with sqlite3.connect(harness.path) as connection:
-        connection.execute(live.COOPERATION_ATTEMPT_SCHEMA)
-    with pytest.raises(live.LiveSessionStoreError, match="schema incompatible"):
-        harness.acquire()
-    with sqlite3.connect(harness.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (11,)
-
-
-def test_v12_table_rejects_malformed_burns(harness: Harness) -> None:
+def test_cooperation_table_rejects_malformed_burns(harness: Harness) -> None:
     with sqlite3.connect(harness.path) as connection:
         for cooperation_id, binding, generation, created_at, deadline_at, state in (
             (b"short", b"{}", 1, 1, 2, "BURNED"),
@@ -124,7 +47,7 @@ def test_v12_table_rejects_malformed_burns(harness: Harness) -> None:
                 )
 
 
-def test_v12_burned_id_is_permanent_and_one_active_attempt_per_session(harness: Harness) -> None:
+def test_burned_id_is_permanent_and_one_active_attempt_per_session(harness: Harness) -> None:
     with sqlite3.connect(harness.path) as connection:
         statement = (
             "INSERT INTO cooperation_attempts "

@@ -881,17 +881,11 @@ class ReverseSettlement:
         operation = self._check_operation()
         checkpoint = self._store.reverse_spend_checkpoint(item.session_id, operation=operation)
         if checkpoint is None:
-            # No anchor proves no branch history. Accept prior coverage without
-            # replay; never turn missing metadata into an automatic full rescan.
-            height = tip if item.spend_scan_height is None else item.spend_scan_height
-            block = await self._worker(self._chain.block_hash, height)
-            self._store.update_reverse_spend_checkpoint(
-                item.session_id,
-                expected=None,
-                checkpoint=ReverseSpendCheckpoint(height, block, height, block),
-                operation=operation,
+            # FUNDED commits its checkpoint atomically, so a missing one is
+            # damaged state: never invent scan coverage or refund without it.
+            raise LiveSessionStoreError(
+                "reverse scan checkpoint unavailable; operator recovery required"
             )
-            return item.state
         floor_block = await self._worker(self._chain.block_hash, checkpoint.floor_height)
         if floor_block != checkpoint.floor_block:
             raise LiveSessionStoreError(

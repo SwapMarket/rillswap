@@ -289,7 +289,6 @@ def _funded_item(state: str = "FUNDED", **changes: Any) -> SettlementItem:  # no
         funding_txid="51" * 32,
         funding_vout=0,
         funding_tx=b"funding-raw",
-        spend_scan_height=1009,
         **changes,
     )
 

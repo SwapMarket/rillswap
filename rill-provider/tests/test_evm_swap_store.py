@@ -86,7 +86,7 @@ def _accept_evm_swap(
     session = reservation.session_id
     connection.execute(
         "INSERT INTO swaps VALUES (?, ?, ?, ?, 'ACCEPTED', NULL, NULL, NULL, NULL, 1000, NULL, "
-        "NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
+        "NULL, NULL, NULL, NULL, NULL, NULL)",
         (session, digest, canonicalize(offer), b"accepted"),
     )
     connection.execute(

@@ -88,21 +88,6 @@ def _provision_store(config: OperatorConfig) -> int:
     return 0
 
 
-def _migrate_store(config: OperatorConfig, crypto: Context, custody: str) -> None:
-    """Explicitly upgrade an authoritative v5-v7 store without running the service."""
-    with LiveSessionStore.acquire(
-        config.store_path,
-        config.network,
-        config.provider_identity_xonly,
-        config.handshake_policy(),
-        crypto=crypto,
-        custody_identity=custody,
-        public_keys=crypto,
-        upgrade_from_v5=True,
-    ):
-        pass
-
-
 def _inspect_swaps(
     config: OperatorConfig, crypto: Context, custody: str, args: argparse.Namespace
 ) -> None:
@@ -484,7 +469,6 @@ def _parser() -> argparse.ArgumentParser:
     identity.add_argument("--native-crypto-library", type=Path, required=True)
     for name, text in (
         ("provision-store", "create a new empty live session store"),
-        ("migrate-store", "explicitly upgrade an authoritative v5-v7 store; no network actions"),
         ("serve", "run the handshake service until SIGINT/SIGTERM"),
     ):
         command = commands.add_parser(name, help=text)
@@ -525,9 +509,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _provision_store(config)
         custody = read_custody_identity(config.custody_identity_file)
         with _context(config.native_crypto_library) as crypto:
-            if args.command == "migrate-store":
-                _migrate_store(config, crypto, custody)
-            elif args.command == "inspect-swaps":
+            if args.command == "inspect-swaps":
                 _inspect_swaps(config, crypto, custody, args)
             elif args.command == "reconcile-payment":
                 _reconcile_payment(config, crypto, custody, args)

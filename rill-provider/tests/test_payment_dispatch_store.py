@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import sqlite3
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
@@ -11,7 +10,7 @@ from unittest.mock import Mock
 import pytest
 from rill_core.wire.canonical import canonicalize
 from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE
-from test_live_session_store import Harness, swaps_as_v9, without_v12_cooperation
+from test_live_session_store import Harness
 
 from rill_provider import live_session_store as live
 
@@ -51,7 +50,7 @@ def _insert_funded_swap(store: live.LiveSessionStore, harness: Harness, state: s
     # Database fixture for the durable transition boundary, not wire admission.
     store._connection.execute(  # noqa: SLF001
         "INSERT INTO swaps VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, "
-        "NULL, NULL, NULL, NULL, NULL, NULL)",
+        "NULL, NULL, NULL, NULL, NULL)",
         (
             reservation.session_id,
             source["contract_hash"],
@@ -74,27 +73,6 @@ def _insert_funded_swap(store: live.LiveSessionStore, harness: Harness, state: s
         (_hash(harness), reservation.session_id),
     )
     return reservation.session_id
-
-
-def _as_v5(path: Path) -> None:
-    _as_v6(path)
-    with sqlite3.connect(path) as connection:
-        connection.execute("DROP TABLE payment_dispatch")
-        connection.execute("UPDATE meta SET schema_version=5")
-        connection.execute("PRAGMA user_version=5")
-
-
-def _as_v6(path: Path) -> None:
-    with sqlite3.connect(path) as connection:
-        without_v12_cooperation(connection)
-        swaps_as_v9(connection)
-        connection.execute("DROP TABLE claim_attempts")
-        connection.execute("DROP TABLE economic_reservations")
-        connection.execute("DROP TABLE epoch_admissions")
-        connection.execute("DROP TABLE epoch_retirement")
-        connection.execute("DROP TABLE epoch_key_history")
-        connection.execute("UPDATE meta SET schema_version=6")
-        connection.execute("PRAGMA user_version=6")
 
 
 def _hash(harness: Harness) -> str:
@@ -147,91 +125,3 @@ def test_interruption_after_dispatch_commit_does_not_restore_permission(harness:
         assert store._connection.execute(  # noqa: SLF001
             "SELECT state FROM swaps WHERE session_id=?", (session,)
         ).fetchone() == ("PAYING",)
-
-
-def test_upgraded_funded_swap_gets_permission_only_on_new_paying_transition(
-    harness: Harness,
-) -> None:
-    with harness.acquire() as store:
-        session = _insert_funded_swap(store, harness, "FUNDING_SEEN")
-    _as_v5(harness.path)
-    with harness.acquire_at(harness.path, upgrade_from_v5=True) as store:
-        assert not store.commit_payment_dispatch(session, _hash(harness), b"premature")
-        store.advance_swap(
-            session, from_state="FUNDING_SEEN", to_state="PAYING", signer=Mock(), now=1001
-        )
-        assert store.commit_payment_dispatch(session, _hash(harness), b"new payment")
-
-
-def test_partial_current_schema_is_not_repaired_by_migration(harness: Harness) -> None:
-    with sqlite3.connect(harness.path) as connection:
-        connection.execute("DROP TABLE payment_dispatch")
-    with pytest.raises(live.LiveSessionStoreError, match="schema incompatible"):
-        harness.acquire_at(harness.path, upgrade_from_v5=True)
-    with sqlite3.connect(harness.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (live.SCHEMA_VERSION,)
-        assert (
-            connection.execute(
-                "SELECT name FROM sqlite_master WHERE name='payment_dispatch'"
-            ).fetchall()
-            == []
-        )
-
-
-@pytest.mark.parametrize(
-    "state", ["ACCEPTED", "FUNDING_SEEN", "PAYING", "PAID", "CLAIMING", "CLAIMED", "FAILED"]
-)
-def test_upgrade_is_explicit_and_never_backfills_send_permission(
-    harness: Harness, state: str
-) -> None:
-    with harness.acquire() as store:
-        session = _insert_funded_swap(store, harness, state)
-        before = store._connection.execute("SELECT * FROM swaps").fetchall()  # noqa: SLF001
-    _as_v5(harness.path)
-    with pytest.raises(live.LiveSessionStoreError, match="version unsupported"):
-        harness.acquire()
-    with harness.acquire_at(harness.path, upgrade_from_v5=True) as store:
-        assert store._connection.execute("SELECT * FROM swaps").fetchall() == before  # noqa: SLF001
-        assert store._connection.execute("SELECT * FROM payment_dispatch").fetchall() == []  # noqa: SLF001
-        assert not store.commit_payment_dispatch(session, _hash(harness), b"request")
-    with harness.acquire() as store:
-        assert store._connection.execute("PRAGMA user_version").fetchone() == (18,)  # noqa: SLF001
-        assert not store.commit_payment_dispatch(session, _hash(harness), b"request")
-
-
-def test_interrupted_upgrade_rolls_back_all_schema_and_version_changes(
-    harness: Harness, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _as_v5(harness.path)
-    upgrade = live._upgrade_v5  # noqa: SLF001
-
-    def interrupted(connection: sqlite3.Connection) -> None:
-        upgrade(connection)
-        raise OSError("simulated interruption before commit")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(live, "_upgrade_v5", interrupted)
-        with pytest.raises(live.LiveSessionStoreError, match="unavailable"):
-            harness.acquire_at(harness.path, upgrade_from_v5=True)
-    with sqlite3.connect(harness.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (5,)
-        assert connection.execute("SELECT schema_version FROM meta").fetchone() == (5,)
-        assert (
-            connection.execute(
-                "SELECT name FROM sqlite_master WHERE name='payment_dispatch'"
-            ).fetchall()
-            == []
-        )
-    with harness.acquire_at(harness.path, upgrade_from_v5=True):
-        pass
-
-
-def test_explicit_upgrade_still_refuses_missing_or_foreign_state(harness: Harness) -> None:
-    absent = harness.path.parent / "missing.sqlite"
-    with pytest.raises(live.LiveSessionStoreError):
-        harness.acquire_at(absent, upgrade_from_v5=True)
-    assert not absent.exists()
-    with sqlite3.connect(harness.path) as connection:
-        connection.execute("PRAGMA user_version=999")
-    with pytest.raises(live.LiveSessionStoreError, match="version unsupported"):
-        harness.acquire_at(harness.path, upgrade_from_v5=True)

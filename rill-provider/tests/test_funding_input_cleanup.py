@@ -37,7 +37,7 @@ def _certificate(store: LiveSessionStore, session: str) -> bool:
     return asyncio.run(check())
 
 
-@pytest.mark.parametrize("state", ["UNSENT", "UNKNOWN", "DISPATCHED", "RELEASED"])
+@pytest.mark.parametrize("state", ["UNSENT", "DISPATCHED", "RELEASED"])
 def test_only_open_matching_reservation_authorizes_cleanup(harness: Harness, state: str) -> None:
     with harness.acquire() as store:
         session = insert_reverse_swap(
@@ -49,7 +49,7 @@ def test_only_open_matching_reservation_authorizes_cleanup(harness: Harness, sta
                 "WHERE session_id=?",
                 (b"release", session),
             )
-        assert _certificate(store, session) is (state in {"UNSENT", "UNKNOWN"})
+        assert _certificate(store, session) is (state == "UNSENT")
 
 
 @pytest.mark.parametrize(

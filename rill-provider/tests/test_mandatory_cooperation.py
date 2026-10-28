@@ -74,32 +74,24 @@ def test_new_unfeatured_initiation_is_refused_before_any_reservation(harness: Ha
         assert store.reserve(_featured_init(harness)) == reserved
 
 
-def test_store_upgrade_adds_cooperation_exactly_and_keeps_history(harness: Harness) -> None:
-    harness.provision()  # provisioned by a release without cooperation
-    with harness.acquire() as store:
-        historical = store.reserve(harness.init)
+def test_store_policy_never_changes_in_place(harness: Harness) -> None:
+    harness.provision()  # without cooperation
+    for changed in (
+        COOPERATIVE,
+        replace(POLICY, features=frozenset({COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE})),
+    ):
+        harness.policy = changed
+        with pytest.raises(LiveSessionStoreError, match="policy mismatch"):
+            harness.acquire()  # no upgrade
+    harness.path = harness.path.with_name("cooperative.sqlite")
     harness.policy = COOPERATIVE
+    harness.provision()
     with harness.acquire() as store:
         assert _stored_policy(store)["features"] == [COOPERATIVE_CLAIM_FEATURE]
-        # The recorded unfeatured reservation still replays exactly.
-        assert store.reserve(harness.init) == historical
-    with harness.acquire() as store:  # idempotent on the next start
-        assert _stored_policy(store)["features"] == [COOPERATIVE_CLAIM_FEATURE]
-    harness.policy = POLICY
-    with pytest.raises(LiveSessionStoreError, match="policy mismatch"):
-        harness.acquire()  # no silent downgrade
-    harness.policy = replace(COOPERATIVE, capabilities=frozenset({"core/v1"}))
-    with pytest.raises(LiveSessionStoreError, match="policy mismatch"):
-        harness.acquire()  # only the exact additive feature is an upgrade
-
-
-def test_epoch_upgrade_is_not_implied_by_the_cooperation_upgrade(harness: Harness) -> None:
-    harness.provision()
-    harness.policy = replace(
-        POLICY, features=frozenset({COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE})
-    )
-    with pytest.raises(LiveSessionStoreError, match="policy mismatch"):
-        harness.acquire()
+    for changed in (POLICY, replace(COOPERATIVE, capabilities=frozenset({"core/v1"}))):
+        harness.policy = changed
+        with pytest.raises(LiveSessionStoreError, match="policy mismatch"):
+            harness.acquire()  # no silent downgrade or selection change
 
 
 def test_terms_features_follow_the_negotiated_transcript() -> None:
@@ -123,41 +115,33 @@ def test_terms_features_follow_the_negotiated_transcript() -> None:
     os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
     reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
 )
-def test_native_accept_commits_cooperation_and_historical_reservation_gets_none(
+def test_native_accept_commits_cooperation(
     harness: Harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from rill_crypto import Context  # noqa: PLC0415
 
     from rill_provider.provider_identity import ProviderIdentity  # noqa: PLC0415
 
+    harness.policy = COOPERATIVE
     harness.provision()
     unlock = x25519.Identity.generate()
     with (
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
     ):
-        with harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store:
-            historical = store.reserve(harness.init).session_id
-        harness.policy = COOPERATIVE
-        with harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store:
-            with monkeypatch.context() as patch:  # fixture identity scalar 1
-                patch.setattr(
-                    "rill_provider.provider_identity.secrets.token_bytes",
-                    lambda _n: (1).to_bytes(32, "big"),
-                )
-                xonly = ProviderIdentity.provision(
-                    tmp_path / "id.age", recipient=str(unlock.to_public()), crypto=crypto
-                )
-            signer = ProviderIdentity.load(
-                tmp_path / "id.age",
-                custody_identity=str(unlock),
-                expected_xonly_public_key=xonly,
-                crypto=crypto,
+        with monkeypatch.context() as patch:  # fixture identity scalar 1
+            patch.setattr(
+                "rill_provider.provider_identity.secrets.token_bytes",
+                lambda _n: (1).to_bytes(32, "big"),
             )
-            with pytest.raises(LiveSessionStoreError, match="requires cooperative claims"):
-                store.create_accept(historical, identity=signer, transport_endpoints=("wss://r/",))
-            assert store.pending_outbox() == ()
-        harness.path = tmp_path / "fresh.sqlite"  # a new store for the same fixture session
-        harness.provision()
+            xonly = ProviderIdentity.provision(
+                tmp_path / "id.age", recipient=str(unlock.to_public()), crypto=crypto
+            )
+        signer = ProviderIdentity.load(
+            tmp_path / "id.age",
+            custody_identity=str(unlock),
+            expected_xonly_public_key=xonly,
+            crypto=crypto,
+        )
         with harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store:
             reserved = store.reserve(_featured_init(harness))
             committed = store.create_accept(

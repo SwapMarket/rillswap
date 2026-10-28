@@ -1,4 +1,4 @@
-"""Private knowledge survives refusal and upgrade without becoming debt."""
+"""Private knowledge survives refusal without becoming debt."""
 
 from __future__ import annotations
 
@@ -10,18 +10,17 @@ from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
 import pytest
-from pyrage import x25519
 from rill_core.wire.canonical import canonicalize
 from rill_core.wire.hashes import unsigned_envelope_hash
 from rill_core.wire.messages import Envelope
 from test_handshake_reverse_gate import CommitThenFail
-from test_live_session_store import Harness, without_v14_preimage_evidence
+from test_live_session_store import Harness
 from test_payment_reconciliation import Signer
 from test_reverse_proposal_reservation import (
     reserved as reserved,  # noqa: PLC0414 - pytest re-export
 )
 from test_reverse_settlement_intent import _funded
-from test_reverse_swap_store import HASH, PREIMAGE, _ledger, insert_reverse_swap
+from test_reverse_swap_store import HASH, PREIMAGE, _ledger
 
 from rill_provider import live_session_store as live
 from rill_provider.reverse_operations import ReverseOperations
@@ -37,57 +36,6 @@ NATIVE = pytest.mark.skipif(
     os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
     reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 for authenticated preimage evidence",
 )
-
-
-def _historical(harness: Harness, version: int) -> None:
-    """Construct an exact old empty capability, never discard private evidence."""
-    schemas = {
-        8: live.SCHEMA_V8,
-        9: live.SCHEMA_V9,
-        10: live.SCHEMA_V10,
-        11: live.SCHEMA_V11,
-        12: live.SCHEMA_V12,
-        13: live.SCHEMA_V13,
-    }
-    wanted = {statement.split()[2]: statement for statement in schemas[version]}
-    with sqlite3.connect(harness.path) as connection:
-        definitions = dict(
-            connection.execute(
-                "SELECT name,sql FROM sqlite_master WHERE type='table' "
-                "AND name NOT GLOB 'sqlite_*'",
-            )
-        )
-        for table, definition in definitions.items():
-            if wanted.get(table) == definition:
-                continue
-            assert connection.execute(f"SELECT count(*) FROM {table}").fetchone() == (0,)  # noqa: S608
-            connection.execute(f"DROP TABLE {table}")
-            if table in wanted:
-                connection.execute(wanted[table])
-        connection.execute("UPDATE meta SET schema_version=?", (version,))
-        connection.execute(f"PRAGMA user_version={version}")
-
-
-@pytest.mark.parametrize("version", [8, 9, 10, 11, 12, 13])
-def test_supported_upgrade_chains_add_empty_knowledge_without_authority(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    version: int,
-) -> None:
-    harness = Harness(tmp_path, monkeypatch)
-    harness.provision()
-    _historical(harness, version)
-    with harness.acquire() as store:
-        assert store._connection.execute("PRAGMA user_version").fetchone() == (18,)
-        assert store._connection.execute("SELECT schema_version FROM meta").fetchone() == (18,)
-        assert store._connection.execute(
-            "SELECT count(*) FROM reverse_preimage_evidence"
-        ).fetchone() == (0,)
-        assert store._reverse_preimage_evidence("unknown") is None
-        assert not store._reverse_negotiations
-        assert not store._reverse_proposals
-        assert not store._cooperation_handles
-        assert store._connection.execute("SELECT count(*) FROM swaps").fetchone() == (0,)
 
 
 @pytest.mark.parametrize(
@@ -121,29 +69,7 @@ def test_evidence_table_enforces_document_and_audit_storage_bounds(
         ).fetchone() == (0,)
 
 
-def test_v13_upgrade_preserves_retained_handshake_and_has_no_knowledge_backfill(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    harness = Harness(tmp_path, monkeypatch)
-    harness.provision()
-    with harness.acquire() as store:
-        store.reserve(harness.init)
-        store.commit_accept(harness.accept)
-        store.admit_confirm(harness.confirm)
-        before = store._connection.execute("SELECT * FROM sessions").fetchall()
-        without_v14_preimage_evidence(store._connection)
-        store._connection.execute("UPDATE meta SET schema_version=13")
-        store._connection.execute("PRAGMA user_version=13")
-    with harness.acquire() as upgraded:
-        assert upgraded._connection.execute("SELECT * FROM sessions").fetchall() == before
-        assert upgraded._connection.execute(
-            "SELECT count(*) FROM reverse_preimage_evidence"
-        ).fetchone() == (0,)
-        assert not upgraded._reverse_negotiations
-
-
-@pytest.mark.parametrize("corruption", ["missing table", "partial v13", "metadata mismatch"])
+@pytest.mark.parametrize("corruption", ["missing table", "older version", "metadata mismatch"])
 def test_partial_schema_refuses_without_repair(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -154,7 +80,7 @@ def test_partial_schema_refuses_without_repair(
     with sqlite3.connect(harness.path) as connection:
         if corruption == "missing table":
             connection.execute("DROP TABLE reverse_preimage_evidence")
-        elif corruption == "partial v13":
+        elif corruption == "older version":
             connection.execute("PRAGMA user_version=13")
             connection.execute("UPDATE meta SET schema_version=13")
         else:
@@ -169,152 +95,6 @@ def test_partial_schema_refuses_without_repair(
             connection.execute("SELECT type,name,sql FROM sqlite_master ORDER BY name").fetchall()
             == before
         )
-
-
-def test_failed_upgrade_rolls_back_empty_table_and_versions(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    harness = Harness(tmp_path, monkeypatch)
-    harness.provision()
-    _historical(harness, 13)
-    upgrade = live._upgrade_v13
-
-    def fail(connection: sqlite3.Connection) -> None:
-        upgrade(connection)
-        raise RuntimeError("upgrade reporting failure")
-
-    monkeypatch.setattr(live, "_upgrade_v13", fail)
-    with pytest.raises(live.LiveSessionStoreError):
-        harness.acquire()
-    with sqlite3.connect(harness.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (13,)
-        assert connection.execute("SELECT schema_version FROM meta").fetchone() == (13,)
-        assert (
-            connection.execute(
-                "SELECT name FROM sqlite_master WHERE name='reverse_preimage_evidence'"
-            ).fetchone()
-            is None
-        )
-
-
-@pytest.mark.parametrize("debt", [False, True])
-def test_populated_v13_preserves_finances_and_only_existing_restart_reconciliation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, debt: bool
-) -> None:
-    harness = Harness(tmp_path, monkeypatch)
-    harness.provision()
-    tables = ("sessions", "swaps", "payment_hashes", "economic_reservations", "inbox", "outbox")
-    with harness.acquire() as store:
-        session = (
-            _funded(store, harness) if debt else insert_reverse_swap(store, harness, "ACCEPTED")
-        )
-        if debt:
-            store.record_reverse_settlement_preimage(
-                session, from_state="FUNDED", preimage=PREIMAGE, now=2001
-            )
-        for number, state in ((1, "COMPLETE"), (2, "BURNED")):
-            complete = state == "COMPLETE"
-            store._connection.execute(
-                "INSERT INTO cooperation_attempts "
-                "(cooperation_id,session_id,owner_generation,binding,created_at,deadline_at,"
-                "state,local_nonce,peer_nonce,partial_signature,"
-                "nonce_response_id,partial_response_id) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    bytes([number]) * 32,
-                    session,
-                    store.generation,
-                    b"{}",
-                    1000,
-                    1020,
-                    state,
-                    b"\x02" * 66 if complete else None,
-                    b"\x03" * 66 if complete else None,
-                    b"\x04" * 32 if complete else None,
-                    "nonce-response" if complete else None,
-                    "partial-response" if complete else None,
-                ),
-            )
-        before = {
-            table: store._connection.execute(f"SELECT * FROM {table}").fetchall()  # noqa: S608
-            for table in tables
-        }
-        attempts = store._connection.execute(
-            "SELECT * FROM cooperation_attempts ORDER BY cooperation_id"
-        ).fetchall()
-        # Reconstruct a pre-v17 fixture: these checkpoints did not exist in v13.
-        store._connection.execute("DELETE FROM reverse_spend_scans")
-        without_v14_preimage_evidence(store._connection)
-        store._connection.execute("UPDATE meta SET schema_version=13")
-        store._connection.execute("PRAGMA user_version=13")
-    # BURNED -> ABANDONED already occurs on every owner acquisition, independent of DDL.
-    abandoned = list(attempts[1])
-    abandoned[6] = "ABANDONED"
-    for _ in range(2):
-        with harness.acquire() as upgraded:
-            assert upgraded._connection.execute("PRAGMA user_version").fetchone() == (18,)
-            assert upgraded._connection.execute("SELECT schema_version FROM meta").fetchone() == (
-                18,
-            )
-            for table in tables:
-                assert (
-                    upgraded._connection.execute(f"SELECT * FROM {table}").fetchall()  # noqa: S608
-                    == before[table]
-                )
-            assert upgraded._connection.execute(
-                "SELECT * FROM cooperation_attempts ORDER BY cooperation_id"
-            ).fetchall() == [attempts[0], tuple(abandoned)]
-            assert (
-                upgraded._connection.execute("SELECT * FROM reverse_preimage_evidence").fetchall()
-                == []
-            )
-            assert not upgraded._reverse_negotiations
-            assert not upgraded._reverse_proposals
-            assert not upgraded._cooperation_handles
-
-
-@pytest.mark.parametrize("refusal", ["namespace", "custody", "owner"])
-def test_refused_valid_v13_acquisition_changes_neither_schema_nor_markers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refusal: str
-) -> None:
-    harness = Harness(tmp_path, monkeypatch)
-    harness.provision()
-    owner = harness.acquire()
-    try:
-        without_v14_preimage_evidence(owner._connection)
-        owner._connection.execute("UPDATE meta SET schema_version=13")
-        owner._connection.execute("PRAGMA user_version=13")
-        if refusal != "owner":
-            owner.close()
-        with sqlite3.connect(harness.path) as connection:
-            before = (
-                connection.execute(
-                    "SELECT type,name,sql FROM sqlite_master ORDER BY name"
-                ).fetchall(),
-                connection.execute("SELECT * FROM meta").fetchall(),
-                connection.execute("PRAGMA user_version").fetchone(),
-            )
-        if refusal == "namespace":
-            monkeypatch.setattr(harness, "identity", "02" * 32)
-        if refusal == "custody":
-            with pytest.raises(live.LiveSessionStoreError, match="custody identity does not match"):
-                harness.acquire_at(harness.path, custody_identity=str(x25519.Identity.generate()))
-        else:
-            with pytest.raises(live.LiveSessionStoreError):
-                harness.acquire()
-        with sqlite3.connect(harness.path) as connection:
-            after = (
-                connection.execute(
-                    "SELECT type,name,sql FROM sqlite_master ORDER BY name"
-                ).fetchall(),
-                connection.execute("SELECT * FROM meta").fetchall(),
-                connection.execute("PRAGMA user_version").fetchone(),
-            )
-        assert after == before
-        assert after[2] == (13,)
-    finally:
-        owner.close()
 
 
 @pytest.mark.parametrize("state", ["FUNDED", "REFUNDING"])

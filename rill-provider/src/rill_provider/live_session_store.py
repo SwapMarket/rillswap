@@ -149,7 +149,7 @@ if TYPE_CHECKING:
     from rill_provider.reverse_operations import ReverseOperation, ReverseOperations
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
-SCHEMA_VERSION = 18  # v8-v17 upgrade on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
+SCHEMA_VERSION = 19  # every other version is refused: recreate with provision-store
 CONTRACT_KEY_RECORD_KIND = "rillswap-provider-contract-key"
 OPEN_PHASES = ("CONFIRMED", "ACCEPTED")  # sessions that may still send requests
 SWAP_TRANSITIONS = frozenset(
@@ -239,32 +239,14 @@ KEY_RECORD_KIND = "rill-provider/live-session-key/v1"
 EPOCH_RECORD_KIND = "rill-provider/epoch-inbox-key/v1"
 MAX_ADVERTISED_EPOCHS = 4  # RS-005 epoch_inbox_xonly_keys maximum
 MAX_INSPECTION_PAGE = 1000
-SWAPS_V9_SCHEMA = (
-    "CREATE TABLE swaps (session_id TEXT PRIMARY KEY, contract_hash TEXT NOT NULL UNIQUE, "
-    "terms_offer BLOB NOT NULL, terms_accept BLOB NOT NULL, state TEXT NOT NULL CHECK "
-    "(state IN ('ACCEPTED', 'FUNDING_SEEN', 'PAYING', 'PAID', 'FAILED', 'CLAIMING', "
-    "'CLAIMED')), funding_binding BLOB, preimage TEXT, claim_txid TEXT, claim_tx BLOB, "
-    "updated_at INTEGER NOT NULL)"
-)
-# v10: LOST is terminal for a CLAIMING swap whose contract output was spent on
+# LOST is terminal for a CLAIMING swap whose contract output was spent on
 # the confirmed chain by something other than a recorded claim attempt (the
 # client's refund) and stayed spent for refund_resolution_confirmations
 # blocks. outpoint_spent_height/block are the tip height and hash at which
 # that spend was first observed (the anchor must stay on the active chain);
 # NULL while the output is unspent or a recorded attempt is mined.
-SWAPS_V10_SCHEMA = (
-    "CREATE TABLE swaps (session_id TEXT PRIMARY KEY, contract_hash TEXT NOT NULL UNIQUE, "
-    "terms_offer BLOB NOT NULL, terms_accept BLOB NOT NULL, state TEXT NOT NULL CHECK "
-    "(state IN ('ACCEPTED', 'FUNDING_SEEN', 'PAYING', 'PAID', 'FAILED', 'CLAIMING', "
-    "'CLAIMED', 'LOST')), funding_binding BLOB, preimage TEXT, claim_txid TEXT, claim_tx BLOB, "
-    "updated_at INTEGER NOT NULL, outpoint_spent_height INTEGER "
-    "CHECK (outpoint_spent_height > 0), outpoint_spent_block TEXT "
-    "CHECK ((outpoint_spent_block IS NULL) = (outpoint_spent_height IS NULL)))"
-)
-# v11 adds the LN to BTC states and the provider's own funding and refund
-# transactions (RS-004): funding_* is the signed funding the provider
-# broadcast, refund_* its refund spend, spend_scan_height the last block
-# scanned for a client claim spending the contract.
+# funding_* is the signed LN to BTC funding the provider broadcast and
+# refund_* its refund spend (RS-004).
 SWAPS_SCHEMA = (
     "CREATE TABLE swaps (session_id TEXT PRIMARY KEY, contract_hash TEXT NOT NULL UNIQUE, "
     "terms_offer BLOB NOT NULL, terms_accept BLOB NOT NULL, state TEXT NOT NULL CHECK "
@@ -275,12 +257,156 @@ SWAPS_SCHEMA = (
     "CHECK (outpoint_spent_height > 0), outpoint_spent_block TEXT "
     "CHECK ((outpoint_spent_block IS NULL) = (outpoint_spent_height IS NULL)), "
     "funding_txid TEXT, funding_vout INTEGER CHECK (funding_vout >= 0), funding_tx BLOB, "
-    "refund_txid TEXT, refund_tx BLOB, spend_scan_height INTEGER CHECK (spend_scan_height > 0), "
+    "refund_txid TEXT, refund_tx BLOB, "
     "CHECK ((funding_txid IS NULL) = (funding_tx IS NULL) AND "
     "(funding_txid IS NULL) = (funding_vout IS NULL)), "
     "CHECK ((refund_txid IS NULL) = (refund_tx IS NULL)))"
 )
-SCHEMA_V5 = (
+PAYMENT_DISPATCH_SCHEMA = (
+    "CREATE TABLE payment_dispatch (session_id TEXT PRIMARY KEY, "
+    "payment_hash TEXT NOT NULL UNIQUE, "
+    "state TEXT NOT NULL CHECK (state IN ('UNSENT', 'SUBMITTED')), request BLOB)"
+)
+EPOCH_ADMISSION_SCHEMA = (
+    "CREATE TABLE epoch_admissions (session_id TEXT PRIMARY KEY, epoch_key TEXT NOT NULL, "
+    "retire_after INTEGER NOT NULL, expired INTEGER NOT NULL CHECK (expired IN (0, 1)))"
+)
+EPOCH_RETIREMENT_SCHEMA = (
+    "CREATE TABLE epoch_retirement (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
+    "retired_through INTEGER NOT NULL CHECK (retired_through >= 0))"
+)
+EPOCH_KEY_HISTORY_SCHEMA = "CREATE TABLE epoch_key_history (epoch_key TEXT PRIMARY KEY)"
+# One row per payment-hash reservation, kept forever. Only RELEASED rows stop
+# counting against financial capacity, and only with versioned closure evidence.
+ECONOMIC_RESERVATION_SCHEMA = (
+    "CREATE TABLE economic_reservations (payment_hash TEXT PRIMARY KEY, "
+    "session_id TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN "
+    "('UNSENT', 'DISPATCHED', 'RELEASED')), release_evidence BLOB, "
+    "CHECK ((state = 'RELEASED') = (release_evidence IS NOT NULL)))"
+)
+# Every signed claim a CLAIMING swap may have broadcast, kept forever: any of
+# them can confirm. swaps.claim_tx/claim_txid mirror the latest attempt until
+# CLAIMED, then the attempt that confirmed. A NULL fee or height is not yet
+# validated or observed; neither authorizes a bump.
+CLAIM_ATTEMPT_SCHEMA = (
+    "CREATE TABLE claim_attempts (session_id TEXT NOT NULL, "
+    "attempt INTEGER NOT NULL CHECK (attempt >= 0), txid TEXT NOT NULL UNIQUE, "
+    "raw BLOB NOT NULL, fee_sat INTEGER CHECK (fee_sat >= 0), "
+    "first_seen_height INTEGER CHECK (first_seen_height > 0), "
+    "PRIMARY KEY (session_id, attempt))"
+)
+COOPERATION_ATTEMPT_SCHEMA = (
+    "CREATE TABLE cooperation_attempts (cooperation_id BLOB PRIMARY KEY NOT NULL CHECK "
+    "(typeof(cooperation_id)='blob' AND length(cooperation_id)=32), session_id TEXT NOT NULL, "
+    "owner_generation INTEGER NOT NULL CHECK (typeof(owner_generation)='integer' AND "
+    "owner_generation > 0), binding BLOB NOT NULL "
+    "CHECK (typeof(binding)='blob' AND length(binding) BETWEEN 1 AND 65536), "
+    "created_at INTEGER NOT NULL CHECK (typeof(created_at)='integer' AND created_at >= 0), "
+    "deadline_at INTEGER NOT NULL CHECK (typeof(deadline_at)='integer' AND "
+    "deadline_at > created_at), state TEXT NOT NULL CHECK "
+    "(state IN ('BURNED','NONCE_READY','SIGNING','COMPLETE','ABANDONED')), "
+    "local_nonce BLOB CHECK (local_nonce IS NULL OR (typeof(local_nonce)='blob' AND "
+    "length(local_nonce)=66)), peer_nonce BLOB CHECK (peer_nonce IS NULL OR "
+    "(typeof(peer_nonce)='blob' AND length(peer_nonce)=66)), partial_signature BLOB CHECK "
+    "(partial_signature IS NULL OR (typeof(partial_signature)='blob' AND "
+    "length(partial_signature)=32)), nonce_response_id TEXT, partial_response_id TEXT, "
+    "CHECK ((local_nonce IS NULL)=(nonce_response_id IS NULL)), "
+    "CHECK ((partial_signature IS NULL)=(partial_response_id IS NULL)), "
+    "CHECK ((state='BURNED' AND local_nonce IS NULL AND peer_nonce IS NULL) OR "
+    "(state='NONCE_READY' AND local_nonce IS NOT NULL AND peer_nonce IS NULL) OR "
+    "(state='SIGNING' AND local_nonce IS NOT NULL AND peer_nonce IS NOT NULL) OR "
+    "(state='COMPLETE' AND local_nonce IS NOT NULL AND peer_nonce IS NOT NULL AND "
+    "partial_signature IS NOT NULL) OR "
+    "(state='ABANDONED' AND partial_signature IS NULL)), "
+    "CHECK (state='COMPLETE' OR partial_signature IS NULL))"
+)
+# Arbitration is distinct from nonce custody: an affirmative admission row
+# alone grants no waiting period or signing authority. A complete presigned
+# unilateral bundle is required before any future runtime can open a window.
+CLAIM_ARBITRATION_SCHEMA = (
+    "CREATE TABLE claim_arbitration (session_id TEXT PRIMARY KEY NOT NULL, "
+    "contract_hash TEXT NOT NULL CHECK (typeof(contract_hash)='text' AND "
+    "length(contract_hash)=64), version INTEGER NOT NULL CHECK "
+    "(typeof(version)='integer' AND version=1), state TEXT NOT NULL CHECK "
+    "(state IN ('ADMITTED','WAITING','CLOSED')), owner_generation INTEGER "
+    "CHECK (owner_generation IS NULL OR (typeof(owner_generation)='integer' AND "
+    "owner_generation>0)), prepared_at INTEGER CHECK (prepared_at IS NULL OR "
+    "(typeof(prepared_at)='integer' AND prepared_at>=0)), deadline_at INTEGER "
+    "CHECK (deadline_at IS NULL OR (typeof(deadline_at)='integer' AND "
+    "deadline_at>prepared_at)), deadline_height INTEGER CHECK "
+    "(deadline_height IS NULL OR (typeof(deadline_height)='integer' AND "
+    "deadline_height>0)), fallback_raw BLOB CHECK (fallback_raw IS NULL OR "
+    "(typeof(fallback_raw)='blob' AND length(fallback_raw)>0)), fallback_txid TEXT "
+    "CHECK (fallback_txid IS NULL OR (typeof(fallback_txid)='text' AND "
+    "length(fallback_txid)=64)), fallback_fee_sat INTEGER CHECK "
+    "(fallback_fee_sat IS NULL OR (typeof(fallback_fee_sat)='integer' AND "
+    "fallback_fee_sat>=0)), cooperative_raw BLOB CHECK (cooperative_raw IS NULL OR "
+    "(typeof(cooperative_raw)='blob' AND length(cooperative_raw)>0)), "
+    "cooperative_txid TEXT CHECK (cooperative_txid IS NULL OR "
+    "(typeof(cooperative_txid)='text' AND length(cooperative_txid)=64)), "
+    "CHECK ((owner_generation IS NULL)=(prepared_at IS NULL) AND "
+    "(owner_generation IS NULL)=(deadline_at IS NULL) AND "
+    "(owner_generation IS NULL)=(deadline_height IS NULL) AND "
+    "(owner_generation IS NULL)=(fallback_raw IS NULL) AND "
+    "(owner_generation IS NULL)=(fallback_txid IS NULL) AND "
+    "(owner_generation IS NULL)=(fallback_fee_sat IS NULL)), "
+    "CHECK ((cooperative_raw IS NULL)=(cooperative_txid IS NULL) AND "
+    "(cooperative_raw IS NULL OR owner_generation IS NOT NULL)), "
+    "CHECK ((state='ADMITTED' AND owner_generation IS NULL AND "
+    "cooperative_raw IS NULL) OR (state='WAITING' AND owner_generation IS NOT NULL "
+    "AND cooperative_raw IS NULL) OR state='CLOSED'))"
+)
+REVERSE_PREIMAGE_EVIDENCE_SCHEMA = (
+    "CREATE TABLE reverse_preimage_evidence (session_id TEXT PRIMARY KEY NOT NULL, "
+    "document BLOB NOT NULL CHECK (typeof(document)='blob' AND "
+    "length(document) BETWEEN 1 AND 65536), received_at INTEGER NOT NULL CHECK "
+    "(typeof(received_at)='integer' AND received_at>=0))"
+)
+# RS-010: EVM HTLC evidence for erc20-to-ln and ln-to-erc20 swaps. A row
+# exists for every EVM-profile swap from acceptance, and its presence routes
+# the swap to the EVM lifecycle (``evm_settlement_work``) instead of the
+# Bitcoin one. lock_* is the counterparty's observed ``Lockup`` log (forward
+# swaps); provider_tx_hash is our own lock (reverse swaps); claim_tx_hash is
+# our claim (forward, with its signed bytes) or the observed client claim
+# (reverse, hash only); refund_tx_hash is our refund (reverse). Signed bytes
+# are retained so an interrupted broadcast can be repeated after a restart.
+# Hashes are lowercase hex without ``0x``.
+EVM_SWAP_SCHEMA = (
+    "CREATE TABLE evm_swaps (session_id TEXT PRIMARY KEY NOT NULL, "
+    "lock_tx_hash TEXT, lock_log_index INTEGER CHECK (lock_log_index >= 0), "
+    "lock_block INTEGER CHECK (lock_block >= 0), provider_tx_hash TEXT, provider_tx BLOB, "
+    "claim_tx_hash TEXT, claim_tx BLOB, refund_tx_hash TEXT, refund_tx BLOB, "
+    "CHECK ((lock_tx_hash IS NULL) = (lock_log_index IS NULL) AND "
+    "(lock_tx_hash IS NULL) = (lock_block IS NULL)), "
+    "CHECK ((provider_tx_hash IS NULL) = (provider_tx IS NULL)), "
+    "CHECK ((refund_tx_hash IS NULL) = (refund_tx IS NULL)))"
+)
+REVERSE_SPEND_SCAN_SCHEMA = (
+    "CREATE TABLE reverse_spend_scans (session_id TEXT PRIMARY KEY NOT NULL "
+    "REFERENCES swaps(session_id), "
+    "floor_height INTEGER NOT NULL CHECK (typeof(floor_height)='integer' AND floor_height>=0), "
+    "floor_block TEXT NOT NULL CHECK (length(floor_block)=64 "
+    "AND floor_block NOT GLOB '*[^0-9a-f]*'), "
+    "cursor_height INTEGER NOT NULL CHECK (typeof(cursor_height)='integer' "
+    "AND cursor_height>=floor_height), "
+    "cursor_block TEXT NOT NULL CHECK (length(cursor_block)=64 "
+    "AND cursor_block NOT GLOB '*[^0-9a-f]*'), "
+    "CHECK (cursor_height!=floor_height OR cursor_block=floor_block))"
+)
+# Append-only per-swap accounting, written in each event's own transaction
+# (swap_accounting.py).
+SWAP_LEDGER_SCHEMA = (
+    "CREATE TABLE swap_ledger (entry_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "session_id TEXT NOT NULL, "
+    "recorded_at INTEGER NOT NULL CHECK (typeof(recorded_at)='integer'), "
+    "kind TEXT NOT NULL CHECK (kind IN ("
+    + ", ".join(f"'{kind}'" for kind in LEDGER_KINDS)
+    + ")), amount INTEGER CHECK (amount IS NULL OR (typeof(amount)='integer' AND amount>=0)), "
+    "unit TEXT CHECK (unit IS NULL OR unit IN ("
+    + ", ".join(f"'{unit}'" for unit in LEDGER_UNITS)
+    + ")), CHECK ((amount IS NULL) = (unit IS NULL)))"
+)
+SCHEMA = (
     (
         "CREATE TABLE meta (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
         "schema_version INTEGER NOT NULL, store_uuid TEXT NOT NULL, network_jcs BLOB NOT NULL, "
@@ -332,212 +458,35 @@ SCHEMA_V5 = (
         "compressed_key TEXT NOT NULL UNIQUE, secret_age BLOB NOT NULL)"
     ),
     # Accepted contracts are never idle-expired (RS-003 acceptance).
-    SWAPS_V9_SCHEMA,
+    SWAPS_SCHEMA,
     # Never deleted: a payment hash is offered at most once, forever (RS-003).
     (
         "CREATE TABLE payment_hashes (payment_hash TEXT PRIMARY KEY, "
         "session_id TEXT NOT NULL, reserved_at INTEGER NOT NULL)"
     ),
-)
-PAYMENT_DISPATCH_SCHEMA = (
-    "CREATE TABLE payment_dispatch (session_id TEXT PRIMARY KEY, "
-    "payment_hash TEXT NOT NULL UNIQUE, "
-    "state TEXT NOT NULL CHECK (state IN ('UNSENT', 'SUBMITTED')), request BLOB)"
-)
-SCHEMA_V6 = (*SCHEMA_V5, PAYMENT_DISPATCH_SCHEMA)
-EPOCH_ADMISSION_SCHEMA = (
-    "CREATE TABLE epoch_admissions (session_id TEXT PRIMARY KEY, epoch_key TEXT NOT NULL, "
-    "retire_after INTEGER NOT NULL, expired INTEGER NOT NULL CHECK (expired IN (0, 1)))"
-)
-EPOCH_RETIREMENT_SCHEMA = (
-    "CREATE TABLE epoch_retirement (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
-    "retired_through INTEGER NOT NULL CHECK (retired_through >= 0))"
-)
-EPOCH_KEY_HISTORY_SCHEMA = "CREATE TABLE epoch_key_history (epoch_key TEXT PRIMARY KEY)"
-SCHEMA_V7 = (
-    *SCHEMA_V6,
+    PAYMENT_DISPATCH_SCHEMA,
     EPOCH_ADMISSION_SCHEMA,
     EPOCH_RETIREMENT_SCHEMA,
     EPOCH_KEY_HISTORY_SCHEMA,
-)
-# One row per payment-hash reservation, kept forever. Only RELEASED rows stop
-# counting against financial capacity, and only with versioned closure evidence.
-ECONOMIC_RESERVATION_SCHEMA = (
-    "CREATE TABLE economic_reservations (payment_hash TEXT PRIMARY KEY, "
-    "session_id TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN "
-    "('UNKNOWN', 'UNSENT', 'DISPATCHED', 'RELEASED')), release_evidence BLOB, "
-    "CHECK ((state = 'RELEASED') = (release_evidence IS NOT NULL)))"
-)
-SCHEMA_V8 = (*SCHEMA_V7, ECONOMIC_RESERVATION_SCHEMA)
-# Every signed claim a CLAIMING swap may have broadcast, kept forever: any of
-# them can confirm. swaps.claim_tx/claim_txid mirror the latest attempt until
-# CLAIMED, then the attempt that confirmed. NULL fee or height means a
-# migrated attempt not yet validated or observed; neither authorizes a bump.
-CLAIM_ATTEMPT_SCHEMA = (
-    "CREATE TABLE claim_attempts (session_id TEXT NOT NULL, "
-    "attempt INTEGER NOT NULL CHECK (attempt >= 0), txid TEXT NOT NULL UNIQUE, "
-    "raw BLOB NOT NULL, fee_sat INTEGER CHECK (fee_sat >= 0), "
-    "first_seen_height INTEGER CHECK (first_seen_height > 0), "
-    "PRIMARY KEY (session_id, attempt))"
-)
-SCHEMA_V9 = (*SCHEMA_V8, CLAIM_ATTEMPT_SCHEMA)
-SCHEMA_V10 = tuple(
-    SWAPS_V10_SCHEMA if statement is SWAPS_V9_SCHEMA else statement for statement in SCHEMA_V9
-)
-SCHEMA_V11 = tuple(
-    SWAPS_SCHEMA if statement is SWAPS_V10_SCHEMA else statement for statement in SCHEMA_V10
-)
-COOPERATION_ATTEMPT_SCHEMA = (
-    "CREATE TABLE cooperation_attempts (cooperation_id BLOB PRIMARY KEY NOT NULL CHECK "
-    "(typeof(cooperation_id)='blob' AND length(cooperation_id)=32), session_id TEXT NOT NULL, "
-    "owner_generation INTEGER NOT NULL CHECK (typeof(owner_generation)='integer' AND "
-    "owner_generation > 0), binding BLOB NOT NULL "
-    "CHECK (typeof(binding)='blob' AND length(binding) BETWEEN 1 AND 65536), "
-    "created_at INTEGER NOT NULL CHECK (typeof(created_at)='integer' AND created_at >= 0), "
-    "deadline_at INTEGER NOT NULL CHECK (typeof(deadline_at)='integer' AND "
-    "deadline_at > created_at), state TEXT NOT NULL CHECK "
-    "(state IN ('BURNED','NONCE_READY','SIGNING','COMPLETE','ABANDONED')), "
-    "local_nonce BLOB CHECK (local_nonce IS NULL OR (typeof(local_nonce)='blob' AND "
-    "length(local_nonce)=66)), peer_nonce BLOB CHECK (peer_nonce IS NULL OR "
-    "(typeof(peer_nonce)='blob' AND length(peer_nonce)=66)), partial_signature BLOB CHECK "
-    "(partial_signature IS NULL OR (typeof(partial_signature)='blob' AND "
-    "length(partial_signature)=32)), nonce_response_id TEXT, partial_response_id TEXT, "
-    "CHECK ((local_nonce IS NULL)=(nonce_response_id IS NULL)), "
-    "CHECK ((partial_signature IS NULL)=(partial_response_id IS NULL)), "
-    "CHECK ((state='BURNED' AND local_nonce IS NULL AND peer_nonce IS NULL) OR "
-    "(state='NONCE_READY' AND local_nonce IS NOT NULL AND peer_nonce IS NULL) OR "
-    "(state='SIGNING' AND local_nonce IS NOT NULL AND peer_nonce IS NOT NULL) OR "
-    "(state='COMPLETE' AND local_nonce IS NOT NULL AND peer_nonce IS NOT NULL AND "
-    "partial_signature IS NOT NULL) OR "
-    "(state='ABANDONED' AND partial_signature IS NULL)), "
-    "CHECK (state='COMPLETE' OR partial_signature IS NULL))"
-)
-SCHEMA_V12 = (*SCHEMA_V11, COOPERATION_ATTEMPT_SCHEMA)
-# Arbitration is distinct from nonce custody: an affirmative admission row
-# alone grants no waiting period or signing authority. A complete presigned
-# unilateral bundle is required before any future runtime can open a window.
-CLAIM_ARBITRATION_SCHEMA = (
-    "CREATE TABLE claim_arbitration (session_id TEXT PRIMARY KEY NOT NULL, "
-    "contract_hash TEXT NOT NULL CHECK (typeof(contract_hash)='text' AND "
-    "length(contract_hash)=64), version INTEGER NOT NULL CHECK "
-    "(typeof(version)='integer' AND version=1), state TEXT NOT NULL CHECK "
-    "(state IN ('ADMITTED','WAITING','CLOSED')), owner_generation INTEGER "
-    "CHECK (owner_generation IS NULL OR (typeof(owner_generation)='integer' AND "
-    "owner_generation>0)), prepared_at INTEGER CHECK (prepared_at IS NULL OR "
-    "(typeof(prepared_at)='integer' AND prepared_at>=0)), deadline_at INTEGER "
-    "CHECK (deadline_at IS NULL OR (typeof(deadline_at)='integer' AND "
-    "deadline_at>prepared_at)), deadline_height INTEGER CHECK "
-    "(deadline_height IS NULL OR (typeof(deadline_height)='integer' AND "
-    "deadline_height>0)), fallback_raw BLOB CHECK (fallback_raw IS NULL OR "
-    "(typeof(fallback_raw)='blob' AND length(fallback_raw)>0)), fallback_txid TEXT "
-    "CHECK (fallback_txid IS NULL OR (typeof(fallback_txid)='text' AND "
-    "length(fallback_txid)=64)), fallback_fee_sat INTEGER CHECK "
-    "(fallback_fee_sat IS NULL OR (typeof(fallback_fee_sat)='integer' AND "
-    "fallback_fee_sat>=0)), cooperative_raw BLOB CHECK (cooperative_raw IS NULL OR "
-    "(typeof(cooperative_raw)='blob' AND length(cooperative_raw)>0)), "
-    "cooperative_txid TEXT CHECK (cooperative_txid IS NULL OR "
-    "(typeof(cooperative_txid)='text' AND length(cooperative_txid)=64)), "
-    "CHECK ((owner_generation IS NULL)=(prepared_at IS NULL) AND "
-    "(owner_generation IS NULL)=(deadline_at IS NULL) AND "
-    "(owner_generation IS NULL)=(deadline_height IS NULL) AND "
-    "(owner_generation IS NULL)=(fallback_raw IS NULL) AND "
-    "(owner_generation IS NULL)=(fallback_txid IS NULL) AND "
-    "(owner_generation IS NULL)=(fallback_fee_sat IS NULL)), "
-    "CHECK ((cooperative_raw IS NULL)=(cooperative_txid IS NULL) AND "
-    "(cooperative_raw IS NULL OR owner_generation IS NOT NULL)), "
-    "CHECK ((state='ADMITTED' AND owner_generation IS NULL AND "
-    "cooperative_raw IS NULL) OR (state='WAITING' AND owner_generation IS NOT NULL "
-    "AND cooperative_raw IS NULL) OR state='CLOSED'))"
-)
-SCHEMA_V13 = (*SCHEMA_V12, CLAIM_ARBITRATION_SCHEMA)
-REVERSE_PREIMAGE_EVIDENCE_SCHEMA = (
-    "CREATE TABLE reverse_preimage_evidence (session_id TEXT PRIMARY KEY NOT NULL, "
-    "document BLOB NOT NULL CHECK (typeof(document)='blob' AND "
-    "length(document) BETWEEN 1 AND 65536), received_at INTEGER NOT NULL CHECK "
-    "(typeof(received_at)='integer' AND received_at>=0))"
-)
-SCHEMA_V14 = (*SCHEMA_V13, REVERSE_PREIMAGE_EVIDENCE_SCHEMA)
-# v15 (RS-010): EVM HTLC evidence for erc20-to-ln and ln-to-erc20 swaps. A row
-# exists for every EVM-profile swap from acceptance, and its presence routes
-# the swap to the EVM lifecycle (``evm_settlement_work``) instead of the
-# Bitcoin one. lock_* is the counterparty's observed ``Lockup`` log (forward
-# swaps); provider_tx_hash is our own lock (reverse swaps); claim_tx_hash is
-# our claim (forward, with its signed bytes) or the observed client claim
-# (reverse, hash only); refund_tx_hash is our refund (reverse). Signed bytes
-# are retained so an interrupted broadcast can be repeated after a restart.
-# Hashes are lowercase hex without ``0x``.
-EVM_SWAP_SCHEMA = (
-    "CREATE TABLE evm_swaps (session_id TEXT PRIMARY KEY NOT NULL, "
-    "lock_tx_hash TEXT, lock_log_index INTEGER CHECK (lock_log_index >= 0), "
-    "lock_block INTEGER CHECK (lock_block >= 0), provider_tx_hash TEXT, provider_tx BLOB, "
-    "claim_tx_hash TEXT, claim_tx BLOB, refund_tx_hash TEXT, refund_tx BLOB, "
-    "CHECK ((lock_tx_hash IS NULL) = (lock_log_index IS NULL) AND "
-    "(lock_tx_hash IS NULL) = (lock_block IS NULL)), "
-    "CHECK ((provider_tx_hash IS NULL) = (provider_tx IS NULL)), "
-    "CHECK ((refund_tx_hash IS NULL) = (refund_tx IS NULL)))"
-)
-SCHEMA_V16 = (*SCHEMA_V14, EVM_SWAP_SCHEMA)
-REVERSE_SPEND_SCAN_SCHEMA = (
-    "CREATE TABLE reverse_spend_scans (session_id TEXT PRIMARY KEY NOT NULL "
-    "REFERENCES swaps(session_id), "
-    "floor_height INTEGER NOT NULL CHECK (typeof(floor_height)='integer' AND floor_height>=0), "
-    "floor_block TEXT NOT NULL CHECK (length(floor_block)=64 "
-    "AND floor_block NOT GLOB '*[^0-9a-f]*'), "
-    "cursor_height INTEGER NOT NULL CHECK (typeof(cursor_height)='integer' "
-    "AND cursor_height>=floor_height), "
-    "cursor_block TEXT NOT NULL CHECK (length(cursor_block)=64 "
-    "AND cursor_block NOT GLOB '*[^0-9a-f]*'), "
-    "CHECK (cursor_height!=floor_height OR cursor_block=floor_block))"
-)
-SCHEMA_V17 = (*SCHEMA_V16, REVERSE_SPEND_SCAN_SCHEMA)
-# v18: append-only per-swap accounting, written in each event's own transaction
-# (swap_accounting.py). Swaps from before the upgrade have no rows: no backfill.
-SWAP_LEDGER_SCHEMA = (
-    "CREATE TABLE swap_ledger (entry_id INTEGER PRIMARY KEY AUTOINCREMENT, "
-    "session_id TEXT NOT NULL, "
-    "recorded_at INTEGER NOT NULL CHECK (typeof(recorded_at)='integer'), "
-    "kind TEXT NOT NULL CHECK (kind IN ("
-    + ", ".join(f"'{kind}'" for kind in LEDGER_KINDS)
-    + ")), amount INTEGER CHECK (amount IS NULL OR (typeof(amount)='integer' AND amount>=0)), "
-    "unit TEXT CHECK (unit IS NULL OR unit IN ("
-    + ", ".join(f"'{unit}'" for unit in LEDGER_UNITS)
-    + ")), CHECK ((amount IS NULL) = (unit IS NULL)))"
-)
-SCHEMA = (*SCHEMA_V17, SWAP_LEDGER_SCHEMA)
-# Exact deployed variants, not permissive column-count recognition. Non-NULL
-# evidence that cannot be represented losslessly remains an acquisition refusal.
-SWAPS_HEIGHT_ONLY_V10_SCHEMA = (
-    "CREATE TABLE swaps (session_id TEXT PRIMARY KEY, contract_hash TEXT NOT NULL UNIQUE, "
-    "terms_offer BLOB NOT NULL, terms_accept BLOB NOT NULL, state TEXT NOT NULL CHECK "
-    "(state IN ('ACCEPTED', 'FUNDING_SEEN', 'PAYING', 'PAID', 'FAILED', 'CLAIMING', "
-    "'CLAIMED', 'LOST')), funding_binding BLOB, preimage TEXT, claim_txid TEXT, claim_tx BLOB, "
-    "updated_at INTEGER NOT NULL, outpoint_spent_height INTEGER "
-    "CHECK (outpoint_spent_height > 0))"
-)
-EVM_HASH_ONLY_V15_SCHEMA = (
-    "CREATE TABLE evm_swaps (session_id TEXT PRIMARY KEY NOT NULL, "
-    "lock_tx_hash TEXT, lock_log_index INTEGER CHECK (lock_log_index >= 0), "
-    "lock_block INTEGER CHECK (lock_block >= 0), provider_tx_hash TEXT, "
-    "claim_tx_hash TEXT, refund_tx_hash TEXT, "
-    "CHECK ((lock_tx_hash IS NULL) = (lock_log_index IS NULL) AND "
-    "(lock_tx_hash IS NULL) = (lock_block IS NULL)))"
+    ECONOMIC_RESERVATION_SCHEMA,
+    CLAIM_ATTEMPT_SCHEMA,
+    COOPERATION_ATTEMPT_SCHEMA,
+    CLAIM_ARBITRATION_SCHEMA,
+    REVERSE_PREIMAGE_EVIDENCE_SCHEMA,
+    EVM_SWAP_SCHEMA,
+    REVERSE_SPEND_SCAN_SCHEMA,
+    SWAP_LEDGER_SCHEMA,
 )
 MAX_CLAIM_ATTEMPTS = 32
 COOPERATION_BUDGET_SECONDS = 30
 COOPERATION_OBSERVATION_MAX_AGE_SECONDS = 5
-ADMISSION_INDEXES = (
+INDEXES = (
     "CREATE INDEX epoch_admissions_expiry ON epoch_admissions (expired, retire_after)",
-)
-RESERVATION_INDEXES = (
     "CREATE INDEX economic_reservations_state ON economic_reservations (state, session_id)",
-)
-COOPERATION_INDEXES = (
     (
         "CREATE UNIQUE INDEX cooperation_unfinished_session ON cooperation_attempts (session_id) "
         "WHERE state IN ('BURNED','NONCE_READY','SIGNING')"
     ),
-)
-LEDGER_INDEXES = (
     "CREATE INDEX swap_ledger_session ON swap_ledger (session_id)",
     "CREATE INDEX swap_ledger_time ON swap_ledger (recorded_at)",
 )
@@ -567,9 +516,9 @@ FINISHED_SWAP_STATES = frozenset(EVM_TERMINAL_STATES)
 def _declared_work(init_bytes: bytes) -> int | None:
     """Return the transport work an admitted init declared, or None.
 
-    Admission refuses malformed declarations, so an unreadable one can only
-    come from an older store; it is treated as undeclared, which never makes
-    a session require work its client did not promise.
+    Admission refuses malformed declarations, so an unreadable one means
+    damaged bytes; it is treated as undeclared, which never makes a session
+    require work its client did not promise.
     """
     try:
         return transport_pow.requirement(json.loads(init_bytes)["payload"]["extensions"])
@@ -855,13 +804,12 @@ class SettlementItem:
     # a non-attempt; the hash anchors the wait to the active chain.
     outpoint_spent_height: int | None = None
     outpoint_spent_block: str | None = None
-    # LN to BTC (RS-004): the provider's own funding and refund, and the scan cursor.
+    # LN to BTC (RS-004): the provider's own funding and refund.
     funding_txid: str | None = None
     funding_vout: int | None = None
     funding_tx: bytes | None = None
     refund_txid: str | None = None
     refund_tx: bytes | None = None
-    spend_scan_height: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1141,14 +1089,7 @@ class LiveSessionStore:
             try:
                 _configure(connection)
                 connection.execute("BEGIN IMMEDIATE")
-                for statement in SCHEMA:
-                    connection.execute(statement)
-                for statement in (
-                    *ADMISSION_INDEXES,
-                    *RESERVATION_INDEXES,
-                    *COOPERATION_INDEXES,
-                    *LEDGER_INDEXES,
-                ):
+                for statement in (*SCHEMA, *INDEXES):
                     connection.execute(statement)
                 connection.execute("INSERT INTO epoch_retirement VALUES (1, 0)")
                 connection.execute(
@@ -1193,17 +1134,14 @@ class LiveSessionStore:
         max_tombstones: int = DEFAULT_MAX_TOMBSTONES,
         new_sessions_per_minute: int = DEFAULT_NEW_SESSIONS_PER_MINUTE,
         max_active_reservations: int = DEFAULT_MAX_ACTIVE_RESERVATIONS,
-        upgrade_from_v5: bool = False,
     ) -> Self:
         """Take lifetime exclusive ownership; refuse any unknown or copied state.
 
         ``max_sessions`` caps pre-acceptance sessions, which ``expire_idle``
         reclaims. ``max_active_reservations`` caps unreleased economic
         reservations (firm offers and accepted swaps); only evidenced closure
-        releases one. The historical ``upgrade_from_v5=True`` spelling
-        authorizes supported v5-v7 schema upgrades and adding the epoch-bound
-        admission feature.
-        No old payment or handshake gains new authority from the migration.
+        releases one. A store of any other schema version is refused with its
+        contents unchanged: there is no upgrade path.
         """
         if not all(
             type(limit) is int and limit >= 1
@@ -1242,7 +1180,7 @@ class LiveSessionStore:
                 location.as_uri() + "?mode=rw", uri=True, isolation_level=None
             )
             connection.execute("PRAGMA busy_timeout=5000")
-            version, variant = _check_schema(connection, allow_v5=upgrade_from_v5 is True)
+            _check_schema(connection)
             _configure(connection)
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -1250,23 +1188,7 @@ class LiveSessionStore:
                 "db_inode, lock_inode, generation, store_uuid, authority_jcs, custody_recipient "
                 "FROM meta"
             ).fetchall()
-            if len(row) != 1 or row[0][:3] != (version, network_jcs, identity):
-                raise LiveSessionStoreError("store namespace or policy mismatch")  # noqa: TRY301
-            # Exact additive upgrades only: a store provisioned before
-            # cooperation became intrinsic (and, from v5, before epoch binding)
-            # differs by exactly those features; anything else is a mismatch.
-            # The rewrite below commits with the new owner generation.
-            additive = [frozenset({COOPERATIVE_CLAIM_FEATURE})]
-            if upgrade_from_v5 is True:
-                additive += [
-                    frozenset({EPOCH_SESSION_FEATURE}),
-                    frozenset({EPOCH_SESSION_FEATURE, COOPERATIVE_CLAIM_FEATURE}),
-                ]
-            if row[0][3] != policy_jcs and not any(
-                added <= policy.features
-                and row[0][3] == _policy_bytes(replace(policy, features=policy.features - added))
-                for added in additive
-            ):
+            if len(row) != 1 or row[0][:4] != (SCHEMA_VERSION, network_jcs, identity, policy_jcs):
                 raise LiveSessionStoreError("store namespace or policy mismatch")  # noqa: TRY301
             _check_provisioning(row[0][7], row[0][8])
             if row[0][9] != str(unlocking.to_public()):
@@ -1275,35 +1197,6 @@ class LiveSessionStore:
                 raise LiveSessionStoreError(  # noqa: TRY301 - copied or restored file
                     "store files are not the provisioned authoritative copy"
                 )
-            _normalize_historical_schema(connection, variant)
-            if version == 5:  # noqa: PLR2004 - exact legacy schema
-                _upgrade_v5(connection)
-            if version in (5, 6):
-                _upgrade_v6(connection)
-            if version in (5, 6, 7):
-                _upgrade_v7(connection)
-            if version in (5, 6, 7, 8):
-                _upgrade_v8(connection)
-            if version in (5, 6, 7, 8, 9):
-                _upgrade_v9(connection)
-            if version in (5, 6, 7, 8, 9, 10):
-                _upgrade_v10(connection)
-            if version in (5, 6, 7, 8, 9, 10, 11):
-                _upgrade_v11(connection)
-            if version in (5, 6, 7, 8, 9, 10, 11, 12):
-                _upgrade_v12(connection)
-            if version in (5, 6, 7, 8, 9, 10, 11, 12, 13):
-                _upgrade_v13(connection)
-            if version in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14):
-                _upgrade_v14(connection)
-            if version in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16):
-                connection.execute(REVERSE_SPEND_SCAN_SCHEMA)
-            if version != SCHEMA_VERSION:
-                _upgrade_v17(connection)
-            if version != SCHEMA_VERSION:
-                connection.execute("UPDATE meta SET schema_version=?", (SCHEMA_VERSION,))
-                connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-                _check_schema(connection)
             _epoch_watermark(connection)
             if connection.execute(
                 "SELECT 1 FROM epochs e LEFT JOIN epoch_key_history h "
@@ -1355,7 +1248,6 @@ class LiveSessionStore:
             # No process-local deadline worker or native handle survives owner
             # change. Closing eligibility does not itself dispatch or spend.
             connection.execute("UPDATE claim_arbitration SET state='CLOSED' WHERE state='WAITING'")
-            connection.execute("UPDATE meta SET policy_jcs=?", (policy_jcs,))
             generation = row[0][6] + 1
             connection.execute("UPDATE meta SET generation=?", (generation,))
             connection.execute("COMMIT")
@@ -2659,8 +2551,7 @@ class LiveSessionStore:
                 and not cooperative
                 and init.profile_id != "ln-to-btc/v1"
             ):
-                # A reservation recorded before cooperation became mandatory
-                # gets no fresh accept; the client must negotiate again.
+                # reserve() already refuses these; never sign an accept for one.
                 raise LiveSessionStoreError("new session requires cooperative claims")  # noqa: TRY301
             selection = HandshakeAccept(
                 handshake_init_hash=handshake_init_hash(init).hex(),
@@ -3031,11 +2922,9 @@ class LiveSessionStore:
                 ]
                 # Release before deletion: an idle session's open offer can never
                 # be accepted again. Its payment hash stays reserved forever.
-                # UNKNOWN (migrated) rows of a pre-acceptance session never had a
-                # contract either: nothing was dispatched for a hash with no swap.
                 connection.executemany(
                     "UPDATE economic_reservations SET state='RELEASED', release_evidence=? "
-                    "WHERE session_id=? AND state IN ('UNSENT', 'UNKNOWN') "
+                    "WHERE session_id=? AND state='UNSENT' "
                     "AND session_id NOT IN (SELECT session_id FROM swaps)",
                     [(_release_evidence("expired-offer", expired_at=now), sid) for (sid,) in idle],
                 )
@@ -3344,7 +3233,7 @@ class LiveSessionStore:
 
         No signed session expiry exists. This supplies no deadline, payment,
         nonce, chain, or signing authority. Missing process memory (including
-        after upgrade/restart) denies provenance without initiating any work.
+        after restart) denies provenance without initiating any work.
         The future admission must independently enforce original cooperation
         deadlines and every other financial prerequisite under the shared gate.
         """
@@ -6078,8 +5967,7 @@ class LiveSessionStore:
                     "i.canonical_bytes, w.preimage, w.claim_tx, w.claim_txid, "
                     "COALESCE(p.state, 'UNKNOWN'), p.payment_hash, p.request, "
                     "w.outpoint_spent_height, w.outpoint_spent_block, w.funding_txid, "
-                    "w.funding_vout, w.funding_tx, w.refund_txid, w.refund_tx, "
-                    "w.spend_scan_height FROM swaps w "
+                    "w.funding_vout, w.funding_tx, w.refund_txid, w.refund_tx FROM swaps w "
                     "JOIN sessions s ON s.session_id = w.session_id "
                     "LEFT JOIN payment_dispatch p ON p.session_id = w.session_id "
                     "JOIN inbox i ON i.session_id = w.session_id AND i.sender_key = s.client_key "
@@ -6394,7 +6282,7 @@ class LiveSessionStore:
         self,
         session_id: str,
         *,
-        expected: ReverseSpendCheckpoint | None,
+        expected: ReverseSpendCheckpoint,
         checkpoint: ReverseSpendCheckpoint,
         operation: ReverseOperation,
         rewind: bool = False,
@@ -6402,11 +6290,10 @@ class LiveSessionStore:
         """Compare-and-swap scan progress under the current reverse operation.
 
         Only an affirmative canonical mismatch permits an explicit rewind to
-        the immutable floor. Legacy initialization accepts prior coverage,
-        never authorizes a historical replay.
+        the immutable floor. The checkpoint itself is created with FUNDED.
         """
         self.reverse_operations.check(operation)
-        if expected is not None and (
+        if (
             (checkpoint.floor_height, checkpoint.floor_block)
             != (expected.floor_height, expected.floor_block)
             or (rewind and checkpoint.height != checkpoint.floor_height)
@@ -6418,8 +6305,6 @@ class LiveSessionStore:
             )
         ):
             raise LiveSessionStoreError("reverse scan update unsupported")
-        if expected is None and (rewind or checkpoint.height != checkpoint.floor_height):
-            raise LiveSessionStoreError("reverse scan initialization unsupported")
         with self._write() as connection:
             row = connection.execute(
                 "SELECT state,terms_offer FROM swaps WHERE session_id=?", (session_id,)
@@ -6430,18 +6315,7 @@ class LiveSessionStore:
                 or _offer_terms(row[1]).profile_id != "ln-to-btc/v1"
             ):
                 raise StaleSwapError("reverse scan swap unavailable")
-            if expected is None:
-                connection.execute(
-                    "INSERT INTO reverse_spend_scans VALUES (?,?,?,?,?)",
-                    (
-                        session_id,
-                        checkpoint.floor_height,
-                        checkpoint.floor_block,
-                        checkpoint.height,
-                        checkpoint.block,
-                    ),
-                )
-            elif (
+            if (
                 connection.execute(
                     "UPDATE reverse_spend_scans SET cursor_height=?,cursor_block=? "
                     "WHERE session_id=? "
@@ -6495,7 +6369,7 @@ class LiveSessionStore:
                         and terms.network_identity == self._network
                         and len(reservations) == 1
                         and reservations[0][0] == terms.invoice_binding.payment_hash
-                        and reservations[0][1] in {"UNSENT", "UNKNOWN"}
+                        and reservations[0][1] == "UNSENT"
                         and reservations[0][2] is None
                         and all(
                             _canonical_envelope(document).message_type != "funding_binding"
@@ -6614,7 +6488,7 @@ class LiveSessionStore:
                 if to_state == "FUNDING_SENT":
                     granted = connection.execute(
                         "UPDATE economic_reservations SET state='DISPATCHED' "
-                        "WHERE payment_hash=? AND session_id=? AND state IN ('UNSENT', 'UNKNOWN')",
+                        "WHERE payment_hash=? AND session_id=? AND state='UNSENT'",
                         (payment_hash, session_id),
                     ).rowcount
                     if granted != 1:
@@ -6666,22 +6540,6 @@ class LiveSessionStore:
         self._record_observation(
             connection, session_id, payload, signer, now, message_type="funding_binding"
         )
-
-    def record_spend_scan(self, session_id: str, height: int) -> None:
-        """Remember the last block scanned for a spend of this swap's contract."""
-        if type(height) is not int or height <= 0:
-            raise LiveSessionStoreError("scan height must be a positive block height")
-        try:
-            with self._write() as connection:
-                connection.execute(
-                    "UPDATE swaps SET spend_scan_height=? WHERE session_id=? "
-                    "AND (spend_scan_height IS NULL OR spend_scan_height < ?)",
-                    (height, session_id, height),
-                )
-        except LiveSessionStoreError:
-            raise
-        except Exception:  # noqa: BLE001 - never echo storage details
-            raise LiveSessionStoreError("scan cursor refused") from None
 
     def evm_settlement_work(self) -> tuple[EvmSettlementItem, ...]:
         """Return every open EVM-profile swap (RS-010) with its retained evidence."""
@@ -6809,7 +6667,7 @@ class LiveSessionStore:
                     )
                     granted = connection.execute(
                         "UPDATE economic_reservations SET state='DISPATCHED' "
-                        "WHERE payment_hash=? AND session_id=? AND state IN ('UNSENT', 'UNKNOWN')",
+                        "WHERE payment_hash=? AND session_id=? AND state='UNSENT'",
                         (payment_hash, session_id),
                     ).rowcount
                     if granted != 1:
@@ -7762,7 +7620,7 @@ class LiveSessionStore:
     def observe_claim_attempt(
         self, session_id: str, attempt: int, *, fee_sat: int, height: int
     ) -> None:
-        """Fill a migrated attempt's validated fee and first-seen height, once.
+        """Fill an unobserved attempt's validated fee and first-seen height, once.
 
         Values already recorded are never overwritten, so a restart cannot move
         the escalation anchor.
@@ -7841,31 +7699,6 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - never echo storage details
             raise LiveSessionStoreError("swap listing refused") from None
 
-    def unreleased_claims(self, *, after: str = "", limit: int = 16) -> list[tuple[str, str, int]]:
-        """Return (session_id, claim_txid, required depth) for claimed, unreleased swaps.
-
-        These are historical rows (for example migrated UNKNOWN reservations).
-        Only a fresh chain observation passed to release_claim can close them.
-        Pages by session ID after ``after`` so unconfirmable rows cannot starve
-        later ones; callers wrap around when a page is short.
-        """
-        try:
-            with self._write() as connection:
-                rows = connection.execute(
-                    "SELECT w.session_id, w.claim_txid, w.terms_offer FROM swaps w "
-                    "JOIN economic_reservations r ON r.session_id=w.session_id "
-                    "WHERE w.state='CLAIMED' AND w.claim_txid IS NOT NULL "
-                    "AND r.state IN ('DISPATCHED', 'UNKNOWN') AND w.session_id > ? "
-                    "ORDER BY w.session_id LIMIT ?",
-                    (after, limit),
-                ).fetchall()
-                return [
-                    (sid, txid, _offer_terms(offer).settlement_confirmations)
-                    for sid, txid, offer in rows
-                ]
-        except Exception:  # noqa: BLE001 - never echo storage details
-            raise LiveSessionStoreError("claim listing refused") from None
-
     def expirable_exposure_pending(self) -> bool:
         """Whether any terminal swap still holds a reservation (worth asking the tip)."""
         try:
@@ -7888,9 +7721,8 @@ class LiveSessionStore:
         (no Lightning HTLC of this swap can still be pending) and
         ``refund_lock_height`` (the client could refund), plus
         ``refund_resolution_confirmations``, nothing can change what this
-        swap cost. This is the only release for migrated ``UNKNOWN`` rows of
-        ``FAILED`` swaps and for ``FAILED`` swaps whose failure no payer
-        attested. Non-terminal swaps are never touched. Returns the count.
+        swap cost. This is the only release for ``FAILED`` swaps whose failure
+        no payer attested. Non-terminal swaps are never touched. Returns the count.
         """
         if type(tip_height) is not int or tip_height <= 0:
             raise LiveSessionStoreError("tip height must be a positive block height")
@@ -7932,30 +7764,6 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - never echo storage details
             raise LiveSessionStoreError("exposure release refused") from None
         return released
-
-    def release_claim(self, session_id: str, claim_txid: str, *, confirmations: int) -> bool:
-        """Release a claimed swap's reservation on fresh evidence of claim depth.
-
-        Refuses anything but the retained claim txid of a CLAIMED swap observed
-        at no less than its signed ``settlement_confirmations``. This accepts
-        Bitcoin's depth-based reorganization risk, like the claim itself.
-        """
-        if type(confirmations) is not int or confirmations < 0:
-            raise LiveSessionStoreError("confirmations unsupported")
-        try:
-            with self._write() as connection:
-                row = connection.execute(
-                    "SELECT terms_offer FROM swaps WHERE session_id=? AND state='CLAIMED' "
-                    "AND claim_txid=?",
-                    (session_id, claim_txid),
-                ).fetchone()
-                if row is None or confirmations < _offer_terms(row[0]).settlement_confirmations:
-                    return False
-                return _release_terminal(connection, session_id, "CLAIMED", None, confirmations)
-        except LiveSessionStoreError:
-            raise
-        except Exception:  # noqa: BLE001 - never echo storage details
-            raise LiveSessionStoreError("claim release refused") from None
 
     def _economic_capacity(self, connection: sqlite3.Connection, session_id: str) -> bool:
         """Whether one more firm offer in this session fits unreleased capacity."""
@@ -8020,7 +7828,7 @@ class LiveSessionStore:
                 if (
                     connection.execute(
                         "UPDATE economic_reservations SET state='DISPATCHED' "
-                        "WHERE payment_hash=? AND session_id=? AND state IN ('UNSENT', 'UNKNOWN')",
+                        "WHERE payment_hash=? AND session_id=? AND state='UNSENT'",
                         (payment_hash, session_id),
                     ).rowcount
                     != 1
@@ -8416,7 +8224,7 @@ class LiveSessionStore:
 
 
 def _immediate_claim_allowed(connection: sqlite3.Connection, session_id: str) -> bool:
-    """Missing admission is legacy, but prepared or closed arbitration is not."""
+    """Allow without an arbitration row (EVM, non-cooperative); never once prepared or closed."""
     row = connection.execute(
         "SELECT state FROM claim_arbitration WHERE session_id=?", (session_id,)
     ).fetchone()
@@ -8500,287 +8308,41 @@ def _configure(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA secure_delete=ON")  # expired sealed keys leave no old pages
 
 
-def _check_schema(
-    connection: sqlite3.Connection, *, allow_v5: bool = False
-) -> tuple[int, Literal["canonical", "height-only-v10", "hash-only-v15"]]:
+def _check_schema(connection: sqlite3.Connection) -> None:
+    """Refuse, before any schema or row change, a store not exactly at this version.
+
+    Older stores have no upgrade path: drain them on their own release, then
+    provision a new store. Closing the refusing connection may still
+    checkpoint a crashed store's committed WAL frames (no logical change).
+    """
     (version,) = connection.execute("PRAGMA user_version").fetchone()
-    if connection.execute("PRAGMA application_id").fetchone() != (
-        APPLICATION_ID,
-    ) or version not in (
-        (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, SCHEMA_VERSION)
-        if allow_v5
-        else (8, 9, 10, 11, 12, 13, 14, 15, 16, 17, SCHEMA_VERSION)
-    ):
+    if connection.execute("PRAGMA application_id").fetchone() != (APPLICATION_ID,):
         raise LiveSessionStoreError("live session store version unsupported")
+    if version != SCHEMA_VERSION:
+        raise LiveSessionStoreError(
+            f"live session store version unsupported (found {int(version)}, "
+            f"requires {SCHEMA_VERSION}); recreate it with provision-store"
+        )
     objects = {
         (kind, name): definition
         for kind, name, definition in connection.execute(
             "SELECT type, name, sql FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'"
         )
     }
-    schema = {
-        5: SCHEMA_V5,
-        6: SCHEMA_V6,
-        7: SCHEMA_V7,
-        8: SCHEMA_V8,
-        9: SCHEMA_V9,
-        10: SCHEMA_V10,
-        11: SCHEMA_V11,
-        12: SCHEMA_V12,
-        13: SCHEMA_V13,
-        14: SCHEMA_V14,
-        15: SCHEMA_V16,
-        16: SCHEMA_V16,
-        17: SCHEMA_V17,
-        SCHEMA_VERSION: SCHEMA,
-    }[version]
-    indexes = {
-        7: ADMISSION_INDEXES,
-        8: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
-        9: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
-        10: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
-        11: (*ADMISSION_INDEXES, *RESERVATION_INDEXES),
-        12: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
-        13: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
-        14: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
-        15: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
-        16: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
-        17: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
-        SCHEMA_VERSION: (
-            *ADMISSION_INDEXES,
-            *RESERVATION_INDEXES,
-            *COOPERATION_INDEXES,
-            *LEDGER_INDEXES,
-        ),
-    }
-    expected = {("table", statement.split()[2]): statement for statement in schema}
+    expected = {("table", statement.split()[2]): statement for statement in SCHEMA}
     expected.update(
         {
             (
                 "index",
                 sql.split()[3] if sql.startswith("CREATE UNIQUE INDEX ") else sql.split()[2],
             ): sql
-            for sql in indexes.get(version, ())
+            for sql in INDEXES
         }
     )
-    variant: Literal["canonical", "height-only-v10", "hash-only-v15"] = "canonical"
-    if objects != expected and version in (10, 15):
-        table, definition = (
-            ("swaps", SWAPS_HEIGHT_ONLY_V10_SCHEMA)
-            if version == 10  # noqa: PLR2004 - exact historical marker
-            else ("evm_swaps", EVM_HASH_ONLY_V15_SCHEMA)
-        )
-        expected[("table", table)] = definition
-        variant = "height-only-v10" if version == 10 else "hash-only-v15"  # noqa: PLR2004
     if objects != expected:
         raise LiveSessionStoreError("live session store schema incompatible")
     if connection.execute("PRAGMA quick_check").fetchone() != ("ok",):
         raise LiveSessionStoreError("live session store integrity unavailable")
-    return int(version), variant
-
-
-def _normalize_historical_schema(
-    connection: sqlite3.Connection,
-    variant: Literal["canonical", "height-only-v10", "hash-only-v15"],
-) -> None:
-    """Lossless representation conversion, never proof that a send is safe."""
-    if variant == "height-only-v10":
-        if connection.execute(
-            "SELECT 1 FROM swaps WHERE outpoint_spent_height IS NOT NULL LIMIT 1"
-        ).fetchone():
-            raise LiveSessionStoreError(
-                "historical spent-height evidence requires operator recovery"
-            )
-        connection.execute("ALTER TABLE swaps RENAME TO swaps_height_only")
-        connection.execute(SWAPS_V10_SCHEMA)
-        connection.execute(
-            "INSERT INTO swaps (session_id,contract_hash,terms_offer,terms_accept,state,"
-            "funding_binding,preimage,claim_txid,claim_tx,updated_at,outpoint_spent_height,"
-            "outpoint_spent_block) SELECT session_id,contract_hash,terms_offer,terms_accept,state,"
-            "funding_binding,preimage,claim_txid,claim_tx,updated_at,outpoint_spent_height,NULL "
-            "FROM swaps_height_only"
-        )
-        connection.execute("DROP TABLE swaps_height_only")
-    elif variant == "hash-only-v15":
-        if connection.execute(
-            "SELECT 1 FROM evm_swaps WHERE provider_tx_hash IS NOT NULL OR "
-            "claim_tx_hash IS NOT NULL OR refund_tx_hash IS NOT NULL LIMIT 1"
-        ).fetchone():
-            raise LiveSessionStoreError(
-                "historical transaction-hash evidence requires operator recovery"
-            )
-        connection.execute("ALTER TABLE evm_swaps RENAME TO evm_swaps_hash_only")
-        connection.execute(EVM_SWAP_SCHEMA)
-        connection.execute(
-            "INSERT INTO evm_swaps (session_id,lock_tx_hash,lock_log_index,lock_block,"
-            "provider_tx_hash,provider_tx,claim_tx_hash,claim_tx,refund_tx_hash,refund_tx) "
-            "SELECT session_id,lock_tx_hash,lock_log_index,lock_block,provider_tx_hash,NULL,"
-            "claim_tx_hash,NULL,refund_tx_hash,NULL FROM evm_swaps_hash_only"
-        )
-        connection.execute("DROP TABLE evm_swaps_hash_only")
-
-
-def _upgrade_v5(connection: sqlite3.Connection) -> None:
-    """Add dispatch custody inside the verified owner's existing transaction.
-
-    No old swap is labeled UNSENT. Only a future FUNDING_SEEN to PAYING
-    transition can create that affirmative marker, before any send occurs.
-    """
-    connection.execute(PAYMENT_DISPATCH_SCHEMA)
-
-
-def _upgrade_v6(connection: sqlite3.Connection) -> None:
-    """Add empty epoch custody explicitly, without reclassifying any old session."""
-    connection.execute(EPOCH_ADMISSION_SCHEMA)
-    connection.execute(EPOCH_RETIREMENT_SCHEMA)
-    connection.execute(EPOCH_KEY_HISTORY_SCHEMA)
-    # v5/v6 kept every epoch row, including retired ones. Preserve that complete
-    # public-key history before any v7 secret retirement becomes possible.
-    connection.execute("INSERT INTO epoch_key_history SELECT epoch_key FROM epochs")
-    for statement in ADMISSION_INDEXES:
-        connection.execute(statement)
-    # Explicit migration proves only that no epoch retirement has been recorded
-    # under this format. It never converts old sessions to the new admission lane.
-    connection.execute("INSERT INTO epoch_retirement VALUES (1, 0)")
-
-
-def _upgrade_v7(connection: sqlite3.Connection) -> None:
-    """Backfill the economic ledger from retained reservations, conservatively.
-
-    Every payment-hash reservation gets one row. A still-open offer (a
-    pre-acceptance session with no swap) becomes UNSENT, exactly like a new
-    offer, so idle expiry can close it. A tombstoned session with neither
-    session nor swap rows is an expired unaccepted offer that can never be
-    accepted; it is RELEASED with migration evidence. Everything else, notably
-    every accepted swap and every hash without affirmative provenance, is
-    UNKNOWN and keeps its capacity until later evidenced closure. A swap
-    without a reservation is inconsistent custody and refuses the upgrade.
-    """
-    connection.execute(ECONOMIC_RESERVATION_SCHEMA)
-    for statement in RESERVATION_INDEXES:
-        connection.execute(statement)
-    for session_id, offer in connection.execute("SELECT session_id, terms_offer FROM swaps"):
-        # The exact hash bound by the accepted offer, not any hash of the session.
-        accepted = _offered_payment_hash(offer)
-        if not connection.execute(
-            "SELECT 1 FROM payment_hashes WHERE payment_hash=? AND session_id=?",
-            (accepted, session_id),
-        ).fetchone():
-            raise LiveSessionStoreError("swap without payment-hash reservation")
-    connection.execute(
-        "INSERT INTO economic_reservations SELECT h.payment_hash, h.session_id, CASE "
-        "WHEN w.session_id IS NULL AND s.phase IN ('RESERVED', 'ACCEPT_COMMITTED', "
-        "'CONFIRMED') THEN 'UNSENT' "
-        "WHEN w.session_id IS NULL AND s.session_id IS NULL AND (h.session_id IN "
-        "(SELECT session_id FROM expired) OR h.session_id IN (SELECT session_id FROM "
-        "epoch_admissions WHERE expired=1)) THEN 'RELEASED' ELSE 'UNKNOWN' END, "
-        "CASE WHEN w.session_id IS NULL AND s.session_id IS NULL AND (h.session_id IN "
-        "(SELECT session_id FROM expired) OR h.session_id IN (SELECT session_id FROM "
-        "epoch_admissions WHERE expired=1)) THEN ? ELSE NULL END "
-        "FROM payment_hashes h LEFT JOIN swaps w ON w.session_id=h.session_id "
-        "LEFT JOIN sessions s ON s.session_id=h.session_id",
-        (_release_evidence("expired-offer", source="migration"),),
-    )
-
-
-def _upgrade_v8(connection: sqlite3.Connection) -> None:
-    """Record each CLAIMING swap's retained claim as its attempt 0.
-
-    Additive and cheap, so it runs on ordinary acquire. Fee and first-seen
-    height stay NULL: the engine validates the bytes and records the height it
-    first observes before any fee bump. A CLAIMING swap without exact claim
-    bytes gets no attempt, so the engine isolates it for the operator instead
-    of inventing one; other swaps keep settling. CLAIMED swaps keep their
-    confirmed claim_txid and need no attempt history.
-    """
-    connection.execute(CLAIM_ATTEMPT_SCHEMA)
-    connection.execute(
-        "INSERT INTO claim_attempts SELECT session_id, 0, claim_txid, claim_tx, NULL, NULL "
-        "FROM swaps WHERE state='CLAIMING' AND claim_tx IS NOT NULL AND claim_txid IS NOT NULL"
-    )
-
-
-def _upgrade_v9(connection: sqlite3.Connection) -> None:
-    """Rebuild ``swaps`` with the LOST state and the outpoint-spent height.
-
-    Additive: every row is copied unchanged with a NULL spent height, so no
-    swap changes state and the engine starts observing from scratch. The
-    table is rebuilt because SQLite cannot alter a CHECK constraint; nothing
-    references ``swaps`` by foreign key.
-    """
-    connection.execute("ALTER TABLE swaps RENAME TO swaps_v9")
-    connection.execute(SWAPS_V10_SCHEMA)
-    connection.execute(
-        "INSERT INTO swaps SELECT session_id, contract_hash, terms_offer, terms_accept, state, "
-        "funding_binding, preimage, claim_txid, claim_tx, updated_at, NULL, NULL "
-        "FROM swaps_v9"
-    )
-    connection.execute("DROP TABLE swaps_v9")
-
-
-def _upgrade_v10(connection: sqlite3.Connection) -> None:
-    """Rebuild ``swaps`` with the LN to BTC states and provider transaction columns.
-
-    Additive: every row is copied unchanged with NULL provider transactions;
-    no swap changes state. Existing stores only ever held BTC to LN swaps.
-    """
-    connection.execute("ALTER TABLE swaps RENAME TO swaps_v10")
-    connection.execute(SWAPS_SCHEMA)
-    connection.execute(
-        "INSERT INTO swaps SELECT *, NULL, NULL, NULL, NULL, NULL, NULL FROM swaps_v10"
-    )
-    connection.execute("DROP TABLE swaps_v10")
-
-
-def _upgrade_v11(connection: sqlite3.Connection) -> None:
-    """Add durable cooperation burns without retrofitting legacy swaps.
-
-    The empty table proves storage capability, never an affirmative signing
-    grant. Only a newly authenticated, signed cooperative contract may later
-    insert a fresh burned attempt before allocating an opaque nonce handle.
-    """
-    connection.execute(COOPERATION_ATTEMPT_SCHEMA)
-    for statement in COOPERATION_INDEXES:
-        connection.execute(statement)
-
-
-def _upgrade_v17(connection: sqlite3.Connection) -> None:
-    """Add the swap ledger empty: earlier swaps keep no accounting.
-
-    An absent row proves nothing about a swap accepted before the upgrade, so
-    reports count such swaps as unaccounted, never as free of costs.
-    """
-    connection.execute(SWAP_LEDGER_SCHEMA)
-    for statement in LEDGER_INDEXES:
-        connection.execute(statement)
-
-
-def _upgrade_v12(connection: sqlite3.Connection) -> None:
-    """Add arbitration storage without granting any existing swap eligibility.
-
-    An absent row proves nothing. No row is backfilled, no claim is delayed,
-    and no transaction is published or signed by the migration.
-    """
-    connection.execute(CLAIM_ARBITRATION_SCHEMA)
-
-
-def _upgrade_v13(connection: sqlite3.Connection) -> None:
-    """Add empty knowledge storage, never reclassify any existing swap or debt.
-
-    Missing evidence remains unknown. No backfill, scan, RPC, signing, payment,
-    retry, or conversion of retained knowledge to debt follows this migration.
-    Established acquisition reconciliation of nonce ownership is unchanged.
-    """
-    connection.execute(REVERSE_PREIMAGE_EVIDENCE_SCHEMA)
-
-
-def _upgrade_v14(connection: sqlite3.Connection) -> None:
-    """Add the empty EVM evidence table (RS-010); no existing swap is an EVM swap.
-
-    Bitcoin swaps keep their states and lifecycle: only swaps accepted under
-    an EVM profile after this version ever get a row here.
-    """
-    connection.execute(EVM_SWAP_SCHEMA)
 
 
 def _check_evm_transition(
@@ -8846,21 +8408,21 @@ def _release_evm_terminal(  # noqa: PLR0913 - explicit terminal evidence
         if claim_tx_hash is None:
             raise LiveSessionStoreError("claim evidence unavailable")
         evidence = _release_evidence("evm-claim-confirmed", claim_tx_hash=claim_tx_hash)
-        allowed = ("DISPATCHED", "UNKNOWN")
+        allowed = ("DISPATCHED", "DISPATCHED")
     elif to_state == "LOST":
         evidence = _release_evidence("evm-claim-lost", lost_at=int(now))
-        allowed = ("DISPATCHED", "UNKNOWN")
+        allowed = ("DISPATCHED", "DISPATCHED")
     elif to_state == "ABORTED":
         evidence = _release_evidence("hold-canceled", aborted_at=int(now))
-        allowed = ("UNSENT", "UNKNOWN")
+        allowed = ("UNSENT", "UNSENT")
     elif to_state == "SETTLED":
         evidence = _release_evidence("hold-settled", settled_at=int(now))
-        allowed = ("DISPATCHED", "UNKNOWN")
+        allowed = ("DISPATCHED", "DISPATCHED")
     else:
         if refund_tx_hash is None:
             raise LiveSessionStoreError("refund evidence unavailable")
         evidence = _release_evidence("evm-refund-confirmed", refund_tx_hash=refund_tx_hash)
-        allowed = ("DISPATCHED", "UNKNOWN")
+        allowed = ("DISPATCHED", "DISPATCHED")
     return bool(
         connection.execute(
             "UPDATE economic_reservations SET state='RELEASED', release_evidence=? "
@@ -8939,10 +8501,10 @@ def _release_reverse_terminal(  # noqa: PLR0913 - explicit terminal evidence
     payment_hash = terms.invoice_binding.payment_hash
     if to_state == "ABORTED":
         evidence = _release_evidence("hold-canceled", aborted_at=now)
-        allowed = ("UNSENT", "UNKNOWN")
+        allowed = ("UNSENT", "UNSENT")
     elif to_state == "SETTLED":
         evidence = _release_evidence("hold-settled", settled_at=now)
-        allowed = ("DISPATCHED", "UNKNOWN")
+        allowed = ("DISPATCHED", "DISPATCHED")
     else:
         (refund_txid,) = connection.execute(
             "SELECT refund_txid FROM swaps WHERE session_id=?", (session_id,)
@@ -8955,7 +8517,7 @@ def _release_reverse_terminal(  # noqa: PLR0913 - explicit terminal evidence
             required_confirmations=terms.refund_resolution_confirmations,
             observed_confirmations=int(refund_confirmations or 0),
         )
-        allowed = ("DISPATCHED", "UNKNOWN")
+        allowed = ("DISPATCHED", "DISPATCHED")
     connection.execute(
         "UPDATE economic_reservations SET state='RELEASED', release_evidence=? "
         "WHERE payment_hash=? AND session_id=? AND state IN (?, ?)",
@@ -8967,8 +8529,7 @@ def _release_terminal(  # noqa: PLR0913 - explicit terminal evidence
     connection: sqlite3.Connection,
     session_id: str,
     to_state: str,
-    now: int | None,
-    confirmations: int | None = None,
+    now: int,
     *,
     failed_by_payer: str | None = None,
     network: NetworkIdentity | None = None,
@@ -8981,10 +8542,9 @@ def _release_terminal(  # noqa: PLR0913 - explicit terminal evidence
     so UNSENT proves no payment was or can be sent. A DISPATCHED reservation
     is released only when the failure was attested by the dispatch record's
     own bound payer (``failed_by_payer``): that node reports no HTLC of the
-    sole authorized attempt in flight. A migrated UNKNOWN reservation or a
-    failure without attributable payer keeps its capacity. CLAIMED (entered
-    only at signed claim depth) releases a DISPATCHED or UNKNOWN
-    reservation: the claim proves the provider recovered its funds. LOST
+    sole authorized attempt in flight. A failure without attributable payer
+    keeps its capacity. CLAIMED (entered only at signed claim depth) releases
+    a DISPATCHED reservation: the claim proves the provider recovered its funds. LOST
     releases the same: the exposure was realized as a loss and nothing
     further can happen to it, whether a refund spent the contract output or
     a ``conflict`` double-spent the deposit that would have created it.
@@ -8994,7 +8554,7 @@ def _release_terminal(  # noqa: PLR0913 - explicit terminal evidence
     ).fetchone()
     terms = _offer_terms(offer)
     if to_state == "FAILED":
-        evidence = _release_evidence("failed-before-dispatch", failed_at=int(now or 0))
+        evidence = _release_evidence("failed-before-dispatch", failed_at=int(now))
         allowed = ("UNSENT", "UNSENT")
         row = connection.execute(
             "SELECT request FROM payment_dispatch WHERE session_id=? AND state='SUBMITTED'",
@@ -9009,12 +8569,12 @@ def _release_terminal(  # noqa: PLR0913 - explicit terminal evidence
             if payer.node_pubkey != failed_by_payer:
                 raise LiveSessionStoreError("failure attributed to another payer")
             evidence = _release_evidence(
-                "failed-after-dispatch", failed_at=int(now or 0), payer=payer.node_pubkey
+                "failed-after-dispatch", failed_at=int(now), payer=payer.node_pubkey
             )
             allowed = ("UNSENT", "DISPATCHED")
     elif to_state == "LOST" and conflict is not None:
         evidence = _funding_conflict_evidence(conflict)
-        allowed = ("DISPATCHED", "UNKNOWN")
+        allowed = ("DISPATCHED", "DISPATCHED")
     elif to_state == "LOST":
         (spent_height, spent_block) = connection.execute(
             "SELECT outpoint_spent_height, outpoint_spent_block FROM swaps WHERE session_id=?",
@@ -9028,18 +8588,16 @@ def _release_terminal(  # noqa: PLR0913 - explicit terminal evidence
             outpoint_spent_block=spent_block,
             required_confirmations=terms.refund_resolution_confirmations,
         )
-        allowed = ("DISPATCHED", "UNKNOWN")
+        allowed = ("DISPATCHED", "DISPATCHED")
     else:
         if type(claim_txid) is not str:
             raise LiveSessionStoreError("claim evidence unavailable")
-        facts: dict[str, str | int] = {
-            "claim_txid": claim_txid,
-            "required_confirmations": terms.settlement_confirmations,
-        }
-        if confirmations is not None:
-            facts["observed_confirmations"] = confirmations
-        evidence = _release_evidence("claim-confirmed", **facts)
-        allowed = ("DISPATCHED", "UNKNOWN")
+        evidence = _release_evidence(
+            "claim-confirmed",
+            claim_txid=claim_txid,
+            required_confirmations=terms.settlement_confirmations,
+        )
+        allowed = ("DISPATCHED", "DISPATCHED")
     return bool(
         connection.execute(
             "UPDATE economic_reservations SET state='RELEASED', release_evidence=? "
@@ -9342,7 +8900,7 @@ def _record_outcome(
 
     ``completed`` carries the revenue and ``lost`` the paid principal, both
     from the signed terms. A confirmed Bitcoin claim also records its fee
-    from the attempt that confirmed (NULL when a legacy attempt has none).
+    from the attempt that confirmed (NULL when it recorded none).
     """
     kind = TERMINAL_KIND_BY_STATE.get(to_state)
     if kind is None:
@@ -9380,13 +8938,13 @@ def _apply_effect(
         offered = _offered_payment_hash(replied[0])
         if not connection.execute(
             "SELECT 1 FROM economic_reservations WHERE payment_hash=? AND session_id=? "
-            "AND state IN ('UNSENT', 'UNKNOWN')",
+            "AND state='UNSENT'",
             (offered, request.session_id),
         ).fetchone():
             raise LiveSessionStoreError("offer reservation is closed")
         connection.execute(
             "INSERT INTO swaps VALUES (?, ?, ?, ?, 'ACCEPTED', NULL, NULL, NULL, NULL, ?, "
-            "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
+            "NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
             (request.session_id, effect.contract_hash, replied[0], document, now),
         )
         economics = _offer_economics(replied[0])

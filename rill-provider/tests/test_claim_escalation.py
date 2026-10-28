@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sqlite3
 from dataclasses import dataclass, replace
 from itertools import pairwise
 from types import SimpleNamespace
@@ -13,7 +12,7 @@ from unittest.mock import Mock
 
 import pytest
 from rill_core.wire.settlement_messages import FundingBindingPayload
-from test_live_session_store import Harness, swaps_as_v9, without_v12_cooperation
+from test_live_session_store import Harness
 from test_payment_dispatch_store import _insert_funded_swap
 from test_settlement_engine import BINDING, ITEM, TERMS
 
@@ -100,66 +99,6 @@ def _claiming(store: live.LiveSessionStore, harness: Harness, *, raw: bytes | No
         (raw, None if raw is None else "a0" * 32, session),
     )
     return session
-
-
-def _as_v8(path: Any) -> None:  # noqa: ANN401
-    with sqlite3.connect(path) as connection:
-        without_v12_cooperation(connection)
-        swaps_as_v9(connection)
-        connection.execute("DROP TABLE claim_attempts")
-        connection.execute("UPDATE meta SET schema_version=8")
-        connection.execute("PRAGMA user_version=8")
-
-
-def test_v8_upgrades_on_ordinary_acquire_with_unobserved_attempt_zero(harness: Harness) -> None:
-    with harness.acquire() as store:
-        session = _claiming(store, harness)
-    _as_v8(harness.path)
-    with harness.acquire() as store:
-        assert store._connection.execute("PRAGMA user_version").fetchone() == (18,)  # noqa: SLF001
-        assert store.claim_attempts(session) == (ClaimAttempt(0, "a0" * 32, b"c0", None, None),)
-        store.observe_claim_attempt(session, 0, fee_sat=300, height=990)
-        store.observe_claim_attempt(session, 0, fee_sat=1, height=1)  # a restart cannot move it
-        assert store.claim_attempts(session) == (ClaimAttempt(0, "a0" * 32, b"c0", 300, 990),)
-
-
-def test_v9_upgrades_on_ordinary_acquire_keeping_every_swap_row(harness: Harness) -> None:
-    with harness.acquire() as store:
-        session = _claiming(store, harness)
-        store._connection.execute(  # noqa: SLF001
-            "INSERT INTO claim_attempts VALUES (?, 0, ?, ?, 300, 990)", (session, "a0" * 32, b"c0")
-        )
-        before = store._connection.execute(  # noqa: SLF001
-            "SELECT session_id, contract_hash, terms_offer, terms_accept, state, "
-            "funding_binding, preimage, claim_txid, claim_tx, updated_at FROM swaps"
-        ).fetchall()
-    with sqlite3.connect(harness.path) as connection:
-        without_v12_cooperation(connection)
-        swaps_as_v9(connection)
-        connection.execute("UPDATE meta SET schema_version=9")
-        connection.execute("PRAGMA user_version=9")
-    with harness.acquire() as store:
-        assert store._connection.execute("PRAGMA user_version").fetchone() == (18,)  # noqa: SLF001
-        rows = store._connection.execute("SELECT * FROM swaps").fetchall()  # noqa: SLF001
-        assert [row[:-8] for row in rows] == before
-        assert [row[-8:] for row in rows] == [(None,) * 8]  # observation starts from scratch
-        assert store.claim_attempts(session) == (ClaimAttempt(0, "a0" * 32, b"c0", 300, 990),)
-        with pytest.raises(live.LiveSessionStoreError, match="loss evidence"):
-            store.advance_swap(  # LOST is reachable only through an observed spend
-                session,
-                from_state="CLAIMING",
-                to_state="LOST",
-                signer=None,  # type: ignore[arg-type]
-                now=1,
-            )
-
-
-def test_upgrade_isolates_a_claiming_swap_without_claim_bytes(harness: Harness) -> None:
-    with harness.acquire() as store:
-        session = _claiming(store, harness, raw=None)
-    _as_v8(harness.path)
-    with harness.acquire() as store:  # other swaps keep settling
-        assert store.claim_attempts(session) == ()
 
 
 def test_attempts_append_in_order_and_mirror_the_latest(harness: Harness) -> None:
@@ -325,10 +264,11 @@ def test_an_unconfirmed_claim_is_recorded_before_the_bump_is_broadcast(
     assert recorded_at_broadcast == [1, 2]  # rebroadcast latest, then the recorded bump
 
 
-def test_migrated_attempts_are_observed_first_and_never_bumped_that_tick(
+def test_unobserved_attempts_are_observed_first_and_never_bumped_that_tick(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    attempts = [ClaimAttempt(0, "a0" * 32, b"c0", None, None)]
+    # An arbitration winner is recorded before any tip observed it.
+    attempts = [ClaimAttempt(0, "a0" * 32, b"c0", 300, None)]
     engine, store, _chain = _engine(monkeypatch, attempts, {}, 1000)
     _run(engine)
     assert store.attempts == [ClaimAttempt(0, "a0" * 32, b"c0", 300, 1000)]

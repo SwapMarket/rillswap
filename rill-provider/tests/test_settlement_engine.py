@@ -241,7 +241,6 @@ def test_exposure_release_asks_the_tip_only_when_a_terminal_swap_holds_capacity(
     store, chain = Mock(), Mock()
     store.settlement_work.return_value = ()
     store.unfunded_swaps.return_value = ()
-    store.unreleased_claims.return_value = ()
     store.expirable_exposure_pending.return_value = pending
     store.release_expired_exposure.return_value = 2
     chain.tip_height.return_value = 1200

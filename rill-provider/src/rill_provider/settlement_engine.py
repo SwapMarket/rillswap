@@ -181,7 +181,6 @@ class ChainBackend(Protocol):
         ...
 
 
-CLAIM_PAGE = 16  # historical claims checked per tick
 CONFLICT_LOSS_CONFIRMATIONS = 6  # depth of another spend of a deposit input that proves a loss
 CONFLICT_SCAN_MARGIN_BLOCKS = 144  # search for that spend from this far below the first claim
 CLAIM_URGENCY_BLOCKS = 6  # claim at the signed maximum fee this far before refund
@@ -304,7 +303,6 @@ class SettlementEngine:
                 allow_regtest_fixed_fee=self._settings.allow_regtest_fixed_fee,
             )
         )
-        self._claim_cursor = ""  # fair paging of the historical claim sweep
         self._new_exposure_allowed = True
         self._new_featured_sessions: dict[str, tuple[str, int]] = {}
         self._claim_probes: dict[str, ClaimProbeWindow] = {}
@@ -1044,7 +1042,6 @@ class SettlementEngine:
                 results[item.session_id] = state
         for session_id in await self._close_unfunded(now):
             results[session_id] = "FAILED"
-        await self._release_claims()
         await self._release_expired()
         return results
 
@@ -1107,23 +1104,6 @@ class SettlementEngine:
             return
         if released:
             LOG.info("released %d reservations whose exposure windows closed", released)
-
-    async def _release_claims(self) -> None:
-        """Release historical claimed reservations on fresh claim-depth evidence.
-
-        One bounded page per tick; the cursor wraps after a short page, so rows
-        that never confirm (or keep failing) cannot starve later claims.
-        """
-        page = self._store.unreleased_claims(after=self._claim_cursor, limit=CLAIM_PAGE)
-        self._claim_cursor = page[-1][0] if len(page) == CLAIM_PAGE else ""
-        for session_id, txid, _required in page:
-            try:
-                depth = await asyncio.to_thread(self._chain.confirmations, txid)
-                self._store.release_claim(session_id, txid, confirmations=depth)
-            except StaleOwnerError:
-                raise
-            except Exception:  # noqa: BLE001 - retried next tick; nothing is released
-                LOG.warning("claim reservation release deferred", exc_info=False)
 
     def _move(self, item: SettlementItem, to_state: str, now: int, **fields: object) -> str:
         self._store.advance_swap(

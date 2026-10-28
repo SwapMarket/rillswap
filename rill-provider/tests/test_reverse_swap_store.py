@@ -78,7 +78,7 @@ def insert_reverse_swap(
     connection = store._connection  # noqa: SLF001
     connection.execute(
         "INSERT INTO swaps VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 1000, NULL, NULL, "
-        "NULL, NULL, NULL, NULL, NULL, NULL)",
+        "NULL, NULL, NULL, NULL, NULL)",
         (session, REVERSE["contract_hash"], canonicalize(offer), b"accepted", state),
     )
     # Supply explicit historical handshake feature commitments for this manual
@@ -219,7 +219,7 @@ def test_refund_records_the_transaction_and_releases_only_at_depth(harness: Harn
 
 @pytest.mark.parametrize(
     ("from_state", "reservation", "released"),
-    [("ACCEPTED", "UNSENT", True), ("LN_HELD", "UNKNOWN", True), ("LN_HELD", "DISPATCHED", False)],
+    [("ACCEPTED", "UNSENT", True), ("LN_HELD", "UNSENT", True), ("LN_HELD", "DISPATCHED", False)],
 )
 def test_abort_releases_only_an_undispatched_reservation(
     harness: Harness,
@@ -258,12 +258,10 @@ def test_settlement_work_lists_reverse_states_with_provider_transactions(harness
         _advance(
             store, harness, session, from_state="LN_HELD", to_state="FUNDING_SENT", funding=FUNDING
         )
-        store.record_spend_scan(session, 1234)
-        store.record_spend_scan(session, 1200)  # never moves backwards
         (item,) = store.settlement_work()
         assert (item.state, item.invoice) == ("FUNDING_SENT", "")
         assert (item.funding_txid, item.funding_vout, item.funding_tx) == FUNDING_ROW
-        assert (item.refund_txid, item.refund_tx, item.spend_scan_height) == (None, None, 1234)
+        assert (item.refund_txid, item.refund_tx) == (None, None)
         assert store.unfunded_swaps() == []  # LN_HELD is not an unfunded BTC to LN swap
         _advance(store, harness, session, from_state="FUNDING_SENT", to_state="FUNDED")
         assert store.settlement_work()[0].state == "FUNDED"

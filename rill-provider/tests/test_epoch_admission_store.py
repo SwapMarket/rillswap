@@ -21,7 +21,6 @@ from rill_core.wire.hashes import (
 )
 from rill_core.wire.messages import Envelope
 from test_live_session_store import POLICY, Harness, PurePublicKeys, _forgeries
-from test_payment_dispatch_store import _as_v6, _hash, _insert_funded_swap
 
 from rill_provider import live_session_store as live
 
@@ -141,9 +140,8 @@ def test_absent_epoch_retirement_marker_is_not_repaired(harness: Harness) -> Non
     harness.provision()
     with sqlite3.connect(harness.path) as connection:
         connection.execute("DELETE FROM epoch_retirement")
-    for upgrade in (False, True):
-        with pytest.raises(live.LiveSessionStoreError, match="retirement custody"):
-            harness.acquire_at(harness.path, upgrade_from_v5=upgrade)
+    with pytest.raises(live.LiveSessionStoreError, match="retirement custody"):
+        harness.acquire()
     with sqlite3.connect(harness.path) as connection:
         assert connection.execute("SELECT * FROM epoch_retirement").fetchall() == []
 
@@ -177,82 +175,15 @@ def test_repeated_epoch_scalar_cannot_reopen_pruned_id(
         assert store._connection.execute("SELECT * FROM epoch_key_history").fetchall() == [(epoch,)]  # noqa: SLF001
 
 
-def test_v6_upgrade_retains_dispatch_and_legacy_custody_without_backfill(harness: Harness) -> None:
-    harness.policy = POLICY
-    harness.provision()
-    with harness.acquire() as store:
-        session = _insert_funded_swap(store, harness, "PAYING")
-        store._connection.execute(  # noqa: SLF001
-            "INSERT INTO payment_dispatch VALUES (?, ?, 'SUBMITTED', ?)",
-            (session, _hash(harness), b"old exact request"),
-        )
-        before = store._connection.execute("SELECT * FROM sessions").fetchall()  # noqa: SLF001
-    _as_v6(harness.path)
-    with pytest.raises(live.LiveSessionStoreError, match="version unsupported"):
-        harness.acquire()
-    harness.policy = EPOCH_POLICY
-    with harness.acquire_at(harness.path, upgrade_from_v5=True) as store:
-        assert store._connection.execute("SELECT * FROM sessions").fetchall() == before  # noqa: SLF001
-        assert store.reserve(harness.init).session_id == session
-        assert store._connection.execute("SELECT * FROM epoch_admissions").fetchall() == []  # noqa: SLF001
-        assert not store.commit_payment_dispatch(session, _hash(harness), b"resend")
-        assert store._connection.execute("SELECT request FROM payment_dispatch").fetchall() == [  # noqa: SLF001
-            (b"old exact request",)
-        ]
-    harness.policy = POLICY
-    with pytest.raises(live.LiveSessionStoreError, match="policy mismatch"):
-        harness.acquire_at(harness.path, upgrade_from_v5=True)
-
-
-def test_policy_enablement_is_explicit_and_irreversible(harness: Harness) -> None:
+def test_existing_store_never_gains_epoch_binding_in_place(harness: Harness) -> None:
     harness.policy = POLICY
     harness.provision()
     harness.policy = EPOCH_POLICY
     with pytest.raises(live.LiveSessionStoreError, match="policy mismatch"):
         harness.acquire()
-    with harness.acquire_at(harness.path, upgrade_from_v5=True) as store:
-        assert store.requires_epoch_bound_sessions
-    harness.policy = replace(EPOCH_POLICY, capabilities=frozenset({"other/v1"}))
-    with pytest.raises(live.LiveSessionStoreError, match="policy mismatch"):
-        harness.acquire_at(harness.path, upgrade_from_v5=True)
-
-
-def test_interrupted_v6_upgrade_rolls_back_policy_tables_and_marker(
-    harness: Harness, monkeypatch: pytest.MonkeyPatch
-) -> None:
     harness.policy = POLICY
-    harness.provision()
     with harness.acquire() as store:
-        _epoch(store)
-        old_epochs = store._connection.execute("SELECT * FROM epochs").fetchall()  # noqa: SLF001
-    _as_v6(harness.path)
-    harness.policy = EPOCH_POLICY
-    upgrade = live._upgrade_v6  # noqa: SLF001
-
-    def interrupted(connection: sqlite3.Connection) -> None:
-        upgrade(connection)
-        raise OSError("interrupted")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(live, "_upgrade_v6", interrupted)
-        with pytest.raises(live.LiveSessionStoreError, match="unavailable"):
-            harness.acquire_at(harness.path, upgrade_from_v5=True)
-    with sqlite3.connect(harness.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (6,)
-        assert connection.execute("SELECT * FROM epochs").fetchall() == old_epochs
-        assert (
-            connection.execute(
-                "SELECT name FROM sqlite_master WHERE name IN ('epoch_admissions', "
-                "'epoch_retirement', 'epoch_admissions_expiry', 'epoch_key_history')"
-            ).fetchall()
-            == []
-        )
-        assert (
-            EPOCH_SESSION_FEATURE.encode()
-            not in connection.execute("SELECT policy_jcs FROM meta").fetchone()[0]
-        )
-    with harness.acquire_at(harness.path, upgrade_from_v5=True):
-        pass
+        assert not store.requires_epoch_bound_sessions
 
 
 def test_interrupted_retirement_never_leaves_pruned_history_with_reopened_epoch(
@@ -282,24 +213,6 @@ def test_interrupted_retirement_never_leaves_pruned_history_with_reopened_epoch(
             store.reserve(init, now=1000)
 
 
-def test_v6_migration_seeds_all_old_epoch_keys_before_retiring_secrets(
-    harness: Harness, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    harness.policy = POLICY
-    harness.provision()
-    monkeypatch.setattr(live, "_new_epoch_scalar", lambda: (10).to_bytes(32, "big"))
-    with harness.acquire() as store:
-        epoch = _epoch(store)
-    _as_v6(harness.path)
-    harness.policy = EPOCH_POLICY
-    with harness.acquire_at(harness.path, upgrade_from_v5=True) as store:
-        assert store._connection.execute("SELECT * FROM epoch_key_history").fetchall() == [(epoch,)]  # noqa: SLF001
-        assert store.receiving_epochs(now=1000) == (epoch,)
-        store.expire_idle(now=1200, idle_timeout=100)
-        with pytest.raises(live.LiveSessionStoreError, match="rotation"):
-            _epoch(store, now=1200)
-
-
 def test_partial_key_history_is_refused_instead_of_reconstructed(harness: Harness) -> None:
     harness.provision()
     with harness.acquire() as store:
@@ -307,7 +220,7 @@ def test_partial_key_history_is_refused_instead_of_reconstructed(harness: Harnes
     with sqlite3.connect(harness.path) as connection:
         connection.execute("DELETE FROM epoch_key_history")
     with pytest.raises(live.LiveSessionStoreError, match="key history unavailable"):
-        harness.acquire_at(harness.path, upgrade_from_v5=True)
+        harness.acquire()
     with sqlite3.connect(harness.path) as connection:
         assert connection.execute("SELECT * FROM epoch_key_history").fetchall() == []
 

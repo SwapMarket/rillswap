@@ -32,9 +32,10 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
     return result
 
 
-def _legacy(store: LiveSessionStore, harness: Harness, state: str = "FUNDED") -> str:
+def _funded(store: LiveSessionStore, harness: Harness, state: str = "FUNDED") -> str:
+    """Insert a funded reverse swap; the caller seeds its scan checkpoint."""
     session = insert_reverse_swap(store, harness, state, reservation="DISPATCHED")
-    store._connection.execute(  # noqa: SLF001 - historical funded record, no new checkpoint
+    store._connection.execute(  # noqa: SLF001 - funded record fixture
         "UPDATE swaps SET funding_txid=?,funding_vout=0,funding_tx=?,"
         "refund_txid=?,refund_tx=? WHERE session_id=?",
         (
@@ -115,12 +116,14 @@ class Chain:
 def _checkpoint(
     store: LiveSessionStore, session: str, value: ReverseSpendCheckpoint | None = None
 ) -> ReverseSpendCheckpoint | None:
+    if value is not None:  # FUNDED normally commits this row atomically
+        store._connection.execute(  # noqa: SLF001 - checkpoint fixture
+            "INSERT INTO reverse_spend_scans VALUES (?,?,?,?,?)",
+            (session, value.floor_height, value.floor_block, value.height, value.block),
+        )
+
     async def work() -> ReverseSpendCheckpoint | None:
         async with store.reverse_operations.operation() as operation:
-            if value is not None:
-                store.update_reverse_spend_checkpoint(
-                    session, expected=None, checkpoint=value, operation=operation
-                )
             return store.reverse_spend_checkpoint(session, operation=operation)
 
     return asyncio.run(work())
@@ -144,7 +147,7 @@ def test_same_height_reorg_rewinds_durably_then_finds_claim_in_later_batch(
             return asyncio.run(engine.advance(store.settlement_work(session_id=session)[0], NOW))
 
         with harness.acquire() as store:
-            session = _legacy(store, harness)
+            session = _funded(store, harness)
             _checkpoint(
                 store,
                 session,
@@ -175,7 +178,7 @@ def test_mixed_or_abandoned_branch_batch_never_commits_progress(
     chain = Chain()
     chain.mixed, chain.tail_reorg = fault == "mixed", fault == "tail"
     with _server(chain.respond, []) as port, harness.acquire() as store:
-        session = _legacy(store, harness)
+        session = _funded(store, harness)
         initial = ReverseSpendCheckpoint(100, _hash("old", 100), 100, _hash("old", 100))
         _checkpoint(store, session, initial)
         reader = CoreTransactionReader(
@@ -196,7 +199,7 @@ def test_floor_crossing_reorg_blocks_refund_even_after_restart(
     harness: Harness, monkeypatch: pytest.MonkeyPatch, state: str
 ) -> None:
     with harness.acquire() as store:
-        session = _legacy(store, harness, state)
+        session = _funded(store, harness, state)
         _checkpoint(store, session, ReverseSpendCheckpoint(100, "ab" * 32, 100, "ab" * 32))
     with harness.acquire() as store:
         engine, chain = _engine(store, harness, monkeypatch)
@@ -209,27 +212,20 @@ def test_floor_crossing_reorg_blocks_refund_even_after_restart(
         engine._hold.cancel.assert_not_called()  # noqa: SLF001
 
 
-@pytest.mark.parametrize("legacy_height", [None, 123])
-def test_legacy_missing_anchor_backfills_without_replay_or_refund(
-    harness: Harness, monkeypatch: pytest.MonkeyPatch, legacy_height: int | None
+def test_missing_checkpoint_requires_operator_recovery_without_scan_or_refund(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     with harness.acquire() as store:
-        session = _legacy(store, harness)
-        if legacy_height is not None:
-            store.record_spend_scan(session, legacy_height)
+        session = _funded(store, harness)
         engine, chain = _engine(store, harness, monkeypatch)
         chain.tip_height.return_value = 1200
         chain.block_hash.return_value = "ab" * 32
-        assert (
+        with pytest.raises(LiveSessionStoreError, match="operator recovery required"):
             asyncio.run(engine.advance(store.settlement_work(session_id=session)[0], NOW))
-            == "FUNDED"
-        )
-        height = 1200 if legacy_height is None else legacy_height
-        assert _checkpoint(store, session) == ReverseSpendCheckpoint(
-            height, "ab" * 32, height, "ab" * 32
-        )
+        assert _checkpoint(store, session) is None  # no coverage is invented
         chain.find_spender.assert_not_called()
         chain.broadcast.assert_not_called()
+        engine._hold.cancel.assert_not_called()  # noqa: SLF001
 
 
 @pytest.mark.parametrize("state", ["FUNDED", "REFUNDING"])
@@ -239,7 +235,7 @@ def test_scan_backlog_blocks_refund_start_and_hold_cancellation(
     from rill_provider.core_tx_bytes import SpendScan  # noqa: PLC0415 - focused adapter fixture
 
     with harness.acquire() as store:
-        session = _legacy(store, harness, state)
+        session = _funded(store, harness, state)
         _checkpoint(store, session, ReverseSpendCheckpoint(100, "ab" * 32, 100, "ab" * 32))
         engine, chain = _engine(store, harness, monkeypatch)
         chain.tip_height.return_value = 1200
@@ -257,7 +253,7 @@ def test_retained_preimage_settles_even_with_noncanonical_floor_and_unavailable_
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     with harness.acquire() as store:
-        session = _legacy(store, harness)
+        session = _funded(store, harness)
         _checkpoint(store, session, ReverseSpendCheckpoint(100, "ab" * 32, 100, "ab" * 32))
         store.record_reverse_settlement_preimage(
             session, from_state="FUNDED", preimage=PREIMAGE, now=NOW
@@ -281,7 +277,7 @@ def test_atomic_funded_transition_rolls_back_both_checkpoint_and_state(
     from test_payment_reconciliation import Signer  # noqa: PLC0415 - custody signing fixture
 
     with harness.acquire() as store:
-        session = _legacy(store, harness, "FUNDING_SENT")
+        session = _funded(store, harness, "FUNDING_SENT")
         initial = ReverseSpendCheckpoint(100, "ab" * 32, 100, "ab" * 32)
         with pytest.raises(LiveSessionStoreError, match="requires its initial"):
             store.advance_reverse_swap(
@@ -326,7 +322,7 @@ def test_stale_cursor_update_cannot_overwrite_progress_or_change_the_floor(
     harness: Harness,
 ) -> None:
     with harness.acquire() as store:
-        session = _legacy(store, harness)
+        session = _funded(store, harness)
         initial = ReverseSpendCheckpoint(100, "ab" * 32, 100, "ab" * 32)
         _checkpoint(store, session, initial)
 
@@ -366,7 +362,7 @@ def test_decoded_spend_survives_lost_canonical_proof_but_never_grants_unproven_p
     chain.valid_preimage = valid
     chain.claim_reorg, chain.unavailable_tail = fault == "reorg", fault == "unavailable"
     with _server(chain.respond, []) as port, harness.acquire() as store:
-        session = _legacy(store, harness, "REFUNDING")
+        session = _funded(store, harness, "REFUNDING")
         initial = ReverseSpendCheckpoint(100, _hash("new", 100), 112, _hash("new", 112))
         _checkpoint(
             store, session, ReverseSpendCheckpoint(100, _hash("new", 100), 100, _hash("new", 100))

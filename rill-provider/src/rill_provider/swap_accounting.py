@@ -1,11 +1,11 @@
 """Durable per-swap accounting: the ledger vocabulary and each swap's economics.
 
-From store schema v18 the live session store appends ledger rows in the same
-transaction as the swap event they describe: a firm offer, an acceptance, a
-terminal outcome (with the revenue or loss it realized), and every realized
-cost an engine measured (LN routing fee, BTC claim, funding and refund fees,
-EVM gas). Swaps accepted before the upgrade have no ``accepted`` row, so a
-report can tell them apart instead of treating a missing cost as zero.
+The live session store appends ledger rows in the same transaction as the
+swap event they describe: a firm offer, an acceptance, a terminal outcome
+(with the revenue or loss it realized), and every realized cost an engine
+measured (LN routing fee, BTC claim, funding and refund fees, EVM gas). A swap
+without an ``accepted`` row is reported as inexact instead of treating a
+missing cost as zero.
 """
 
 from __future__ import annotations
@@ -143,8 +143,8 @@ def ledger_amount(value: object) -> int | None:
 class SwapResult:
     """One closed swap's realized economics, from its ledger entries.
 
-    ``exact`` is False when the swap was accepted before the ledger existed
-    or an expected cost (or the outcome amount) was not measured; ``net_msat``
+    ``exact`` is False when the swap has no ``accepted`` row or an expected
+    cost (or the outcome amount) was not measured; ``net_msat``
     is then an upper bound, since every missing cost is non-negative.
     """
 

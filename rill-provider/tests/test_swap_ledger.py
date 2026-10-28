@@ -16,7 +16,7 @@ from evm_fixtures import evm_terms
 from rill_core.wire.messages import ContractTerms, Envelope
 from test_economic_reservations import CONFLICT
 from test_evm_swap_store import LOCKUP, TX, _accept_evm_swap, _advancer
-from test_live_session_store import Harness, without_v17_spend_scans, without_v18_ledger
+from test_live_session_store import Harness
 from test_payment_dispatch_store import _insert_funded_swap
 from test_reverse_swap_store import FUNDING, PREIMAGE, REFUND, _advance, insert_reverse_swap
 
@@ -41,100 +41,19 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
     return ready
 
 
-def _as_version(path: Path, version: int) -> None:
-    """Rebuild an exact previous release schema, including both version markers."""
-    with sqlite3.connect(path) as connection:
-        (without_v18_ledger if version == 17 else without_v17_spend_scans)(connection)
-        connection.execute("UPDATE meta SET schema_version=?", (version,))
-        connection.execute(f"PRAGMA user_version={version}")
-
-
 def _snapshot(path: Path) -> tuple[str, ...]:
     with sqlite3.connect(path) as connection:
         (version,) = connection.execute("PRAGMA user_version").fetchone()
         return (f"PRAGMA user_version={version}", *connection.iterdump())
 
 
-def _ledger_table(path: Path) -> list[tuple[str]]:
-    with sqlite3.connect(path) as connection:
-        return connection.execute(
-            "SELECT name FROM sqlite_master WHERE tbl_name='swap_ledger' ORDER BY name"
-        ).fetchall()
-
-
-@pytest.mark.parametrize("version", [16, 17])
-def test_previous_release_upgrades_on_acquire_with_an_empty_ledger(
-    harness: Harness, version: int
-) -> None:
-    with harness.acquire() as store:
-        reserved = store.reserve(harness.init, now=1000)
-        original = store._connection.execute(  # noqa: SLF001 - exact upgrade evidence
-            "SELECT * FROM sessions WHERE session_id=?", (reserved.session_id,)
-        ).fetchone()
-    _as_version(harness.path, version)
-    for _ in range(2):  # the second acquire finds nothing left to upgrade
-        with harness.acquire() as store:
-            connection = store._connection  # noqa: SLF001 - exact upgrade evidence
-            assert connection.execute("PRAGMA user_version").fetchone() == (18,)
-            assert connection.execute("SELECT schema_version FROM meta").fetchone() == (18,)
-            assert store.ledger_head() == 0  # history before the upgrade is not invented
-            assert store.ledger_after(0) == ()
-            assert (
-                connection.execute(
-                    "SELECT * FROM sessions WHERE session_id=?", (reserved.session_id,)
-                ).fetchone()
-                == original
-            )
-    assert _ledger_table(harness.path) == [
-        ("swap_ledger",),
-        ("swap_ledger_session",),
-        ("swap_ledger_time",),
-    ]
-
-
-def test_interrupted_upgrade_keeps_exact_v17_then_retries(
+def test_previous_release_refuses_a_newer_store_without_writing(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _as_version(harness.path, 17)
-    before = _snapshot(harness.path)
-    original_upgrade = live._upgrade_v17  # noqa: SLF001 - inject a fault before commit
-
-    def interrupt(connection: sqlite3.Connection) -> None:
-        original_upgrade(connection)
-        raise OSError("interrupted before durable commit")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(live, "_upgrade_v17", interrupt)
-        with pytest.raises(live.LiveSessionStoreError, match="store unavailable"):
-            harness.acquire()
-    assert _ledger_table(harness.path) == []
-    with sqlite3.connect(harness.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (17,)
-        assert connection.execute("SELECT schema_version FROM meta").fetchone() == (17,)
-    assert [line for line in _snapshot(harness.path) if "generation" not in line] == [
-        line for line in before if "generation" not in line
-    ]
-    with harness.acquire() as store:
-        assert store.ledger_head() == 0
-
-
-def test_partial_v17_schema_is_not_taken_as_an_upgrade_marker(harness: Harness) -> None:
-    _as_version(harness.path, 17)
-    with sqlite3.connect(harness.path) as connection:
-        connection.execute(live.SWAP_LEDGER_SCHEMA)
-    with pytest.raises(live.LiveSessionStoreError, match="schema incompatible"):
-        harness.acquire()
-    with sqlite3.connect(harness.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone() == (17,)
-
-
-def test_previous_release_refuses_a_v18_store_without_writing(
-    harness: Harness, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Rollback to the v17 binary refuses the store, exactly as earlier bumps did."""
+    """Rollback to an older binary refuses the store and leaves it untouched."""
     before = _snapshot(harness.path)
     with monkeypatch.context() as patch:
-        patch.setattr(live, "SCHEMA_VERSION", 17)
+        patch.setattr(live, "SCHEMA_VERSION", live.SCHEMA_VERSION - 1)
         with pytest.raises(live.LiveSessionStoreError, match="version unsupported"):
             harness.acquire()
     assert _snapshot(harness.path) == before
