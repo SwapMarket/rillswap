@@ -2,7 +2,7 @@
 import { MAX_RECOVERY_CIPHERTEXT_BYTES } from "./recoveryAgeContainer";
 import { decryptRecoveryContainer } from "./recoveryKeys";
 import { inspectRecoveryPlaintext, type RecoveryInspection } from "./recoveryInspection";
-import { observeRecoveryFunding } from "./recoveryFunding";
+import { observeRecoveryFunding, RecoveryFundingSpentError } from "./recoveryFunding";
 import { reverseRecoveryControls } from "./reverseRecoveryUi";
 import { evmRecoveryControls } from "./erc20Ui";
 import { identityToRecipient } from "age-encryption";
@@ -237,8 +237,11 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
             `Waiting for a tip above block ${observation.refundLockHeight}. The refund lock has not passed yet.`),
           element("p", "Repeated API responses agree on confirmed, unspent funding. These are trusted observations, not independent chain proof or permission to sign."),
           element("p", "Nothing was signed or broadcast by this funding check. Refund signing requires separate approval."));
-      } catch {
-        fundingResult.replaceChildren(element("p", "Funding could not be verified for the current selection. Check the file, key, network, API, and revision, then try again. Nothing was signed or broadcast."));
+      } catch (error) {
+        fundingResult.replaceChildren(element("p", error instanceof RecoveryFundingSpentError
+          ? "Funding could not be verified as unspent: your API reports the selected revision's swap output already spent, so it cannot be refunded. " +
+            "Usually the provider claimed it after paying your Lightning invoice (check your wallet), or a refund was already broadcast. Nothing was signed or broadcast."
+          : "Funding could not be verified for the current selection. Check the file, key, network, API, and revision, then try again. Nothing was signed or broadcast."));
       } finally {
         plaintext?.fill(0); busy = false;
         file.disabled = keyFile.disabled = words.disabled = inspect.disabled = check.disabled = revision.disabled = false;

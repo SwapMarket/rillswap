@@ -31,6 +31,19 @@ export class RecoveryFundingUnavailableError extends Error {
   }
 }
 
+/**
+ * The API reported the authenticated, confirmed contract output as spent. Still
+ * unavailable to every caller (no refund, the same retries); only the message is
+ * specific, so a user whose provider claimed after paying is not sent to debug a file.
+ */
+export class RecoveryFundingSpentError extends RecoveryFundingUnavailableError {
+  constructor() {
+    super();
+    this.message = "Your API reports the funding output already spent.";
+    this.name = "RecoveryFundingSpentError";
+  }
+}
+
 const HEX32 = /^[0-9a-f]{64}$/;
 function require(condition: boolean): void { if (!condition) throw new RecoveryFundingUnavailableError(); }
 
@@ -87,7 +100,7 @@ async function observeFunding(plaintext: Uint8Array,
   independentlySelectedNetwork: { readonly name: NetworkName; readonly genesis_hash: string }, selection: RecoveryFundingSelection, base: string,
   options: { readonly signal?: AbortSignal; readonly fetch?: ChainFetch }, profile: "btc-to-ln/v1" | "ln-to-btc/v1",
 ): Promise<RecoveryFundingObservation> {
-  let snapshot: Uint8Array | undefined;
+  let snapshot: Uint8Array | undefined, spent = false;
   try {
     require(plaintext instanceof Uint8Array && plaintext.length > 0 && plaintext.length <= MAX_RECOVERY_PLAINTEXT_BYTES);
     snapshot = Uint8Array.from(plaintext);
@@ -127,6 +140,7 @@ async function observeFunding(plaintext: Uint8Array,
       if (inclusion) require(inclusion.height === height && inclusion.hash === hash);
       inclusion = { height, hash };
       const outspend = await readOutspend(get, binding.funding_txid, binding.contract_vout);
+      spent = outspend.spent === true;
       require(outspend.spent === false);
     }
     const after = await readChainTip(api, network, { signal, fetch: transport });
@@ -140,5 +154,5 @@ async function observeFunding(plaintext: Uint8Array,
       refundLockHeight: report.refundLockHeight, refundMatureAtObservedTip: tip.height > report.refundLockHeight });
   } catch { /* Never expose document, parser, endpoint response, or nested error details. */ }
   finally { snapshot?.fill(0); }
-  throw new RecoveryFundingUnavailableError();
+  throw spent ? new RecoveryFundingSpentError() : new RecoveryFundingUnavailableError();
 }

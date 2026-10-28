@@ -319,6 +319,23 @@ for (const changed of ["network", "API"]) {
   });
 }
 
+for (const spent of [true, false]) {
+  test(`a spent swap output is named instead of blaming the file: spent ${spent}`, async ({ page }) => {
+    const item = corpus()[0]!; await chainApi(page, item);
+    await page.route(`${BASE}/tx/*/outspend/0`, (route) => route.fulfill({ status: 200, body: spent ? '{"spent":true}' : "{}", headers: { "Access-Control-Allow-Origin": "http://127.0.0.1:18765" } }));
+    await page.goto("http://127.0.0.1:18765/test-only/swap.html"); await importRecord(page, item);
+    await page.locator("#swap-recovery-check-funding").click();
+    const result = page.locator("#swap-recovery-funding-result");
+    await expect(result).toContainText("Nothing was signed or broadcast");
+    if (spent) {
+      await expect(result).toContainText("already spent"); await expect(result).toContainText("provider claimed it after paying");
+      await expect(result).not.toContainText("Check the file, key");
+    } else {
+      await expect(result).toContainText("Check the file, key, network, API, and revision"); await expect(result).not.toContainText("already spent");
+    }
+  });
+}
+
 test("a failed observation acknowledges no signing/broadcast without denying the API disclosure", async ({ page }) => {
   const item = corpus()[0]!, calls = await chainApi(page, item);
   await page.route(`${BASE}/tx/*/outspend/0`, (route) => route.fulfill({ status: 200, body: '{"spent":true}', headers: { "Access-Control-Allow-Origin": "http://127.0.0.1:18765" } }));

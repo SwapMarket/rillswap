@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import canonicalize from "canonicalize";
 import { schnorr } from "@noble/curves/secp256k1.js";
-import { observeRecoveryFunding, RecoveryFundingUnavailableError } from "../src/recoveryFunding";
+import { observeRecoveryFunding, RecoveryFundingSpentError, RecoveryFundingUnavailableError } from "../src/recoveryFunding";
 import { MAX_RECOVERY_PLAINTEXT_BYTES } from "../src/recoveryAgeContainer";
 import { appendBinding, fixtureRecord, signRecord } from "./fixtures/recoveryInspectionFixture";
 import { refundCase, recoveryRefundCases, type RecoveryRefundCase } from "./fixtures/recoveryRefundCases";
@@ -237,4 +237,24 @@ test("a mempool backend without the single outspend lookup is read from its outs
   const answered = run('[{"spent":false}]', new Response('{"spent":true}'));
   await expect(answered.result).rejects.toBeInstanceOf(RecoveryFundingUnavailableError);
   expect(answered.mock.calls.some((c) => c.path.endsWith("/outspends"))).toBe(false);
+});
+
+test("only an authenticated, confirmed output reported spent:true is named spent; it stays unavailable", async () => {
+  const spent = api(), txid = spent.item.record.funding_history[0]!.binding.funding_txid;
+  spent.responses.set(`tx/${txid}/outspend/0`, '{"spent":true}');
+  const error = await spent.run().catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(RecoveryFundingSpentError); expect(error).toBeInstanceOf(RecoveryFundingUnavailableError);
+  // The backend without the single lookup reports it through its list.
+  const listed = api(); listed.responses.delete(`tx/${txid}/outspend/0`); listed.responses.set(`tx/${txid}/outspends`, '[{"spent":true}]');
+  expect(await listed.run().catch((caught: unknown) => caught)).toBeInstanceOf(RecoveryFundingSpentError);
+  for (const body of ['{}', 'null', '{"spent":"true"}', '{"spent":1}', '{"spent":true,"spent":true}']) {
+    const mock = api(); mock.responses.set(`tx/${txid}/outspend/0`, body);
+    expect(await mock.run().catch((caught: unknown) => caught)).not.toBeInstanceOf(RecoveryFundingSpentError);
+  }
+  // An unconfirmed or unauthenticated funding transaction is never reported spent.
+  const unconfirmed = api(); unconfirmed.responses.set(`tx/${txid}/outspend/0`, '{"spent":true}');
+  unconfirmed.responses.set(`tx/${txid}/status`, '{"confirmed":false}');
+  expect(await unconfirmed.run().catch((caught: unknown) => caught)).not.toBeInstanceOf(RecoveryFundingSpentError);
+  const forged = api(); forged.responses.set(`tx/${txid}/outspend/0`, '{"spent":true}'); forged.responses.set(`tx/${txid}/hex`, "00".repeat(60));
+  expect(await forged.run().catch((caught: unknown) => caught)).not.toBeInstanceOf(RecoveryFundingSpentError);
 });
