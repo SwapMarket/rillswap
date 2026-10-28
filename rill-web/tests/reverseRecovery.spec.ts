@@ -152,6 +152,26 @@ test("nothing can be exposed before a claim is prepared, and preparing is the on
   await page.locator("#swap-reverse-recovery-export").click(); await expect(page.locator('a[download="rillswap-recovered-claim.hex"]')).toHaveCount(2); expect(transport.posts).toBe(0);
 });
 
+for (const spent of [true, false]) {
+  test(`a spent lockup is named instead of a generic block: spent ${spent}`, async ({ page }) => {
+    await ready(page); const transport = await api(page);
+    await page.route(BASE + "/tx/*/outspend/0", (route) => route.fulfill({ body: spent ? '{"spent":true}' : "{}", headers: { "Access-Control-Allow-Origin": "*" } }));
+    await page.evaluate((data) => window.mountReverseRecovery(data), fixture());
+    const message = page.locator("#swap-reverse-recovery-message");
+    await page.locator("#swap-reverse-recovery-check").click();
+    if (spent) {
+      await expect(message).toContainText("already spent"); await expect(message).toContainText("Nothing was broadcast"); await expect(message).not.toContainText("blocked");
+    } else {
+      await expect(message).toContainText("Recovery remains blocked"); await expect(message).not.toContainText("already spent");
+    }
+    // Spent is still unavailable: preparing a claim stays refused and nothing is posted.
+    await page.locator("#swap-reverse-recovery-fee").fill("100"); await page.locator("#swap-reverse-recovery-prepare").click();
+    await expect(page.locator("#swap-reverse-recovery-prepare")).toBeEnabled();
+    await expect(message).toContainText(spent ? "already spent" : "blocked");
+    await expect(page.locator("#swap-reverse-recovery-claim-status")).not.toContainText("backup for claim "); expect(transport.posts).toBe(0);
+  });
+}
+
 for (const change of ["fee", "api", "file", "key", "network"]) {
   test(`changing ${change} during deferred recovery exposure prevents private export and POST`, async ({ page }) => {
     const transport = await mountedClaim(page);

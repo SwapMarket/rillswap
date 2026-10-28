@@ -1,6 +1,6 @@
 /** Imported reverse controls remain disconnected until an explicit action. */
 import { inspectReverseRecoveryPlaintext } from "./recoveryInspection";
-import { observeReverseRecoveryFunding } from "./recoveryFunding";
+import { observeReverseRecoveryFunding, RecoveryFundingSpentError } from "./recoveryFunding";
 import { loadBrowserReverseRecovery, recoverBrowserReverseFunding, prepareRecoveredReverseClaim, exposeRecoveredReverseClaim } from "./browserReverseRecovery";
 import { scriptAddress } from "./swap/address";
 import type { NetworkName } from "./swap/config";
@@ -21,7 +21,12 @@ export function reverseRecoveryControls(root: HTMLElement, options: {
     node("p", "This proves internal consistency under embedded signers, not provenance, ownership or current funding. Nothing connected or was paid. Recovery never accepts or pays another invoice."), controls, files, message);
   const act = (control: HTMLButtonElement, run: () => Promise<void>): void => { control.onclick = () => {
     if (busy || disposed) return; busy = true; control.disabled = true;
-    void run().catch(() => { message.textContent = "Recovery remains blocked for this selection. Keep the originals. No uncertain payment or claim will be retried."; })
+    void run().catch((error: unknown) => {
+      message.textContent = error instanceof RecoveryFundingSpentError
+        ? "Your API reports this swap's Bitcoin lockup already spent, so there is nothing left to claim here. Usually your claim already went through " +
+          "(check your wallet for the payout), or the provider refunded it after its refund height. Keep the originals. Nothing was broadcast."
+        : "Recovery remains blocked for this selection. Keep the originals. No uncertain payment or claim will be retried.";
+    })
       .finally(() => { busy = false; if (!disposed) control.disabled = control.dataset.locked === "true"; });
   }; };
   const local = button(controls, "Inspect local execution state", "swap-reverse-recovery-local");
