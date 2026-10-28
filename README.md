@@ -24,16 +24,20 @@ without the provider, the website or any RillSwap service.
 ## Features
 
 - **Four swap profiles.** BTC to Lightning, Lightning to BTC, USDC/USDT to
-  Lightning and Lightning to USDC/USDT.
+  Lightning and Lightning to USDC/USDT. Stablecoin swaps need a web build
+  configured with pinned token and contract deployments; the published
+  GitHub Pages build offers the Bitcoin profiles.
 - **Atomic and non-custodial.** Bitcoin swaps lock funds in a two-leaf Taproot
   contract (hash-locked claim, time-locked refund); stablecoin swaps use the
   Boltz `ERC20Swap` hash-time-lock contract. A provider cannot take your funds
   without paying you, and if the swap fails you can refund after the timeout.
-- **Private by default.** Claims are cooperative MuSig2 key-path spends that
-  look like ordinary Taproot payments, with a script-path fallback that never
-  depends on the provider.
+- **Private by default.** Bitcoin claims are cooperative MuSig2 key-path
+  spends that look like ordinary Taproot payments, with a script-path
+  fallback that never depends on the provider.
 - **Independent recovery.** Encrypted [age](https://age-encryption.org)
-  recovery files let the `rill` CLI claim or refund any swap on its own.
+  recovery files let the `rill` CLI refund or claim Bitcoin swaps with your
+  own Bitcoin Core node. Stablecoin swaps are refunded or claimed from the
+  browser wallet.
 - **Permissionless discovery.** Providers publish signed offers on Nostr
   relays. There is no registry or allowlist, and all session traffic is
   end-to-end encrypted (NIP-44 inside NIP-59 gift wraps).
@@ -45,9 +49,10 @@ without the provider, the website or any RillSwap service.
 - **Gas-sponsored stablecoin claims.** Receive USDC/USDT at a fresh address
   that holds no ETH, through an EIP-7702 / ERC-4337 sponsor that the browser
   verifies but does not trust.
-- **Merchant checkout.** An experimental checkout SDK and merchant ledger. The
-  demo shop accepts Lightning, on-chain BTC through a swap, test stablecoins
-  and regtest Monero.
+- **Merchant checkout.** The RillPay checkout dialog and a merchant server
+  that issues Lightning invoices from your own LND node and signs payment
+  acceptances. Buyers can pay over Lightning or with on-chain BTC through a
+  swap. The demo shop also shows local stablecoin and Monero rails.
 
 ## Try it locally
 
@@ -113,7 +118,7 @@ commands. To run your own provider, use the published
 | --- | --- |
 | Regtest | Used by the development stack and end-to-end tests |
 | Signet, testnet4 | Supported test networks |
-| Mainnet | Enabled |
+| Mainnet | Supported. RillSwap is new software: start with small amounts |
 
 See the [architecture](rill-docs/ARCHITECTURE.md) for the protocol design,
 state machines and security invariants.
@@ -121,12 +126,13 @@ state machines and security invariants.
 ## Development
 
 CI runs the specification conformance suite and each component's checks
-(`.github/workflows/`). To run them locally, work inside a component directory
-and follow its README to set up its environment, for example:
+(`.github/workflows/`). To run them locally, set up a component's environment
+as described in its README, then run its tests from that directory, for
+example:
 
 ```sh
-cd rill-core && .venv/bin/pytest -q
-cd rill-web && bun test unit && bun run test
+(cd rill-core && .venv/bin/pytest -q)
+(cd rill-web && bun test unit && bun run test)
 ```
 
 Install the repository hooks with [prek](https://github.com/j178/prek) (or

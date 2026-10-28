@@ -311,7 +311,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q \
 | --- | --- |
 | `native_crypto` | `RILL_CRYPTO_LIBRARY` set to the built library; `RILLSWAP_RUN_NATIVE_CRYPTO=1` for tests that require explicit opt-in |
 | `bitcoin_core` | `RILLSWAP_RUN_BITCOIN_CORE=1`, Docker and the native build |
-| `age_interop` | `RILL_CRYPTO_LIBRARY` and `AGE_BINARY` pointing to Go age (v1.3.1 for the pinned gate, see `scripts/check_age_interop.py --help`) |
+| `age_interop` | `RILL_CRYPTO_LIBRARY` and `AGE_BINARY` pointing to Go age (v1.3.1, pinned by `scripts/check_age_interop.py`, see its `--help`) |
 
 ## Further reading
 

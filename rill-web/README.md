@@ -265,9 +265,7 @@ The network indicator in the header is a picker: choosing mainnet or signet
 opens the other build, and any other network reconfigures the current page
 like Settings does. The Pages build ignores local `VITE_RILLSWAP_*` overrides
 (it sets its own `VITE_RILLSWAP_DEPLOYMENTS`) so regtest endpoints never leak
-into the public site.
-Pushes to `main` publish the mainnet and signet apps. Local builds and commits
-do not publish them.
+into the public site. Local builds never publish.
 
 ### Serve locally
 
@@ -291,9 +289,9 @@ The intended public-network sponsor is Alchemy's Wallet API:
 | Sponsor policy | Your gas policy UUID |
 
 Restrict the API key to your site's origin. The policy may be omitted when a
-proxy applies its own; unsponsored calls are refused. **Live Alchemy
-responses and browser CORS have not been tested**, so verify them on a
-testnet first.
+proxy applies its own; unsponsored calls are refused. The sponsor flow is
+tested against the local development stand-in, so verify Alchemy's responses
+and browser CORS on a testnet before enabling it on mainnet.
 
 ## Opt-in tests
 

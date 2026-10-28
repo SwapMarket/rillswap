@@ -4,7 +4,7 @@
 terms over Nostr relays, handles client sessions, and coordinates Bitcoin,
 Lightning and ERC20 settlement using your own nodes.
 
-It is for operators testing a self-hosted liquidity provider, not a hosted
+It is for operators running a self-hosted liquidity provider, not a hosted
 service. Running it requires node credentials, liquidity, and careful
 handling of encrypted keys and persistent swap state.
 
@@ -71,8 +71,9 @@ SIGTERM. Never restore an older store snapshot.
 
 CI publishes `ghcr.io/rillswap/rill-provider` for amd64 and arm64. It holds
 `rill-provider`, the `rill` CLI, the native crypto library and a Tor client,
-and runs as uid 1000. `latest` follows `main`; pin `sha-<commit>` or a
-release tag in production.
+and runs as uid 1000. `latest` follows `main`; in production, pin an image
+digest, a `sha-<full commit hash>` tag, or a version tag such as `1.2.3` from
+a `v1.2.3` release.
 
 [docker/compose.yaml](docker/compose.yaml) runs one service per swap profile
 (`btc-to-ln`, `ln-to-btc`, `erc20-to-ln`, `ln-to-erc20`), each with its own
@@ -215,9 +216,9 @@ before a hold invoice is opened. The LN to BTC check also applies with
 as before. LN to ERC20 does not check its token balance. Concurrent quotes
 each see the whole balance.
 
-LN to BTC reads the balance with Core's `getbalances`. If you generated the
-`rpcwhitelist` before this release, add `getbalances` to it and restart
-Core; until then the provider logs `liquidity unavailable` and `funding
+LN to BTC reads the balance with Core's `getbalances`. If your
+`rpcwhitelist` does not include `getbalances`, add it and restart Core;
+until then the provider logs `liquidity unavailable` and `funding
 balance unavailable`, keeps the configured bands, and does not check firm
 quotes against the balance.
 
@@ -239,9 +240,8 @@ Core adds it to the fee instead. Only single-key coins whose signed size is
 known (P2TR key path, P2WPKH, P2SH-P2WPKH, P2PKH) are candidates. Run one
 provider per funding wallet.
 
-This needs Core's `listunspent`. If you generated the `rpcwhitelist` before
-this release, add `listunspent` to it and restart Core; until then the
-provider logs a warning and lets Core pick the inputs, at the same rate.
+This needs Core's `listunspent`. If your `rpcwhitelist` does not include
+`listunspent`, add it and restart Core; until then the provider logs a warning and lets Core pick the inputs, at the same rate.
 
 ### LN to BTC claim fee reserve
 
@@ -460,14 +460,14 @@ and cancellation after a completed worker may still require operator inspection.
 ### Upgrades
 
 Stop the service before installing a new version. Current stores use schema
-v15. Stores v8 to v14 upgrade automatically when opened, including by the
+v17. Stores v8 to v16 upgrade automatically when opened, including by the
 inspection commands. Stores v5 to v7 need an explicit offline migration:
 
 ```sh
 rill-provider migrate-store --config tmp/signet/provider.json
 ```
 
-Then restart `serve`. Stores v1 to v4 (never released) are refused. Migration
+Then restart `serve`. Stores v1 to v4 are not supported and are refused. Migration
 does not reconcile restored snapshots or grant old payments new retry
 authority. Do not assume an older release can reopen an upgraded store.
 

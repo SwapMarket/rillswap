@@ -53,8 +53,8 @@ drains mining RPCs and waits for LND to match Core's tip. Mining resumes before
 payment, including on checkout failure. This controls fixture timing without
 relaxing the merchant's freshness checks or retrying checkout creation.
 
-The component CI's actual-HTTPS merchant diagnostic temporarily uses pinned
-Chrome for Testing 157.0.8090.0. Playwright 1.63's bundled Chromium reports
+The component CI's actual-HTTPS merchant diagnostic uses pinned Chrome for
+Testing 157.0.8090.0. Playwright 1.63's bundled Chromium reports
 fully consumed streaming responses as aborted because of
 [an upstream EOF bug](https://chromium.googlesource.com/chromium/src/+/62473ad0f747e245e514c93e741bb8e168a2a207).
 Only this diagnostic uses the fixed development snapshot; other browser tests
@@ -68,12 +68,8 @@ RILLSWAP_RUN_MERCHANT_BROWSER=1 RILLSWAP_MERCHANT_BROWSER_EXECUTABLE="$browser" 
   bun test tests/regtestMerchantHttpsDiagnostic.test.ts -t 'default browser reads actual merchant HTTPS'
 ```
 
-Remove this temporary pin once Playwright bundles a Chromium build containing
-the fix and the strict diagnostic passes repeated validation on that build.
-
-Forward Bitcoin browser tests use finalized-PSBT funding. The scoped local
-chain reader does not provide the address-history index required by automatic
-wallet-deposit discovery.
+Forward Bitcoin browser tests fund swaps both with a finalized PSBT and with
+a plain wallet send that the page discovers through the local chain API.
 
 No chain, relay, provider or merchant transport is mocked. The injected EVM
 wallet forwards requests to Anvil's unlocked disposable account, rather than
@@ -153,7 +149,7 @@ example `RILL_DEV_WEB_PORT=9273 RILL_DEV_CHAIN_PORT=9091 dev/devctl up`.
 
 `bootstrap` checks before acting at every step, so it is safe to rerun and it
 completes an interrupted attempt. It creates the wallets, mines to 150 blocks,
-funds both LND nodes and the `user`/`maker` Core wallets (10 BTC each), opens
+funds the `maker` and `user` LND nodes and Core wallets (10 BTC each), opens
 the channels, provisions one maker identity, custody key, config and store per
 direction, deploys the ERC20Swap v6 HTLC and the fUSDC dev token on Anvil
 once (one million fUSDC each to the user, Anvil account 1, and the maker
@@ -210,9 +206,8 @@ land in the Core `maker` wallet (BTC to LN claims) or in LND channel balance
 (LN to BTC).
 
 `maker-swaps` stops that maker for a few seconds, because `inspect-swaps` takes
-the store's owner lock. It currently works only for `btc-to-ln`: the provider's
-inspection does not yet understand LN to BTC swap states, and it fails with
-"swap inspection state unsupported" once that store has swaps.
+the store's owner lock. It supports `btc-to-ln` stores; for an `ln-to-btc`
+store with swaps it fails with "swap inspection state unsupported".
 
 To change maker terms (fees, amount bands), edit
 `/state/makers/<direction>/provider.json` in `devctl shell` and restart the
@@ -272,10 +267,11 @@ requested, without a wallet import, index, or startup scan. Queries have a
 12-second scan budget, a one-million-block cap, and bounded results. Timeouts,
 reorganizations, and oversized histories return unavailable rather than partial
 or empty history. For an oversized disposable history, start fresh with
-`dev/devctl nuke` (this deletes the development stack's data).
+`dev/devctl reset` (this deletes the development stack's data).
 
-Existing volumes need no migration. After updating this chain API, recreate the
-Core and reader containers so Core grants the added read-only activity RPC:
+Existing volumes need no migration. If your volumes predate address
+discovery, recreate the Core and reader containers so Core grants the
+read-only activity RPC:
 
 ```sh
 docker compose -f dev/compose.yaml up -d --force-recreate bitcoind chain
@@ -284,7 +280,7 @@ docker compose -f dev/compose.yaml up -d --force-recreate bitcoind chain
 An older Core container without that permission returns unavailable for address
 queries. Existing volumes are retained by the recreation command.
 
-The merchant CLI configuration now requires an explicit `network`. If an older
+The merchant CLI configuration requires an explicit `network`. If an older
 development volume has `/state/merchant/config.json` without it, add
 `"network": "regtest"` to that file before restarting the merchant. Missing
 network configuration is refused; existing merchant ledgers are not migrated.
@@ -420,7 +416,8 @@ without holding node credentials:
 Origin and Host checks are local safeguards, not production authentication;
 the macaroon can make arbitrary routed regtest payments. No recovery secrets
 are uploaded, and credentials stay in browser memory. The adapters never
-repair state, reset wallets, scan, replay transactions or pay at startup.
+repair state, reset wallets, scan, replay transactions or pay at startup;
+address-history scans run only on explicit requests.
 
 Apply adapter changes without resetting volumes:
 

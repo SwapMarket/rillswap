@@ -208,10 +208,10 @@ is not supported.
 
 ## Payment methods and integrations
 
-| Method or integration | Current scope |
+| Method or integration | Scope |
 | --- | --- |
-| Lightning | Regtest CLI and local demo checkout with merchant acceptance |
-| Bitcoin through RillSwap | Development swap to a merchant Lightning invoice |
+| Lightning | Merchant server with your own LND on mainnet, signet or regtest; signed merchant acceptance |
+| Bitcoin through RillSwap | Buyer swaps on-chain BTC to the merchant's Lightning invoice in the RillSwap app |
 | ERC20 native receipt rail | Local Anvil fUSDC/fUSDT checkout; separate experimental Sepolia ledger and verifier |
 | Monero | Local regtest receipts only, with a separate ledger and signed events |
 | WooCommerce | Opt-in authoritative BTC order pricing and test-store fulfillment |

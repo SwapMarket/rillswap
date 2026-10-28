@@ -10,9 +10,14 @@ normative behavior. Report vulnerabilities privately as described in
 - Contributions must be original or identify their source and a compatible
   license. Vendored or generated material records its origin.
 - Protocol changes go through `rill-docs/specs/` with updated schemas and
-  vectors. Nothing has been released yet: change the specifications in place
-  and keep the CLI, provider and web app consistent with them, without
-  version negotiation or compatibility shims for unreleased behavior.
+  vectors, and keep the CLI, provider and web app consistent with them.
+- Existing installations are the default case. Providers, merchants and users
+  already hold databases, configuration files and recovery files written by
+  earlier versions: keep them working, and describe the upgrade behavior of
+  any change to persisted state, wire messages or recovery formats. Breaking
+  changes need a new protocol or format version and explicit maintainer
+  approval. Published specification versions are never rewritten; corrections
+  receive a new version or an explicit erratum.
 - Add focused tests for every change. Money-path changes also need coverage
   against real nodes in the regtest environment (`dev/devctl up`, see
   [DEVELOPMENT.md](DEVELOPMENT.md)).
