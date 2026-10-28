@@ -938,8 +938,22 @@ class HandshakeService:
             return
         state.deferred = [frame for frame in state.deferred if frame[0] != session_id]
         for _, _, _, event in held:
-            disposition = await self.handle(event, relays)
+            disposition = await self._handle_contained(event, relays)
             LOG.log(_disposition_level(disposition), "deferred relay event: %s", disposition)
+
+    async def _handle_contained(self, event: bytes, relays: Sequence[Relay]) -> str:
+        """``handle`` for the serving loop: one bad event cannot stop every session.
+
+        Ownership loss still stops the service. Any other failure drops the
+        event and is logged by type only, keeping event content out of logs.
+        """
+        try:
+            return await self.handle(event, relays)
+        except StaleOwnerError:
+            raise
+        except Exception as error:  # noqa: BLE001 - deadline supervision must outlive one event
+            LOG.warning("relay event failed: %s", type(error).__name__)
+            return "failed"
 
     async def handle(self, event: bytes, relays: Sequence[Relay]) -> str:  # noqa: PLR0911, PLR0912, PLR0915 - one disposition per outcome
         """Route one untrusted relay event; return a content-free disposition."""
@@ -1667,7 +1681,7 @@ class HandshakeService:
                     if event == _RELAY_CONNECTED:
                         self._state.republish = True  # a new relay lacks our announcement
                         break
-                    disposition = await self.handle(event, list(connected.values()))
+                    disposition = await self._handle_contained(event, list(connected.values()))
                     LOG.log(_disposition_level(disposition), "relay event: %s", disposition)
         finally:
             self._readiness_closed = True  # fence operations suspended before cleanup awaits
