@@ -34,6 +34,13 @@ export const PROFILE = "btc-to-ln/v1";
 // The same selection rill-cli requests; the suite name is a label for NIP-59 delivery.
 /** Seconds an invoice must stay valid at quote time (the provider needs time to pay). */
 const MIN_INVOICE_REMAINING_SECONDS = 600;
+/**
+ * Extra wait for the provider's payment per deposit block it still needs (five mainnet
+ * intervals). It pays only at the signed funding depth, and a confirmed deposit is bound
+ * after its first block: a fixed ten minutes gave up, and lost cooperation, whenever the
+ * next block took longer, about a third of mainnet swaps.
+ */
+export const PENDING_BLOCK_WAIT_MS = 3_000_000;
 
 export interface UserLimits {
   readonly maxSuccessFeeSat: bigint;
@@ -283,18 +290,21 @@ export async function prepareSwap(
           await session.send(bound, providerKey, paymentWindow);
           await session.replyTo(bound, "ack");
           paymentWindow();
+          const depth = terms.funding_confirmations;
           if (broadcastByUser) {
             await hooks.broadcast(funding.raw, funding.txid);
-            hooks.report(`funding ${funding.txid} broadcast; waiting for the provider to pay`);
+            hooks.report(`funding ${funding.txid} broadcast; waiting for the provider to pay (at ${depth} confirmations)`);
           } else {
-            hooks.report(`the provider acknowledged your confirmed deposit ${funding.txid}; waiting for it to pay`);
+            hooks.report(`the provider acknowledged your confirmed deposit ${funding.txid}; waiting for it to pay (at ${depth} confirmations)`);
           }
+          const pendingBlocks = Math.max(0, depth - (broadcastByUser ? 0 : 1));
           const hint =
             `funds are committed; after block ${terms.refund_lock_height} open Recover a swap with the funded ` +
             `recovery file (funding attempt ${binding.funding_attempt_id}) to check funding and prepare your refund`;
           const settled = await settle(
             { session, providerKey, terms, contractHash, binding, contractSecret: contract.secret,
-              tipHeight: request.tipHeight, settleMs: timeouts.settleMs, cosigner: hooks.cosigner, report: hooks.report },
+              tipHeight: request.tipHeight, settleMs: timeouts.settleMs + pendingBlocks * PENDING_BLOCK_WAIT_MS,
+              cosigner: hooks.cosigner, report: hooks.report },
             hint,
           );
           hooks.report(settled.cooperation === "verified"

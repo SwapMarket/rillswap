@@ -15,6 +15,8 @@ for (const scenario of ["only", "disposed", "expired", "concurrent", "mutation",
     if (scenario !== "only" && scenario !== "mutation") expect(result.refused).toBe(true);
     if (scenario === "concurrent") { expect(result.activeSignerPreserved).toBe(true); expect(result.shared).toBe(1); }
     if (scenario === "mutation") { expect(result.recoveryBirthday).toBe(100); expect(result.shared).toBe(1); }
+    // The page broadcasts its own funding: the wait covers both signed funding confirmations.
+    if (scenario === "mutation") expect(result.settleBudgets).toEqual([600_000 + 2 * 3_000_000]);
     if (scenario === "callback_error") { expect(result.accepted).toBe(false); expect(result.shared).toBe(0); }
   });
 }
@@ -29,6 +31,8 @@ for (const scenario of ["deposit", "deposit_refused"]) {
     expect(result.broadcasts).toBe(0);
     if (scenario === "deposit") {
       expect(result.refused).toBe(false); expect(result.shared).toBe(1); expect(result.recoveryStages).toEqual(["terms", "funded"]);
+      // The provider pays at 2 confirmations; the bound deposit has 1, so the wait covers one more block.
+      expect(result.settleBudgets).toEqual([600_000 + 3_000_000]);
     } else {
       // The refusal is terminal (no second prompt) and names the deposit and the refund height.
       expect(result.refused).toBe(true); expect(result.shared).toBe(0); expect(result.recoveryStages).toEqual(["terms"]);

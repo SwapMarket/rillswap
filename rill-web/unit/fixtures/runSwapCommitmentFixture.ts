@@ -11,7 +11,8 @@ const messages: string[] = [];
 const sessionSecrets: Uint8Array[] = [];
 let recoveryBirthday = -1;
 const recoveryExtensions: unknown[] = [];
-const terms = { terms_expiry: 5000, refund_lock_height: 200, max_funding_fee_sat: "10",
+const settleBudgets: number[] = [];
+const terms = { terms_expiry: 5000, refund_lock_height: 200, max_funding_fee_sat: "10", funding_confirmations: 2,
   economics: { contract_amount_sat: "1040", success_fee_sat: "10" } };
 class FixtureSession {
   sessionId = "5".repeat(64); key = receiver.slice(2); providerKey = "8".repeat(64);
@@ -39,7 +40,7 @@ mock.module("../../src/swap/recovery", () => ({ encryptRecovery: async (record: 
   recoveryExtensions.push(structuredClone(record.extensions));
   recoveryBirthday = record.birthday; return new Uint8Array([1]);
 } }));
-mock.module("../../src/swap/cooperative", () => ({ COOPERATIVE_RESERVATION_EXTENSION: "fixture", settle: async () => ({
+mock.module("../../src/swap/cooperative", () => ({ COOPERATIVE_RESERVATION_EXTENSION: "fixture", settle: async (context: { settleMs: number }) => (settleBudgets.push(context.settleMs), {
   cooperation: "abandoned", claimTxid: null, preimage: "private fixture preimage",
   reservation: scenario === "prepare_wallet_reserved" ? { recordedAt: now, proposal: "fixture proposal", signature_hash: "fixture hash" } : null }) }));
 const { executeMerchantSwap } = await import("../../src/swap/merchantCheckout");
@@ -97,7 +98,7 @@ if (scenario?.startsWith("prepare_")) {
   }
   console.log(JSON.stringify({ before, refused, refusal, activeSignerPreserved, recoveryBirthday, recoveryExtensions,
     quoteFrozen: Object.isFrozen(prepared.quote), secretsWiped: sessionSecrets.every((secret) => secret.every((byte) => byte === 0)),
-    accepted: messages.includes("terms_accept"), shared, recoveryStages, broadcasts }));
+    accepted: messages.includes("terms_accept"), shared, recoveryStages, broadcasts, settleBudgets }));
 } else {
 let failed = false; try { await executeMerchantSwap(options); } catch { failed = true; }
 now = 1200; let redispatchRefused = false;
