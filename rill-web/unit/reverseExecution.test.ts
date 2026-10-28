@@ -141,6 +141,20 @@ for (const cooperation of ["signed", "declined", "bad partial"] as const) {
   });
 }
 
+for (const [cooperation, expected] of [["signed", "the provider cosigned; claiming with the private key-path transaction"],
+  ["declined", "the provider declined; claiming with the signed script-path transaction"]] as const) {
+  test(`the swap log names the ${cooperation} cooperation outcome`, async () => {
+    const f = await executionFixture(cooperation), lines: string[] = [], e = await f.prepare({ report: (line) => lines.push(line) });
+    const transport = spyOn(globalThis, "fetch").mockImplementation(f.fetch);
+    try {
+      await e.accept(f.assertCurrent); await e.exposeInvoice(f.assertCurrent); await e.receiveFunding();
+      await e.prepareClaim(API, 100n, f.assertCurrent);
+      expect((await e.exposeClaim(API, BROADCAST, "broadcast", f.assertCurrent)).outcome).toBe("accepted");
+      expect(lines).toEqual([`cooperation: ${expected}`]);
+    } finally { transport.mockRestore(); e.dispose(); }
+  });
+}
+
 test("cooperation still runs when the lockup confirms long after the quote deadline", async () => {
   const f = await executionFixture("signed"), e = await f.prepare(), transport = spyOn(globalThis, "fetch").mockImplementation(f.fetch);
   const proposals: Record<string, unknown>[] = [], send = f.session.send.bind(f.session);

@@ -25,8 +25,11 @@ interface ReverseCooperationOptions {
   readonly capabilities: Cosigner;
   readonly assertCurrent: () => void;
   readonly monotonicClock?: () => number;
+  /** One fixed, secret-free line about the outcome, for the swap log. */
+  readonly report?: (line: string) => void;
 }
 const require = (ok: boolean): void => { if (!ok) throw new Error("Reverse cooperation refused"); };
+const TIMED_OUT = "Cooperation timed out";
 const exact = (value: Record<string, unknown>, keys: readonly string[]): boolean =>
   Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 
@@ -46,18 +49,23 @@ export async function reverseCooperativeClaim(options: ReverseCooperationOptions
     require(Number.isFinite(now) && Number.isFinite(wall) && now >= started);
     wallHighWater = Math.max(wallHighWater, wall);
     const budget = Math.min(deadlineMono - now, deadlineAt * 1000 - wallHighWater);
-    require(budget > 0); return budget;
+    if (!(budget > 0)) throw new Error(TIMED_OUT);
+    return budget;
   };
   const live = (): void => { remaining(); };
   const bounded = async <T>(work: () => Promise<T>): Promise<T> => {
     const budget = remaining(); let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([work(), new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error("Cooperation timed out")), budget);
+        timer = setTimeout(() => reject(new Error(TIMED_OUT)), budget);
       })]);
     } finally { clearTimeout(timer); }
   };
   let musig: Musig | undefined, attempt: MusigAttempt | undefined, finished = false;
+  // Only these fixed strings reach the log: never ids, nonces, signatures or the preimage.
+  let step = "before the proposal";
+  const report = (line: string): void => { try { options.report?.(`cooperation: ${line}`); } catch { /* Reporting never changes the claim. */ } };
+  const fallback = "; claiming with the signed script-path transaction";
   try {
     live();
     const hash = bytesToHex(contractHash(terms));
@@ -68,12 +76,15 @@ export async function reverseCooperativeClaim(options: ReverseCooperationOptions
       canonicalize(session.network) === canonicalize(terms.network_identity) && binding.contract_hash === hash && binding.funder_role === "provider");
     require(options.preimage.length === 32 && bytesToHex(sha256(options.preimage)) === terms.invoice_binding.payment_hash);
     const deadlineHeight = terms.refund_lock_height - terms.timing_policy.claim_confirmation_blocks;
-    require(Number.isSafeInteger(options.tipHeight) && options.tipHeight > 0 && options.tipHeight <= deadlineHeight);
+    require(Number.isSafeInteger(options.tipHeight) && options.tipHeight > 0);
+    if (options.tipHeight > deadlineHeight) { report(`skipped, too close to the provider's refund height${fallback}`); return null; }
     const plan = buildCooperativeClaimPlan(terms, binding, options.feeSat), contract = reconstructTaprootContract(terms);
     require(parseTransaction(plan.baseTransaction).txid === options.expectedTxid);
     const id = randomBytes(32), cooperationId = bytesToHex(id);
+    step = "recording the attempt";
     const completed = await bounded(() => options.capabilities.reserve(hash, { contract_hash: hash, cooperation_id: cooperationId,
       signature_hash: bytesToHex(plan.signatureHash), created_at: Math.floor(wallHighWater / 1000) }, async () => {
+      step = "loading the signer";
       live(); musig = await bounded(async () => {
         const loaded = await options.capabilities.loadMusig();
         if (finished) { loaded.destroy(); throw new Error("Cooperation ended while loading"); }
@@ -86,8 +97,11 @@ export async function reverseCooperativeClaim(options: ReverseCooperationOptions
       const proposal = session.envelope("action_request", { action: "cooperative_claim_propose", cooperation_id: cooperationId,
         unsigned_transaction: bytesToHex(plan.baseTransaction), payment_preimage: bytesToHex(options.preimage), public_nonce: bytesToHex(attempt.publicNonce),
         deadline_at: deadlineAt, deadline_height: deadlineHeight }, { contract: hash, requiredFeatures: [COOPERATIVE_CLAIM_FEATURE] });
+      step = "sending the proposal";
       await bounded(() => session.send(proposal, session.providerKey!, live)); live();
+      step = "waiting for the provider's signature";
       const reply = await bounded(() => session.replyTo(proposal, "action_result", remaining())); live();
+      step = "checking the provider's reply";
       require(reply.sender_session_key === session.providerKey && reply.session_id === session.sessionId && reply.profile_id === session.profile &&
         canonicalize(reply.network_identity) === canonicalize(session.network) && reply.contract_hash === hash && reply.message_type === "action_result" &&
         reply.in_reply_to === proposal.message_id && reply.required_features.includes(COOPERATIVE_CLAIM_FEATURE) &&
@@ -107,10 +121,18 @@ export async function reverseCooperativeClaim(options: ReverseCooperationOptions
         partial_signature: bytesToHex(ownPartial) }, { contract: hash, requiredFeatures: [COOPERATIVE_CLAIM_FEATURE] });
       live(); return { claim, complete };
     }));
-    if (!completed) return null;
+    if (!completed) { report(`the provider declined${fallback}`); return null; }
     // Receipt is informational. Even a failed completion delivery does not invalidate this verified claim.
     try { await bounded(() => session.send(completed.complete, session.providerKey!, live)); } catch { /* Keep the verified key-path spend. */ }
+    report("the provider cosigned; claiming with the private key-path transaction");
     return completed.claim;
-  } catch { return null; }
+  } catch (error) {
+    const timedOut = error instanceof Error && error.message === TIMED_OUT;
+    // reserve() rejects an existing record: one attempt per swap, so a resumed claim does not retry.
+    report(!timedOut && step === "recording the attempt"
+      ? `skipped, this browser already tried once for this swap or cannot store the attempt${fallback}`
+      : `${timedOut ? "timed out" : "stopped"} ${step}${fallback}`);
+    return null;
+  }
   finally { finished = true; attempt?.destroy(); musig?.destroy(); }
 }

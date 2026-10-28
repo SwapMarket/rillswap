@@ -151,3 +151,39 @@ test("shared wire conformance: the claimant emits the proposal/completion cycle 
     }
   } finally { f.provider.destroy(); }
 });
+
+test("the swap log says why the claim was or was not cooperative, with fixed secret-free lines", async () => {
+  const fallback = "; claiming with the signed script-path transaction";
+  const cases: [string, string, ((options: Awaited<ReturnType<typeof claimant>>["options"]) => object)?][] = [
+    ["signed", "the provider cosigned; claiming with the private key-path transaction"],
+    ["declined", `the provider declined${fallback}`],
+    ["expired reply", `timed out waiting for the provider's signature${fallback}`],
+    ["slow preparation", `timed out loading the signer${fallback}`],
+    ["canceled", `stopped waiting for the provider's signature${fallback}`],
+    ["bad partial", `stopped checking the provider's reply${fallback}`],
+    ["signed", `skipped, too close to the provider's refund height${fallback}`, (options) => ({
+      tipHeight: options.terms.refund_lock_height - options.terms.timing_policy.claim_confirmation_blocks + 1 })],
+  ];
+  for (const [mode, expected, change] of cases) {
+    const f = await claimant(mode), lines: string[] = [];
+    try {
+      await reverseCooperativeClaim({ ...f.options, ...change?.(f.options), report: (line) => lines.push(line) });
+      expect(lines).toEqual([`cooperation: ${expected}`]);
+      if (change) expect(f.events).toEqual([]);
+      // A second attempt for the same swap is refused by the journal before any nonce.
+      if (mode === "signed" && !change) {
+        lines.length = 0; await reverseCooperativeClaim({ ...f.options, report: (line) => lines.push(line) });
+        expect(lines).toEqual([`cooperation: skipped, this browser already tried once for this swap or cannot store the attempt${fallback}`]);
+      }
+      for (const line of lines) expect(line).not.toMatch(/[0-9a-f]{16}/);
+    } finally { f.provider.destroy(); }
+  }
+});
+
+test("a throwing swap log never changes the cooperative claim", async () => {
+  const f = await claimant();
+  try {
+    const result = await reverseCooperativeClaim({ ...f.options, report: () => { throw new Error("log gone"); } });
+    expect(result).not.toBeNull(); expect(parseTransaction(hexToBytes(result!.raw)).inputs[0]!.witness).toHaveLength(1);
+  } finally { f.provider.destroy(); }
+});

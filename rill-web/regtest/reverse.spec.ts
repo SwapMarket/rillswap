@@ -85,6 +85,9 @@ test(`real browser reverse swap (${nodePayment ? "configured node" : "external w
    expect(raw.vin[0].txinwitness).toHaveLength(refusal ? 4 : 1);
    if (refusal) expect(raw.vin[0].txinwitness[1]).toMatch(/^[0-9a-f]{64}$/);
    else expect(raw.vin[0].txinwitness[0]).toMatch(/^[0-9a-f]{128}$/);
+   // The swap log says which claim was used and, on the fallback, why.
+   if (refusal) await expect(page.locator("#swap-log")).toContainText("; claiming with the signed script-path transaction");
+   else await expect(page.locator("#swap-log")).toContainText("cooperation: the provider cosigned; claiming with the private key-path transaction");
   expect(payments).toBe(nodePayment ? 1 : 0); expect(broadcasts).toBe(1); expect(errors).toEqual([]);
    await expect(page.locator("#swap-status")).toContainText(nodePayment ? "Swap complete" : "Bitcoin claim confirmed");
   if (payer) {

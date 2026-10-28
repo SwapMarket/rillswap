@@ -40,6 +40,8 @@ export interface ReverseExecutionUiOptions extends ReverseProgressOptions {
   readonly destinationScript: string;
   readonly ageRecipient: string;
   readonly nodeApi: string;
+  /** The swap log: fixed, secret-free lines such as why the claim was not cooperative. */
+  readonly report?: (line: string) => void;
 }
 type ClaimExecution = Pick<PreparedReverseExecution, "terms" | "record" | "recoveryFile" | "claimFeeSat" | "funding" | "fundingDepth" | "receiveFunding" | "prepareClaim" | "exposeClaim" | "dispose">;
 
@@ -194,7 +196,8 @@ export async function mountReverseExecution(root: HTMLElement, options: ReverseE
     current(); options.status("Checking signed final terms", 0);
     const api = validateMempoolApi(options.chainApi, options.network.name), tip = await readChainTip(api, options.network); current();
     execution = await options.prepared.prepareExecution({ destinationScript: options.destinationScript, tipHeight: tip.height,
-      ageRecipient: options.ageRecipient, journal, cooperation: browserCosigner, assertCurrent: current }); current();
+      ageRecipient: options.ageRecipient, journal, cooperation: browserCosigner, assertCurrent: current,
+      ...(options.report ? { report: options.report } : {}) }); current();
     const e = execution, terms = e.terms, v = view(root, e, options); v.backup(e.recoveryFile);
     v.screen.append(node("h2", `Pay ${BigInt(terms.economics.hold_invoice_sat).toLocaleString()} sat`),
       node("p", `Receive at least ${BigInt(terms.economics.nominal_payout_sat).toLocaleString()} sat in Bitcoin. Your wallet's routing fee is extra.`),

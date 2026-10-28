@@ -29,6 +29,8 @@ export interface ReverseExecutionConfiguration {
   readonly ageRecipient: string;
   readonly journal: BrowserReverseJournal;
   readonly cooperation?: Cosigner;
+  /** Fixed, secret-free swap log lines (why the cooperative claim did or did not happen). */
+  readonly report?: (line: string) => void;
   /** Recheck original UI selection, wallet identity, cancellation and network after awaits. */
   readonly assertCurrent: () => void;
 }
@@ -184,6 +186,7 @@ export async function prepareReverseExecution(session: Session, handshake: Hands
           session, init, accept, terms, binding: parts.funding.at(-1)!.binding as RecoveryFundingBinding, contractSecret: contract.secret, preimage,
           feeSat: BigInt(inspectReverseRecoveryPlaintext(document!, network).fallbackFeeSat!), expectedTxid: record.claim!.txid,
           tipHeight, capabilities: config.cooperation!, assertCurrent: () => { current(); approve(); },
+          ...(config.report ? { report: config.report } : {}),
         }) : undefined;
         const result = await exposeJournaledReverseClaim(claimContext(approve), chainApi, broadcastApi, action,
           () => { require(!exposing); exposing = true; }, cooperative);

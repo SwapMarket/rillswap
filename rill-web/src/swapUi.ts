@@ -1015,7 +1015,7 @@ function mount(root: HTMLElement): void {
             await mountReverseExecution(panel, { prepared: selected.prepared, network: { ...NETWORKS[name], name }, destinationScript,
               ageRecipient: info.recipient, chainApi: chainApi.value.trim(), broadcastApi: broadcastApi.value.trim(), assertCurrent,
               nodeApi: __SWAP_DEFAULTS__.network === name ? __SWAP_DEFAULTS__.nodeApi ?? "" : name === "regtest" ? "http://127.0.0.1:8093" : "",
-              status: (message, step) => setStatus(message, step),
+              status: (message, step) => setStatus(message, step), report,
               download: offerDownload, saved: (file) => { publishLink(file, name); void refreshSavedRecoveries(); } });
           })().catch(() => { report("stopped: Reverse execution could not continue. Keep backups; no uncertain payment will be retried."); });
           return true;

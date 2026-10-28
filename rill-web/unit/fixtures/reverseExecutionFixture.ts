@@ -128,10 +128,10 @@ export async function executionFixture(cooperation: "unilateral" | "signed" | "d
       [`tx/${funding?.payload.binding ? (funding.payload.binding as { funding_txid: string }).funding_txid : ""}/outspend/0`]: JSON.stringify({ spent }), "block-height/190": "d".repeat(64) };
     if (!(path in responses)) throw new Error("unexpected endpoint"); return new Response(responses[path]!);
   };
-  const prepare = () => prepareReverseExecution(session, { init: saved.handshake_init as HandshakeInit, accept: saved.handshake_accept as HandshakeAccept,
+  const prepare = (extra: { readonly report?: (line: string) => void } = {}) => prepareReverseExecution(session, { init: saved.handshake_init as HandshakeInit, accept: saved.handshake_accept as HandshakeAccept,
     acceptSignature: saved.provider_identity_signature, transcript }, request,
     { destinationScript: source.contract_terms.client_destination_script, tipHeight: 200, ageRecipient: identity.recipient, journal, assertCurrent,
-      ...(cooperation === "unilateral" ? {} : { cooperation: capabilities }) }, () => now.seconds * 1000);
+      ...(cooperation === "unilateral" ? {} : { cooperation: capabilities }), ...extra }, () => now.seconds * 1000);
   return { events, files, prepare, payer, assertCurrent, postedTransactions, fetch: Object.assign(fetch, { preconnect: () => {} }) as typeof globalThis.fetch, now, session, request, decrypt: (f: Uint8Array) => decryptRecoveryContainer(f, identity.identity),
     get posts() { return posts; }, get record() { return stored; }, get funding() { return funding; }, get terms() { return offer.terms.contract_terms; },
     set approved(value: boolean) { approved = value; }, set fail(stage: string) { fail = stage; }, set callback(value: (stage: string) => void) { callback = value; },
