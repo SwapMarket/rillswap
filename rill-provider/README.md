@@ -335,6 +335,53 @@ The EVM signer file holds one hex secp256k1 private key, must be owned by the
 service user, and must have owner-only permissions. Bitcoin profiles include
 `cooperative-claim/v1` automatically; ERC20 profiles do not use it.
 
+### Funding confirmations
+
+`quote.funding_confirmations` (default 1) is how many confirmations the
+funding needs before the swap moves on. For BTC to LN it is how long you wait
+on the client's deposit before paying the invoice. For Lightning to BTC it is
+how long the client waits on your lockup before claiming; it must be at least
+1. ERC20 profiles use `evm.funding_confirmations` instead (EVM blocks, at
+least 1). The value is signed into every offer and announced as
+`rillswap/funding-confirmations`. The web app ranks providers by it by
+default (fewest confirmations first, then lowest price) and labels the
+fastest and cheapest offers. Clients refuse offers that wait longer than you
+announced.
+
+Upgrading: configurations that omit the field now wait 1 confirmation instead
+of 2. Set `"funding_confirmations": 2` under `quote` to keep the old
+behavior. Swaps already in progress keep the depth they signed.
+
+#### Zero confirmations (BTC to LN only)
+
+With `"funding_confirmations": 0` the provider pays the Lightning invoice as
+soon as the exact contract output is unspent in its own node's mempool, before
+any confirmation. This is fast for the client and risky for you:
+
+- **The client can double-spend.** Until the deposit confirms, the client can
+  replace it (RBF, or a conflicting transaction sent straight to miners) and
+  spend the same inputs elsewhere. You have already paid the invoice and
+  there is nothing left to claim: you lose the full swap amount.
+- **Fee bumping is a race to the bottom.** You could spend the unconfirmed
+  deposit in a child transaction (CPFP) that pays enough to confirm the
+  deposit and your claim together, but the client can always answer with a
+  higher-fee conflict. Each round costs both sides more. The provider does
+  not do this today; automating it in the future could remove the client's
+  incentive to cheat.
+- **Your node must see the deposit.** Payment needs the deposit in your Core
+  node's mempool. A deposit your node refuses (policy, fee rate, a full
+  mempool) is paid only once it confirms.
+- **A double-spent swap stays open.** It is never marked lost unless its
+  funding was mined, so it stays in `CLAIMING` and keeps its reservation in
+  `max_active_reservations`. Inspect it with `inspect-swaps` and keep the
+  store.
+
+Consider 0 only for small amounts and keep at least 1 for larger ones. An
+advertisement carries a single value, so run one maker per policy: for
+example, a 0-confirmation maker with a small `terms.amount_bands` and a
+1-confirmation maker for larger amounts. Each needs its own store and
+identity, but they can share the same Bitcoin Core and LND nodes.
+
 ### LND credentials
 
 Use separate scoped macaroons instead of `admin.macaroon`:

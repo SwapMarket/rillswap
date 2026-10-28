@@ -131,12 +131,23 @@ Pick a pair under **You send / You receive** (or use the switch button).
 Available providers and their advertised assets decide which pairs can be
 quoted.
 
+Automatic provider choice ranks offers by the funding confirmations each
+provider announces (fewest first), then by price. **Provider ranking** in
+Settings switches to lowest price first. Providers that do not announce their
+confirmations rank after those that do. The manual selection list labels the
+fastest and the cheapest offer, and the Providers dialog shows each
+provider's confirmations. An offer that waits longer than its provider
+announced is refused.
+
 **Bitcoin to Lightning.** Paste the Lightning invoice to be paid. After
 accepting the quote, send the exact amount to
 the displayed contract address from any native segwit wallet (a `bitcoin:`
 link and QR code are shown). Advanced users can supply a finalized PSBT. Do
 not send extra or multiple deposits: deposits that break the funding rules
-stop the swap and cannot currently be refunded from the panel.
+stop the swap and cannot currently be refunded from the panel. If the
+provider pays at zero confirmations, the page binds your payment as soon as it
+sees it. Do not bump its fee or replace it then: the replacement is not the
+bound transaction, and you can only refund it after the refund height.
 
 **Lightning to Bitcoin.** Enter the amount and Bitcoin address, accept the signed
 price, and pay the invoice from any Lightning wallet (or a configured LND node).

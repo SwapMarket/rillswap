@@ -166,6 +166,12 @@ fallback. Regtest allows direct connections. `providers list` accepts repeated
 `--relay` arguments and skips onion relays quietly when there is no proxy;
 compare independent relays, since a relay can withhold announcements.
 
+Each listed announcement shows the provider's funding confirmations under
+`extensions["rillswap/funding-confirmations"]`; without that key the depth is
+unknown. Both swap directions refuse signed terms that wait more funding
+confirmations than the provider announced. Extension keys the CLI does not
+know are ignored rather than hiding the provider.
+
 ## Recovery files
 
 Recovery snapshots are encrypted age files with everything needed to inspect
