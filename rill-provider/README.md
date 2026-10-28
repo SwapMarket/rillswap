@@ -423,7 +423,7 @@ relays are skipped (one INFO log line) and are not announced.
 
 ## Persistent state and backups
 
-Store format 17 automatically upgrades exact recognized v8 to v16 schemas after
+Store format 18 automatically upgrades exact recognized v8 to v17 schemas after
 custody and authoritative-file verification. Earlier v5 to v7 stores still need
 the explicit migration command. A deployed hash-only v15 EVM table is converted
 only when all transaction hashes are NULL; a height-only v10 table is converted
@@ -432,6 +432,13 @@ remain unchanged and require operator recovery. NULL permits lossless storage
 conversion, not a payment retry or a conclusion that no funds were committed.
 Both version markers advance atomically. No RPC, rescan, or new dispatch is
 performed by this compatibility upgrade; older binaries must not reopen it.
+
+From v18 the store keeps an append-only swap ledger: each firm offer,
+acceptance and outcome, and every realized cost (Lightning routing fee, claim,
+funding and refund mining fees, EVM gas), written in the same transaction as
+the swap event. The upgrade adds it empty. Swaps accepted before the upgrade
+have no ledger rows, so reports list them as having unrecorded costs instead of
+counting those costs as zero.
 
 Reverse spent-output scans retain a block-hash anchor and an immutable replay
 floor, checking parent continuity in batches of at most 12 blocks. Above-floor
@@ -470,7 +477,7 @@ and cancellation after a completed worker may still require operator inspection.
 ### Upgrades
 
 Stop the service before installing a new version. Current stores use schema
-v17. Stores v8 to v16 upgrade automatically when opened, including by the
+v18. Stores v8 to v17 upgrade automatically when opened, including by the
 inspection commands. Stores v5 to v7 need an explicit offline migration:
 
 ```sh

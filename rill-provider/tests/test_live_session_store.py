@@ -210,8 +210,19 @@ def without_v15_evm_swaps(connection: sqlite3.Connection) -> None:
     connection.execute("DROP TABLE evm_swaps")
 
 
+def without_v18_ledger(connection: sqlite3.Connection) -> None:
+    """Restore exact v17 (or earlier): drop the accounting a v17 store never had.
+
+    Unlike the protocol evidence of older tables, ledger rows are accounting
+    only; dropping them leaves exactly the swaps an upgrading v17 store holds.
+    """
+    if connection.execute("SELECT 1 FROM sqlite_master WHERE name='swap_ledger'").fetchone():
+        connection.execute("DROP TABLE swap_ledger")
+
+
 def without_v17_spend_scans(connection: sqlite3.Connection) -> None:
     """Restore pre-anchor fixtures without discarding any retained cursor."""
+    without_v18_ledger(connection)
     if connection.execute(
         "SELECT 1 FROM sqlite_master WHERE name='reverse_spend_scans'"
     ).fetchone():

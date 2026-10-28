@@ -115,6 +115,25 @@ from rill_provider.issuance_reservation import _policy_bytes
 from rill_provider.lnd_hold_invoice import BoundHoldInvoiceObservation, HeldHtlc, HoldInvoiceStatus
 from rill_provider.payment_dispatch_record import PaymentAuthority, bound_payer
 from rill_provider.reverse_cooperation import ReverseCooperationWindow
+from rill_provider.swap_accounting import (
+    ACCEPTED,
+    CLAIM_FEE,
+    COMPLETED,
+    FUNDING_FEE,
+    GAS,
+    LEDGER_KINDS,
+    LEDGER_UNITS,
+    LOST,
+    OFFERED,
+    REFUND_FEE,
+    ROUTING_FEE,
+    TERMINAL_KIND_BY_STATE,
+    TERMINAL_KINDS,
+    LedgerEntry,
+    SwapEconomics,
+    ledger_amount,
+    swap_economics,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -130,7 +149,7 @@ if TYPE_CHECKING:
     from rill_provider.reverse_operations import ReverseOperation, ReverseOperations
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
-SCHEMA_VERSION = 17  # v8-v16 upgrade on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
+SCHEMA_VERSION = 18  # v8-v17 upgrade on acquire; v5-v7 need explicit upgrade; v1-v4 refused.
 CONTRACT_KEY_RECORD_KIND = "rillswap-provider-contract-key"
 OPEN_PHASES = ("CONFIRMED", "ACCEPTED")  # sessions that may still send requests
 SWAP_TRANSITIONS = frozenset(
@@ -470,7 +489,21 @@ REVERSE_SPEND_SCAN_SCHEMA = (
     "AND cursor_block NOT GLOB '*[^0-9a-f]*'), "
     "CHECK (cursor_height!=floor_height OR cursor_block=floor_block))"
 )
-SCHEMA = (*SCHEMA_V16, REVERSE_SPEND_SCAN_SCHEMA)
+SCHEMA_V17 = (*SCHEMA_V16, REVERSE_SPEND_SCAN_SCHEMA)
+# v18: append-only per-swap accounting, written in each event's own transaction
+# (swap_accounting.py). Swaps from before the upgrade have no rows: no backfill.
+SWAP_LEDGER_SCHEMA = (
+    "CREATE TABLE swap_ledger (entry_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "session_id TEXT NOT NULL, "
+    "recorded_at INTEGER NOT NULL CHECK (typeof(recorded_at)='integer'), "
+    "kind TEXT NOT NULL CHECK (kind IN ("
+    + ", ".join(f"'{kind}'" for kind in LEDGER_KINDS)
+    + ")), amount INTEGER CHECK (amount IS NULL OR (typeof(amount)='integer' AND amount>=0)), "
+    "unit TEXT CHECK (unit IS NULL OR unit IN ("
+    + ", ".join(f"'{unit}'" for unit in LEDGER_UNITS)
+    + ")), CHECK ((amount IS NULL) = (unit IS NULL)))"
+)
+SCHEMA = (*SCHEMA_V17, SWAP_LEDGER_SCHEMA)
 # Exact deployed variants, not permissive column-count recognition. Non-NULL
 # evidence that cannot be represented losslessly remains an acquisition refusal.
 SWAPS_HEIGHT_ONLY_V10_SCHEMA = (
@@ -503,6 +536,10 @@ COOPERATION_INDEXES = (
         "CREATE UNIQUE INDEX cooperation_unfinished_session ON cooperation_attempts (session_id) "
         "WHERE state IN ('BURNED','NONCE_READY','SIGNING')"
     ),
+)
+LEDGER_INDEXES = (
+    "CREATE INDEX swap_ledger_session ON swap_ledger (session_id)",
+    "CREATE INDEX swap_ledger_time ON swap_ledger (recorded_at)",
 )
 
 
@@ -1106,7 +1143,12 @@ class LiveSessionStore:
                 connection.execute("BEGIN IMMEDIATE")
                 for statement in SCHEMA:
                     connection.execute(statement)
-                for statement in (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES):
+                for statement in (
+                    *ADMISSION_INDEXES,
+                    *RESERVATION_INDEXES,
+                    *COOPERATION_INDEXES,
+                    *LEDGER_INDEXES,
+                ):
                     connection.execute(statement)
                 connection.execute("INSERT INTO epoch_retirement VALUES (1, 0)")
                 connection.execute(
@@ -1254,8 +1296,10 @@ class LiveSessionStore:
                 _upgrade_v13(connection)
             if version in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14):
                 _upgrade_v14(connection)
-            if version != SCHEMA_VERSION:
+            if version in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16):
                 connection.execute(REVERSE_SPEND_SCAN_SCHEMA)
+            if version != SCHEMA_VERSION:
+                _upgrade_v17(connection)
             if version != SCHEMA_VERSION:
                 connection.execute("UPDATE meta SET schema_version=?", (SCHEMA_VERSION,))
                 connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -3273,6 +3317,15 @@ class LiveSessionStore:
                         "next_provider_seq=?, active_at=? WHERE session_id=?",
                         (admitted, client_seq + 1, provider_seq + 1, now, outer.session_id),
                     )
+                    if reply.payment_hash is not None and reply.message_type == "terms_offer":
+                        economics = _offer_economics(canonicalize(response.model_dump(mode="json")))
+                        _record_ledger(
+                            connection,
+                            outer.session_id,
+                            now,
+                            OFFERED,
+                            None if economics is None else economics.volume_sat,
+                        )
         except LiveSessionStoreError:
             raise
         except Exception:  # noqa: BLE001 - never echo caller documents or crypto details
@@ -6467,6 +6520,8 @@ class LiveSessionStore:
         refund_confirmations: int | None = None,
         observation: dict[str, Any] | None = None,
         scan_checkpoint: ReverseSpendCheckpoint | None = None,
+        funding_fee_sat: int | None = None,
+        refund_fee_sat: int | None = None,
     ) -> None:
         """Move one LN to BTC swap forward (RS-004) in one transaction.
 
@@ -6481,6 +6536,8 @@ class LiveSessionStore:
         invoice pays for the contract. ``REFUNDING`` records the refund
         ``(txid, raw)``; ``REFUNDED`` releases on the refund's depth;
         ``ABORTED`` releases an undispatched reservation (nothing was funded).
+        The mining fees of our funding and refund, and terminal outcomes, are
+        appended to the swap ledger in the same transaction.
         """
         if (to_state == "FUNDED") != (scan_checkpoint is not None):
             raise LiveSessionStoreError("funded transition requires its initial scan checkpoint")
@@ -6571,6 +6628,11 @@ class LiveSessionStore:
                         terms=terms,
                         refund_confirmations=refund_confirmations,
                     )
+                if funding_fee_sat is not None:
+                    _record_ledger(connection, session_id, now, FUNDING_FEE, funding_fee_sat)
+                if refund_fee_sat is not None:
+                    _record_ledger(connection, session_id, now, REFUND_FEE, refund_fee_sat)
+                _record_outcome(connection, session_id, to_state, now)
                 if funding is not None:
                     self._record_funding_binding(connection, session_id, funding, signer, now)
                 if observation is not None:
@@ -6686,6 +6748,8 @@ class LiveSessionStore:
         preimage: str | None = None,
         failed_by_payer: str | None = None,
         observation: dict[str, Any] | None = None,
+        routing_fee_msat: int | None = None,
+        gas_wei: int | None = None,
     ) -> None:
         """Move one EVM-profile swap (RS-010) forward in one transaction.
 
@@ -6697,6 +6761,8 @@ class LiveSessionStore:
         ``FUNDING_SENT`` also marks the reservation ``DISPATCHED`` so a lock is
         never signed twice. ``SETTLED`` may name the client's ``observed_claim``
         hash. Terminal states release the reservation with their evidence.
+        ``routing_fee_msat``, the ``gas_wei`` our mined transaction cost, and
+        terminal outcomes are appended to the swap ledger in the same transaction.
         """
         _check_evm_transition((from_state, to_state), lockup=lockup, sent=sent, preimage=preimage)
         try:
@@ -6773,6 +6839,13 @@ class LiveSessionStore:
                         failed_by_payer=failed_by_payer,
                         network=self._network,
                     )
+                if routing_fee_msat is not None:
+                    _record_ledger(
+                        connection, session_id, now, ROUTING_FEE, routing_fee_msat, unit="msat"
+                    )
+                if gas_wei is not None:
+                    _record_ledger(connection, session_id, now, GAS, gas_wei, unit="wei")
+                _record_outcome(connection, session_id, to_state, now)
                 if observation is not None:
                     self._record_observation(connection, session_id, observation, signer, now)
         except LiveSessionStoreError:
@@ -6826,7 +6899,7 @@ class LiveSessionStore:
         except Exception:  # noqa: BLE001 - never echo storage or crypto details
             raise LiveSessionStoreError("swap transition refused") from None
 
-    def advance_swap(  # noqa: PLR0913 - one atomic transition's explicit parts
+    def advance_swap(  # noqa: PLR0912, PLR0913 - one atomic transition's explicit parts
         self,
         session_id: str,
         *,
@@ -6842,6 +6915,7 @@ class LiveSessionStore:
         failed_by_payer: str | None = None,
         observation: dict[str, Any] | None = None,
         loss_evidence: FundingConflict | None = None,
+        routing_fee_msat: int | None = None,
     ) -> None:
         """Move one swap forward and record its observation in one transaction.
 
@@ -6853,6 +6927,8 @@ class LiveSessionStore:
         dispatch record's bound payer; any other failure keeps capacity.
         ``CLAIMING`` to ``LOST`` closes on the anchored refund observation, or
         on ``loss_evidence`` when the deposit itself was double-spent.
+        ``routing_fee_msat`` (the LN fee a payment actually paid) and terminal
+        outcomes are appended to the swap ledger in the same transaction.
 
         Raises ``StaleSwapError`` unless the swap is still in ``from_state``,
         so a crash or a concurrent tick can never apply a transition twice.
@@ -6911,6 +6987,17 @@ class LiveSessionStore:
                         network=self._network,
                         conflict=loss_evidence,
                     )
+                if routing_fee_msat is not None:
+                    _record_ledger(
+                        connection, session_id, now, ROUTING_FEE, routing_fee_msat, unit="msat"
+                    )
+                _record_outcome(
+                    connection,
+                    session_id,
+                    to_state,
+                    now,
+                    claim_txid=claim_txid if to_state == "CLAIMED" else None,
+                )
                 if observation is not None:
                     self._record_observation(connection, session_id, observation, signer, now)
         except LiveSessionStoreError:
@@ -8184,6 +8271,57 @@ class LiveSessionStore:
             raise LiveSessionStoreError("outbox unavailable") from None
         return tuple(OutboxEntry(*row) for row in rows)
 
+    def ledger_head(self) -> int:
+        """Return the newest swap ledger entry ID, 0 when the ledger is empty."""
+        try:
+            with self._write() as connection:
+                (head,) = connection.execute(
+                    "SELECT COALESCE(MAX(entry_id), 0) FROM swap_ledger"
+                ).fetchone()
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("swap ledger unavailable") from None
+        return int(head)
+
+    def ledger_after(self, entry_id: int, *, limit: int = 256) -> tuple[LedgerEntry, ...]:
+        """Return up to ``limit`` ledger entries newer than ``entry_id``, oldest first."""
+        if type(entry_id) is not int or type(limit) is not int or not 1 <= limit <= 4096:  # noqa: PLR2004
+            raise LiveSessionStoreError("swap ledger bounds unsupported")
+        return self._ledger_rows("entry_id > ? ORDER BY entry_id LIMIT ?", (entry_id, limit))
+
+    def ledger_session(self, session_id: str) -> tuple[LedgerEntry, ...]:
+        """Return every ledger entry of one swap, oldest first."""
+        return self._ledger_rows("session_id = ? ORDER BY entry_id", (session_id,))
+
+    def ledger_window(self, since: int, until: int) -> tuple[LedgerEntry, ...]:
+        """Return the entries recorded in ``[since, until)`` and the swaps closed in it.
+
+        Every entry of a swap whose terminal entry falls in the window is
+        included, so its earlier costs count with its outcome.
+        """
+        terminal = ", ".join("?" for _ in TERMINAL_KINDS)
+        return self._ledger_rows(
+            "(recorded_at >= ? AND recorded_at < ?) OR session_id IN (SELECT session_id "  # noqa: S608 - placeholders only
+            f"FROM swap_ledger WHERE kind IN ({terminal}) AND recorded_at >= ? "
+            "AND recorded_at < ?) ORDER BY entry_id",
+            (since, until, *sorted(TERMINAL_KINDS), since, until),
+        )
+
+    def _ledger_rows(self, predicate: str, values: tuple[object, ...]) -> tuple[LedgerEntry, ...]:
+        try:
+            with self._write() as connection:
+                rows = connection.execute(
+                    "SELECT entry_id, session_id, recorded_at, kind, amount, unit "
+                    "FROM swap_ledger WHERE " + predicate,
+                    values,
+                ).fetchall()
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("swap ledger unavailable") from None
+        return tuple(LedgerEntry(*row) for row in rows)
+
     def inspect_swaps(
         self, *, session_id: str | None = None, after: str | None = None, limit: int = 100
     ) -> SwapInspectionPage:
@@ -8369,9 +8507,9 @@ def _check_schema(
     if connection.execute("PRAGMA application_id").fetchone() != (
         APPLICATION_ID,
     ) or version not in (
-        (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, SCHEMA_VERSION)
+        (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, SCHEMA_VERSION)
         if allow_v5
-        else (8, 9, 10, 11, 12, 13, 14, 15, 16, SCHEMA_VERSION)
+        else (8, 9, 10, 11, 12, 13, 14, 15, 16, 17, SCHEMA_VERSION)
     ):
         raise LiveSessionStoreError("live session store version unsupported")
     objects = {
@@ -8393,6 +8531,7 @@ def _check_schema(
         14: SCHEMA_V14,
         15: SCHEMA_V16,
         16: SCHEMA_V16,
+        17: SCHEMA_V17,
         SCHEMA_VERSION: SCHEMA,
     }[version]
     indexes = {
@@ -8406,7 +8545,13 @@ def _check_schema(
         14: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
         15: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
         16: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
-        SCHEMA_VERSION: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
+        17: (*ADMISSION_INDEXES, *RESERVATION_INDEXES, *COOPERATION_INDEXES),
+        SCHEMA_VERSION: (
+            *ADMISSION_INDEXES,
+            *RESERVATION_INDEXES,
+            *COOPERATION_INDEXES,
+            *LEDGER_INDEXES,
+        ),
     }
     expected = {("table", statement.split()[2]): statement for statement in schema}
     expected.update(
@@ -8596,6 +8741,17 @@ def _upgrade_v11(connection: sqlite3.Connection) -> None:
     """
     connection.execute(COOPERATION_ATTEMPT_SCHEMA)
     for statement in COOPERATION_INDEXES:
+        connection.execute(statement)
+
+
+def _upgrade_v17(connection: sqlite3.Connection) -> None:
+    """Add the swap ledger empty: earlier swaps keep no accounting.
+
+    An absent row proves nothing about a swap accepted before the upgrade, so
+    reports count such swaps as unaccounted, never as free of costs.
+    """
+    connection.execute(SWAP_LEDGER_SCHEMA)
+    for statement in LEDGER_INDEXES:
         connection.execute(statement)
 
 
@@ -9144,6 +9300,71 @@ def _swap(connection: sqlite3.Connection, session_id: str) -> SwapRecord | None:
     return None if row is None else SwapRecord(*row)
 
 
+def _record_ledger(  # noqa: PLR0913 - one row's explicit parts
+    connection: sqlite3.Connection,
+    session_id: str,
+    now: int,
+    kind: str,
+    amount: object = None,
+    *,
+    unit: str = "sat",
+) -> None:
+    """Append one accounting row inside the caller's transaction.
+
+    The values are sanitized here, so the row can never refuse the swap event
+    it describes: an unexpected amount is stored as unmeasured (NULL).
+    """
+    measured = ledger_amount(amount)
+    connection.execute(
+        "INSERT INTO swap_ledger (session_id, recorded_at, kind, amount, unit) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (session_id, int(now), kind, measured, None if measured is None else unit),
+    )
+
+
+def _offer_economics(offer: bytes) -> SwapEconomics | None:
+    """Return a retained offer's committed amounts; None if they cannot be read."""
+    try:
+        return swap_economics(_offered_any_terms(offer))
+    except Exception:  # noqa: BLE001 - accounting never refuses a protocol step
+        return None
+
+
+def _record_outcome(
+    connection: sqlite3.Connection,
+    session_id: str,
+    to_state: str,
+    now: int,
+    *,
+    claim_txid: str | None = None,
+) -> None:
+    """Record a terminal transition with what it realized; other states add nothing.
+
+    ``completed`` carries the revenue and ``lost`` the paid principal, both
+    from the signed terms. A confirmed Bitcoin claim also records its fee
+    from the attempt that confirmed (NULL when a legacy attempt has none).
+    """
+    kind = TERMINAL_KIND_BY_STATE.get(to_state)
+    if kind is None:
+        return
+    row = connection.execute(
+        "SELECT terms_offer FROM swaps WHERE session_id=?", (session_id,)
+    ).fetchone()
+    economics = None if row is None else _offer_economics(row[0])
+    amount: int | None = None
+    if economics is not None and kind == COMPLETED:
+        amount = economics.revenue_sat
+    elif economics is not None and kind == LOST:
+        amount = economics.principal_sat
+    _record_ledger(connection, session_id, now, kind, amount)
+    if kind == COMPLETED and claim_txid is not None:
+        fee = connection.execute(
+            "SELECT fee_sat FROM claim_attempts WHERE session_id=? AND txid=?",
+            (session_id, claim_txid),
+        ).fetchone()
+        _record_ledger(connection, session_id, now, CLAIM_FEE, None if fee is None else fee[0])
+
+
 def _apply_effect(
     connection: sqlite3.Connection,
     request: Envelope,
@@ -9167,6 +9388,14 @@ def _apply_effect(
             "INSERT INTO swaps VALUES (?, ?, ?, ?, 'ACCEPTED', NULL, NULL, NULL, NULL, ?, "
             "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
             (request.session_id, effect.contract_hash, replied[0], document, now),
+        )
+        economics = _offer_economics(replied[0])
+        _record_ledger(
+            connection,
+            request.session_id,
+            now,
+            ACCEPTED,
+            None if economics is None else economics.volume_sat,
         )
         if isinstance(_offered_any_terms(replied[0]), EvmContractTerms):
             connection.execute(

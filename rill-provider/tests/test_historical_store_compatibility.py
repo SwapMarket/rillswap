@@ -105,8 +105,8 @@ def test_populated_historical_store_preserves_claim_and_reservation_across_resta
     for _ in range(2):
         with harness.acquire() as store:
             connection = store._connection  # noqa: SLF001 - durable acquisition acceptance
-            assert connection.execute("PRAGMA user_version").fetchone() == (17,)
-            assert connection.execute("SELECT schema_version FROM meta").fetchone() == (17,)
+            assert connection.execute("PRAGMA user_version").fetchone() == (18,)
+            assert connection.execute("SELECT schema_version FROM meta").fetchone() == (18,)
             assert (
                 connection.execute(
                     f"SELECT {HISTORICAL_SWAP_COLUMNS} FROM swaps WHERE session_id=?",  # noqa: S608
@@ -146,8 +146,8 @@ def test_interrupted_normalization_rolls_back_schema_rows_and_both_markers(
         raise OSError("injected interruption")
 
     def interrupt_after_markers(connection: sqlite3.Connection) -> int:
-        assert connection.execute("PRAGMA user_version").fetchone() == (17,)
-        assert connection.execute("SELECT schema_version FROM meta").fetchone() == (17,)
+        assert connection.execute("PRAGMA user_version").fetchone() == (18,)
+        assert connection.execute("SELECT schema_version FROM meta").fetchone() == (18,)
         raise OSError("interrupted after version markers")
 
     with monkeypatch.context() as patch:
