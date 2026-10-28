@@ -207,29 +207,51 @@ test("cooperation still runs when the lockup confirms long after the quote deadl
   } finally { transport.mockRestore(); e.dispose(); }
 });
 
-test("a transient post-cooperation read is retried in place and the cooperative claim is posted", async () => {
-  const f = await executionFixture("signed"), e = await f.prepare(), transport = spyOn(globalThis, "fetch").mockImplementation(f.fetch);
-  try {
-    await e.accept(f.assertCurrent); await e.exposeInvoice(f.assertCurrent); await e.receiveFunding();
-    await e.prepareClaim(API, 100n, f.assertCurrent); f.failFreshAfterCooperation = FRESH_READ_ATTEMPTS - 1;
-    expect((await e.exposeClaim(API, BROADCAST, "broadcast", f.assertCurrent)).outcome).toBe("accepted");
-    expect(parseTransaction(hexToBytes(f.postedTransactions[0]!)).inputs[0]!.witness).toHaveLength(1); // key path
-    expect(f.events.filter((event) => event === "action:cooperative_claim_propose")).toHaveLength(1);
-    expect(f.posts).toBe(1);
-  } finally { transport.mockRestore(); e.dispose(); }
-});
-
-test("a persistent post-cooperation read failure retries the fallback without another proposal or POST authority", async () => {
+test("post-cooperation read failures do not hold back the claim once the proposal is sent", async () => {
   const f = await executionFixture("signed"), e = await f.prepare(), transport = spyOn(globalThis, "fetch").mockImplementation(f.fetch);
   try {
     await e.accept(f.assertCurrent); await e.exposeInvoice(f.assertCurrent); await e.receiveFunding();
     await e.prepareClaim(API, 100n, f.assertCurrent); f.failFreshAfterCooperation = FRESH_READ_ATTEMPTS;
-    await expect(e.exposeClaim(API, BROADCAST, "broadcast", f.assertCurrent)).rejects.toThrow();
-    expect(e.record.stage).toBe("claim-ready"); expect(f.posts).toBe(0);
     expect((await e.exposeClaim(API, BROADCAST, "broadcast", f.assertCurrent)).outcome).toBe("accepted");
-    expect(parseTransaction(hexToBytes(f.postedTransactions[0]!)).inputs[0]!.witness).toHaveLength(4);
+    expect(parseTransaction(hexToBytes(f.postedTransactions[0]!)).inputs[0]!.witness).toHaveLength(1); // key path
     expect(f.events.filter((event) => event === "action:cooperative_claim_propose")).toHaveLength(1);
     expect(f.events.filter((event) => event === "cooperation-nonce")).toHaveLength(1);
     expect(f.posts).toBe(1);
+  } finally { transport.mockRestore(); e.dispose(); }
+});
+
+for (const cooperation of ["signed", "declined"] as const) {
+  test(`a block crossing the claim cutoff after a ${cooperation} proposal still broadcasts the claim`, async () => {
+    const f = await executionFixture(cooperation), e = await f.prepare();
+    const transport = spyOn(globalThis, "fetch").mockImplementation((async (url: string | URL | Request, init?: RequestInit) => {
+      if (f.events.includes("action:cooperative_claim_propose")) f.tipHeight = 219;
+      return f.fetch(url, init);
+    }) as typeof globalThis.fetch);
+    try {
+      await e.accept(f.assertCurrent); await e.exposeInvoice(f.assertCurrent); await e.receiveFunding();
+      f.tipHeight = 218; // refund_lock_height 220 with claim_confirmation_blocks 2: the last claimable tip
+      const prepared = await e.prepareClaim(API, 100n, f.assertCurrent);
+      const result = await e.exposeClaim(API, BROADCAST, "broadcast", f.assertCurrent);
+      expect(result.outcome).toBe("accepted"); expect(result.txid).toBe(prepared.claim.txid); expect(f.posts).toBe(1);
+      expect(parseTransaction(hexToBytes(f.postedTransactions[0]!)).inputs[0]!.witness).toHaveLength(cooperation === "signed" ? 1 : 4);
+      // The exposure is durable before the preimage-bearing proposal leaves the browser.
+      expect(f.events.indexOf("claim-unknown")).toBeGreaterThan(-1);
+      expect(f.events.indexOf("claim-unknown")).toBeLessThan(f.events.indexOf("action:cooperative_claim_propose"));
+      expect(f.record.stage).toBe("accepted");
+    } finally { transport.mockRestore(); e.dispose(); }
+  });
+}
+
+test("cooperation that stops before the proposal keeps the claim cutoff", async () => {
+  const f = await executionFixture("signed"), e = await f.prepare({ cooperation: {
+    loadMusig: () => Promise.reject(new Error("unused")),
+    reserve: async () => { f.tipHeight = 219; throw new Error("storage unavailable"); },
+  } } as Parameters<typeof f.prepare>[0]), transport = spyOn(globalThis, "fetch").mockImplementation(f.fetch);
+  try {
+    await e.accept(f.assertCurrent); await e.exposeInvoice(f.assertCurrent); await e.receiveFunding();
+    f.tipHeight = 218; await e.prepareClaim(API, 100n, f.assertCurrent);
+    await expect(e.exposeClaim(API, BROADCAST, "broadcast", f.assertCurrent)).rejects.toThrow("Reverse claim refused");
+    expect(f.events).not.toContain("action:cooperative_claim_propose");
+    expect(f.record.stage).toBe("claim-ready"); expect(f.posts).toBe(0);
   } finally { transport.mockRestore(); e.dispose(); }
 });
