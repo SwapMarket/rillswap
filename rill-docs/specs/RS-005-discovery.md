@@ -1,6 +1,6 @@
 # RS-005: Provider discovery
 
-Status: pre-release draft
+Status: draft
 
 Version: `0.1.0-pre.1`
 

@@ -1,6 +1,6 @@
 # RS-007: Recovery package
 
-Status: pre-release draft
+Status: draft
 
 Format version: `1-pre.1`
 
@@ -12,7 +12,7 @@ either one user-provided X25519 recipient or the age scrypt passphrase mode.
 Scrypt recipients MUST NOT be mixed with other recipient types. Armor is not
 part of version 1.
 
-For the pre-release CLI profile, "one recipient" means exactly one X25519
+For the CLI profile, "one recipient" means exactly one X25519
 key-wrapping stanza. Zero to four bounded GREASE stanzas (tags ending in
 `-grease`) MAY accompany it; they are not additional decrypting recipients.
 The scrypt stanza MUST be the only stanza, including no GREASE. The importer
@@ -138,7 +138,7 @@ current chain validity, timely or durable encrypted publication, nor permission
 to disclose. Independent key-based rebuilding remains available; this fixed-fee
 transaction is never the sole recovery path. Missing, partial, older, or restored
 records authorize no automatic work, migration, payment retry, or cooperation.
-Restart abandons cooperation. The future live flow must separately verify durable
+Restart abandons cooperation. Live execution must separately verify durable
 publication and fresh original-session payment/funding authority, then durably
 reserve possible preimage disclosure before transmission. This artifact is not
 that disclosure reservation and does not enable reverse readiness or cooperation.

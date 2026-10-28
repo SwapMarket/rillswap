@@ -2,7 +2,7 @@
 
 **Version:** 0.1.0  
 **License:** MIT  
-**Status:** initial release design
+**Status:** current design
 
 This document describes the design that the RillSwap specifications and
 components implement: goals, decisions, protocol shape, state machines,
@@ -16,9 +16,9 @@ currently supports. External standards are listed in
 
 RillSwap is an open, provider-neutral Bitcoin–Lightning atomic-swap protocol with a locally verifying client, independent recovery, replaceable discovery, and replaceable encrypted transport. The reference implementation consists of a Python provider, a Python CLI, and a separately implemented TypeScript browser client. No hosted RillSwap service, official provider registry, token, coordinator, or account is required for settlement.
 
-The initial release supports Bitcoin mainnet, default and custom signet, regtest, and versioned additional Bitcoin network definitions. It supports two explicitly distinct flows: conventional on-chain-first BTC→LN, and held-Lightning-first LN→BTC. Both use the same two-leaf P2TR construction, with roles reversed. Standard BOLT11 invoices, a 32-byte SHA256 preimage, confirmed funding, and unilateral script-path claim/refund are the baseline. Cooperative MuSig2 key-path claims provide the normal privacy optimization.
+RillSwap supports Bitcoin mainnet, default signet, testnet4 and namespaced regtest, each through a versioned network definition. It supports two explicitly distinct flows: conventional on-chain-first BTC→LN, and held-Lightning-first LN→BTC. Both use the same two-leaf P2TR construction, with roles reversed. Standard BOLT11 invoices, a 32-byte SHA256 preimage, confirmed funding, and unilateral script-path claim/refund are the baseline. A BTC→LN provider may announce zero funding confirmations and pay from an unconfirmed deposit; that double-spend risk is the provider's alone. Cooperative MuSig2 key-path claims provide the normal privacy optimization.
 
-The baseline excludes zero-confirmation swaps, Electrum-style HTLC-first BTC→LN, AMP/keysend, BOLT12, PTLC/adaptor-signature protocols, automatic swap batching, and early cooperative refunds. These require new profiles or negotiated extensions; they are not hidden implementation choices. Assets other than BTC are added only as separate profiles: [RS-010](specs/RS-010-erc20-swaps.md) defines ERC20 ↔ Lightning swaps over a pinned EVM hash-time-lock contract.
+The baseline excludes zero-confirmation LN→BTC funding, Electrum-style HTLC-first BTC→LN, AMP/keysend, BOLT12, PTLC/adaptor-signature protocols, automatic swap batching, and early cooperative refunds. These require new profiles or negotiated extensions; they are not hidden implementation choices. Assets other than BTC are added only as separate profiles: [RS-010](specs/RS-010-erc20-swaps.md) defines ERC20 ↔ Lightning swaps over a pinned EVM hash-time-lock contract.
 
 **Security objective:** under stated chain, Lightning, fee, key-security, and monitoring assumptions, a counterparty cannot take the principal without providing the corresponding payment, or leaving the honest party an enforceable recovery path. Fees, liquidity lockup, censorship, and missed deadlines remain possible. A refund becoming eligible is not a refund becoming final.
 
@@ -183,7 +183,7 @@ sequence, in_reply_to, contract_hash,
 message_type, payload, required_features, extensions
 ```
 
-Use separate domain-separated BIP340 tagged-hash signatures for provider-authenticated economic terms and any application envelopes that require transferable authentication. Sign canonical bytes excluding the signature field. Specify exact tags and object schemas in RS-001; freeze their byte vectors before interoperability release. The Nostr rumor itself remains unsigned as required by NIP59; an explicitly signed application object inside it is a different object and forfeits deniability for that object.
+Use separate domain-separated BIP340 tagged-hash signatures for provider-authenticated economic terms and any application envelopes that require transferable authentication. Sign canonical bytes excluding the signature field. RS-001 specifies the exact tags and object schemas, with byte vectors. The Nostr rumor itself remains unsigned as required by NIP59; an explicitly signed application object inside it is a different object and forfeits deniability for that object.
 
 Handshakes negotiate profile, protocol version, encryption suite, capabilities, network, fresh client/provider session keys, random challenges, and transport endpoints. A provider-identity signature binds this transcript. Reject downgrade or unknown mandatory features. Unknown fields are invalid except inside a bounded namespaced extension container; optional extensions cannot alter base-profile safety rules.
 
@@ -201,7 +201,7 @@ The discovery interface returns authenticated advertisements, not trusted liquid
 
 The Nostr adapter uses a dedicated addressable announcement kind, not NIP78's generic app-data kind: current NIP78 explicitly directs interoperable public applications toward dedicated kinds and describes owner-authenticated storage behavior.
 
-For local interoperability testing only, this design reserves **project-local experimental kind 39417** for advertisements and **21417** for unpublished protocol rumors. These are not claimed to be registered or globally unoccupied. Require a `rillswap` namespace and an experimental binding version. Before a public stable specification, coordinate and freeze dedicated kinds in the companion NIP draft; a change is a binding-version change, not silent reinterpretation. The core protocol never embeds these numbers in settlement semantics.
+This design uses **project-local kind 39417** for advertisements and **21417** for unpublished protocol rumors. These are not claimed to be registered or globally unoccupied. Events require a `rillswap` namespace and a binding version. Registering dedicated kinds through the companion NIP draft is a binding-version change, not a silent reinterpretation. The core protocol never embeds these numbers in settlement semantics.
 
 Use a `d` identifier scoped to protocol/network/advertisement slot and minimal public protocol/network tags. Provider names/descriptions are untrusted plain text. Do not put payment hashes, invoices, transaction IDs, swap IDs, individual amounts, or client identities in discovery tags.
 
@@ -227,9 +227,9 @@ Tor clients use SOCKS with remote DNS and fail closed: no automatic clearnet rec
 
 A future direct HTTPS/WebSocket or `.onion` adapter can carry the **same encrypted signed frames** without a relay. This changes transport exposure, not settlement or identity validation. Any future cryptographic suite must use a separately reviewed established construction, authenticate its negotiation, and receive a distinct suite identifier. Cross-transport resume requires authenticated session/recovery authorization and explicit user privacy policy; no silent downgrade or clearnet fallback.
 
-## 10. Candidate Taproot contract
+## 10. Taproot contract
 
-This is the proposed new RillSwap construction, not a claim of existing Boltz script compatibility. Freeze serialized vectors only after independent review and Bitcoin Core execution tests.
+This is a RillSwap-specific construction; it is not script-compatible with Boltz swaps. Serialized vectors are in `vectors/`.
 
 Given fresh valid compressed public keys `K_user` and `K_provider`, aggregate in **exact order `[K_user, K_provider]`** using BIP327. Reject duplicate keys. Use the aggregate x-only key as the internal key, applying the BIP341 Taproot tweak for exactly two leaf-version `0xc0` leaves. TapBranch ordering and control-block parity follow BIP341; use library APIs, not custom point arithmetic.
 
@@ -402,7 +402,7 @@ The provider always runs a durable watcher. CLI users can run `rill recover watc
 
 Bundle all JS, WASM, styles, and assets. No CDN dependencies, analytics, remote executable scripts, or third-party fonts. Use a small Vite/TypeScript application, strict compiler options (`strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`), bounded runtime schemas, a signer worker, and safe plain-text rendering.
 
-A release ZIP contains the same `dist/` bytes deployed to GitHub Pages. Support loopback static serving:
+The static build can be served from GitHub Pages or from loopback:
 
 ```sh
 python -m http.server 8080 --bind 127.0.0.1 --directory dist
@@ -416,7 +416,7 @@ The UI locally validates contracts, transactions, signatures, invoices, amounts,
 
 - `own-node`: data from the user's full node through a restricted authenticated endpoint/local agent; the provider is not the chain authority.
 - `remote-chain-source`: clearly disclosed dependence on a selected external data service; multiple sources help availability/cross-checks, not full consensus verification.
-- Future `verified-light-client`: release-gated header/inclusion/discovery verification with documented security assumptions and signet validation; not a marketing label attached to explorer queries.
+- A `verified-light-client` mode is not implemented. It would require header, inclusion and discovery verification with documented security assumptions, not a label attached to explorer queries.
 
 Strict own-node mode rejects provider-only or unverified remote confirmation assertions. A standalone static build has no mandatory RillSwap backend, but still needs chain data, Lightning access through wallets/providers, and transport connectivity. Full validation and zero external infrastructure are different requirements.
 
@@ -424,7 +424,7 @@ The optional local agent serves UI and a narrow same-origin API, binds loopback,
 
 UI flow: select network and privacy/chain mode; discover/import provider; compare indicative terms; create selected quote; verify full terms; export recovery; commit; show evidence-backed status and deadlines; complete or recover. Fee/lockup/preimage-exposure warnings remain visible and precise. A remote provider description never injects HTML.
 
-GitHub Pages deployment runs on pushes to `main` (never on pull requests) through official Pages artifact/deploy actions and a protected environment. PRs build and test without deploy credentials. Pin action commits; use locked package installation; verify type/unit/vector tests; build once; attach the same bytes and checksums to a release; upload those bytes to Pages. Configure relative base paths for repository/fork hosting. Do not execute untrusted PR code via privileged `pull_request_target`.
+GitHub Pages deployment runs on pushes to `main` (never on pull requests) through the official Pages artifact/deploy actions. PRs build and test without deploy credentials. The workflow pins action commits, installs locked packages, runs the unit and browser tests, and uploads the tested build. Relative base paths support repository and fork hosting. Do not execute untrusted PR code via privileged `pull_request_target`.
 
 Signed builds and attestations help a user verify a pinned artifact; they do not automatically verify the JavaScript that every website visitor executes. GitHub Pages' header controls also differ from a custom server, so document which CSP protections are actually delivered rather than claiming unavailable headers.
 
@@ -447,43 +447,29 @@ Notifications are optional. They default to “swap requires attention” plus a
 
 Provider logs/metrics are aggregate and redacted; do not label metrics with payment hashes, addresses, invoices, or stable customer identifiers. Redaction tests use known synthetic secrets. Expose admin actions locally with authentication. Run containers as non-root, restrict writable directories, avoid Docker socket mounts, and use health checks that measure chain/LN/reconciliation readiness rather than process existence.
 
-## 21. Docker E2E architecture
+## 21. End-to-end testing
 
 The repository ships a Docker Compose regtest environment (`dev/`, see
 `DEVELOPMENT.md`) with Bitcoin Core, separate maker, user and merchant LND
 nodes, a Nostr relay, an Anvil EVM chain, makers for all four swap profiles,
-the CLI, the browser app, a gas sponsor and a demo shop. It is the basis for
-manual testing and opt-in funded diagnostics. The full release harness extends
-it to the following shape:
+the CLI, the browser app, a gas sponsor and a demo shop. Playwright suites in
+`rill-web/regtest/` drive real browser flows against it, and
+`scripts/regtest_e2e.py` runs isolated Core, LND, relay, provider and client
+containers for both swap directions.
 
-```text
-pytest driver + deterministic block controller
-  Bitcoin Core A/B/C (regtest; independent datadirs for forks/reorgs)
-  LND provider A + provider B + customer + routing node
-  Rill provider A + provider B (separate wallets/keys)
-  Nostr relay A/B/C + malicious-observation relay proxy
-  latency/fault proxy
-  Rill CLI
-  static web server + Playwright browsers
-  notification sink
-  optional private Tor test network + onion endpoints
-```
+Use real Bitcoin Core, LND, and relay implementations, pinned by version or digest. Fake adapters are appropriate for unit tests, not as substitutes for money-path end-to-end tests. Default integration tests have no public-network dependencies: no faucets or production relays.
 
-Use real Bitcoin Core, LND, and relay implementations, pinned by digest. Fake adapters are appropriate for unit tests, not as substitutes for the full money-path E2E suite. Disable public-network dependencies in default integration tests; no faucets or production relays.
+Fixture bootstrap mines enough blocks for coinbase maturity, funds wallets, initializes restricted macaroons, opens channels, and waits on observable state rather than arbitrary sleeps. Tests that depend on block timing control block production explicitly.
 
-Fixture bootstrap mines enough blocks for coinbase maturity, funds wallets, initializes restricted macaroons, opens channels and verifies routes, and waits on observable state. Do not rely on arbitrary sleeps or an uncontrolled autominer. Explicitly advance block heights and introduce forks, fee pressure, and LN force closes as test actions.
+Browser tests use a real static HTTP origin and actual browser wallet/backup flows, not only unit tests. Python/TypeScript implementations must agree on canonical messages, contract commitments, signatures, and recoveries. Two provider processes sharing one implementation demonstrate deployment independence, not independent protocol implementation.
 
-Compose profiles: `smoke`, `e2e`, `browser`, `chaos`, `tor`, `custom-signet`, and `compat`. A one-shot test-runner service determines the exit status. The wrapper script performs cleanup, unique project naming, fixture validation, and redacted artifact collection even after failure.
+Money-path tests must cover both directions, both spend paths, timeout/refund races, restarts at effect boundaries, malformed commitments, short HTLC expiries, ambiguous LN outcomes, nonce lifecycle violations, relay replay/censorship, browser backup loss, unilateral CLI recovery with all RillSwap services removed, coin-selection privacy, and chain-source trust enforcement.
 
-Browser tests use a real static HTTP origin and actual browser wallet/backup flows, not only Node unit tests. Python/TypeScript implementations must agree on canonical messages, contract commitments, signatures, and recoveries. Two provider processes sharing one implementation demonstrate deployment independence, not independent protocol implementation; test both client implementations and seek a separate implementation before declaring ecosystem interoperability.
+Tor tests should use an isolated private test network where practical, with captured DNS/egress to prove fail-closed behavior. They cannot prove anonymity against a global observer. Public-network smoke tests are separate from deterministic PR tests.
 
-Detailed cases and identifiers are in [`compatibility/TEST-MATRIX.md`](compatibility/TEST-MATRIX.md). Minimum acceptance includes both directions, both spend paths, timeout/refund races, restarts at every effect boundary, malformed commitments, short HTLC expiries, ambiguous LN outcomes, nonce lifecycle violations, relay replay/censorship, browser backup loss, unilateral CLI recovery with all RillSwap services removed, coin-selection privacy, and chain-source trust enforcement.
+## 22. Security invariants
 
-Tor tests use an isolated private test network where practical, with captured DNS/egress to prove fail-closed behavior. They cannot prove anonymity against a global observer. Public-network smoke tests are separate from deterministic PR tests.
-
-## 22. Security catalogue and release invariants
-
-The attack catalogue records attacker, prerequisites, principal exposure, fee exposure, privacy loss, liveness assumptions, mitigation, and corresponding test IDs. Mandatory invariants:
+Threat analysis considers each attack's attacker, prerequisites, principal exposure, fee exposure, privacy loss, liveness assumptions, and mitigation. Mandatory invariants:
 
 - No funding/payment/reveal/signing action based solely on provider status.
 - No accepted contract with an unexpected internal key, leaf, network, amount, hash, or timeout.
@@ -498,19 +484,10 @@ The attack catalogue records attacker, prerequisites, principal exposure, fee ex
 
 Model the two directional reducers with stateful property tests and a small bounded state model. Include asynchronous observations, reordered messages, counterparty refusal, crash/restart, fees, and block progression. A model passing is not proof that adapter behavior matches it; test adapters against real nodes and document the correspondence.
 
-## 23. Implementation milestones
+## 23. Interoperability with other swap services
 
-1. **Feasibility and specification freeze:** verify native/WASM MuSig capability; execute candidate scripts through Core; test LND absolute deadlines and hold visibility; prove age cross-import; establish network identities; review licensing. Produce exact fixtures and threat-model decisions before money UI work.
-2. **Unilateral vertical slice:** pure core + Core wallet + LND + CLI; both directions, script claims/refunds, durable secrets, recovery without provider. No privacy optimization can substitute for this milestone.
-3. **Provider durability and economics:** persistent action journal, reservations, reconciliation, conservative fee/time policies, two independent provider instances, fault injection at every effect boundary.
-4. **Nostr and interoperability:** modular discovery/transport, signed terms, NIP44/59 privacy policy, adversarial relay tests, stable public event-kind coordination, published schemas/vectors.
-5. **Browser delivery:** independent TS SDK, static local UI, recovery interoperability, real Playwright flows, Pages/release automation, explicit chain-trust modes and local agent hardening.
-6. **Cooperative privacy and hardening:** reviewed MuSig lifecycle, exact transaction authorization, unilateral fallback under withheld signatures, Tor/direct-transport extension tests, cryptographic/state-machine reviews, independent audits.
-
-## 24. Future interoperability and translation
-
-Add an adapter interface for existing provider APIs only after the native profile is stable. A noncustodial adapter translates offers/messages while retaining the actual upstream settlement profile; it cannot make a P2WSH contract become P2TR or turn a custodial exchange deposit into an atomic claim.
+Adapters for existing provider APIs are not implemented. A noncustodial adapter translates offers/messages while retaining the actual upstream settlement profile; it cannot make a P2WSH contract become P2TR or turn a custodial exchange deposit into an atomic claim.
 
 A liquidity-bearing router can offer a new RillSwap P2TR contract while sourcing/hedging upstream. That router is an independent swap participant with capital, fee, timing, and counterparty exposure. Hash-linked multi-leg composition requires a separately analyzed profile and nested deadlines. Neither discovery nor the client should conceal the difference between a message translator and a funded intermediary.
 
-The long-term success criterion is not the number of provider listings. It is independently implemented clients and providers agreeing on exact contracts, messages, recovery files, and failure behavior without permission from the original RillSwap maintainers.
+The measure of success is not the number of provider listings. It is independently implemented clients and providers agreeing on exact contracts, messages, recovery files, and failure behavior without permission from the original RillSwap maintainers.

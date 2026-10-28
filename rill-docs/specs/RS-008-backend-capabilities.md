@@ -1,6 +1,6 @@
 # RS-008: Backend capabilities and evidence
 
-Status: pre-release draft
+Status: draft
 
 Version: `0.1.0-pre.1`
 

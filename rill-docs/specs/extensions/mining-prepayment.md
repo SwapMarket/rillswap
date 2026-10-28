@@ -1,6 +1,6 @@
 # Mining prepayment extension
 
-Status: disabled pre-release draft
+Status: draft, disabled
 
 Identifier: `org.rillswap/mining-prepayment/v1`
 

@@ -1,14 +1,13 @@
 # RS-006: Nostr encrypted transport
 
-Status: pre-release draft
+Status: draft
 
 Suite: `nostr-nip44v2-nip59/v1`
 
-The first transport encrypts RS-001 application frames with NIP-44 version 2
-inside NIP-59 gift wraps. Durable outer events use kind 1059. For local
-interoperability tests, inner protocol rumors use project-local experimental
-kind 21417. For **private-regtest experimental binding**
-`nostr-experimental-1`, the rumor is exactly the six NIP-01 members `id`,
+This transport encrypts RS-001 application frames with NIP-44 version 2
+inside NIP-59 gift wraps. Durable outer events use kind 1059. Inner protocol
+rumors use project-local kind 21417. For binding `nostr-experimental-1`, the
+rumor is exactly the six NIP-01 members `id`,
 `pubkey`, `created_at`, `kind`, `tags`, `content`, with **no** `sig` member
 (including no null signature). Its tags are exactly
 `[["rillswap","nostr-experimental-1"]]`. Its `content` is the canonical
@@ -22,12 +21,12 @@ than trying a weaker interpretation. The inner rumor remains unsigned as
 NIP-59 requires; any signed RillSwap application object inside is separately
 authenticated and is not deniable. The **project-local rumor kind 21417 and
 binding `nostr-experimental-1`** are not registered public identifiers;
-coordinate stable values before deployment. Seal kind 13 and outer gift-wrap
+registered values would require a new binding version. Seal kind 13 and outer gift-wrap
 kind 1059 are already NIP-59 identifiers.
 
 Implementations MUST follow NIP-59 rumor, seal, and gift-wrap construction,
 including a signed kind-13 seal with **empty tags**, a one-time wrapper key,
-and valid outer signatures. **RillSwap's private-regtest profile additionally
+and valid outer signatures. **This binding additionally
 requires** a durable kind-1059 outer event (not NIP-59's ephemeral 21059),
 exactly one matching recipient `p` routing tag, and randomized outer
 timestamps. NIP-59 describes recipient routing tags and timestamp tweaking
@@ -56,11 +55,10 @@ malformed ciphertext and malformed plaintext SHOULD be uniform and redacted.
 
 The decoded application envelope `content` is limited to 16 KiB of UTF-8
 bytes. NIP-44's own mandatory plaintext padding still applies at both layers.
-The previously proposed **additional** 4/8/16 KiB transport-padding container
-has no wire encoding yet: this experimental binding MUST send and receive
-only the direct, unpadded canonical-envelope content defined above. A future
-optional authenticated transport-padding format requires a separately
-specified binding version and explicit negotiation; do not guess it from
+This binding defines no **additional** transport-padding container: it MUST
+send and receive only the direct, unpadded canonical-envelope content defined
+above. An optional authenticated transport-padding format would require a
+separately specified binding version and explicit negotiation; do not guess it from
 extra JSON fields, whitespace, or ciphertext length. The final encoded outer
 event size is checked after construction. Retries use a fresh seal/wrapper
 and randomness around the unchanged logical application message.

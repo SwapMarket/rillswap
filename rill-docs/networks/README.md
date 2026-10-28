@@ -11,7 +11,7 @@ consensus profile and fixture.
 
 The active implementation targets are default signet, testnet4, mainnet, and
 namespaced regtest. The testnet3 definition remains for inspection of historical
-records, not as an enabled live network. Custom signets are outside this rollout.
+records, not as an enabled live network. Custom signets are not supported.
 
 Backend checks must compare Core's chain and genesis, its `signet_challenge` on
 signet, and LND's actual chain identity. The shared testnet3/testnet4 invoice

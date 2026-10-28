@@ -1,6 +1,6 @@
 # RS-003: BTC to Lightning profile
 
-Status: pre-release draft
+Status: draft
 
 Version: `btc-to-ln/v1`
 
@@ -168,8 +168,9 @@ contract hash.
   `claim_broadcast` names the provider's claim transaction. Observations
   inform only. The client still verifies the preimage and the chain itself.
 
-Version one uses the unilateral claim leaf. Cooperative MuSig2 claims are
-optional and not yet negotiated. The provider prepares an explicit LND route
+New swaps negotiate `cooperative-claim/v1` (RS-002 section 5.1), but the
+cooperative MuSig2 key-path claim stays optional: the provider can always
+claim through the unilateral claim leaf. The provider prepares an explicit LND route
 and checks its absolute `total_time_lock` against
 `timing_policy.max_outgoing_htlc_expiry_height`. A relative `cltv_limit` alone
 does not enforce this invariant when Core and LND sample different heights.

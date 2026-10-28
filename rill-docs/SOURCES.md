@@ -10,7 +10,3 @@ RillSwap specifications cite external standards by name. The main ones are:
 | Recovery files | age v1 file format |
 | EVM | ERC-20, EIP-712, EIP-7702, ERC-4337 (EntryPoint v0.7), Boltz `ERC20Swap` v6 |
 | Cryptography library | `bitcoin-core/secp256k1` (Schnorr, extrakeys and MuSig2 modules) |
-
-Earlier drafts used numbered `[Sxx]` source markers whose register was never
-published. Those markers were removed; statements that relied on them are
-design decisions, not cited facts.

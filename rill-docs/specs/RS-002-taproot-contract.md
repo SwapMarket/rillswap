@@ -1,6 +1,6 @@
 # RS-002: Taproot contract and transactions
 
-Status: pre-release draft
+Status: draft
 
 Version: `0.1.0-pre.1`
 
@@ -136,7 +136,7 @@ The BTC-to-LN client's burn is the append-once encrypted reservation described
 in RS-007 section 3.1. Its already-paid, exact provider claim does not change
 `dangerous_signature_issued`; the reservation never proves signature issuance
 or permits signing from recovery. The one-attempt-per-swap limit below still
-applies to fee changes in the first release.
+applies to fee changes.
 
 The cooperative claim uses transaction version 2, locktime zero, input sequence
 `0xfffffffd`, and the same one-contract-input, one-role-destination output, fee,
@@ -201,8 +201,8 @@ settlement, or broadcast authority. A second distinct completion for the same
 attempt is refused; an exact admitted completion replays its archived receipt.
 
 The local attempt has at most 30 seconds and ends before the existing
-unilateral broadcast/escalation cutoff (both constraints apply). The first
-release permits one cooperative attempt per swap; later fee bumps use fresh
+unilateral broadcast/escalation cutoff (both constraints apply). This profile
+permits one cooperative attempt per swap; later fee bumps use fresh
 unilateral spends. Both parties burn before allocating a nonce, consume before
 revealing a partial, and fall back without extending the budget on refusal,
 invalid data, restart, or timeout. For LN to BTC the client first durably
@@ -230,7 +230,7 @@ signing share this window. Recheck before native signing and before granting
 new disclosure authority. Late settlement does not reopen cooperation; exact
 already-committed response delivery does not authorize another signature.
 
-First-release proposal-derived settlement debt is restricted to a fresh,
+Proposal-derived settlement debt is restricted to a fresh,
 original-owner negotiation with an exact valid burned proposal reservation and
 a still-live original window. The swap must be `FUNDED`, with no potentially
 issued refund, positive confirmed-unspent Own-Core funding evidence, and safely
@@ -241,7 +241,7 @@ timing, not authentic observations, atomic backend state, or financial authority
 Invalid, incomplete, stale, or expired intervals abandon cooperation without
 renewal. Historical, restarted, expired, and invalid-plan proposals can retain
 preimage knowledge but do not create new proposal-derived debt under this
-first-release policy. Existing witness-derived debt and independent owed-debt
+profile. Existing witness-derived debt and independent owed-debt
 repayment remain unchanged.
 
 Live height authorization permits

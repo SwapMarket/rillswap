@@ -1,6 +1,6 @@
 # RS-004: Lightning to BTC profile
 
-Status: pre-release draft
+Status: draft
 
 Version: `ln-to-btc/v1`
 

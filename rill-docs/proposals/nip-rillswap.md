@@ -13,7 +13,7 @@ This draft uses NIP01 events, NIP44 v2 encryption, and NIP59 wrapping. It is not
 
 ## Kind allocation
 
-RillSwap requires a dedicated addressable provider-announcement kind and an application rumor kind. For private regtest interoperability, this draft uses experimental values **39417** and **21417**, respectively. These values are not claimed to be registered, globally unused, or final. Require protocol namespace and binding version, and coordinate/freeze the public stable values before deployment. Never publish the private rumor directly.
+RillSwap requires a dedicated addressable provider-announcement kind and an application rumor kind. This draft uses project-local values **39417** and **21417**, respectively. These values are not claimed to be registered or globally unused. Events carry the protocol namespace and binding version; registering stable values is a binding-version change. Never publish the private rumor directly.
 
 Do not use NIP78 kind 30078 as a generic public provider directory: its current documented purpose and owner-authenticated relay behavior differ from this use case.
 
@@ -52,13 +52,13 @@ Subsequent messages use per-session mailbox keys. A separate per-swap recovery a
 
 ## Message wrapping
 
-The application rumor contains the canonical RillSwap envelope as its content. For the private-regtest binding only, RS-006 fixes its kind 21417 and tags exactly `[["rillswap","nostr-experimental-1"]]`, matching the separately advertised binding version. The rumor ID uses NIP01 serialization and has **no** `sig` member. Apply NIP59: encrypt the rumor inside an author-signed, empty-tag kind-13 seal, then encrypt that seal inside a one-time-key gift wrap with one matching recipient `p` tag. Use NIP44 v2 at each prescribed encryption step and durable outer kind 1059. Follow NIP59's timestamp, recipient, and signature rules. Do not publish the private rumor directly or treat a valid wrapper as authenticated swap admission. Public kind/version allocation remains open.
+The application rumor contains the canonical RillSwap envelope as its content. For binding `nostr-experimental-1`, RS-006 fixes its kind 21417 and tags exactly `[["rillswap","nostr-experimental-1"]]`, matching the separately advertised binding version. The rumor ID uses NIP01 serialization and has **no** `sig` member. Apply NIP59: encrypt the rumor inside an author-signed, empty-tag kind-13 seal, then encrypt that seal inside a one-time-key gift wrap with one matching recipient `p` tag. Use NIP44 v2 at each prescribed encryption step and durable outer kind 1059. Follow NIP59's timestamp, recipient, and signature rules. Do not publish the private rumor directly or treat a valid wrapper as authenticated swap admission.
 
 Verify event signatures/size bounds before decrypting, then validate the seal and expected peer. App-level signed quotes are allowed inside the encrypted payload and remain explicitly transferable evidence; do not claim that such quotes are deniable merely because the enclosing rumor is unsigned.
 
 Encrypted application messages bind protocol version, profile, network, session/message ID, sender, sequence, response correlation, contract hash, type, payload, and mandatory features. Session authentication never replaces independent Bitcoin/LN observations for financial authorization.
 
-The profile caps application envelope content at 16 KiB and received outer events at 128 KiB. NIP44's mandatory plaintext padding remains in use; the proposed additional 4/8/16 KiB transport container cannot be sent or accepted in the first private-regtest binding because its exact encoding is not yet specified. A separately versioned future binding may define it, with final encoded-size checks. This cap is a RillSwap policy, not a claim about NIP44's protocol maximum.
+The profile caps application envelope content at 16 KiB and received outer events at 128 KiB. NIP44's mandatory plaintext padding remains in use; the binding defines no additional transport-padding container. A separately versioned binding may define one, with final encoded-size checks. This cap is a RillSwap policy, not a claim about NIP44's protocol maximum.
 
 ## Delivery and idempotency
 

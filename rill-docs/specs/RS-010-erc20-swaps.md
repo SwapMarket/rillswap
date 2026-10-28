@@ -1,6 +1,6 @@
 # RS-010: ERC20 stablecoin profiles
 
-Status: pre-release draft
+Status: draft
 
 Versions: `erc20-to-ln/v1`, `ln-to-erc20/v1`
 

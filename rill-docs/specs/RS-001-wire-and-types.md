@@ -1,6 +1,6 @@
 # RS-001: Wire format and protocol types
 
-Status: pre-release draft
+Status: draft
 
 Version: `0.1.0-pre.1`
 
