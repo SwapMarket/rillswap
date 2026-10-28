@@ -143,19 +143,32 @@ const hexInt = (value: unknown, what: string): number => {
 /** Stateless JSON-RPC reads against one configured endpoint; never signs. */
 export class EvmRpc {
   private readonly fetchFn: (input: string, init: RequestInit) => Promise<Response>;
-  constructor(private readonly url: string, fetchFn?: (input: string, init: RequestInit) => Promise<Response>) {
+  constructor(
+    private readonly url: string,
+    fetchFn?: (input: string, init: RequestInit) => Promise<Response>,
+    // Bounds every request, so a stalled endpoint cannot outlive awaitReceipt's deadline.
+    private readonly requestTimeoutMs = 15_000,
+  ) {
     // A bare `fetch` reference loses its window binding ("Illegal invocation" in browsers).
     this.fetchFn = fetchFn ?? ((input, init) => fetch(input, init));
   }
 
   async call(method: string, params: unknown[]): Promise<unknown> {
-    const response = await this.fetchFn(this.url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-    });
-    if (!response.ok) throw new EvmError(`EVM RPC ${method} failed: HTTP ${response.status}`);
-    const body = await response.json() as { result?: unknown; error?: { message?: string } };
+    const signal = AbortSignal.timeout(this.requestTimeoutMs);
+    let body: { result?: unknown; error?: { message?: string } };
+    try {
+      const response = await this.fetchFn(this.url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+        signal,
+      });
+      if (!response.ok) throw new EvmError(`EVM RPC ${method} failed: HTTP ${response.status}`);
+      body = await response.json() as typeof body;
+    } catch (error) {
+      if (signal.aborted) throw new EvmError(`EVM RPC ${method} timed out`);
+      throw error;
+    }
     if (body.error) throw new EvmError(`EVM RPC ${method} failed: ${body.error.message ?? "error"}`);
     return body.result;
   }
