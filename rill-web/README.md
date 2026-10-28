@@ -144,9 +144,10 @@ The page checks the provider's funding and confirmations, then saves and broadca
 the claim automatically. Keep the page open. The claim pays exactly the signed fee
 reserve, so the address receives exactly the requested amount. Before asking for
 signed terms, the page reads the chain API's next-block fee rate (`fastestFee`
-from `/v1/fees/recommended`) and asks for a reserve that pays the cooperative claim
-at that rate; without an estimate, or if that reserve exceeds your maximum claim
-fee, it stops before any payment. Live swaps first attempt a cooperative
+from `/v1/fees/recommended`) and asks for a reserve that pays the larger
+script-path claim at that rate, so the cooperative claim pays at least as much;
+without an estimate, or if that reserve exceeds your maximum claim fee, it
+stops before any payment. Live swaps first attempt a cooperative
 key-path claim, keeping the script and preimage off chain. The signed unilateral
 fallback is saved before disclosure and used if cooperation fails. Transient
 chain-read failures retry before the one-shot broadcast election, never after an

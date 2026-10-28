@@ -24,15 +24,17 @@ import type { ReverseSwapRequest } from "./reverseSwap";
 const require = (ok: boolean): void => { if (!ok) throw new SwapError("Reverse execution refused. Keep backups; no payment or exposure is retried."); };
 
 /**
- * The least claim fee reserve to ask for: the cooperative (key-path) claim at the next-block
- * rate, so the claim pays exactly the reserve and the destination receives exactly the payout.
- * One Taproot key-path input and one output: 77 vB plus the destination script (99 P2WPKH, 111 P2TR).
+ * The least claim fee reserve to ask for: the larger script-path claim at the next-block rate,
+ * so either claim path pays at least that rate, the claim pays exactly the reserve, and the
+ * destination receives exactly the payout. One Taproot script-path input (signature, preimage,
+ * claim script, control block) and one output: 121 vB plus the destination script (143 P2WPKH,
+ * 155 P2TR), as rill_core.settlement.claim_vsizes.
  */
 export function minimumClaimFeeReserveSat(destinationScript: string, rateSatKvb: number, configuredSat: bigint): bigint {
   if (!/^(?:[0-9a-f]{2}){1,80}$/.test(destinationScript) || !Number.isSafeInteger(rateSatKvb) || rateSatKvb <= 0) {
     throw new SwapError("Invalid claim fee inputs");
   }
-  const vsize = BigInt(77 + destinationScript.length / 2), nextBlock = (vsize * BigInt(rateSatKvb) + 999n) / 1000n;
+  const vsize = BigInt(121 + destinationScript.length / 2), nextBlock = (vsize * BigInt(rateSatKvb) + 999n) / 1000n;
   return nextBlock > configuredSat ? nextBlock : configuredSat;
 }
 const sign = (digest: Uint8Array, key: Uint8Array): string => bytesToHex(schnorr.sign(digest, key, randomBytes(32)));

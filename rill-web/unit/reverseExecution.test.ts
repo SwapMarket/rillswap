@@ -12,11 +12,12 @@ async function paidFixture() {
   await execution.accept(f.assertCurrent); const plan = await execution.planPayment(f.payer, NODE, 10n, f.assertCurrent);
   await execution.pay(f.payer, plan, NODE, f.assertCurrent); return { f, execution };
 }
-test("the minimum claim fee reserve pays the cooperative claim at the next-block rate", () => {
+test("the minimum claim fee reserve pays the script-path claim at the next-block rate", () => {
   const p2wpkh = `0014${"11".repeat(20)}`, p2tr = `5120${"11".repeat(32)}`;
-  expect(minimumClaimFeeReserveSat(p2wpkh, 2000, 0n)).toBe(198n); // 99 vB key-path claim
-  expect(minimumClaimFeeReserveSat(p2tr, 2000, 0n)).toBe(222n); // 111 vB
-  expect(minimumClaimFeeReserveSat(p2wpkh, 1001, 0n)).toBe(100n); // whole sats, rounded up
+  expect(minimumClaimFeeReserveSat(p2wpkh, 2000, 0n)).toBe(286n); // 143 vB script-path claim
+  expect(minimumClaimFeeReserveSat(p2tr, 2000, 0n)).toBe(310n); // 155 vB
+  expect(minimumClaimFeeReserveSat(p2tr, 100, 0n)).toBe(16n); // 0.1 sat/vB: never 0.078 for the fallback
+  expect(minimumClaimFeeReserveSat(p2wpkh, 1001, 0n)).toBe(144n); // whole sats, rounded up
   expect(minimumClaimFeeReserveSat(p2wpkh, 1000, 500n)).toBe(500n); // a higher configured floor wins
   for (const [script, rate] of [["", 1000], ["zz", 1000], [p2wpkh, 0], [p2wpkh, 1.5], [p2wpkh, Number.NaN]] as const) {
     expect(() => minimumClaimFeeReserveSat(script, rate, 0n)).toThrow();
@@ -24,9 +25,9 @@ test("the minimum claim fee reserve pays the cooperative claim at the next-block
 });
 test("the firm request asks for at least the next-block claim fee", async () => {
   const quiet = await executionFixture(); (await quiet.prepare()).dispose();
-  expect(quiet.firm.limits.min_claim_fee_reserve_sat).toBe("500"); // 99 sat at 1 sat/vB: the configured 500 stays
+  expect(quiet.firm.limits.min_claim_fee_reserve_sat).toBe("500"); // 143 sat at 1 sat/vB: the configured 500 stays
   const busy = await executionFixture(); (await busy.prepare({ claimFeeRateSatKvb: 6000 })).dispose(); // the signed 1,000 sat reserve honors it
-  expect(busy.firm.limits.min_claim_fee_reserve_sat).toBe("594");
+  expect(busy.firm.limits.min_claim_fee_reserve_sat).toBe("858");
 });
 test("a reserve above the maximum claim fee is refused before any secret is stored or request sent", async () => {
   const f = await executionFixture();
