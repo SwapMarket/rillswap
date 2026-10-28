@@ -67,7 +67,13 @@ def add_parser(categories: argparse._SubParsersAction[argparse.ArgumentParser]) 
     reverse = kinds.add_parser("ln-to-btc", help="receive on-chain BTC by paying over Lightning")
     _common_arguments(reverse)
     reverse.add_argument("--payout-sat", required=True, type=int, help="on-chain amount wanted")
-    reverse.add_argument("--min-claim-fee-reserve-sat", type=int, default=500)
+    reverse.add_argument(
+        "--min-claim-fee-reserve-sat",
+        type=int,
+        default=0,
+        help="optional floor for the claim fee reserve; the claim pays exactly the "
+        "reserve, which always covers your Core's next-block estimate",
+    )
     reverse.add_argument(
         "--min-refund-delay-blocks",
         type=int,
@@ -81,7 +87,18 @@ def add_parser(categories: argparse._SubParsersAction[argparse.ArgumentParser]) 
         help="how long your Lightning funds may stay held",
     )
     reverse.add_argument("--max-routing-fee-sat", type=int, default=1_000)
-    reverse.add_argument("--fee-rate", type=int, default=2, help="claim sat/vB")
+    reverse.add_argument(
+        "--fee-rate",
+        type=int,
+        default=0,
+        help="optional minimum claim sat/vB above your Core's economical next-block estimate",
+    )
+    reverse.add_argument(
+        "--max-fee-estimate-sat-vb",
+        type=int,
+        help="cap your Core's next-block estimate when pricing the claim fee reserve "
+        "(for skewed estimators such as signet's; relay and mempool floors still apply)",
+    )
     reverse.add_argument("--wallet", required=True, help="Core wallet receiving the payout")
     reverse.add_argument(
         "--lnd-macaroon", required=True, help="macaroon able to decode and send payments"
@@ -265,9 +282,9 @@ def run(args: argparse.Namespace, network: NetworkIdentity, identity: str) -> st
             claim_fee_floor_sat=args.claim_fee_floor_sat,
         )
         limits.validate_cooperative_fee_floor()
-        ceiling = args.max_fee_estimate_sat_vb
-        if ceiling is not None and not 1 <= ceiling <= MAX_FEE_ESTIMATE_CEILING_SAT_VB:
-            raise SwapError("fee estimate ceiling out of range")
+    ceiling = getattr(args, "max_fee_estimate_sat_vb", None)
+    if ceiling is not None and not 1 <= ceiling <= MAX_FEE_ESTIMATE_CEILING_SAT_VB:
+        raise SwapError("fee estimate ceiling out of range")
     credentials = X25519Credentials(args.recipient, identity)
     # Refuse an unsafe relay route before the native library, files, or wallet.
     proxy = require_relay_route(network, args.relay_proxy, allow_direct=args.allow_direct_relay)
@@ -292,7 +309,8 @@ def run(args: argparse.Namespace, network: NetworkIdentity, identity: str) -> st
             cookie_path=args.core_cookie,
             wallet=args.wallet,
             network=network,
-            # Only btc-to-ln samples cooperative fee evidence from its own Core.
+            # Caps Core's estimate for cooperative fee evidence (btc-to-ln) and
+            # the claim fee reserve (ln-to-btc).
             max_fee_estimate_sat_vb=getattr(args, "max_fee_estimate_sat_vb", None),
         )
         if args.command == "ln-to-btc":

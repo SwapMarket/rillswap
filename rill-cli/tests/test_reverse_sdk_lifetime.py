@@ -26,6 +26,7 @@ from rill_core.wire.messages import (
 )
 from rill_core.wire.quotes import TermsOfferPayload
 from rill_crypto import Context
+from rill_provider.core_tx_bytes import NextBlockFee
 from rill_provider.lnd_payment_observation import LndUnavailableError
 from test_cooperative_reservation_publication import _credentials
 from test_live_reverse_swap import _segwit_claim
@@ -138,6 +139,7 @@ class NativeSdk:
         ).hex()
         self.wallet = Mock(
             tip_height=Mock(return_value=1000),
+            next_block_fee=Mock(return_value=NextBlockFee(1000, 1000, 1000)),
             new_destination_script=Mock(
                 return_value=bytes.fromhex(self.terms.client_destination_script)
             ),
@@ -260,7 +262,7 @@ def test_native_reverse_sdk_propagates_one_original_deadline_and_keeps_paid_dist
         )
         assert (tmp_path / "reverse.age").exists()
         assert (tmp_path / "reverse.age.funded").exists()
-        assert fixture.contract_signatures == 2
+        assert fixture.contract_signatures == 1  # the one broadcast claim
         assert any("hold payment observed (IN_FLIGHT)" in report for report in fixture.reports)
         assert not any("hold invoice paid" in report for report in fixture.reports)
 
@@ -338,7 +340,7 @@ def test_native_reverse_expiry_never_renews_signing_or_assumes_broadcast(
         assert "preimage stays private" not in str(error.value)
         assert (tmp_path / "reverse.age.funded").exists()
         assert fixture.broadcasts == []
-        assert fixture.contract_signatures == (0 if phase == "depth" else 1)
+        assert fixture.contract_signatures == (1 if phase == "sign" else 0)
 
     with Context(library_path=NATIVE_LIBRARY) as crypto:
         asyncio.run(exercise(crypto))

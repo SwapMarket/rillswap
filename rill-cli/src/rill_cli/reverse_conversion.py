@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 from rill_core.networks import require_supported_network
 from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_model_json
 from rill_core.wire.messages import ContractTerms, FundingBinding, LnToBtcEconomics, LnToBtcTiming
-from rill_provider.core_tx_bytes import CoreTransactionReader
+from rill_provider.core_tx_bytes import CoreTransactionReader, NextBlockFee
 from rill_provider.lnd_invoice_decode import LndInvoiceDecoder
 from rill_provider.payment_dispatch_record import PaymentAuthority
 
@@ -88,6 +88,9 @@ class _DestinationWallet:
             if self.first_tip is None:
                 self.first_tip = tip
         return tip
+
+    def next_block_fee(self) -> NextBlockFee:
+        return self._wallet.next_block_fee()
 
     def new_destination_script(self) -> bytes:
         return self._script

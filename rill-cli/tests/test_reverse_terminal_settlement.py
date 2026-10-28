@@ -410,7 +410,7 @@ def test_native_sdk_explicit_terminal_mode_uses_original_claim_and_lifetime(  # 
             assert 0 < deadline_seconds <= min(10, sdk.bounds[0]["deadline"] - sdk.now())
             assert len(sdk.bounds) == 1
             assert len(sdk.broadcasts) == (2 if older else 1)
-            assert sdk.contract_signatures == (3 if older else 2)
+            assert sdk.contract_signatures == (2 if older else 1)
             authorization = UnilateralAuthorization.from_terms(
                 sdk.terms,
                 FundingOutput(
@@ -444,12 +444,19 @@ def test_native_sdk_explicit_terminal_mode_uses_original_claim_and_lifetime(  # 
 
         sdk.wallet.observe_historical_wallet_output = Mock(side_effect=observe)
 
+        if older:
+            # The claim pays the signed 500-sat reserve, clamped to the signed
+            # 400-sat ceiling, so it cannot be bumped by its 143-vB relay
+            # increment. Starting at 143 sat creates replacement headroom
+            # without changing signed terms.
+            watcher = reverse.ClaimWatcher
+            monkeypatch.setattr(
+                reverse,
+                "ClaimWatcher",
+                lambda **kwargs: watcher(**{**kwargs, "initial_fee_sat": 143}),
+            )
+
         async def stronger(*args: object, **kwargs: object) -> reverse.ReverseSwapOutcome:
-            if older:
-                # The signed 400-sat ceiling cannot bump a 286-sat initial
-                # claim by its 143-vB relay increment. A lower requested rate
-                # creates replacement headroom without changing signed terms.
-                kwargs["limits"] = dataclasses.replace(kwargs["limits"], claim_fee_rate_sat_vb=1)
             return await original(*args, **kwargs, await_settlement=True)
 
         monkeypatch.setattr(reverse, "run_reverse_swap", stronger)
@@ -461,7 +468,7 @@ def test_native_sdk_explicit_terminal_mode_uses_original_claim_and_lifetime(  # 
         try:
             result = await sdk.run(acknowledged, settle_timeout=120)
         finally:
-            assert all(count == (1, 2 if older else 1, 3 if older else 2) for count in counts), (
+            assert all(count == (1, 2 if older else 1, 2 if older else 1) for count in counts), (
                 counts
             )
         assert (

@@ -23,7 +23,9 @@ from rill_core.settlement import FundingPrevout, PlannedFundingOutput, inspect_t
 from rill_provider.core_tx_bytes import (
     CooperativeClaimOutpoint,
     CooperativeFeePolicy,
+    CoreReadError,
     CoreTransactionReader,
+    NextBlockFee,
 )
 
 from rill_cli.recovery_core_observation import _cookie, _matches_signet_challenge
@@ -162,8 +164,9 @@ class WalletRpc:
     ) -> None:
         """Configure only; no network or file access.
 
-        ``max_fee_estimate_sat_vb`` caps only Core's estimate in cooperative
-        fee evidence, for chains with a skewed estimator; ``None`` keeps it.
+        ``max_fee_estimate_sat_vb`` caps only Core's estimate, in cooperative
+        fee evidence and the LN to BTC claim reserve, for chains with a skewed
+        estimator; ``None`` keeps it.
         """
         if type(port) is not int or not 1 <= port <= MAX_PORT:
             raise ValueError("Core RPC port unsupported")
@@ -308,6 +311,20 @@ class WalletRpc:
     def tip_height(self) -> int:
         """Return the best height only after checking the actual wallet backend."""
         return self._verify_network()
+
+    def next_block_fee(self) -> NextBlockFee:
+        """Core's economical two-block advice with this node's relay and mempool floors.
+
+        Capped by ``max_fee_estimate_sat_vb``. Public networks refuse without
+        an estimate (the cap is never a fallback); regtest uses the floors.
+        """
+        try:
+            fee = self._transactions.next_block_fee()
+        except CoreReadError:
+            raise WalletRpcError("Core next-block fee estimate unavailable") from None
+        if type(fee) is not NextBlockFee:
+            raise WalletRpcError("Core next-block fee estimate unavailable")
+        return fee
 
     def _verify_network(
         self,

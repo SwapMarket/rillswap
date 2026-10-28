@@ -1,4 +1,4 @@
-"""``--max-fee-estimate-sat-vb``: cap the own-node estimate in btc-to-ln cooperative checks."""
+"""``--max-fee-estimate-sat-vb``: cap the own-node estimate (cooperative checks, claim reserve)."""
 
 from __future__ import annotations
 
@@ -49,10 +49,11 @@ REQUIRED = [
 ]
 
 
-def _parse(*extra: str) -> argparse.Namespace:
+def _parse(*extra: str, command: str = "btc-to-ln") -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     swap_command.add_parser(parser.add_subparsers(dest="category"))
-    return parser.parse_args(["swap", "btc-to-ln", *REQUIRED, "--invoice", "lnbc1x", *extra])
+    specific = ["--invoice", "lnbc1x"] if command == "btc-to-ln" else ["--payout-sat", "1"]
+    return parser.parse_args(["swap", command, *REQUIRED, *specific, *extra])
 
 
 def _signet() -> NetworkIdentity:
@@ -66,20 +67,17 @@ def _signet() -> NetworkIdentity:
     )
 
 
-def test_flag_is_optional_and_forward_only() -> None:
-    assert _parse().max_fee_estimate_sat_vb is None
-    assert _parse("--max-fee-estimate-sat-vb", "2").max_fee_estimate_sat_vb == 2
-    parser = argparse.ArgumentParser()
-    swap_command.add_parser(parser.add_subparsers(dest="category"))
-    with pytest.raises(SystemExit):
-        parser.parse_args(
-            ["swap", "ln-to-btc", *REQUIRED, "--payout-sat", "1", "--max-fee-estimate-sat-vb", "2"]
-        )
+@pytest.mark.parametrize("command", ["btc-to-ln", "ln-to-btc"])
+def test_flag_is_optional_on_both_directions(command: str) -> None:
+    # btc-to-ln caps cooperative fee evidence; ln-to-btc caps the claim reserve.
+    assert _parse(command=command).max_fee_estimate_sat_vb is None
+    assert _parse("--max-fee-estimate-sat-vb", "2", command=command).max_fee_estimate_sat_vb == 2
 
 
+@pytest.mark.parametrize("command", ["btc-to-ln", "ln-to-btc"])
 @pytest.mark.parametrize("value", [0, -1, 10_001])
 def test_out_of_range_ceiling_fails_before_native_and_relay_setup(
-    monkeypatch: pytest.MonkeyPatch, value: int
+    monkeypatch: pytest.MonkeyPatch, value: int, command: str
 ) -> None:
     relay, crypto = (
         Mock(side_effect=AssertionError("no relay")),
@@ -88,16 +86,19 @@ def test_out_of_range_ceiling_fails_before_native_and_relay_setup(
     monkeypatch.setattr(swap_command, "RelayConnection", relay)
     monkeypatch.setattr(swap_command, "Context", crypto)
     with pytest.raises(SwapError, match="fee estimate ceiling"):
-        swap_command.run(_parse("--max-fee-estimate-sat-vb", str(value)), Mock(), "unused")
+        swap_command.run(
+            _parse("--max-fee-estimate-sat-vb", str(value), command=command), Mock(), "unused"
+        )
     relay.assert_not_called()
     crypto.assert_not_called()
 
 
+@pytest.mark.parametrize("command", ["btc-to-ln", "ln-to-btc"])
 @pytest.mark.parametrize(
     ("extra", "expected"), [((), None), (("--max-fee-estimate-sat-vb", "3"), 3)]
 )
 def test_run_hands_the_ceiling_to_the_wallet(
-    monkeypatch: pytest.MonkeyPatch, extra: tuple[str, ...], expected: int | None
+    monkeypatch: pytest.MonkeyPatch, extra: tuple[str, ...], expected: int | None, command: str
 ) -> None:
     class StopError(Exception):
         pass
@@ -113,7 +114,7 @@ def test_run_hands_the_ceiling_to_the_wallet(
     wallet = Mock(side_effect=StopError)
     monkeypatch.setattr(swap_command, "WalletRpc", wallet)
     with pytest.raises(StopError):
-        swap_command.run(_parse(*extra), Mock(), "unused")
+        swap_command.run(_parse(*extra, command=command), Mock(), "unused")
     assert wallet.call_args.kwargs["max_fee_estimate_sat_vb"] == expected
 
 

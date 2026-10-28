@@ -106,18 +106,29 @@ coins when no single one covers the amount and fee reserve.
 `rill swap ln-to-btc` receives `--payout-sat` into your Core `--wallet`:
 
 1. Verify the provider, negotiate a session and generate a local preimage.
-2. Request and verify signed terms, a wallet destination and the hold invoice.
+2. Read your Core's economical two-block fee estimate, then request and verify
+   signed terms, a wallet destination and the hold invoice.
 3. Write the encrypted recovery snapshot before accepting.
 4. Pay the hold invoice through LND within your routing fee limit.
 5. Verify the provider's funding transaction and write a `.funded` successor.
 6. Wait for the required depth, then sign and broadcast the claim, bumping its
-   fee within the signed limits if it does not confirm.
+   fee within the signed limits only if it is still unconfirmed late.
+
+The requested claim fee reserve pays the cooperative (key-path) claim at that
+estimate, and at least your node's relay and mempool minimum for the larger
+script-path fallback. The claim pays exactly the signed reserve (or the signed
+claim fee cap if that is lower), so your wallet receives exactly `--payout-sat`.
+Without an estimate (outside regtest), or if that reserve exceeds
+`--max-claim-fee-sat`, the swap stops before requesting terms.
 
 The provider settles its hold invoice with the preimage revealed by the
 claim, so the claim must confirm before the provider's refund window. Core
 needs `txindex=1` for the funding depth lookup.
 
-The claim watcher reserves a final attempt for the approved fee ceiling and
+The claim watcher keeps the initial fee for the first three quarters of the
+window before `refund_lock_height` minus the claim confirmations; in the last
+quarter it raises the fee linearly to the ceiling, so a stuck claim still beats
+the provider's refund. It reserves a final attempt for the approved fee ceiling and
 keeps older attempts available for confirmation checks. Claims affirmatively
 refused before broadcast are not first submitted after the safe height deadline.
 Ambiguous transmissions remain eligible for rebroadcast because their preimage
@@ -131,10 +142,11 @@ upgrade-triggered action or retroactive disclosure assumption.
 | Flag | Use |
 | --- | --- |
 | `--max-success-fee-sat` | Required provider success fee limit |
-| `--fee-rate` | Initial funding or claim rate, default 2 sat/vB |
+| `--fee-rate` | Forward: funding rate, default 2 sat/vB. Reverse: optional claim rate floor above your Core's next-block estimate, default none |
+| `--min-claim-fee-reserve-sat` | Reverse: optional claim fee reserve floor, default none (the next-block reserve) |
 | `--max-funding-fee-sat`, `--max-refund-fee-sat` | Forward fee limits, default 5,000 sat each |
 | `--max-refund-delay-blocks` | Forward refund delay limit, default 288 blocks |
-| `--max-fee-estimate-sat-vb` | Forward only: cap your Core's fee estimate when checking the provider's cooperative claim fee. Use it on signet, whose estimator can report hundreds of sat/vB and make you refuse every cooperative claim; relay and mempool minimums still apply |
+| `--max-fee-estimate-sat-vb` | Cap your Core's fee estimate: forward when checking the provider's cooperative claim fee, reverse when pricing the claim fee reserve. Use it on signet, whose estimator can report hundreds of sat/vB and make you refuse every cooperative claim or overpay the reserve; relay and mempool minimums still apply |
 | `--max-claim-fee-sat` | Reverse claim fee ceiling, default 5,000 sat |
 | `--max-routing-fee-sat` | Reverse routing fee limit, default 1,000 sat |
 | `--min-refund-delay-blocks` | Reverse minimum provider refund delay, default 72 blocks |
@@ -243,7 +255,10 @@ rill recover watch-claim "${recovery[@]}" \
   --initial-fee-sat 300 --max-fee-sat 3000 ln-to-btc.age.funded
 ```
 
-It signs only once the funding output has the signed confirmation depth. Pass
+It keeps `--initial-fee-sat` for the first three quarters of the remaining
+window and only then raises it toward `--max-fee-sat`, so choose an initial
+fee that confirms soon at current rates. It signs only once the funding output
+has the signed confirmation depth. Pass
 the newest snapshot: from `.fallback` on, it also holds the claim the live swap
 prepared, which may already be broadcast. The watcher then reports that claim
 and exits with `claim_confirmed` once it confirms, without signing another.

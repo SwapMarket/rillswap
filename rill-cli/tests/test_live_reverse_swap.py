@@ -19,7 +19,10 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from rill_core.settlement import inspect_transaction_outputs
 from rill_core.wire.messages import InvoiceBinding
+from rill_provider.core_tx_bytes import NextBlockFee
+from rill_provider.quote_policy import ClaimFeeRate
 from test_live_swap import NATIVE, NETWORK, PROVIDER_TESTS, TIP, FakeWallet
 
 from rill_cli.age_container import X25519Credentials, verify_export_ciphertext
@@ -324,6 +327,7 @@ def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(  # noqa:
     )
     wallet = SimpleNamespace(
         tip_height=chain.tip_height,
+        next_block_fee=lambda: NextBlockFee(1000, 1000, None),  # regtest: no estimate
         new_destination_script=chain.new_destination_script,
         confirmed_output=chain.confirmed_output,
         unspent_on_chain=chain.unspent_on_chain,
@@ -408,6 +412,7 @@ def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(  # noqa:
                 invoice_decoder=hold.decode,
                 settlement=engine,
                 hold_invoices=hold,  # type: ignore[arg-type]
+                claim_fee=lambda: ClaimFeeRate(rate_sat_kvb=1000, floor_sat_kvb=1000),
             )
             runner = asyncio.create_task(service.run(stop, tick_seconds=0.2))
             try:
@@ -424,12 +429,11 @@ def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(  # noqa:
                         write_recovery=write_recovery,
                         limits=ReverseSwapLimits(
                             max_success_fee_sat=1_000,
-                            min_claim_fee_reserve_sat=500,
+                            min_claim_fee_reserve_sat=0,  # the next-block reserve only
                             max_claim_fee_sat=5_000,
                             min_refund_delay_blocks=72,
                             max_incoming_htlc_delay_blocks=432,
                             max_routing_fee_sat=100,
-                            claim_fee_rate_sat_vb=2,
                         ),
                         crypto=crypto,
                         timeout=10,
@@ -451,8 +455,13 @@ def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(  # noqa:
         outcome, final_state = asyncio.run(scenario(crypto))
 
     assert final_state == "SETTLED"
-    assert outcome.payout_sat > PAYOUT  # V = D + claim fee reserve
+    # V = D + C: C is the 155 vB P2TR script-path claim at the 1 sat/vB relay
+    # floor (above the 111 vB key-path claim at the next-block rate).
+    assert outcome.payout_sat == PAYOUT + 155
     assert chain.claim_txids == [outcome.claim_txid]
+    # The claim pays exactly the reserve: the destination receives exactly D.
+    (paid,) = inspect_transaction_outputs(chain.claims[0]).outputs
+    assert paid.value_sat == PAYOUT
     assert set(chain.provider_broadcasts) == {outcome.funding_txid}  # idempotent rebroadcast
     # The hold was settled with the preimage revealed by the claim witness.
     initial = json.loads(recoveries[0])

@@ -31,6 +31,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol, TypeVar, cast
 
+from rill_core.errors import ValidationError
 from rill_core.recovery import (
     REVERSE_COOPERATIVE_RESERVATION_EXTENSION,
     REVERSE_DISCLOSURE_EXTENSION,
@@ -43,6 +44,7 @@ from rill_core.settlement import (
     build_cooperative_claim,
     build_unilateral_spend,
     check_funding_binding_transaction,
+    claim_vsizes,
     finalize_cooperative_claim,
     finalize_unilateral_spend,
     max_spendable_fee,
@@ -60,7 +62,7 @@ from rill_core.wire.hashes import (
     funding_binding_hash,
     provider_terms_hash,
 )
-from rill_core.wire.messages import ClientAcceptance
+from rill_core.wire.messages import ClientAcceptance, LnToBtcEconomics
 from rill_core.wire.quotes import TermsOfferPayload
 from rill_core.wire.reverse_quotes import (
     ReverseFirmQuoteRequest,
@@ -69,6 +71,7 @@ from rill_core.wire.reverse_quotes import (
 )
 from rill_core.wire.settlement_messages import FundingBindingPayload, parse_observation
 from rill_core.wire.types import NetworkIdentity
+from rill_provider.core_tx_bytes import NextBlockFee
 from rill_provider.lnd_payment_observation import LndObservationError
 
 from rill_cli.claim_watcher import ClaimAttempt, ClaimWatcher
@@ -227,6 +230,10 @@ class ClaimWallet(Protocol):
         """Return the best height."""
         ...
 
+    def next_block_fee(self) -> NextBlockFee:
+        """Return this node's next-block advice and relay floors."""
+        ...
+
     def new_destination_script(self) -> bytes:
         """Return a fresh payout scriptPubKey."""
         ...
@@ -274,7 +281,14 @@ class HoldPayer(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class ReverseSwapLimits:
-    """The user's ceilings for the firm offer and the payment."""
+    """The user's ceilings for the firm offer and the payment.
+
+    The requested claim fee reserve is at least ``min_claim_fee_reserve_sat``,
+    the cooperative claim at the larger of Core's next-block estimate and
+    ``claim_fee_rate_sat_vb`` (an optional floor, 0 for none), and the
+    script-path claim at Core's relay floor. The claim pays exactly the signed
+    reserve, so the destination receives exactly the nominal payout.
+    """
 
     max_success_fee_sat: int
     min_claim_fee_reserve_sat: int
@@ -282,7 +296,7 @@ class ReverseSwapLimits:
     min_refund_delay_blocks: int  # blocks the provider must wait before refunding
     max_incoming_htlc_delay_blocks: int  # how long the LN funds may stay held
     max_routing_fee_sat: int
-    claim_fee_rate_sat_vb: int
+    claim_fee_rate_sat_vb: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,6 +308,26 @@ class ReverseSwapOutcome:
     funding_txid: str
     claim_txid: str
     payout_sat: int
+
+
+def minimum_claim_fee_reserve_sat(
+    destination: bytes, fee: NextBlockFee, limits: ReverseSwapLimits
+) -> int:
+    """Return the least claim fee reserve to ask for (see ``ReverseSwapLimits``)."""
+    if type(fee) is not NextBlockFee or type(limits.claim_fee_rate_sat_vb) is not int:
+        raise SwapError("claim fee inputs unsupported")
+    if limits.claim_fee_rate_sat_vb < 0:
+        raise SwapError("claim fee inputs unsupported")
+    try:
+        cooperative, unilateral = claim_vsizes(destination)
+    except ValidationError:
+        raise SwapError("claim destination unsupported") from None
+    rate = max(fee.rate_sat_kvb, limits.claim_fee_rate_sat_vb * 1000)
+    return max(
+        limits.min_claim_fee_reserve_sat,
+        -(-cooperative * rate // 1000),
+        -(-unilateral * fee.floor_sat_kvb // 1000),
+    )
 
 
 def _check_offer(  # noqa: PLR0913 - every binding checked explicitly
@@ -1111,6 +1145,15 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
         async with _ReverseLifetime(settle_timeout) as lifetime:
             tip = await lifetime.worker(wallet.tip_height)
             destination = await lifetime.worker(wallet.new_destination_script)
+            # No estimate, no swap: the reserve must pay the next-block claim.
+            fee = await lifetime.worker(wallet.next_block_fee)
+            minimum_reserve = minimum_claim_fee_reserve_sat(destination, fee, limits)
+            if minimum_reserve > limits.max_claim_fee_sat:
+                raise SwapError(
+                    f"the minimum claim fee reserve ({minimum_reserve} sat, at least the "
+                    "next-block fee) exceeds your maximum claim fee "
+                    f"({limits.max_claim_fee_sat} sat)"
+                )
             request_model = ReverseFirmQuoteRequest(
                 kind="ln-to-btc",
                 mode="firm",
@@ -1121,7 +1164,7 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
                 client_destination_script=destination.hex(),
                 limits=ReverseQuoteLimits(
                     max_success_fee_sat=str(limits.max_success_fee_sat),
-                    min_claim_fee_reserve_sat=str(limits.min_claim_fee_reserve_sat),
+                    min_claim_fee_reserve_sat=str(minimum_reserve),
                     max_claim_fee_sat=str(limits.max_claim_fee_sat),
                     min_refund_lock_height=tip + limits.min_refund_delay_blocks,
                     max_incoming_htlc_expiry_height=tip + limits.max_incoming_htlc_delay_blocks,
@@ -1279,10 +1322,11 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
                 crypto=crypto,
                 check_authority=lifetime.check,
             )
-            probe_vsize = (await lifetime.worker(lambda: sign(min(ceiling, 1), 0)))[3]
-            initial_fee = max(
-                1, min(ceiling, math.ceil(limits.claim_fee_rate_sat_vb * probe_vsize))
-            )
+            # The claim pays exactly the signed reserve (priced for the next
+            # block), so the destination receives exactly the nominal payout.
+            if not isinstance(terms.economics, LnToBtcEconomics):
+                raise SwapError("terms are not LN to BTC")
+            initial_fee = max(1, min(ceiling, int(terms.economics.claim_fee_reserve_sat)))
             cooperative: ClaimAttempt | None = None
             fallback: ClaimAttempt | None = None
             preimage_disclosed = False

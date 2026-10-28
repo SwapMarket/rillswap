@@ -44,7 +44,7 @@ PACKAGE = json.loads(
 TERMS = ContractTerms.model_validate_json(canonicalize(PACKAGE["contract_terms"]))
 NOW = 1_700_000_110
 BOLT11 = "lnbcrt1syntheticownerinvoice"
-LIMITS = ReverseSwapLimits(2000, 500, 400, 200, 250, 1000, 1)
+LIMITS = ReverseSwapLimits(2000, 500, 500, 200, 250, 1000, 1)  # reserve <= claim fee cap
 _UNLOCK = x25519.Identity.generate()
 CREDENTIALS = X25519Credentials(str(_UNLOCK.to_public()), str(_UNLOCK))
 

@@ -128,7 +128,7 @@ def test_featured_reverse_fallback_is_published_read_back_without_implicit_discl
             fixture.terms.network_identity,
             crypto=crypto,
         )
-        assert fixture.contract_signatures == 2
+        assert fixture.contract_signatures == 1  # the prepared fallback only
         assert fixture.broadcasts == []
 
     with Context(library_path=NATIVE_LIBRARY) as crypto:
@@ -176,7 +176,7 @@ def test_unknown_or_late_fallback_acknowledgment_never_reaches_broadcast(
         assert (tmp_path / "reverse.age.fallback").exists()
         assert len(fixture.documents) == 3
         assert fixture.broadcasts == []
-        assert fixture.contract_signatures == 2
+        assert fixture.contract_signatures == 1  # the prepared fallback only
         assert len(fixture.bounds) == 1
         assert not any("snapshot acknowledged" in report for report in fixture.reports)
 
@@ -222,7 +222,7 @@ def test_canceled_fallback_publication_drains_and_cannot_adopt_late_acknowledgme
                 await running
             assert (tmp_path / "reverse.age.fallback").exists()
             assert fixture.broadcasts == []
-            assert fixture.contract_signatures == 2
+            assert fixture.contract_signatures == 1  # the prepared fallback only
             assert len(fixture.documents) == 3
         finally:
             release.set()
@@ -265,7 +265,7 @@ def test_timed_out_fallback_publication_keeps_crypto_owned_until_actual_write_fi
                 await running
             assert (tmp_path / "reverse.age.fallback").exists()
             assert fixture.broadcasts == []
-            assert fixture.contract_signatures == 2
+            assert fixture.contract_signatures == 1  # the prepared fallback only
         finally:
             release.set()
             await asyncio.gather(running, return_exceptions=True)
