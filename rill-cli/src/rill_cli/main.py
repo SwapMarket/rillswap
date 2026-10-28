@@ -835,10 +835,17 @@ def _swap(args: argparse.Namespace) -> int:
         sys.stderr.write(f"Swap refused before funding: {error}\n")
         return 5
     except Exception:  # noqa: BLE001 - must not print secret native/library errors
-        sys.stderr.write(
-            "Swap failed. If a funded recovery snapshot ('.funded') exists, funds may be "
-            "committed: keep it and refund after its lock height with `rill recover`.\n"
-        )
+        if args.command == "ln-to-btc":  # the provider funds and refunds; the user claims
+            sys.stderr.write(
+                "Swap failed. Keep all recovery files, check `lncli listpayments` and do not "
+                "pay again. If a funded recovery snapshot ('.funded') exists, claim with "
+                "`rill recover watch-claim` before its refund lock.\n"
+            )
+        else:
+            sys.stderr.write(
+                "Swap failed. If a funded recovery snapshot ('.funded') exists, funds may be "
+                "committed: keep it and refund after its lock height with `rill recover`.\n"
+            )
         return 2
     sys.stdout.write(result + "\n")
     return 0

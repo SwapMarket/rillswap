@@ -475,26 +475,46 @@ async def _await_depth(  # noqa: PLR0913 - explicit waiting bounds
     lifetime: _ReverseLifetime,
     report: Callable[[str], None],
 ) -> None:
-    """Poll Core until the contract output has ``depth`` confirmations."""
+    """Poll Core until the contract output has ``depth`` confirmations.
+
+    The contract is funded by now, so a failed Core read is no evidence and
+    never ends the swap: it waits within the lifetime, like the claim does.
+    """
+    unavailable = False
     while True:
         lifetime.check()
-        seen = await lifetime.worker(
-            lambda: wallet.confirmed_output(binding.funding_txid, binding.contract_vout)
-        )
-        tip = await lifetime.worker(wallet.tip_height)
+        sample = await lifetime.worker(lambda: _depth_sample(wallet, binding))
         lifetime.check()
-        if tip >= lock_height:
-            raise SwapError("the refund lock passed before funding was usable; " + _UNRESOLVED)
-        if seen is not None:
-            if (seen.script_pubkey, seen.value_sat) != (script, value):
-                raise SwapError("Core shows another output at the provider's funding outpoint")
-            if seen.confirmations >= depth:
-                return
-        report(
-            f"funding {binding.funding_txid} at depth "
-            f"{0 if seen is None else seen.confirmations}/{depth}"
-        )
+        if sample is None:
+            if not unavailable:  # once per outage
+                report(f"Core unavailable while funding {binding.funding_txid} confirms; retrying")
+            unavailable = True
+        else:
+            unavailable = False
+            seen, tip = sample
+            if tip >= lock_height:
+                raise SwapError("the refund lock passed before funding was usable; " + _UNRESOLVED)
+            if seen is not None:
+                if (seen.script_pubkey, seen.value_sat) != (script, value):
+                    raise SwapError("Core shows another output at the provider's funding outpoint")
+                if seen.confirmations >= depth:
+                    return
+            report(
+                f"funding {binding.funding_txid} at depth "
+                f"{0 if seen is None else seen.confirmations}/{depth}"
+            )
         await asyncio.sleep(min(POLL_SECONDS, max(0, lifetime.deadline - time.monotonic())))
+
+
+def _depth_sample(
+    wallet: ClaimWallet, binding: FundingBinding
+) -> tuple[ConfirmedOutput | None, int] | None:
+    """Return the contract output as Core sees it and the tip, or ``None`` if Core failed."""
+    try:
+        seen = wallet.confirmed_output(binding.funding_txid, binding.contract_vout)
+        return seen, wallet.tip_height()
+    except Exception:  # noqa: BLE001 - a failed sample is no evidence; wait
+        return None
 
 
 def _claim_signer(  # noqa: PLR0913 - explicit signing inputs

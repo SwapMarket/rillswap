@@ -112,7 +112,9 @@ coins when no single one covers the amount and fee reserve.
 4. Pay the hold invoice through LND within your routing fee limit.
 5. Verify the provider's funding transaction and write a `.funded` successor.
 6. Wait for the required depth, then sign and broadcast the claim, bumping its
-   fee within the signed limits only if it is still unconfirmed late.
+   fee within the signed limits only if it is still unconfirmed late. Once the
+   contract is funded, a failed Core read is reported and retried, never fatal;
+   if the swap still stops, claim with `rill recover watch-claim`.
 
 The requested claim fee reserve pays the larger script-path claim at that
 estimate (never below your node's relay and mempool minimum), so the
