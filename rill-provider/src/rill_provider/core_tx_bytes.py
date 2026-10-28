@@ -973,29 +973,26 @@ class CoreTransactionReader:
         terms: ContractTerms,
         *,
         keys: TaprootKeyOperations,
-        allow_unconfirmed: bool = False,
     ) -> CooperativeClaimOutpoint:
-        """Sample one confirmed outpoint, including known mempool spends.
+        """Sample one outpoint, including known mempool spends.
 
         A positive sample is immediately staleable and grants no signing
         permission. Future runtime must independently bound total elapsed
         acquisition time, establish fee/payment/deadline policy, and ensure
         unilateral fallback. No chain-only fallback is attempted on failure.
 
-        ``allow_unconfirmed`` also accepts the exact output while its
-        transaction is only in the mempool (zero confirmations, no inclusion
-        block). Only the provider's own LN to BTC funding uses it: a client
-        claiming that early takes the double-spend risk itself.
+        LN to BTC terms also accept the exact output while its transaction is
+        only in the mempool (zero confirmations, no inclusion block): that is
+        the provider's own funding, and a client claiming that early takes the
+        double-spend risk itself. Every other profile needs a confirmed output.
         """
-        if allow_unconfirmed and terms.profile_id != "ln-to-btc/v1":
-            raise ValueError("unconfirmed cooperative evidence is only for LN to BTC funding")
         match, tip_hash, tip_height, confirmations, inclusion_height, inclusion_hash = (
             self._observe_outpoint(
                 binding,
                 terms,
                 keys=keys,
                 include_mempool=True,
-                minimum=0 if allow_unconfirmed else 1,
+                minimum=0 if terms.profile_id == "ln-to-btc/v1" else 1,
             )
         )
         return CooperativeClaimOutpoint(

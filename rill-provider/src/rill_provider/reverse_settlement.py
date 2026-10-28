@@ -153,14 +153,9 @@ class ReverseChainBackend(Protocol):
         """Active chain height."""
 
     def observe_cooperative_claim_outpoint(
-        self,
-        binding: FundingBinding,
-        terms: ContractTerms,
-        *,
-        keys: TaprootKeyOperations,
-        allow_unconfirmed: bool = False,
+        self, binding: FundingBinding, terms: ContractTerms, *, keys: TaprootKeyOperations
     ) -> CooperativeClaimOutpoint:
-        """Read the named unspent output using public-only key results."""
+        """Read the named unspent output (LN to BTC: at any depth) with public-only keys."""
 
     def observe_cooperative_fee_policy(
         self, target_blocks: int, *, allow_regtest_fixed_fee: bool = False
@@ -500,7 +495,6 @@ class ReverseSettlement:
                             context.binding,
                             context.terms,
                             keys=keys,
-                            allow_unconfirmed=True,
                         )
                     )
                     operation.check()
@@ -628,7 +622,6 @@ class ReverseSettlement:
                         context.binding,
                         context.terms,
                         keys=keys,
-                        allow_unconfirmed=True,
                     )
                 )
                 operation.check()
@@ -842,12 +835,14 @@ class ReverseSettlement:
             if await self._worker(self._chain.confirmations, txid) < 1:
                 raise
         tip = await self._worker(self._chain.tip_height)
-        mempool = await self._worker(  # an empty block range: the mempool only
+        anchor = await self._worker(self._chain.block_hash, tip)
+        mempool = await self._worker(  # an empty block range: the mempool at this tip only
             self._chain.find_spender,
             txid,
             int(item.funding_vout or 0),
             from_height=tip + 1,
             to_height=tip,
+            anchor_block=anchor,
         )
         if mempool.spender is not None:
             preimage = _preimage_in(mempool.spender.witness, terms.invoice_binding.payment_hash)

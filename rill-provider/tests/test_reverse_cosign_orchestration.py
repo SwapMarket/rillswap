@@ -101,7 +101,6 @@ def test_proposal_first_runs_the_providers_own_funding_depth_step(
         ).fetchall()
         assert state == "SETTLED"
         chain.confirmations.assert_called()
-        assert chain.observe_cooperative_claim_outpoint.call_args.kwargs["allow_unconfirmed"]
 
     with caplog.at_level("INFO", logger="rill_provider.reverse_settlement"):
         asyncio.run(exercise())

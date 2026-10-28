@@ -217,7 +217,10 @@ def test_funding_sent_settles_an_early_mempool_claim_before_the_depth(backends: 
     chain.find_spender.return_value = SpendScan(SpendObservation("61" * 32, witness, None), 1000)
     assert _run(engine, item) == "SETTLED"
     # An empty block range asks Core's mempool only.
-    chain.find_spender.assert_called_once_with("51" * 32, 0, from_height=1001, to_height=1000)
+    chain.find_spender.assert_called_once_with(
+        "51" * 32, 0, from_height=1001, to_height=1000, anchor_block="ab" * 32
+    )
+    chain.block_hash.assert_called_once_with(1000)  # the sampled tip anchors the mempool read
     chain.confirmations.assert_not_called()
     store.record_reverse_settlement_preimage.assert_called_once_with(
         "11" * 32, from_state="FUNDING_SENT", preimage=PREIMAGE, now=NOW

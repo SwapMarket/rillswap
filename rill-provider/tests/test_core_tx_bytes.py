@@ -811,7 +811,6 @@ def test_reverse_cooperative_sample_accepts_the_provider_funding_from_the_mempoo
             binding,
             terms,
             keys=None,  # type: ignore[arg-type]
-            allow_unconfirmed=True,
         )
     assert result.confirmations == depth
     if depth == 0:
@@ -828,19 +827,6 @@ def test_reverse_cooperative_sample_accepts_the_provider_funding_from_the_mempoo
         assert (result.inclusion_height, result.inclusion_block_hash) == (103, "cc" * 32)
         assert len(requests) == 7
     assert requests[3]["params"] == [binding.funding_txid, binding.contract_vout, True]
-
-
-def test_unconfirmed_cooperative_sample_is_only_for_ln_to_btc_funding(tmp_path: Path) -> None:
-    terms, binding, network = _context()
-    assert terms.profile_id != "ln-to-btc/v1"
-    reader = CoreTransactionReader(port=9, cookie_path=_cookie(tmp_path), network=network)
-    with pytest.raises(ValueError, match="only for LN to BTC"):
-        reader.observe_cooperative_claim_outpoint(
-            binding,
-            terms,
-            keys=None,  # type: ignore[arg-type]
-            allow_unconfirmed=True,
-        )
 
 
 def test_cooperative_sample_never_falls_back_to_chain_only_after_mempool_spend(
@@ -893,7 +879,7 @@ def test_cooperative_sample_never_falls_back_to_chain_only_after_mempool_spend(
         ("script", CoreProtocolError),
         ("value", CoreProtocolError),
         ("fractional-sat", CoreProtocolError),
-        ("zero-confirms", CoreProtocolError),
+        ("zero-confirms", CoreProtocolError),  # only LN to BTC terms sample the mempool
         ("negative-confirms", CoreProtocolError),
         ("missing-confirms", CoreProtocolError),
         ("coinbase", CoreProtocolError),
