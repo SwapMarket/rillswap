@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
 import pytest
+from rill_core.wire.canonical import canonicalize
 from test_cooperative_readiness import PROVIDER_SIGNATURE, _context, _request
 
 from rill_cli import live_swap
@@ -195,5 +196,33 @@ def test_selectively_retained_inbox_is_bounded(monkeypatch: pytest.MonkeyPatch, 
         else:
             assert len(session.inbox) == 1
             assert session._inbox_bytes > 0  # noqa: SLF001
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    ("payload", "shown"),
+    [
+        ({"code": "capacity_unavailable", "message": "busy"}, "capacity_unavailable"),
+        ({"code": "\x1b[2J\x1b]0;pwned\x07", "message": ""}, "malformed error"),
+        ({"code": "capacity_unavailable", "message": "\x1b[31mfake\x1b[0m"}, "malformed error"),
+        ({"code": ["capacity_unavailable"]}, "malformed error"),
+    ],
+)
+def test_provider_error_codes_reach_the_terminal_only_from_the_closed_set(
+    monkeypatch: pytest.MonkeyPatch, payload: dict[str, object], shown: str
+) -> None:
+    async def exercise() -> None:
+        session, _events, frames = _live_provider(monkeypatch)
+        request = SimpleNamespace(message_id="ab" * 32, message_type="quote_request")
+        error = frames[b"seq1"].model_copy(
+            update={"message_type": "error", "in_reply_to": request.message_id, "payload": payload}
+        )
+        session.inbox.append(error)
+        session._inbox_bytes += len(canonicalize(error.model_dump(mode="json")))  # noqa: SLF001
+        with pytest.raises(SwapError) as refused:
+            await session.reply_to(request, "quote_offer")  # type: ignore[arg-type]
+        assert str(refused.value) == f"provider refused quote_request: {shown}"
+        assert "\x1b" not in str(refused.value)
 
     asyncio.run(exercise())

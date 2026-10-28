@@ -76,6 +76,7 @@ from rill_core.wire.messages import (
 )
 from rill_core.wire.quotes import (
     FirmQuoteRequest,
+    QuoteError,
     QuoteLimits,
     TermsOfferPayload,
     check_terms_offer,
@@ -639,9 +640,12 @@ class _Session:
         except TimeoutError:
             raise SwapError(f"no answer to {request.message_type}") from None
         if answer.message_type == "error":
-            raise SwapError(
-                f"provider refused {request.message_type}: {answer.payload.get('code')}"
-            )
+            # Only a closed protocol code reaches the terminal, never provider text.
+            try:
+                code: str = QuoteError.model_validate(answer.payload).code
+            except ValueError:
+                code = "malformed error"
+            raise SwapError(f"provider refused {request.message_type}: {code}")
         if answer.message_type != expected:
             raise SwapError(f"unexpected answer {answer.message_type}")
         return answer
