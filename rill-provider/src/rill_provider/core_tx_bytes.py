@@ -9,15 +9,17 @@ genesis, and signet challenge, NOT deployment namespace or consensus profile.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
 import stat
+import threading
 import time
 from contextlib import suppress
 from dataclasses import dataclass
-from decimal import ROUND_CEILING, Decimal, InvalidOperation, localcontext
 from decimal import Context as DecimalContext
+from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -32,9 +34,15 @@ from rill_core.settlement import (
 from rill_core.wire.messages import ContractTerms, FundingBinding
 from rill_core.wire.types import NetworkIdentity
 
+from rill_provider.funding_selection import INPUT_WEIGHTS, Coin, input_kind, select_funding_inputs
+
 if TYPE_CHECKING:
     from rill_core.settlement import TaprootKeyOperations
 
+LOG = logging.getLogger(__name__)
+# One funding build at a time per process: listing coins, then locking the
+# chosen ones, must not interleave with another build picking the same coins.
+_FUNDING_LOCK = threading.Lock()
 RPC_VERIFY_ALREADY_IN_CHAIN = -27
 RPC_INVALID_ADDRESS_OR_KEY = -5  # getrawtransaction: not in mempool or txindex
 MAX_COOKIE_BYTES = 512
@@ -43,7 +51,10 @@ MAX_SOURCE_SECONDS = 10
 MAX_HISTORICAL_BLOCK_HEIGHT = 499_999_999
 MAX_BLOCK_RESPONSE_BYTES = 32 * 1024 * 1024  # a decoded block (getblock verbosity 2)
 MAX_SPEND_SCAN_BLOCKS = 12  # blocks decoded per find_spender call
-FUNDING_ESTIMATE_TARGET = 6
+# Core clamps target 1 to 2: economical two-block advice is its closest
+# next-block estimate.
+NEXT_BLOCK_ESTIMATE_TARGET = 2
+MAX_UNSPENT_RESPONSE_BYTES = 16 * 1024 * 1024  # listunspent of a busy funding wallet
 MAX_SCRIPT_BYTES = 40
 _WALLET_NAME = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 SATS_PER_BTC = Decimal(100_000_000)
@@ -82,8 +93,11 @@ CORE_RPC_METHODS = (
     "getblockheader",
     # Caps the announced amounts by the funding wallet's balance.
     "getbalances",
+    # Privacy-first funding: the provider picks the inputs itself.
+    "listunspent",
 )
-_WALLET_RPC_METHODS = ("lockunspent", "getbalances")  # besides the wallet* methods
+# Besides the wallet* methods.
+_WALLET_RPC_METHODS = ("lockunspent", "getbalances", "listunspent")
 MAX_VOUT = 0xFFFFFFFF
 
 
@@ -206,6 +220,29 @@ class CooperativeFeePolicy:
             raise ValueError("cooperative fee inputs invalid")
         rate = max(self.min_relay_sat_kvb, self.mempool_min_sat_kvb, self.estimate_sat_kvb or 0)
         return max(configured_floor_sat, (rate * vsize + 999) // 1000)
+
+
+@dataclass(frozen=True, slots=True)
+class NextBlockFee:
+    """Economical next-block advice and the node's own admission floors, in sat/kvB.
+
+    Advice, not a guarantee: it targets inclusion in the next block or two.
+    ``estimate_sat_kvb`` is ``None`` only on regtest without an estimate.
+    """
+
+    relay_sat_kvb: int
+    mempool_min_sat_kvb: int
+    estimate_sat_kvb: int | None
+
+    @property
+    def floor_sat_kvb(self) -> int:
+        """The lowest rate this node relays and keeps in its mempool right now."""
+        return max(self.relay_sat_kvb, self.mempool_min_sat_kvb)
+
+    @property
+    def rate_sat_kvb(self) -> int:
+        """The rate to pay: the estimate, never below the node floor or 1 sat/kvB."""
+        return max(self.estimate_sat_kvb or 0, self.floor_sat_kvb, 1)
 
 
 class CoreReadError(Exception):
@@ -981,7 +1018,7 @@ class CoreTransactionReader:
             raise CoreProtocolError("Core reported another transaction ID")
         return txid
 
-    def fund_output(
+    def fund_output(  # noqa: PLR0912 - one cleanup scope owns every identified input
         self, script_pubkey: bytes, value_sat: int, *, max_fee_sat: int
     ) -> FundedOutput:
         """Build and sign (never broadcast) a wallet transaction paying ``value_sat`` to the script.
@@ -990,6 +1027,13 @@ class CoreTransactionReader:
         are locked in the wallet so a second build cannot double-spend them.
         The fee must not exceed ``max_fee_sat`` or nothing is signed. The
         caller records the exact bytes durably, then ``broadcast``s them.
+
+        The rate is economical next-block advice (``next_block_fee``). The
+        provider picks the inputs itself for privacy: the fewest coins, then
+        the least excess (``funding_selection``); Core never adds more, and it
+        drops change not worth keeping into the fee. A Core credential whose
+        ``rpcwhitelist`` predates ``listunspent`` keeps Core's own selection
+        at the same explicit rate.
         """
         if not (
             type(script_pubkey) is bytes
@@ -1001,45 +1045,49 @@ class CoreTransactionReader:
         ):
             raise ValueError("funding request unsupported")
         amount = f"{Decimal(value_sat) / SATS_PER_BTC:.8f}"
-        options = {
-            "changePosition": 1,
-            "lockUnspents": True,
-            "replaceable": False,
-            "conf_target": FUNDING_ESTIMATE_TARGET,
-            "estimate_mode": "economical",
-        }
         selected_inputs: tuple[tuple[str, int], ...] = ()
         try:
-            with self._client() as client:
-                if self._max_fee_estimate_sat_vb is not None:
-                    # Core refuses fee_rate next to conf_target, so the ceiling
-                    # needs the estimate first; no estimate means the ceiling.
-                    del options["conf_target"], options["estimate_mode"]
-                    options["fee_rate"] = self._capped_funding_rate(client)
-                described = self._rpc(client, "decodescript", [script_pubkey.hex()], 1)
+            # Listing and locking must not interleave with another build.
+            with _FUNDING_LOCK, self._client() as client:
+                rate = self._next_block_fee(client).rate_sat_kvb
+                described = self._rpc(client, "decodescript", [script_pubkey.hex()], 3)
                 address = described.get("address") if isinstance(described, dict) else None
                 if type(address) is not str:
                     raise CoreProtocolError("contract script has no address")  # noqa: TRY301 - cleanup scope
+                chosen = self._choose_funding_inputs(
+                    client, len(script_pubkey), value_sat, rate, max_fee_sat
+                )
+                options: dict[str, object] = {
+                    "changePosition": 1,
+                    "lockUnspents": True,
+                    "replaceable": False,
+                    "fee_rate": f"{rate // 1000}.{rate % 1000:03d}",  # sat/vB
+                }
+                if chosen is not None:
+                    options["add_inputs"] = False
+                inputs = [{"txid": txid, "vout": vout} for txid, vout in chosen or ()]
                 created = self._rpc(
-                    client, "walletcreatefundedpsbt", [[], [{address: amount}], 0, options], 2
+                    client, "walletcreatefundedpsbt", [inputs, [{address: amount}], 0, options], 5
                 )
                 if not isinstance(created, dict) or type(created.get("psbt")) is not str:
                     raise CoreProtocolError("Core wallet returned no PSBT")  # noqa: TRY301 - cleanup scope
-                psbt = self._rpc(client, "decodepsbt", [created["psbt"]], 3)
+                psbt = self._rpc(client, "decodepsbt", [created["psbt"]], 6)
                 selected_inputs = _funding_inputs(
                     psbt.get("tx") if isinstance(psbt, dict) else None
                 )
+                if chosen is not None and sorted(selected_inputs) != sorted(chosen):
+                    raise CoreProtocolError("Core wallet funded other inputs than selected")  # noqa: TRY301
                 fee = _fee_sat(created)
                 if fee > max_fee_sat:
                     raise CoreProtocolError("funding fee exceeds the signed maximum")  # noqa: TRY301
-                signed = self._rpc(client, "walletprocesspsbt", [created["psbt"], True], 3)
+                signed = self._rpc(client, "walletprocesspsbt", [created["psbt"], True], 7)
                 if not isinstance(signed, dict) or type(signed.get("psbt")) is not str:
                     raise CoreProtocolError("Core wallet could not sign the funding")  # noqa: TRY301
-                final = self._rpc(client, "finalizepsbt", [signed["psbt"], True], 4)
+                final = self._rpc(client, "finalizepsbt", [signed["psbt"], True], 8)
                 if not isinstance(final, dict) or final.get("complete") is not True:
                     raise CoreProtocolError("Core wallet could not sign every funding input")  # noqa: TRY301
                 raw = _transaction_bytes(final.get("hex"))
-                decoded = self._rpc(client, "decoderawtransaction", [raw.hex()], 5)
+                decoded = self._rpc(client, "decoderawtransaction", [raw.hex()], 9)
             txid = decoded.get("txid") if isinstance(decoded, dict) else None
             outputs = decoded.get("vout") if isinstance(decoded, dict) else None
             if (
@@ -1079,25 +1127,70 @@ class CoreTransactionReader:
                 raise refusal from None
             raise
 
-    def _capped_funding_rate(self, client: httpx.Client) -> str:
-        """Return the economical funding estimate, at most the ceiling, as sat/vB text."""
-        ceiling = Decimal(self._max_fee_estimate_sat_vb or 0)
+    def next_block_fee(self) -> NextBlockFee:
+        """Sample economical next-block advice with this node's relay and mempool floors.
+
+        Core's ``estimatesmartfee(2, "ECONOMICAL")`` (target 1 is clamped to
+        2), capped by the operator ceiling. Without an estimate, public
+        networks refuse rather than guess: the ceiling is never a fallback.
+        Regtest alone falls back to the node's own minimums.
+        """
         try:
-            result = self._rpc(
-                client, "estimatesmartfee", [FUNDING_ESTIMATE_TARGET, "ECONOMICAL"], 1
+            with self._client() as client:
+                return self._next_block_fee(client)
+        except httpx.HTTPError:
+            raise CoreUnavailableError("Core RPC transport unavailable") from None
+
+    def _next_block_fee(self, client: httpx.Client) -> NextBlockFee:
+        mempool = self._rpc(client, "getmempoolinfo", [], 1)
+        if not isinstance(mempool, dict):
+            raise CoreProtocolError("Core mempool policy unavailable")
+        relay = _fee_rate_sat_kvb(mempool.get("minrelaytxfee"))
+        minimum = _fee_rate_sat_kvb(mempool.get("mempoolminfee"))
+        try:
+            advice = self._rpc(
+                client, "estimatesmartfee", [NEXT_BLOCK_ESTIMATE_TARGET, "ECONOMICAL"], 2
             )
         except CoreRpcError:
-            result = None
-        rate = result.get("feerate") if isinstance(result, dict) else None
-        if (
-            isinstance(result, dict)
-            and not result.get("errors")
-            and isinstance(rate, (int, float, Decimal))
-            and not isinstance(rate, bool)
-            and 0 < rate < 1
-        ):
-            ceiling = min(ceiling, Decimal(str(rate)) * 100_000)  # BTC/kvB to sat/vB
-        return f"{ceiling.quantize(Decimal('0.001'), rounding=ROUND_CEILING)}"
+            advice = None
+        estimate = (
+            _fee_rate_sat_kvb(advice["feerate"])
+            if isinstance(advice, dict) and "feerate" in advice and not advice.get("errors")
+            else 0
+        )
+        if estimate > 0:
+            return NextBlockFee(relay, minimum, self._capped_estimate_sat_kvb(estimate))
+        if self._network.name != "regtest":
+            raise CoreUnavailableError("Core next-block fee estimate unavailable")
+        return NextBlockFee(relay, minimum, None)
+
+    def _choose_funding_inputs(
+        self,
+        client: httpx.Client,
+        script_length: int,
+        value_sat: int,
+        rate_sat_kvb: int,
+        max_fee_sat: int,
+    ) -> tuple[tuple[str, int], ...] | None:
+        """Explicit inputs, or ``None`` when the credential may not list coins."""
+        try:
+            listed = self._rpc(client, "listunspent", [0], 4)
+        except CoreAuthError:
+            LOG.warning(
+                "Core credential lacks listunspent; funding falls back to Core's own coin "
+                "selection. Add listunspent to the provider's rpcwhitelist."
+            )
+            return None
+        selection = select_funding_inputs(
+            _wallet_coins(listed),
+            value_sat=value_sat,
+            script_len=script_length,
+            rate_sat_kvb=rate_sat_kvb,
+            max_fee_sat=max_fee_sat,
+        )
+        if selection is None:
+            raise CoreUnavailableError("funding wallet cannot pay the contract at this fee rate")
+        return tuple((coin.txid, coin.vout) for coin in selection.coins)
 
     def release_funding_inputs(self, inputs: tuple[tuple[str, int], ...]) -> None:
         """Release exactly this invocation's identified inputs, never all wallet locks."""
@@ -1425,7 +1518,10 @@ class CoreTransactionReader:
             raise CoreProtocolError("unsupported Core RPC method")
         wallet = method.startswith("wallet") or method in _WALLET_RPC_METHODS
         path = self._wallet_path if wallet else "/"
-        max_bytes = MAX_BLOCK_RESPONSE_BYTES if method == "getblock" else MAX_RESPONSE_BYTES
+        max_bytes = {
+            "getblock": MAX_BLOCK_RESPONSE_BYTES,
+            "listunspent": MAX_UNSPENT_RESPONSE_BYTES,
+        }.get(method, MAX_RESPONSE_BYTES)
         try:
             with client.stream(
                 "POST",
@@ -1547,6 +1643,39 @@ def _funding_inputs(decoded: object) -> tuple[tuple[str, int], ...]:
     if len(set(outpoints)) != len(outpoints):
         raise CoreProtocolError("Core funding input identities are duplicated")
     return outpoints
+
+
+def _wallet_coins(listed: object) -> list[Coin]:
+    """Safe, solvable single-key wallet coins; anything else stays out of selection."""
+    coins = []
+    for entry in _list(listed):
+        if (
+            not isinstance(entry, dict)
+            or not _hash(entry.get("txid"))
+            or type(entry.get("vout")) is not int
+            or not 0 <= entry["vout"] <= MAX_VOUT
+            or type(entry.get("confirmations")) is not int
+            or entry["confirmations"] < 0
+        ):
+            raise CoreProtocolError("Core wallet coin list is malformed")
+        value = _btc_to_sat(entry.get("amount"))
+        script, descriptor = entry.get("scriptPubKey"), entry.get("desc")
+        kind = (
+            input_kind(script, descriptor)
+            if type(script) is str and type(descriptor) is str
+            else None
+        )
+        if (
+            kind is None
+            or value <= 0
+            or entry.get("solvable") is not True
+            or entry.get("safe") is not True
+            or entry.get("reused") is True  # avoid_reuse wallets skip dirty coins too
+        ):
+            continue
+        confirmed = entry["confirmations"] > 0
+        coins.append(Coin(entry["txid"], entry["vout"], value, INPUT_WEIGHTS[kind], confirmed))
+    return coins
 
 
 def _fee_sat(created: object) -> int:

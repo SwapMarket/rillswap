@@ -12,6 +12,7 @@ from rill_provider.core_tx_bytes import (
     MAX_SPEND_SCAN_BLOCKS,
     CoreProtocolError,
     CoreTransactionReader,
+    CoreUnavailableError,
     SpendObservation,
 )
 
@@ -38,6 +39,40 @@ def _by_method(
     return respond
 
 
+def _coin(
+    txid: str = ANCHOR,
+    vout: int = 7,
+    amount: float = 0.601008,  # JSON's shortest float text parses back as an exact Decimal
+    *,
+    confirmations: int = 3,
+    kind: str = "tr",
+    **changes: Any,  # noqa: ANN401
+) -> dict[str, Any]:
+    script, desc = {
+        "tr": ("5120" + "44" * 32, "tr([d34db33f/86h/1h/0h/1/0]" + "55" * 32 + ")#abcd1234"),
+        "wpkh": ("0014" + "44" * 20, "wpkh([d34db33f/84h/1h/0h/1/0]02" + "55" * 32 + ")#ab"),
+        "sh-wpkh": ("a914" + "44" * 20 + "87", "sh(wpkh([d34db33f/49h]02" + "55" * 32 + "))#ab"),
+        "pkh": ("76a914" + "44" * 20 + "88ac", "pkh([d34db33f/44h]02" + "55" * 32 + ")#ab"),
+        "wsh": ("0020" + "44" * 32, "wsh(multi(1,02" + "55" * 32 + "))#ab"),
+        "tr-tree": ("5120" + "44" * 32, "tr(" + "55" * 32 + ",pk(" + "66" * 32 + "))#ab"),
+    }[kind]
+    entry = {
+        "txid": txid,
+        "vout": vout,
+        "address": "bcrt1qexample",
+        "scriptPubKey": script,
+        "amount": amount,
+        "confirmations": confirmations,
+        "spendable": True,
+        "solvable": True,
+        "desc": desc,
+        "parent_descs": [],
+        "safe": True,
+    }
+    entry.update(changes)
+    return entry
+
+
 def _funding_replies(**changes: Any) -> dict[str, Any]:  # noqa: ANN401
     decoded = {
         "txid": FUNDING_TXID,
@@ -48,6 +83,9 @@ def _funding_replies(**changes: Any) -> dict[str, Any]:  # noqa: ANN401
         ],
     }
     replies: dict[str, Any] = {
+        "getmempoolinfo": {"minrelaytxfee": 0.00000100, "mempoolminfee": 0.00000100},
+        "estimatesmartfee": {"feerate": 0.00001000, "blocks": 2},
+        "listunspent": [_coin()],
         "decodescript": {"address": ADDRESS},
         "walletcreatefundedpsbt": {"psbt": "cHNidP8B", "fee": 0.00000300, "changepos": 1},
         "decodepsbt": {"tx": decoded},
@@ -78,24 +116,32 @@ def test_fund_output_signs_exactly_the_requested_payment_at_index_zero(tmp_path:
     assert funded.selected_inputs == ((ANCHOR, 7),)
     methods = [(r["method"], r["path"]) for r in requests]
     assert methods == [
+        ("getmempoolinfo", "/"),
+        ("estimatesmartfee", "/"),
         ("decodescript", "/"),
+        ("listunspent", "/wallet/rill"),
         ("walletcreatefundedpsbt", "/wallet/rill"),
         ("decodepsbt", "/"),
         ("walletprocesspsbt", "/wallet/rill"),
         ("finalizepsbt", "/"),
         ("decoderawtransaction", "/"),
     ]
-    create = requests[1]["params"]
-    assert create[0] == [] and create[1] == [{ADDRESS: "0.00100500"}]  # noqa: PT018
+    # Economical next-block advice, and every coin including safe unconfirmed ones.
+    assert requests[1]["params"] == [2, "ECONOMICAL"]
+    assert requests[3]["params"] == [0]
+    create = requests[4]["params"]
+    # The provider names its own inputs; Core may not add any.
+    assert create[0] == [{"txid": ANCHOR, "vout": 7}]
+    assert create[1] == [{ADDRESS: "0.00100500"}]
     assert create[3] == {
         "changePosition": 1,
         "lockUnspents": True,
         "replaceable": False,
-        "conf_target": 6,
-        "estimate_mode": "economical",
+        "fee_rate": "1.000",
+        "add_inputs": False,
     }
-    assert requests[2]["params"] == ["cHNidP8B"]
-    assert requests[3]["params"] == ["cHNidP8B", True]
+    assert requests[5]["params"] == ["cHNidP8B"]
+    assert requests[6]["params"] == ["cHNidP8B", True]
     assert not any(r["method"] == "sendrawtransaction" for r in requests)
 
 
@@ -146,6 +192,8 @@ def test_builder_refusal_releases_every_identified_input_only(tmp_path: Path, fa
     _, _, network = _context()
     replies = _funding_replies()
     inputs = [{"txid": ANCHOR, "vout": 7}, {"txid": "b2" * 32, "vout": 8}]
+    # Neither coin pays the contract alone, so both are selected.
+    replies["listunspent"] = [_coin(amount=0.0006), _coin("b2" * 32, 8, 0.0006)]
     replies["decodepsbt"] = {"tx": {"vin": inputs}}
     replies["decoderawtransaction"]["vin"] = inputs
     if failure == "fee":
@@ -234,6 +282,103 @@ def test_cleanup_failure_keeps_original_fee_refusal_and_reports_uncertain_locks(
         with pytest.raises(CoreProtocolError, match="fee exceeds") as error:
             reader.fund_output(SCRIPT, 100_500, max_fee_sat=400)
     assert any("cleanup failed" in note for note in error.value.__notes__)
+
+
+def _fund(
+    tmp_path: Path, replies: dict[str, Any], requests: list[dict[str, Any]], value: int = 100_500
+) -> None:
+    _, _, network = _context()
+    with _server(_by_method(replies), requests) as port:
+        reader = CoreTransactionReader(
+            port=port, cookie_path=_cookie(tmp_path), network=network, wallet="rill"
+        )
+        reader.fund_output(SCRIPT, value, max_fee_sat=5_000)
+
+
+def _created_inputs(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    create = next(r for r in requests if r["method"] == "walletcreatefundedpsbt")
+    assert create["params"][3]["add_inputs"] is False
+    return create["params"][0]
+
+
+def test_reported_wallet_funds_from_the_one_coin_that_suffices(tmp_path: Path) -> None:
+    # bd9f7ed6...: Core added four small coins to a coin that paid 101,000 alone.
+    big = _coin("c0" * 32, 1, 0.99840846)
+    small = [_coin(f"{i:02x}" * 32, 0, amount) for i, amount in enumerate((9826e-8, 830e-8))]
+    replies = _funding_replies(listunspent=[*small, big, _coin("c1" * 32, 0, 0.0000583)])
+    replies["decodepsbt"] = {"tx": {"vin": [{"txid": "c0" * 32, "vout": 1}]}}
+    replies["decoderawtransaction"]["vin"] = [{"txid": "c0" * 32, "vout": 1}]
+    requests: list[dict[str, Any]] = []
+    _fund(tmp_path, replies, requests)
+    assert _created_inputs(requests) == [{"txid": "c0" * 32, "vout": 1}]
+
+
+def test_only_safe_solvable_known_coins_are_candidates(tmp_path: Path) -> None:
+    usable = _coin("c9" * 32, 0, 0.002, kind="wpkh")
+    replies = _funding_replies(
+        listunspent=[
+            _coin("c1" * 32, 0, 0.0010101, safe=False),  # unconfirmed from outside keys
+            _coin("c2" * 32, 0, 0.0010102, solvable=False, desc=None),
+            _coin("c3" * 32, 0, 0.0010103, kind="wsh"),  # unknown signed size
+            _coin("c4" * 32, 0, 0.0010104, kind="tr-tree"),  # Core may use a script path
+            _coin("c5" * 32, 0, 0.0010105, reused=True),  # avoid_reuse wallets skip it
+            usable,
+        ]
+    )
+    replies["decodepsbt"] = {"tx": {"vin": [{"txid": "c9" * 32, "vout": 0}]}}
+    replies["decoderawtransaction"]["vin"] = [{"txid": "c9" * 32, "vout": 0}]
+    requests: list[dict[str, Any]] = []
+    _fund(tmp_path, replies, requests)
+    assert _created_inputs(requests) == [{"txid": "c9" * 32, "vout": 0}]
+
+
+def test_unaffordable_contract_creates_and_locks_nothing(tmp_path: Path) -> None:
+    replies = _funding_replies(listunspent=[_coin(amount=0.0006, confirmations=0)])
+    requests: list[dict[str, Any]] = []
+    with pytest.raises(CoreUnavailableError, match="cannot pay"):
+        _fund(tmp_path, replies, requests)
+    assert [r["method"] for r in requests][-1] == "listunspent"
+
+
+def test_core_choosing_other_inputs_is_refused_and_its_locks_released(tmp_path: Path) -> None:
+    other = [{"txid": ANCHOR, "vout": 7}, {"txid": "b4" * 32, "vout": 2}]
+    replies = _funding_replies(decodepsbt={"tx": {"vin": other}})
+    requests: list[dict[str, Any]] = []
+    with pytest.raises(CoreProtocolError, match="other inputs than selected"):
+        _fund(tmp_path, replies, requests)
+    releases = [r["params"] for r in requests if r["method"] == "lockunspent"]
+    assert releases == [[True, other]]
+    assert not any(r["method"] == "walletprocesspsbt" for r in requests)
+
+
+def test_credential_without_listunspent_keeps_core_selection_at_the_same_rate(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # An upgraded provider whose rpcwhitelist predates listunspent: Core answers 403.
+    replies = _funding_replies()
+    requests: list[dict[str, Any]] = []
+
+    def respond(payload: dict[str, Any]) -> tuple[int, bytes]:
+        if payload["method"] == "listunspent":
+            return 403, b""
+        return _by_method(replies)(payload)
+
+    _, _, network = _context()
+    with _server(respond, requests) as port:
+        reader = CoreTransactionReader(
+            port=port, cookie_path=_cookie(tmp_path), network=network, wallet="rill"
+        )
+        funded = reader.fund_output(SCRIPT, 100_500, max_fee_sat=400)
+    assert funded.selected_inputs == ((ANCHOR, 7),)
+    create = next(r for r in requests if r["method"] == "walletcreatefundedpsbt")
+    assert create["params"][0] == []
+    assert create["params"][3] == {
+        "changePosition": 1,
+        "lockUnspents": True,
+        "replaceable": False,
+        "fee_rate": "1.000",
+    }
+    assert "listunspent" in caplog.text
 
 
 def _spend(txid: str = FUNDING_TXID, vout: int = 0) -> dict[str, Any]:

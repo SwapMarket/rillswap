@@ -1,8 +1,8 @@
 """Operator ceiling on Core fee estimates (skewed signet estimators).
 
-The ceiling lowers only Core's estimate. Unset, every request is unchanged;
-set, funding names an explicit rate, advisory claim/refund rates are capped,
-and strict cooperative evidence keeps its relay and mempool floors and checks.
+The ceiling lowers only Core's estimate, never replaces a missing one. Set,
+the funding rate and advisory claim/refund rates are capped, and the node's
+relay and mempool floors and every strict cooperative check still apply.
 """
 
 from __future__ import annotations
@@ -19,7 +19,11 @@ from test_core_wallet_funding import ADDRESS, SCRIPT, _by_method, _funding_repli
 from test_network_adapters import _network
 
 from rill_provider import cli
-from rill_provider.core_tx_bytes import CoreProtocolError, CoreTransactionReader
+from rill_provider.core_tx_bytes import (
+    CoreProtocolError,
+    CoreTransactionReader,
+    CoreUnavailableError,
+)
 from rill_provider.operator_config import BitcoinCore
 
 if TYPE_CHECKING:
@@ -32,13 +36,10 @@ SKEWED = {"feerate": 0.00231893, "blocks": 6}  # 231.893 sat/vB, as seen on sign
     ("estimate", "rate"),
     [
         (SKEWED, "2.000"),
-        ({"feerate": 0.00001234, "blocks": 6}, "1.234"),  # below the ceiling: Core's own
-        ({"feerate": 0.000012345, "blocks": 6}, "1.235"),  # sub-millisat rounds up
-        ({"errors": ["Insufficient data or no feerate found"], "blocks": 0}, "2.000"),
-        ({"feerate": 1.5, "blocks": 6}, "2.000"),  # nonsense advice is ignored
+        ({"feerate": 0.00001234, "blocks": 2}, "1.234"),  # below the ceiling: Core's own
     ],
 )
-def test_capped_funding_names_an_explicit_rate_instead_of_a_target(
+def test_capped_funding_pays_the_lower_of_the_estimate_and_the_ceiling(
     tmp_path: Path, estimate: dict[str, Any], rate: str
 ) -> None:
     _, _, network = _context()
@@ -54,10 +55,8 @@ def test_capped_funding_names_an_explicit_rate_instead_of_a_target(
         )
         funded = reader.fund_output(SCRIPT, 100_500, max_fee_sat=400)
     assert funded.fee_sat == 300
-    assert (requests[0]["method"], requests[0]["params"]) == (
-        "estimatesmartfee",
-        [6, "ECONOMICAL"],
-    )
+    estimate_request = next(r for r in requests if r["method"] == "estimatesmartfee")
+    assert estimate_request["params"] == [2, "ECONOMICAL"]
     create = next(r for r in requests if r["method"] == "walletcreatefundedpsbt")
     assert create["params"][1] == [{ADDRESS: "0.00100500"}]
     assert create["params"][3] == {
@@ -65,20 +64,30 @@ def test_capped_funding_names_an_explicit_rate_instead_of_a_target(
         "lockUnspents": True,
         "replaceable": False,
         "fee_rate": rate,
+        "add_inputs": False,
     }
 
 
-def test_capped_funding_falls_back_to_the_ceiling_when_core_cannot_estimate(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "estimate",
+    [
+        {"errors": ["Insufficient data or no feerate found"], "blocks": 0},
+        {"code": -32601, "message": "Method not found"},  # an RPC error
+    ],
+)
+def test_missing_estimate_never_selects_the_ceiling(
+    tmp_path: Path, estimate: dict[str, Any]
 ) -> None:
-    _, _, network = _context()
+    # Before, funding paid the ceiling whenever Core could not estimate.
+    network = _network("signet")
     replies = _funding_replies()
 
     def respond(payload: dict[str, Any]) -> tuple[int, bytes]:
-        if payload["method"] == "estimatesmartfee":
-            error = {"code": -32601, "message": "Method not found"}
-            body = {"jsonrpc": "2.0", "id": payload["id"], "error": error}
+        if payload["method"] == "estimatesmartfee" and "code" in estimate:
+            body = {"jsonrpc": "2.0", "id": payload["id"], "error": estimate}
             return 200, json.dumps(body).encode()
+        if payload["method"] == "estimatesmartfee":
+            replies["estimatesmartfee"] = estimate
         return _by_method(replies)(payload)
 
     requests: list[dict[str, Any]] = []
@@ -86,10 +95,25 @@ def test_capped_funding_falls_back_to_the_ceiling_when_core_cannot_estimate(
         reader = CoreTransactionReader(
             port=port, cookie_path=_cookie(tmp_path), network=network, max_fee_estimate_sat_vb=3
         )
+        with pytest.raises(CoreUnavailableError, match="estimate unavailable"):
+            reader.fund_output(SCRIPT, 100_500, max_fee_sat=400)
+    assert [r["method"] for r in requests] == ["getmempoolinfo", "estimatesmartfee"]
+
+
+def test_node_minimums_still_bind_a_capped_estimate(tmp_path: Path) -> None:
+    _, _, network = _context()
+    requests: list[dict[str, Any]] = []
+    replies = _funding_replies(
+        estimatesmartfee=SKEWED,
+        getmempoolinfo={"minrelaytxfee": 0.000001, "mempoolminfee": 0.00003},
+    )
+    with _server(_by_method(replies), requests) as port:
+        reader = CoreTransactionReader(
+            port=port, cookie_path=_cookie(tmp_path), network=network, max_fee_estimate_sat_vb=2
+        )
         reader.fund_output(SCRIPT, 100_500, max_fee_sat=400)
     create = next(r for r in requests if r["method"] == "walletcreatefundedpsbt")
     assert create["params"][3]["fee_rate"] == "3.000"
-    assert "conf_target" not in create["params"][3]
 
 
 def test_capped_funding_still_refuses_a_fee_above_the_signed_maximum(tmp_path: Path) -> None:

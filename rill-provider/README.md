@@ -208,6 +208,28 @@ LN to BTC reads the balance with Core's `getbalances`. If you generated the
 Core; until then the provider logs `liquidity unavailable` and keeps the
 configured bands.
 
+### LN to BTC funding
+
+The provider funds each contract at Core's economical next-block estimate
+(`estimatesmartfee 2 ECONOMICAL`, Core's closest setting to "next block"),
+lowered to `bitcoin_core.max_fee_estimate_sat_vb` when set, and never below
+the node's `minrelaytxfee` or current `mempoolminfee`. Without an estimate
+it refuses to fund rather than guess (regtest alone falls back to the node
+minimum), and the swap is retried later. The ceiling is never used as a
+fallback rate.
+
+It picks the inputs itself, for privacy: the fewest coins that pay the
+contract, then, among those, the set leaving the least excess. Confirmed
+coins come first; safe unconfirmed change only when they are not enough.
+Core adds no other inputs, and when the excess is not worth a change output,
+Core adds it to the fee instead. Only single-key coins whose signed size is
+known (P2TR key path, P2WPKH, P2SH-P2WPKH, P2PKH) are candidates. Run one
+provider per funding wallet.
+
+This needs Core's `listunspent`. If you generated the `rpcwhitelist` before
+this release, add `listunspent` to it and restart Core; until then the
+provider logs a warning and lets Core pick the inputs, at the same rate.
+
 Admission limits include `max_sessions`, `max_tombstones`,
 `new_sessions_per_minute` and `max_active_reservations`. The last one bounds
 unreleased firm offers and accepted swaps (default 4). A swap holds its
@@ -237,9 +259,9 @@ transactions paying hundreds of sat/vB next to empty blocks make
 to BTC funding then exceeds the signed `max_funding_fee_sat` and the swap waits
 until its funding window closes, cooperative claims are refused because their
 fee is below the estimate, and script-path claims start at the signed fee cap.
-With a cap, funding uses an explicit rate of at most the cap (the cap itself
-when Core has no estimate), and claim, refund and cooperative fee checks use
-the capped estimate. Core's relay and mempool minimum fees, the signed caps and
+With a cap, funding pays at most the cap (never the cap in place of a missing
+estimate), and claim, refund and cooperative fee checks use the capped
+estimate. Core's relay and mempool minimum fees, the signed caps and
 fee bumping are unchanged. On mainnet, leave it unset unless you understand
 that a low cap also lowers the starting fee of your claims and refunds. The
 signet example and signet makers created by `rill-provider-init` set 2
