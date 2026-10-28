@@ -1,6 +1,7 @@
 """Owned incoming accounting, original receipts and explicit completion conformance.
 
-The initial authenticated merchant flow is the unchanged M29 diagnostic template.
+The initial authenticated merchant flow is the unchanged funded source-provenance
+diagnostic template.
 Checked test-only substitutions change only this scenario's amount/provider/
 destination and final evidence. Existing scenarios, assertions and artifacts are
 not rewritten. This is not a production accounting projector or relay policy.

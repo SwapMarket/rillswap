@@ -76,7 +76,7 @@ describe("relay connection", () => {
     expect(await refused).toBe(false);
   });
 
-  test("an AUTH challenge never triggers stable-key authentication (N12)", async () => {
+  test("an AUTH challenge never triggers stable-key authentication", async () => {
     const { relay, socket } = await connect();
     await relay.subscribe({ kinds: [1059] });
     socket.deliver(["AUTH", "relay-challenge"]);
@@ -157,7 +157,7 @@ describe("provider discovery", () => {
     await expect(discoverProvider(at([ANNOUNCEMENT]), other, NETWORK, "btc-to-ln/v1")).rejects.toThrow(SwapError);
   });
 
-  test("two independent identities on different relays need no shared registry (N01)", async () => {
+  test("two independent identities on different relays need no shared registry", async () => {
     spyOn(Date, "now").mockReturnValue(1703021600 * 1000);
     const secondSecret = Uint8Array.from({ length: 32 }, (_, index) => index === 31 ? 7 : 0);
     const secondIdentity = getPublicKey(secondSecret);

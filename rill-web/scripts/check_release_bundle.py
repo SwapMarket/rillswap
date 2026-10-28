@@ -1,7 +1,6 @@
 """Verify a deterministic ZIP and extracted Pages candidate against tested dist/.
 
-These artifacts stay local. Publishing, destination-byte identity and release
-authorization remain separate release-gate work.
+These artifacts stay local; this check never publishes them.
 """
 
 from __future__ import annotations

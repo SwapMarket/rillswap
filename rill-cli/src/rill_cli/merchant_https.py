@@ -123,7 +123,7 @@ def _headers(response: http.client.HTTPResponse) -> None:
 
 
 class MerchantHttpsReader:
-    """Explicit M24 regtest loopback profile, inert until a read is requested."""
+    """Explicit regtest loopback HTTPS profile, inert until a read is requested."""
 
     def __init__(self, pin: MerchantSourcePin, leaf_der_sha256: str, ca_path: Path) -> None:
         """Require independently retained leaf identity, never server-learned trust."""

@@ -118,7 +118,7 @@ describe("rill-provider interop", () => {
   });
 });
 
-describe("relay-visible metadata (N07/N08)", () => {
+describe("relay-visible metadata", () => {
   test("a gift wrap exposes only the recipient, a fuzzed time, and its size", async () => {
     const { client, provider } = pair();
     const secret = { payment_hash: "5a".repeat(32), invoice: "lnbcrt500u1pexampleinvoice", contract: "6b".repeat(32) };

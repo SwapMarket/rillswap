@@ -334,7 +334,7 @@ test("the preview page links to the swap page", async ({ page }) => {
   await expect(page).toHaveURL(SWAP);
 });
 
-test("the swap page installs no service worker, so no release replaces it mid-swap (W11)", async ({ page }) => {
+test("the swap page installs no service worker, so no release replaces it mid-swap", async ({ page }) => {
   await page.goto(SWAP);
   await expect(page.locator("#swap-start")).toBeVisible();
   const registrations = await page.evaluate(async () =>

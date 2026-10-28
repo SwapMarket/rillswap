@@ -32,7 +32,7 @@ pytestmark = [
 def case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Case]:
     with Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto:
         value = Case(tmp_path, monkeypatch, crypto)
-        # M36 retains its strict never-complete spy. This distinct M38 fixture
+        # Receipt-only tests retain their strict never-complete spy. This fixture
         # explicitly restores the REAL transactional journal completion method.
         monkeypatch.setattr(
             value.harness.journal,

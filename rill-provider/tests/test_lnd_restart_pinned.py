@@ -56,7 +56,7 @@ def test_restart_history_uses_deterministic_full_messages_without_changing_crash
         )
         for call in calls
     )
-    # Accepted M39 raw snapshots and comparisons remain their original contract.
+    # The accepted raw snapshots and comparisons remain the original contract.
     assert "assert final_payments==original_payments" in program
     assert "assert final_paid.SerializeToString()==original_payments" in program
 
