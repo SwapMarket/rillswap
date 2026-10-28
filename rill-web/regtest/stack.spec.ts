@@ -26,10 +26,13 @@ test("whole Compose stack is ready with real chains, funded channels and all fou
   const monero = JSON.parse(compose("exec", "-T", "tools", "python", "-c",
     "import sys,json;sys.path.insert(0,'/src/dev');from devtool import MoneroDaemon;print(json.dumps(MoneroDaemon()('get_info')))"));
   expect(monero.nettype).toBe("fakechain"); expect(monero.height).toBeGreaterThanOrEqual(130);
-  for (const node of ["maker", "user", "merchant"]) {
-    const info = JSON.parse(command("lncli", node, "getinfo"));
-    expect(info.synced_to_chain).toBe(true); expect(info.num_active_channels).toBeGreaterThan(0);
-  }
+  // Running containers can still be catching up with the blocks mined at bootstrap.
+  await expect(() => {
+    for (const node of ["maker", "user", "merchant"]) {
+      const info = JSON.parse(command("lncli", node, "getinfo"));
+      expect(info.synced_to_chain, node).toBe(true); expect(info.num_active_channels, node).toBeGreaterThan(0);
+    }
+  }).toPass({ timeout: 120000 });
   const balances = JSON.parse(command("info", "--json")).balances;
   expect(balances["core:user"].trusted_btc).toBeGreaterThan(0);
   expect(balances["monero:buyer"].unlocked_xmr).toBeGreaterThan(0);
