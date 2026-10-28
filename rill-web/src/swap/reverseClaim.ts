@@ -95,7 +95,7 @@ export interface ReverseClaimExposure {
 /** The durable digest always binds the unilateral fallback, even if a live cooperative witness is used later. */
 export async function exposeJournaledReverseClaim(context: ClaimContext, api: string, broadcastApi: string,
   action: "download" | "broadcast", beforeExposure: () => void,
-  cooperate?: (tipHeight: number) => Promise<{ readonly raw: string; readonly txid: string } | null>): Promise<{ readonly record: ReverseJournalRecord; readonly exposure: ReverseClaimExposure }> {
+  cooperate?: (tipHeight: number, beforeDisclosure: () => Promise<void>) => Promise<{ readonly raw: string; readonly txid: string } | null>): Promise<{ readonly record: ReverseJournalRecord; readonly exposure: ReverseClaimExposure }> {
   context.assertCurrent();
   const report = inspectReverseRecoveryPlaintext(context.plaintext, context.network), doc = parseRecoveryPlaintext(context.plaintext).document;
   const fallback = (doc.extensions as Record<string, unknown>)[REVERSE_FALLBACK_EXTENSION] as { transaction: string };
@@ -112,10 +112,11 @@ export async function exposeJournaledReverseClaim(context: ClaimContext, api: st
   require(observation.confirmations >= depth && observation.tipHeight + report.claimConfirmationBlocks < report.refundLockHeight + 1);
   verifySelectedReverseClaim(context.plaintext, context.network, { fundingAttemptId: binding.funding_attempt_id, bindingRevision: binding.binding_revision },
     hexToBytes(observation.rawFundingTransactionHex), hexToBytes(fallback.transaction));
-  let transaction = fallback.transaction;
+  let transaction = fallback.transaction, disclosed = false;
+  const expose = async (): Promise<void> => { context.assertCurrent(); beforeExposure(); record = await context.journal.beginClaimExposure(record); };
   if (action === "broadcast" && cooperate) {
     try {
-      const candidate = await cooperate(observation.tipHeight); context.assertCurrent();
+      const candidate = await cooperate(observation.tipHeight, async () => { await expose(); disclosed = true; }); context.assertCurrent();
       if (candidate) {
         const parsed = parseTransaction(hexToBytes(candidate.raw));
         const terms = doc.contract_terms as unknown as LnToBtcTerms;
@@ -125,10 +126,13 @@ export async function exposeJournaledReverseClaim(context: ClaimContext, api: st
         transaction = candidate.raw;
       }
     } catch { context.assertCurrent(); /* Invalid/refused cooperation uses the already-durable fallback. */ }
-    const fresh = await freshFundingObservation(context, api);
-    require(fresh.confirmations >= depth && fresh.tipHeight + report.claimConfirmationBlocks < report.refundLockHeight + 1);
+    // A sent proposal gave the provider the preimage: withholding the claim now only helps its refund.
+    if (!disclosed) {
+      const fresh = await freshFundingObservation(context, api);
+      require(fresh.confirmations >= depth && fresh.tipHeight + report.claimConfirmationBlocks < report.refundLockHeight + 1);
+    }
   }
-  context.assertCurrent(); beforeExposure(); record = await context.journal.beginClaimExposure(record);
+  if (!disclosed) await expose();
   // A committed election (including a rejected readback) never renews POST authority.
   try {
     context.assertCurrent();

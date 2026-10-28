@@ -22,6 +22,8 @@ interface ReverseCooperationOptions {
   readonly feeSat: bigint;
   readonly expectedTxid: string;
   readonly tipHeight: number;
+  /** Durably journal the claim exposure: the proposal carries the preimage. */
+  readonly beforeDisclosure?: () => Promise<void>;
   readonly capabilities: Cosigner;
   readonly assertCurrent: () => void;
   readonly monotonicClock?: () => number;
@@ -97,6 +99,8 @@ export async function reverseCooperativeClaim(options: ReverseCooperationOptions
       const proposal = session.envelope("action_request", { action: "cooperative_claim_propose", cooperation_id: cooperationId,
         unsigned_transaction: bytesToHex(plan.baseTransaction), payment_preimage: bytesToHex(options.preimage), public_nonce: bytesToHex(attempt.publicNonce),
         deadline_at: deadlineAt, deadline_height: deadlineHeight }, { contract: hash, requiredFeatures: [COOPERATIVE_CLAIM_FEATURE] });
+      step = "recording the disclosure";
+      if (options.beforeDisclosure) { await bounded(options.beforeDisclosure); live(); }
       step = "sending the proposal";
       await bounded(() => session.send(proposal, session.providerKey!, live)); live();
       step = "waiting for the provider's signature";
