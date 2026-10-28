@@ -106,6 +106,9 @@ def test_bitcoin_maker_config_passes_the_provider_schema(tmp_path: Path, profile
     assert config.lnd.port == init.LND_PORT
     assert config.lnd.payment_macaroon is not None
     assert (config.lnd.invoices_macaroon is not None) is (profile == "ln-to-btc")
+    # Up to 10M sat, lowered to the maker's liquidity at each announcement.
+    assert config.terms.amount_bands == ((10_000, 10_000_000),)
+    assert config.terms.follow_liquidity is True
 
 
 def test_default_relays_match_the_web_app_and_are_all_served(tmp_path: Path) -> None:

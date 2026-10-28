@@ -48,6 +48,8 @@ SEND_METHOD = "/routerrpc.Router/SendToRouteV2"
 QUERY_METHOD = "/lnrpc.Lightning/QueryRoutes"
 INFO_METHOD = "/lnrpc.Lightning/GetInfo"
 TRACK_METHOD = "/routerrpc.Router/TrackPaymentV2"
+LIST_CHANNELS_METHOD = "/lnrpc.Lightning/ListChannels"
+LIQUIDITY_DEADLINE_SECONDS = 10.0
 MAX_UPDATES = 64
 HASH_BYTES = 32
 # lnrpc.Payment.PaymentStatus
@@ -241,6 +243,28 @@ class LndPaymentSender:
             payer,
             deadline,
         )
+
+    def largest_channel_send_sat(self) -> int:
+        """Return the most one open channel could send now: local balance less its reserve.
+
+        Payments take one route (no multi-part), so this bounds one payment
+        before routing fees. Inactive channels count: a peer reconnecting must
+        not look like spent liquidity, and route checks gate each payment.
+        Indicative only; it authorizes nothing.
+        """
+        deadline = time.monotonic() + LIQUIDITY_DEADLINE_SECONDS
+        with self._connect() as calls:
+            response: lightning_pb2.ListChannelsResponse = calls.unary(
+                LIST_CHANNELS_METHOD,
+                lightning_pb2.ListChannelsRequest(),
+                lightning_pb2.ListChannelsResponse,
+                deadline,
+            )
+        sendable = (
+            int(channel.local_balance) - int(channel.local_constraints.chan_reserve_sat)
+            for channel in response.channels
+        )
+        return max([0, *sendable])
 
     @staticmethod
     def _query(

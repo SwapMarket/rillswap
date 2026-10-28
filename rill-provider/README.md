@@ -179,7 +179,7 @@ The configuration is strict JSON; unknown fields are refused.
 | `lnd` | Loopback gRPC `port`, `tls_certificate` and scoped macaroon paths |
 | `provider_destination_script` | Provider's P2WPKH or P2TR destination script; enables Bitcoin firm offers |
 | `handshake` | Selected profile, features, encryption suites and capabilities |
-| `terms` | Advertised profiles, amount bands, fees and slot label |
+| `terms` | Advertised profiles, amount bands, fees, slot label and the liquidity cap (`follow_liquidity`, `liquidity_margin_percent`) |
 | `quote` | Confirmation requirements, fee caps, deadlines and timing budgets |
 | `authority` | Store volume label and deployment attestations |
 | `relay_urls`, `relay_proxy` | Relay WebSocket URLs and loopback Tor HTTP tunnel |
@@ -188,6 +188,25 @@ The configuration is strict JSON; unknown fields are refused.
 `terms.amount_bands` are in satoshis. Fees use `base_fee_sat` and
 `proportional_millionths`. Review the `quote` settings against your network
 and liquidity instead of treating the defaults as guarantees.
+
+With `terms.follow_liquidity` (default `true`), the provider announces and
+accepts at most what it can pay out, less a random margin from
+`terms.liquidity_margin_percent` (default `[10, 20]`), and never more than the
+configured bands. Each announcement (every 30 minutes) checks the payout
+liquidity again: the largest single LND channel's sendable balance for BTC to
+LN and ERC20 to LN, or the funding wallet's trusted balance for LN to BTC. LN
+to ERC20 keeps its configured bands. The cap only drops when liquidity falls
+below it, with a fresh margin each time, and returns to the configured
+maximum once liquidity is at least `maximum / (1 - high margin)`, so keep more
+than that to reveal nothing about your balance. Below the smallest band, the
+provider stops announcing until liquidity recovers. If the source fails, the
+last cap stays (the configured bands before any reading). The Docker template
+uses one band of 10,000 to 10,000,000 sat.
+
+LN to BTC reads the balance with Core's `getbalances`. If you generated the
+`rpcwhitelist` before this release, add `getbalances` to it and restart
+Core; until then the provider logs `liquidity unavailable` and keeps the
+configured bands.
 
 Admission limits include `max_sessions`, `max_tombstones`,
 `new_sessions_per_minute` and `max_active_reservations`. The last one bounds

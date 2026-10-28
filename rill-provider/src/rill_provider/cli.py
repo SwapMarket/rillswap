@@ -194,6 +194,33 @@ def _payment_sender(config: OperatorConfig) -> LndPaymentSender | None:
         raise OperatorConfigError("settlement requires a supported network") from None
 
 
+def _liquidity(config: OperatorConfig) -> Callable[[], int] | None:
+    """Return what caps the announced amounts: what this profile pays out from.
+
+    LN payouts (btc-to-ln, erc20-to-ln) are bounded by the best single channel,
+    LN to BTC by the Core funding wallet. LN to ERC20 has no token balance
+    source yet, so its configured bands stay as they are.
+    """
+    profile, core = config.handshake.profile, config.bitcoin_core
+    if not config.terms.follow_liquidity:
+        return None
+    if profile in ("btc-to-ln/v1", "erc20-to-ln/v1"):
+        sender = _payment_sender(config)
+        return None if sender is None else sender.largest_channel_send_sat
+    if profile == "ln-to-btc/v1" and core is not None:
+        try:
+            wallet = CoreTransactionReader(
+                port=core.port,
+                cookie_path=core.cookie_file,
+                network=config.network,
+                wallet=core.wallet,
+            )
+        except ValueError:
+            raise OperatorConfigError("bitcoin_core requires a supported network") from None
+        return wallet.trusted_balance_sat
+    return None
+
+
 def _evm_settlement(
     config: OperatorConfig, store: LiveSessionStore, crypto: Context
 ) -> EvmSettlementEngine | None:
@@ -378,6 +405,7 @@ async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
             settlement=_settlement(config, store, crypto),
             hold_invoices=_hold_invoices(config),
             evm_settlement=_evm_settlement(config, store, crypto),
+            liquidity=_liquidity(config),
         )
         await service.run(stop)
 

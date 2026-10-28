@@ -493,3 +493,27 @@ def test_current_tracking_reports_a_held_payment_in_flight_at_once(
     client, channel = _sender(tmp_path, monkeypatch, [_payment(1), _payment(2, PREIMAGE)])
     assert client.track(HASH) == sender.PaymentOutcome("SUCCEEDED", PREIMAGE)
     assert channel.calls[-1][1].no_inflight_updates is True
+
+
+def test_largest_channel_send_is_the_best_single_channel_less_its_reserve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, channel = _sender(tmp_path, monkeypatch, [])
+
+    def opened(local: int, reserve: int, *, active: bool = True) -> lightning_pb2.Channel:
+        return lightning_pb2.Channel(
+            active=active, local_balance=local, local_constraints={"chan_reserve_sat": reserve}
+        )
+
+    channel.unary_responses[sender.LIST_CHANNELS_METHOD] = lightning_pb2.ListChannelsResponse(
+        channels=[opened(400_000, 10_000), opened(900_000, 20_000, active=False), opened(5, 10)]
+    )
+    assert client.largest_channel_send_sat() == 880_000  # inactive channels still count
+    method, request = channel.calls[-1]
+    assert method == sender.LIST_CHANNELS_METHOD
+    assert request == lightning_pb2.ListChannelsRequest()  # all open channels
+    channel.unary_responses[sender.LIST_CHANNELS_METHOD] = lightning_pb2.ListChannelsResponse()
+    assert client.largest_channel_send_sat() == 0
+    channel.unary_responses[sender.LIST_CHANNELS_METHOD] = FakeRpcError(grpc.StatusCode.UNAVAILABLE)
+    with pytest.raises(LndUnavailableError):
+        client.largest_channel_send_sat()

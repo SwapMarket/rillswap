@@ -20,6 +20,7 @@ from test_live_session_store import Harness, _bytes
 
 from rill_provider.handshake_service import HandshakeService, ServicePolicy
 from rill_provider.live_session_store import (
+    LiveSessionStore,
     LiveSessionStoreError,
     SessionExpiredError,
     StaleOwnerError,
@@ -315,6 +316,156 @@ def test_announcements_are_durably_ordered_cached_and_sessions_expire(
         asyncio.run(restarted.tick([up]))
         assert identity.built == built
         assert len(up.published) == published
+
+
+class _BandsIdentity(_Identity):
+    def __init__(self) -> None:
+        super().__init__()
+        self.bands: list[tuple[tuple[int, int], ...]] = []
+
+    def build_announcement(self, terms: Any) -> bytes:  # noqa: ANN401
+        self.bands.append(terms.amount_bands)
+        return super().build_announcement(terms)
+
+
+def _liquidity_service(
+    store: LiveSessionStore,
+    harness: Harness,
+    liquidity: list[int | Exception],
+    clock: list[float],
+) -> tuple[HandshakeService, _BandsIdentity]:
+    policy = ServicePolicy(
+        network=harness.network,
+        profiles=("btc-to-ln/v1",),
+        amount_bands=((1000, 2_000_000),),
+        base_fee_sat=1,
+        proportional_millionths=1,
+        slot="s",
+        relay_urls=("ws://fake/",),
+        liquidity_margin_percent=(10, 10),
+    )
+
+    def read() -> int:
+        value = liquidity[0]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    identity = _BandsIdentity()
+    service = HandshakeService(
+        store,
+        identity,  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        policy,
+        clock=lambda: clock[0],
+        liquidity=read,
+    )
+    return service, identity
+
+
+def _admitted_bands(
+    service: HandshakeService, store: LiveSessionStore, monkeypatch: pytest.MonkeyPatch
+) -> tuple[tuple[int, int], ...]:
+    """Run quote admission and return the bands the quote rules were given."""
+    seen: list[Any] = []
+
+    def answer(*args: Any) -> Any:  # noqa: ANN401 - (request, prior, context, terms, signer)
+        seen.append(args[3])
+        return SimpleNamespace(message_type="error", payload={"code": "amount_out_of_range"})
+
+    def answer_request(_store: object, _document: bytes, *, responder: Any, **_: object) -> Any:  # noqa: ANN401
+        return responder(None, (), SimpleNamespace(economic_capacity_available=True))
+
+    monkeypatch.setattr("rill_provider.handshake_service.answer_client_request", answer)
+    monkeypatch.setattr(type(store), "answer_request", answer_request)
+    document = json.dumps({"message_type": "quote_request", "payload": {}}).encode()
+    asyncio.run(service._prepare_answer(document, 10_000, operation=None))  # noqa: SLF001
+    (terms,) = seen
+    return terms.amount_bands  # type: ignore[no-any-return]
+
+
+def test_announced_and_admitted_amounts_follow_liquidity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, monkeypatch)
+    harness.provision()
+    clock, liquidity = [10_000.0], [1_000_000]
+    relay = _Relay(accept=True)
+    with harness.acquire() as store:
+        service, identity = _liquidity_service(store, harness, liquidity, clock)
+        assert _admitted_bands(service, store, monkeypatch) == ((1000, 2_000_000),)
+        asyncio.run(service.tick([relay]))
+        assert identity.bands == [((1000, 900_000),)]  # 10 % below liquidity
+        assert _admitted_bands(service, store, monkeypatch) == ((1000, 900_000),)
+        liquidity[0] = 850_000  # a drop waits for the scheduled refresh
+        clock[0] += 60
+        asyncio.run(service.tick([relay]))
+        assert len(identity.bands) == 1
+        assert _admitted_bands(service, store, monkeypatch) == ((1000, 900_000),)
+        clock[0] += service._policy.announcement_refresh  # noqa: SLF001
+        asyncio.run(service.tick([relay]))
+        assert identity.bands[-1] == ((1000, 765_000),)
+        assert _admitted_bands(service, store, monkeypatch) == ((1000, 765_000),)
+        liquidity[0] = 5_000_000  # covers every band even 10 % below
+        clock[0] += service._policy.announcement_refresh  # noqa: SLF001
+        asyncio.run(service.tick([relay]))
+        assert identity.bands[-1] == ((1000, 2_000_000),)
+        assert _admitted_bands(service, store, monkeypatch) == ((1000, 2_000_000),)
+
+
+def test_a_failing_liquidity_source_keeps_the_last_cap_and_never_raises_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    harness = Harness(tmp_path, monkeypatch)
+    harness.provision()
+    clock, liquidity = [10_000.0], [OSError("LND down")]
+    relay = _Relay(accept=True)
+    refresh = 30 * 60
+    with harness.acquire() as store:
+        service, identity = _liquidity_service(store, harness, liquidity, clock)
+        asyncio.run(service.tick([relay]))
+        assert identity.bands == [((1000, 2_000_000),)]  # never read: configured bands
+        liquidity[0] = 1_000_000
+        clock[0] += refresh
+        asyncio.run(service.tick([relay]))
+        liquidity[0] = OSError("LND down")
+        for _ in range(2):
+            clock[0] += refresh
+            asyncio.run(service.tick([relay]))
+        assert (
+            identity.bands == [((1000, 2_000_000),), ((1000, 900_000),)] + [((1000, 900_000),)] * 2
+        )
+        assert _admitted_bands(service, store, monkeypatch) == ((1000, 900_000),)
+    warnings = [r.message for r in caplog.records if "liquidity unavailable" in r.message]
+    assert len(warnings) == 2  # once per failure streak
+
+
+def test_liquidity_below_every_band_stops_announcing_and_admitting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = Harness(tmp_path, monkeypatch)
+    harness.provision()
+    clock, liquidity = [10_000.0], [1_000_000]
+    relay = _Relay(accept=True)
+    refresh = 30 * 60
+    with harness.acquire() as store:
+        service, identity = _liquidity_service(store, harness, liquidity, clock)
+        asyncio.run(service.tick([relay]))
+        liquidity[0] = 1000  # 10 % below is under the smallest band
+        clock[0] += refresh
+        asyncio.run(service.tick([relay]))
+        assert len(identity.bands) == 1  # nothing built or recorded
+        assert _admitted_bands(service, store, monkeypatch) == ()
+        service._state.republish = True  # noqa: SLF001 - a relay reconnects
+        clock[0] += 60
+        asyncio.run(service.tick([relay]))
+        assert len(relay.published) == 1  # the old, larger offer is not resent
+        liquidity[0] = 100_000
+        clock[0] += refresh
+        asyncio.run(service.tick([relay]))
+        assert identity.bands[-1] == ((1000, 90_000),)
+        assert len(relay.published) == 2
+        assert _admitted_bands(service, store, monkeypatch) == ((1000, 90_000),)
 
 
 def test_relay_queue_loss_forces_one_replay_req_and_failed_req_retries(

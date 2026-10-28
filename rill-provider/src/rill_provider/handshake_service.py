@@ -26,6 +26,7 @@ from rill_core.wire.reverse_quotes import ReverseFirmQuoteRequest
 
 from rill_provider import _transport_pow as transport_pow
 from rill_provider.evm_quote_policy import EVM_PROFILES, ln_to_erc20_hold_msat
+from rill_provider.liquidity_cap import LiquidityCap
 from rill_provider.live_session_store import (
     COOPERATION_BUDGET_SECONDS,
     FIRST_REQUEST_SEQUENCE,
@@ -81,6 +82,7 @@ MAX_SEEN_EVENTS = 4096
 MAX_DEFERRED_PER_SESSION = 2
 MAX_DEFERRED_EVENTS = 64
 TIP_LOOKUP_WAIT_SECONDS = 2.0  # waiting bound, not cancellation of Core's worker thread
+LIQUIDITY_WAIT_SECONDS = 30.0  # once per announcement; the RPCs carry their own timeouts
 _RELAY_CONNECTED = b""  # in-band wake: tick now and re-announce
 
 
@@ -122,6 +124,8 @@ class ServicePolicy:
     relay_proxy: str | None = None  # checked loopback CONNECT proxy, or direct
     # RS-006 transport proof of work required on new sessions' messages; 0 = off.
     transport_pow_bits: int = 0
+    # With a liquidity source: announce this random percent range below it.
+    liquidity_margin_percent: tuple[int, int] = (10, 20)
 
     def __post_init__(self) -> None:
         """Refuse schedules that would leave advertised epochs undecodable."""
@@ -149,6 +153,9 @@ class _State:
     announcement: bytes | None = None  # exact bytes, retransmitted unchanged
     announcement_expires: int = 0
     republish: bool = False
+    # Bands of the last announcement; quotes admit exactly these. Empty while
+    # liquidity covers no band (nothing is announced then).
+    bands: tuple[tuple[int, int], ...] = ()
     attempts: dict[str, int] = field(default_factory=dict)
     seen: OrderedDict[str, None] = field(default_factory=OrderedDict)
     tip: int | None = None  # per-tick snapshot; requests never trigger RPC
@@ -173,6 +180,7 @@ class HandshakeService:
         settlement: SettlementEngine | None = None,
         hold_invoices: LndHoldInvoices | None = None,
         evm_settlement: EvmSettlementEngine | None = None,
+        liquidity: Callable[[], int] | None = None,
     ) -> None:
         """Bind already-acquired, already-verified resources.
 
@@ -181,7 +189,9 @@ class HandshakeService:
         it, or when it fails, quotes are answered ``capacity_unavailable``.
         ``invoice_decoder`` (blocking, e.g. LND ``DecodePayReq``) plus a
         ``provider_destination_script`` enable firm offers. ``settlement``
-        moves funded swaps to payment and claim once per tick.
+        moves funded swaps to payment and claim once per tick. ``liquidity``
+        (blocking, satoshis this provider can pay out in one swap) is sampled
+        once per announcement to cap the announced and admitted amounts.
         """
         self._store = store
         self._identity = identity
@@ -193,7 +203,14 @@ class HandshakeService:
         self._settlement = settlement
         self._hold_invoices = hold_invoices
         self._evm_settlement = evm_settlement  # RS-010 profiles: quotes, readiness, and ticks
-        self._state = _State()
+        self._liquidity = liquidity
+        self._liquidity_cap = (
+            None
+            if liquidity is None
+            else LiquidityCap(policy.amount_bands, margin_percent=policy.liquidity_margin_percent)
+        )
+        self._liquidity_failing = False
+        self._state = _State(bands=policy.amount_bands)
         self._deadline_healthy = True
         self._deadline_wall_anchor, self._deadline_monotonic_anchor = self._now(), time.monotonic()
         self._deadline_high_water = self._deadline_wall_anchor
@@ -668,8 +685,32 @@ class HandshakeService:
             return None, None
         return height, started
 
+    async def _liquidity_bands(self) -> tuple[tuple[int, int], ...]:
+        """Sample liquidity once and return the bands to announce next."""
+        cap, source = self._liquidity_cap, self._liquidity
+        if cap is None or source is None:
+            return self._policy.amount_bands
+        try:
+            cap.observe(await asyncio.wait_for(asyncio.to_thread(source), LIQUIDITY_WAIT_SECONDS))
+        except Exception:  # noqa: BLE001 - keep the last cap; reverting would raise it
+            if not self._liquidity_failing:
+                LOG.warning("liquidity unavailable; keeping the announced amounts")
+            self._liquidity_failing = True
+        else:
+            self._liquidity_failing = False
+        return cap.bands()
+
     async def _announce(self, epochs: tuple[str, ...], now: int) -> None:
         policy, state = self._policy, self._state
+        bands = await self._liquidity_bands()
+        if not bands:
+            if state.bands:
+                LOG.warning("liquidity below every amount band; not announcing until it recovers")
+            # The last announcement expires by itself; quotes refuse every amount
+            # meanwhile. Look again at the next scheduled refresh.
+            state.bands, state.announcement, state.republish = (), None, False
+            state.announced_keys, state.announced_at = epochs, now
+            return
         try:
             self._store.record_announcement(now)  # durable ordering before publication
         except StaleOwnerError:
@@ -681,7 +722,7 @@ class HandshakeService:
             AnnouncementTerms(
                 network=policy.network,
                 profiles=policy.profiles,
-                amount_bands=policy.amount_bands,
+                amount_bands=bands,
                 base_fee_sat=policy.base_fee_sat,
                 proportional_millionths=policy.proportional_millionths,
                 transport_endpoints=policy.relay_urls,
@@ -694,6 +735,9 @@ class HandshakeService:
                 transport_pow_bits=policy.transport_pow_bits,
             )
         )
+        if bands != state.bands:
+            LOG.info("announcing amount bands %s", bands)
+        state.bands = bands
         state.announced_keys, state.announced_at = epochs, now
         state.announcement_expires = now + policy.announcement_lifetime
         state.republish = True
@@ -1168,7 +1212,7 @@ class HandshakeService:
             now = max(now, self._deadline_now())
         invoice = await self._decode_invoice(document)
         terms = QuoteTerms(
-            amount_bands=policy.amount_bands,
+            amount_bands=self._state.bands,  # exactly what was last announced
             base_fee_sat=policy.base_fee_sat,
             proportional_millionths=policy.proportional_millionths,
             schedule=policy.quote,

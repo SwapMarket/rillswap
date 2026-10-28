@@ -1045,3 +1045,34 @@ def test_fee_estimate_is_advice_only(
         "estimatesmartfee",
         [6, "CONSERVATIVE"],
     )
+
+
+def test_trusted_balance_reads_the_funding_wallet_exactly(tmp_path: Path) -> None:
+    _, _, network = _context()
+    requests: list[dict[str, Any]] = []
+    result = ['{"mine": {"trusted": 1.23456789, "untrusted_pending": 5.0}}']  # raw JSON
+
+    def respond(payload: dict[str, Any]) -> tuple[int, bytes]:
+        if result[0] == "403":
+            return 403, b""
+        return 200, f'{{"jsonrpc": "2.0", "id": {payload["id"]}, "result": {result[0]}}}'.encode()
+
+    with _server(respond, requests) as port:
+        reader = CoreTransactionReader(
+            port=port, cookie_path=_cookie(tmp_path), network=network, wallet="maker"
+        )
+        assert reader.trusted_balance_sat() == 123_456_789
+        assert requests[-1]["method"] == "getbalances"
+        assert requests[-1]["path"] == "/wallet/maker"  # not the default wallet
+        invalid_results = (
+            '{"mine": {"trusted": -1}}',
+            '{"mine": {}}',
+            '{"mine": {"trusted": true}}',
+        )
+        for invalid in (*invalid_results, "[]"):
+            result[0] = invalid
+            with pytest.raises(CoreProtocolError, match="balance"):
+                reader.trusted_balance_sat()
+        result[0] = "403"  # a whitelist generated before getbalances was needed
+        with pytest.raises(CoreAuthError):
+            reader.trusted_balance_sat()

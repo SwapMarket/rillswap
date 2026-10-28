@@ -25,6 +25,7 @@ from rill_provider.core_tx_bytes import MAX_FEE_ESTIMATE_CEILING_SAT_VB
 from rill_provider.evm_quote_policy import EVM_PROFILES, EvmSchedule
 from rill_provider.handshake_service import ServicePolicy
 from rill_provider.handshake_store import HandshakePolicy
+from rill_provider.liquidity_cap import check_margin_percent
 from rill_provider.live_session_store import (
     DEFAULT_MAX_ACTIVE_RESERVATIONS,
     DEFAULT_MAX_SESSIONS,
@@ -184,6 +185,16 @@ class PublicTerms(_Strict):
     base_fee_sat: int
     proportional_millionths: int
     slot: str
+    # Announce and admit at most the payout liquidity less a random margin in
+    # this percent range (never above amount_bands), where the profile has a
+    # liquidity source: LND channels to pay out, or the Core funding wallet.
+    follow_liquidity: bool = True
+    liquidity_margin_percent: tuple[int, int] = (10, 20)
+
+    @field_validator("liquidity_margin_percent")
+    @classmethod
+    def _margin(cls, value: tuple[int, int]) -> tuple[int, int]:
+        return check_margin_percent(value)
 
 
 class OperatorConfig(_Strict):
@@ -272,6 +283,7 @@ class OperatorConfig(_Strict):
             provider_destination_script=self.provider_destination_script,
             evm_assets=self.evm.assets() if self.evm is not None else (),
             transport_pow_bits=self.transport_pow_bits,
+            liquidity_margin_percent=t.liquidity_margin_percent,
         )
 
 

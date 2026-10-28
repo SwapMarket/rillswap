@@ -80,7 +80,10 @@ CORE_RPC_METHODS = (
     "gettxspendingprevout",
     "getblock",
     "getblockheader",
+    # Caps the announced amounts by the funding wallet's balance.
+    "getbalances",
 )
+_WALLET_RPC_METHODS = ("lockunspent", "getbalances")  # besides the wallet* methods
 MAX_VOUT = 0xFFFFFFFF
 
 
@@ -428,6 +431,36 @@ class CoreTransactionReader:
         except httpx.HTTPError:
             raise CoreUnavailableError("Core RPC transport unavailable") from None
         return height
+
+    def trusted_balance_sat(self) -> int:
+        """Return the funding wallet's trusted balance (``getbalances`` mine.trusted).
+
+        Indicative only (it caps announced amounts): it includes coins locked
+        for contracts being funded and authorizes nothing.
+        """
+        username, password = _cookie(self._cookie_path)
+        try:
+            with httpx.Client(
+                base_url=self._url,
+                auth=httpx.BasicAuth(username, password),
+                trust_env=False,
+                follow_redirects=False,
+                timeout=httpx.Timeout(READ_SECONDS, connect=CONNECT_SECONDS),
+            ) as client:
+                result = self._rpc(client, "getbalances", [], 1)
+        except httpx.HTTPError:
+            raise CoreUnavailableError("Core RPC transport unavailable") from None
+        mine = result.get("mine") if isinstance(result, dict) else None
+        trusted = mine.get("trusted") if isinstance(mine, dict) else None
+        if (
+            isinstance(trusted, bool)
+            or not isinstance(trusted, (int, Decimal))
+            or not Decimal(trusted).is_finite()
+            or not 0 <= trusted <= MAX_SATS / SATS_PER_BTC
+        ):
+            raise CoreProtocolError("Core wallet balance invalid")
+        with localcontext(DecimalContext(prec=28)):
+            return int(trusted * SATS_PER_BTC)
 
     def observe_source(
         self, source_height: int, *, deadline_seconds: float = 10
@@ -1390,7 +1423,8 @@ class CoreTransactionReader:
     ) -> Any:  # noqa: ANN401
         if method not in CORE_RPC_METHODS:
             raise CoreProtocolError("unsupported Core RPC method")
-        path = self._wallet_path if method.startswith("wallet") or method == "lockunspent" else "/"
+        wallet = method.startswith("wallet") or method in _WALLET_RPC_METHODS
+        path = self._wallet_path if wallet else "/"
         max_bytes = MAX_BLOCK_RESPONSE_BYTES if method == "getblock" else MAX_RESPONSE_BYTES
         try:
             with client.stream(
