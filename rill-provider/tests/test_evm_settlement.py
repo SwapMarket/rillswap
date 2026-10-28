@@ -176,6 +176,12 @@ def _reservation(store: live.LiveSessionStore) -> str:
     ).fetchone()[0]
 
 
+def _accounting(
+    store: live.LiveSessionStore, session: str
+) -> list[tuple[str, int | None, str | None]]:
+    return [(entry.kind, entry.amount, entry.unit) for entry in store.ledger_session(session)]
+
+
 def _forward_terms() -> EvmContractTerms:
     import hashlib  # noqa: PLC0415
 
@@ -206,7 +212,7 @@ def test_forward_swap_pays_once_after_the_lock_and_claims_with_the_preimage(
         # In flight: nothing is re-sent on later ticks.
         assert asyncio.run(engine.tick(1600)) == {}
         lightning.send.assert_called_once()
-        lightning.track.return_value = PaymentOutcome("SUCCEEDED", preimage=PREIMAGE)
+        lightning.track.return_value = PaymentOutcome("SUCCEEDED", preimage=PREIMAGE, fee_msat=900)
         assert asyncio.run(engine.tick(1700)) == {session: "CLAIMING"}
         (item,) = store.evm_settlement_work()
         assert (item.preimage, item.claim_tx_hash, item.claim_tx) == (
@@ -217,11 +223,16 @@ def test_forward_swap_pays_once_after_the_lock_and_claims_with_the_preimage(
         assert htlc.broadcasts == [b"signed-1"]
         assert asyncio.run(engine.tick(1800)) == {}  # unmined: rebroadcast, never re-sign
         assert (htlc.broadcasts, htlc.signed) == ([b"signed-1", b"signed-1"], 1)
-        htlc.receipts["01" * 32] = TxReceipt("01" * 32, 12, "success")
+        htlc.receipts["01" * 32] = TxReceipt("01" * 32, 12, "success", gas_wei=42_000)
         htlc.tip = 12
         assert asyncio.run(engine.tick(1900)) == {session: "CLAIMED"}
         assert store.evm_settlement_work() == ()
         assert _reservation(store) == "RELEASED"
+        assert _accounting(store, session) == [
+            ("routing_fee", 900, "msat"),
+            ("gas", 42_000, "wei"),
+            ("completed", 5, "sat"),  # the token fee at the quoted rate
+        ]
 
 
 def test_forward_swap_fails_when_no_lock_appears_before_the_invoice_expires(
@@ -246,9 +257,13 @@ def test_forward_claim_reverted_on_a_vanished_lock_is_lost(harness: Harness) -> 
         engine = _engine(store, harness, htlc, lightning=lightning)
         assert asyncio.run(engine.tick(1500)) == {session: "CLAIMING"}
         lightning.send.assert_not_called()  # tracked as already settled: no new dispatch
-        htlc.receipts["01" * 32] = TxReceipt("01" * 32, 12, "reverted")
+        htlc.receipts["01" * 32] = TxReceipt("01" * 32, 12, "reverted", gas_wei=30_000)
         htlc.active = False
         assert asyncio.run(engine.tick(1600)) == {session: "LOST"}
+        assert _accounting(store, session) == [  # a reverted claim still pays its gas
+            ("gas", 30_000, "wei"),
+            ("lost", 1000, "sat"),
+        ]
 
 
 def _hold(state: str = "ACCEPTED", amount_msat: int = 1_100_000, expiry: int = 10_000) -> Mock:
@@ -300,18 +315,23 @@ def test_reverse_swap_refunds_after_the_timelock_and_cancels_the_hold(harness: H
         session = _accept_evm_swap(store, harness, terms)
         engine = _engine(store, harness, htlc, hold=hold)
         assert asyncio.run(engine.tick(1500)) == {session: "FUNDING_SENT"}
-        htlc.receipts["01" * 32] = TxReceipt("01" * 32, 11, "success")
+        htlc.receipts["01" * 32] = TxReceipt("01" * 32, 11, "success", gas_wei=50_000)
         htlc.tip, htlc.active = 11, True
         assert asyncio.run(engine.tick(1600)) == {session: "FUNDED"}
         htlc.tip = terms.htlc_timelock_block
         assert asyncio.run(engine.tick(1700)) == {session: "REFUNDING"}
         assert htlc.broadcasts[-1] == b"signed-2"
-        htlc.receipts["02" * 32] = TxReceipt("02" * 32, 501, "success")
+        htlc.receipts["02" * 32] = TxReceipt("02" * 32, 501, "success", gas_wei=20_000)
         htlc.tip = 501
         assert asyncio.run(engine.tick(1800)) == {session: "REFUNDED"}
         hold.cancel.assert_called_once_with(PAYMENT_HASH)
         hold.settle.assert_not_called()
         assert _reservation(store) == "RELEASED"
+        assert _accounting(store, session) == [  # the lock's and the refund's gas
+            ("gas", 50_000, "wei"),
+            ("gas", 20_000, "wei"),
+            ("refunded", None, None),
+        ]
 
 
 @pytest.mark.parametrize(

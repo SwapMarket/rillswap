@@ -14,6 +14,7 @@ from rill_provider.evm_htlc import (
     EvmBackendError,
     EvmHtlcClient,
     LockParams,
+    _gas_wei,
     load_artifact,
     masked_runtime_sha256,
 )
@@ -265,3 +266,18 @@ def test_anvil_superseded_needs_our_nonce_mined_by_another_transaction(
     )
     assert not stranger.superseded(recorded.raw, 1)  # not signed by this signer
     assert not client.superseded(b"\x02not a transaction", 1)
+
+
+@pytest.mark.parametrize(
+    ("receipt", "gas"),
+    [
+        ({"gasUsed": 21_000, "effectiveGasPrice": 3 * 10**9}, 63 * 10**12),
+        ({"gasUsed": 21_000}, None),  # a node that omits the price
+        ({"gasUsed": "bad", "effectiveGasPrice": 1}, None),
+        ({"gasUsed": -1, "effectiveGasPrice": 1}, None),
+    ],
+)
+def test_receipt_gas_is_used_gas_times_the_effective_price(
+    receipt: dict[str, Any], gas: int | None
+) -> None:
+    assert _gas_wei(receipt) == gas

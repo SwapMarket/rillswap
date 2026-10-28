@@ -517,3 +517,25 @@ def test_largest_channel_send_is_the_best_single_channel_less_its_reserve(
     channel.unary_responses[sender.LIST_CHANNELS_METHOD] = FakeRpcError(grpc.StatusCode.UNAVAILABLE)
     with pytest.raises(LndUnavailableError):
         client.largest_channel_send_sat()
+
+
+def test_succeeded_outcomes_carry_the_routing_fee_paid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fee feeds accounting only: equal outcomes stay equal whatever it is."""
+    paid = lightning_pb2.Payment(
+        payment_hash=HASH, status=2, payment_preimage=PREIMAGE, fee_msat=1234
+    )  # type: ignore[arg-type]
+    client, channel = _sender(tmp_path, monkeypatch, [paid])
+    tracked = client.track(HASH)
+    assert (tracked.status, tracked.fee_msat) == ("SUCCEEDED", 1234)
+    assert tracked == sender.PaymentOutcome("SUCCEEDED", PREIMAGE)
+    invoice = binding_from_payreq(INVOICE, _payreq())
+    payment = client.prepare(
+        INVOICE, invoice_binding=invoice, fee_limit_sat=10, max_expiry_height=1070
+    )
+    assert client.send(payment).fee_msat is None  # an attempt without its route
+    channel.unary_responses[sender.SEND_METHOD] = lightning_pb2.HTLCAttempt(
+        status="SUCCEEDED", preimage=bytes.fromhex(PREIMAGE), route=_route()
+    )
+    assert client.send(payment).fee_msat == 1000

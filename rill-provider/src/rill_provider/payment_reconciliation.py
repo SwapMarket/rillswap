@@ -86,5 +86,6 @@ def reconcile_payment(
         now=now,
         preimage=preimage,
         observation={"kind": "payment_settled", "payment_preimage": preimage},
+        routing_fee_msat=outcome.fee_msat,
     )
     return PaymentReconciliation(session_id, "SUCCEEDED", "PAID", state_changed=True)

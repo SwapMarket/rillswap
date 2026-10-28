@@ -363,3 +363,13 @@ def test_verified_witness_is_atomic_durable_and_never_creates_dispatch_authority
         with pytest.raises(live.LiveSessionStoreError, match="PAYING"):
             reconcile_payment(store, tracker, Signer(harness), session_id=session, now=1003)
     tracker.track.assert_called_once_with(_hash(harness))
+
+
+def test_reconciled_payment_records_the_routing_fee_it_paid(harness: Harness) -> None:
+    tracker = _tracker(PaymentOutcome("SUCCEEDED", PREIMAGE, fee_msat=777))
+    with harness.acquire() as store:
+        session = _paying(store, harness, "SUBMITTED")
+        reconcile_payment(store, tracker, Signer(harness), session_id=session, now=1002)
+        assert [(e.kind, e.amount, e.unit) for e in store.ledger_session(session)] == [
+            ("routing_fee", 777, "msat")
+        ]

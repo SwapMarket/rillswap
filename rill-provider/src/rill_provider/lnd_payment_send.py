@@ -12,7 +12,7 @@ import hashlib
 import math
 import time
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -71,6 +71,9 @@ class PaymentOutcome:
     # Node that attested this outcome on the same channel, when bound: only a
     # FAILED from the dispatch's own payer is terminal for that dispatch.
     payer: str | None = None
+    # Routing fee a SUCCEEDED payment paid, for accounting only: settlement
+    # never acts on it, so it takes no part in comparing outcomes.
+    fee_msat: int | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,7 +155,7 @@ def _outcome(
                 or hashlib.sha256(bytes.fromhex(preimage)).hexdigest() != payment_hash
             ):
                 raise LndProtocolError("LND preimage does not match the payment hash")
-            return PaymentOutcome("SUCCEEDED", preimage)
+            return PaymentOutcome("SUCCEEDED", preimage, fee_msat=payment.fee_msat)
         if payment.status == _FAILED:
             return PaymentOutcome("FAILED")
         if current or count >= MAX_UPDATES:
@@ -387,7 +390,8 @@ class LndPaymentSender:
                 or hashlib.sha256(attempt.preimage).hexdigest() != payment.payment_hash
             ):
                 raise LndProtocolError("LND preimage does not match the payment hash")
-            return PaymentOutcome("SUCCEEDED", attempt.preimage.hex())
+            fee = attempt.route.total_fees_msat if attempt.HasField("route") else None
+            return PaymentOutcome("SUCCEEDED", attempt.preimage.hex(), fee_msat=fee)
         # An attempt failure alone need not prove the whole payment failed.
         # Reconcile the payment-level record; never authorize another shard.
         if attempt.status == lightning_pb2.HTLCAttempt.FAILED:

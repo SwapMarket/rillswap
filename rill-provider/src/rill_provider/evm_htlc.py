@@ -68,6 +68,15 @@ def load_artifact() -> dict[str, Any]:
     return cast("dict[str, Any]", json.loads(text))
 
 
+def _gas_wei(receipt: Any) -> int | None:  # noqa: ANN401 - web3 TxReceipt mapping
+    """Return ``gasUsed * effectiveGasPrice``, or None when a node omits either."""
+    try:
+        used, price = int(receipt["gasUsed"]), int(receipt["effectiveGasPrice"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return used * price if used >= 0 and price >= 0 else None
+
+
 def masked_runtime_sha256(code: bytes, ranges: list[dict[str, int]]) -> str:
     """Hash runtime bytecode with the immutable ranges zeroed, as the artifact does."""
     masked = bytearray(code)
@@ -142,6 +151,7 @@ class TxReceipt:
     tx_hash: str
     block_number: int
     status: Literal["success", "reverted"]
+    gas_wei: int | None = None  # what the sender paid, reverted or not; None if unreported
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +291,7 @@ class EvmHtlcClient:
             tx_hash=tx_hash,
             block_number=int(receipt["blockNumber"]),
             status="success" if int(receipt["status"]) == 1 else "reverted",
+            gas_wei=_gas_wei(receipt),
         )
 
     def confirmations(self, tx_hash: str) -> int:

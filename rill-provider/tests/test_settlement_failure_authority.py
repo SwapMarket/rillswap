@@ -72,13 +72,16 @@ def test_tick_preserves_tracked_failure_then_recovers_witness_after_restart(
         lightning.send.assert_not_called()
     with harness.acquire() as store:
         assert _financial_rows(store) == before
-        lightning.track.return_value = PaymentOutcome("SUCCEEDED", PREIMAGE)
+        lightning.track.return_value = PaymentOutcome("SUCCEEDED", PREIMAGE, fee_msat=640)
         engine = SettlementEngine(store, chain, lightning, Signer(harness))
         # Deliberately stop at the persisted PAID boundary; claim tests own construction.
         monkeypatch.setattr(engine, "_claim", Mock(side_effect=ValueError("claim paused")))
         asyncio.run(engine.tick(now=1003))
         assert store.settlement_work(session_id=session)[0].state == "PAID"
         assert store.settlement_work(session_id=session)[0].preimage == PREIMAGE
+        assert [(e.kind, e.amount) for e in store.ledger_session(session)] == [
+            ("routing_fee", 640)  # the tracked payment's fee, recorded with PAID
+        ]
         assert len(store.pending_outbox()) == 1
         assert store._connection.execute("SELECT * FROM payment_dispatch").fetchall() == before[2]  # noqa: SLF001
         lightning.prepare.assert_not_called()

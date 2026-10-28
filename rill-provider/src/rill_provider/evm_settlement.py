@@ -347,6 +347,7 @@ class EvmSettlementEngine:
                 now,
                 preimage=outcome.preimage,
                 observation={"kind": "payment_settled", "payment_preimage": outcome.preimage},
+                routing_fee_msat=outcome.fee_msat,
             )
             return await self._advance_forward(
                 _with_state(item, "PAID", preimage=outcome.preimage), terms, now
@@ -392,7 +393,7 @@ class EvmSettlementEngine:
                 depth = await asyncio.to_thread(self._htlc.confirmations, item.claim_tx_hash)
                 if depth < terms.settlement_confirmations:
                     return item.state
-                return self._move(item, "CLAIMED", now)
+                return self._move(item, "CLAIMED", now, gas_wei=receipt.gas_wei)
             # Our claim reverted: either the client refunded after the timelock
             # (the lock is gone) or the lock is still there and needs an operator.
             active = await asyncio.to_thread(self._htlc.lock_active, _lock_params(terms))
@@ -400,7 +401,7 @@ class EvmSettlementEngine:
                 LOG.error(
                     "EVM claim reverted and the lock is gone: swap %s lost", item.session_id[:16]
                 )
-                return self._move(item, "LOST", now)
+                return self._move(item, "LOST", now, gas_wei=receipt.gas_wei)  # reverted, paid
             LOG.error(
                 "EVM claim reverted while the lock is active: swap %s needs attention",
                 item.session_id[:16],
@@ -579,7 +580,7 @@ class EvmSettlementEngine:
                 if lockup is not None
                 else None
             )
-            return self._move(item, "FUNDED", now, observation=observation)
+            return self._move(item, "FUNDED", now, observation=observation, gas_wei=receipt.gas_wei)
         if item.state == "FUNDED":
             claim = await self._claim_log(terms)
             if claim is not None:
@@ -625,7 +626,13 @@ class EvmSettlementEngine:
             if depth < terms.settlement_confirmations:
                 return item.state
             await asyncio.to_thread(hold.cancel, payment_hash)
-            return self._move(item, "REFUNDED", now, observation={"kind": "swap_refunded"})
+            return self._move(
+                item,
+                "REFUNDED",
+                now,
+                observation={"kind": "swap_refunded"},
+                gas_wei=receipt.gas_wei,
+            )
         return item.state
 
     async def _claim_log(self, terms: EvmContractTerms) -> Any | None:  # noqa: ANN401

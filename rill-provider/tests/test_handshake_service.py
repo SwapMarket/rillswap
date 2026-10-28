@@ -923,7 +923,7 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: P
         def send(payment: PreparedPayment) -> PaymentOutcome:
             assert payment.request == b"route"
             sent.append(prepared.pop())
-            return PaymentOutcome("SUCCEEDED", preimage)
+            return PaymentOutcome("SUCCEEDED", preimage, fee_msat=1500)
 
         lightning = SimpleNamespace(track=track, prepare=prepare, send=send)
         engine = SettlementEngine(store, chain, lightning, crypto)
@@ -976,6 +976,19 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: P
         assert asyncio.run(engine.tick(later)) == {session_id: "CLAIMED"}
         assert store.settlement_work() == ()
         assert len(sent) == 1  # never paid twice
+        # Durable accounting of the whole swap, each row from its own transition.
+        (claim_fee,) = store._connection.execute(  # noqa: SLF001 - the attempt that confirmed
+            "SELECT fee_sat FROM claim_attempts WHERE txid=?", (claim_txid,)
+        ).fetchone()
+        principal = int(terms.economics.lightning_principal_sat)
+        assert [(e.kind, e.amount, e.unit) for e in store.ledger_session(session_id)] == [
+            ("offered", principal, "sat"),
+            ("accepted", principal, "sat"),
+            ("routing_fee", 1500, "msat"),
+            ("completed", int(terms.economics.success_fee_sat), "sat"),
+            ("claim_fee", claim_fee, "sat"),
+        ]
+        assert claim_fee > 0
 
         # An accepted contract is never idle-expired; its hash stays reserved.
         assert store.expire_idle(now=BINDING.created_at + 10**6, idle_timeout=1) == 0

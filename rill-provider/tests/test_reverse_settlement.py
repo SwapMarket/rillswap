@@ -182,6 +182,7 @@ def test_held_funds_exactly_v_records_the_grant_then_broadcasts(backends: Any) -
         "created_at": NOW,
     }
     assert "observation" not in moved
+    assert moved["funding_fee_sat"] == 250  # the wallet's fee, recorded with the grant
     assert order == ["record", "broadcast"]
     chain.broadcast.assert_called_once_with(b"funding-raw", "51" * 32)
 
@@ -345,7 +346,7 @@ def test_funded_refunds_once_the_lock_is_reached_recording_before_broadcast(
         999, "ab" * 32, 1099, "ab" * 32
     )
     chain.find_spender.return_value = SpendScan(None, 1100, "ab" * 32)
-    spend = Mock(txid="71" * 32, raw_transaction=b"refund-raw")
+    spend = Mock(txid="71" * 32, raw_transaction=b"refund-raw", fee_sat=180)
 
     async def refund(_item: SettlementItem, _terms: ContractTerms) -> Mock:
         return spend
@@ -358,6 +359,7 @@ def test_funded_refunds_once_the_lock_is_reached_recording_before_broadcast(
     moved = _moved(store, "REFUNDING")
     assert moved["refund"] == ("71" * 32, b"refund-raw")
     assert moved["observation"] == {"kind": "refund_broadcast", "refund_txid": "71" * 32}
+    assert moved["refund_fee_sat"] == 180
     assert order == ["record", "broadcast"]
 
 

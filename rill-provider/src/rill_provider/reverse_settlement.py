@@ -797,7 +797,13 @@ class ReverseSettlement:
         # The grant (and the signed funding_binding for the client) is durable
         # before any broadcast; FUNDING_SENT rebroadcasts.
         try:
-            state = self._move(item, "FUNDING_SENT", now, funding=(binding, funded.raw))
+            state = self._move(
+                item,
+                "FUNDING_SENT",
+                now,
+                funding=(binding, funded.raw),
+                funding_fee_sat=funded.fee_sat,
+            )
         except Exception as refusal:  # commit failure is not proof of rollback
             if funded.selected_inputs:
                 try:
@@ -950,6 +956,7 @@ class ReverseSettlement:
             now,
             refund=(spend.txid, spend.raw_transaction),
             observation={"kind": "refund_broadcast", "refund_txid": spend.txid},
+            refund_fee_sat=spend.fee_sat,  # a cost only if the refund wins (REFUNDED)
         )
         await self._worker(self._chain.broadcast, spend.raw_transaction, spend.txid)
         return state

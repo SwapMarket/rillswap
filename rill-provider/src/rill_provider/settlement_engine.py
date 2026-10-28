@@ -1185,6 +1185,7 @@ class SettlementEngine:
                 now,
                 preimage=outcome.preimage,
                 observation={"kind": "payment_settled", "payment_preimage": outcome.preimage},
+                routing_fee_msat=outcome.fee_msat,
             )
             if self._activate_probe(item.session_id, terms):
                 return "PAID"  # explicit new original session; echo handled outside this tick
