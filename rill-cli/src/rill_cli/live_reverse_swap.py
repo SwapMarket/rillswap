@@ -88,7 +88,7 @@ from rill_cli.refund_watcher import ChainView
 from rill_cli.wallet_rpc import HistoricalWalletOutput
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from types import TracebackType
     from typing import Any, Self
 
@@ -567,7 +567,11 @@ def _claim_signer(  # noqa: PLR0913 - explicit signing inputs
 
 
 def _chain_view(
-    wallet: ClaimWallet, binding: FundingBinding, *, unconfirmed_funding: bool = False
+    wallet: ClaimWallet,
+    binding: FundingBinding,
+    *,
+    unconfirmed_funding: bool = False,
+    resubmit_funding: Callable[[], object] | None = None,
 ) -> ChainView | None:
     """Sample whether a confirmed transaction may already spend the funding output.
 
@@ -578,20 +582,75 @@ def _chain_view(
     have one once spent on chain). The checks run in an order where a funding
     or claim confirming between them reads as unspent or as our confirmed
     claim, never as a foreign spend. At the signed depth only the chain counts.
+
+    Below the signed depth, funding gone from every view proves no foreign
+    spend: it may have been evicted from the mempool (or double-spent by the
+    provider, which only a confirmed conflict would show). That sample is
+    unknown, so the watcher keeps checking our own claims and waiting within
+    its lifetime, and ``resubmit_funding`` rebroadcasts the provider's signed
+    funding so that the claim can follow it again.
     """
     txid, vout = binding.funding_txid, binding.contract_vout
     try:
         tip = wallet.tip_height()
-        unspent = wallet.unspent_on_chain(txid, vout) or (
-            unconfirmed_funding
-            and (
-                wallet.confirmed_output(txid, vout) is not None
-                or wallet.mempool_spender(txid, vout) is not None
-            )
-        )
+        if wallet.unspent_on_chain(txid, vout):
+            return ChainView(tip, unspent_on_chain=True)
+        if not unconfirmed_funding:
+            return ChainView(tip, unspent_on_chain=False)
+        if (
+            wallet.confirmed_output(txid, vout) is not None
+            or wallet.mempool_spender(txid, vout) is not None
+        ):
+            return ChainView(tip, unspent_on_chain=True)
     except Exception:  # noqa: BLE001 - a failed sample is no evidence; wait
         return None
-    return ChainView(tip, unspent)
+    if resubmit_funding is not None:
+        resubmit_funding()
+    return None
+
+
+def _funding_resubmitter(  # noqa: PLR0913 - one funding and the watcher's live state
+    wallet: ClaimWallet,
+    binding: FundingBinding,
+    raw: bytes,
+    *,
+    attempts: Sequence[ClaimAttempt],
+    submit: Callable[[bytes, str], bool],
+    report: Callable[[str], None],
+) -> Callable[[], None]:
+    """Rebroadcast the provider's verified funding when an early claim finds it gone.
+
+    ``attempts`` is the watcher's live claim list. At depth 0 the funding and
+    our claim usually confirm in one block, which also empties every view: if
+    one of our claims confirmed, the watcher finds it and nothing is sent.
+    Otherwise the funding was evicted or double-spent: put the signed parent
+    back so the claim can follow it. A rejection (its inputs already spent)
+    changes nothing; the watcher keeps waiting within its lifetime.
+    """
+    missing = False
+
+    def resubmit() -> None:
+        nonlocal missing
+        try:
+            ours = any(
+                type(confirmed := wallet.wallet_confirmations(attempt.txid)) is int
+                and confirmed > 0
+                for attempt in attempts
+            )
+        except Exception:  # noqa: BLE001 - no evidence either way; the next sample retries
+            return
+        if ours:
+            return
+        if not missing:
+            missing = True
+            report(
+                f"the provider's funding {binding.funding_txid} is not visible to Core "
+                "(evicted or double-spent); rebroadcasting it before the claim"
+            )
+        if submit(raw, binding.funding_txid):
+            missing = False
+
+    return resubmit
 
 
 def claim_depth(signed: int, requested: int | None) -> int:
@@ -1345,7 +1404,7 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
             lifetime.check()
             script = reconstruct_taproot_contract(terms, keys=crypto).script_pubkey
             lifetime.check()
-            binding, binding_signature, _raw = await _await_funding(
+            binding, binding_signature, funding_raw = await _await_funding(
                 session,
                 contract=contract,
                 timeout=settle_timeout,
@@ -1455,13 +1514,17 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
                     on_disclosure=mark_disclosed,
                 )
 
+            early = depth < terms.funding_confirmations
             watcher = ClaimWatcher(
                 initial_fee_sat=initial_fee,
                 max_fee_sat=max(1, ceiling),
                 deadline_height=terms.refund_lock_height
                 - terms.timing_policy.claim_confirmation_blocks,
                 chain=lambda: _chain_view(
-                    wallet, binding, unconfirmed_funding=depth < terms.funding_confirmations
+                    wallet,
+                    binding,
+                    unconfirmed_funding=early,
+                    resubmit_funding=resubmit_funding if early else None,
                 ),
                 confirmations=wallet.wallet_confirmations,
                 sign=sign,
@@ -1471,6 +1534,14 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
                 deadline=lifetime.deadline,
                 effect_allowed=lifetime.allowed,
                 preimage_disclosed=preimage_disclosed,
+            )
+            resubmit_funding = _funding_resubmitter(
+                wallet,
+                binding,
+                funding_raw,
+                attempts=watcher.attempts,
+                submit=lambda raw, txid: _submit(wallet, raw, txid, lifetime),
+                report=report,
             )
             if cooperative is not None:
                 # Rebroadcast the key-path claim; only a due fee bump replaces

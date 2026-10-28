@@ -530,6 +530,8 @@ def _native_ln_to_btc_swap(  # noqa: PLR0915
         (warning,) = warnings
         assert f"unconfirmed funding, below the provider's signed {signed}" in warning
         assert "double-spend" in warning
+    # Funding and claim confirmed together: our claim, not an eviction to repair.
+    assert not [line for line in reports if "not visible to Core" in line]
     # V = D + C: C is the 155 vB P2TR script-path claim at the 1 sat/vB relay
     # floor (above the 111 vB key-path claim at the next-block rate).
     assert outcome.payout_sat == PAYOUT + 155

@@ -135,9 +135,11 @@ cooperates. Claiming below the signed depth needs Core 24 or later. The CLI
 prints a warning before paying: the claim reveals the preimage, so the provider
 can settle your Lightning payment and then double-spend its unconfirmed or
 shallow funding, keeping both. Only lower it for providers and amounts you are
-willing to lose. If a replacement removes the funding, the swap reports the
-contract as spent by another transaction. Recovery commands keep waiting for
-the signed depth.
+willing to lose. If the funding disappears from Core (evicted from the mempool
+or double-spent), the CLI says so, rebroadcasts the provider's signed funding
+and keeps rebroadcasting the claim until `--settle-timeout`. If the funding
+never returns, the swap ends unresolved and you keep the journal and recovery
+file. Recovery commands keep waiting for the signed depth.
 
 The claim watcher keeps the initial fee for the first three quarters of the
 window before `refund_lock_height` minus the claim confirmations; in the last

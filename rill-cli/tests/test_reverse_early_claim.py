@@ -14,6 +14,7 @@ from rill_cli import swap_command
 from rill_cli.live_reverse_swap import (
     ReverseSwapLimits,
     _chain_view,
+    _funding_resubmitter,
     claim_depth,
     early_claim_warning,
     run_reverse_swap,
@@ -153,12 +154,6 @@ def test_the_signed_depth_reads_the_chain_only(on_chain: bool) -> None:  # noqa:
             True,
             ["unspent_on_chain", "confirmed_output", "mempool_spender"],
         ),
-        # Gone from every view: confirmed spent (maybe by our claim) or double-spent.
-        (
-            _Wallet(on_chain=False),
-            False,
-            ["unspent_on_chain", "confirmed_output", "mempool_spender"],
-        ),
     ],
 )
 def test_an_early_claim_also_reads_the_mempool(
@@ -171,12 +166,108 @@ def test_an_early_claim_also_reads_the_mempool(
     assert wallet.calls == ["tip_height", *reads]
 
 
+def test_early_funding_gone_from_every_view_is_unknown_and_resubmitted() -> None:
+    # Evicted, double-spent, or confirmed together with our claim: none of
+    # them is proof of a foreign spend, so the watcher checks our claims and waits.
+    wallet, resubmit = _Wallet(on_chain=False), Mock()
+    view = _chain_view(wallet, BINDING, unconfirmed_funding=True, resubmit_funding=resubmit)  # type: ignore[arg-type]
+    assert view is None
+    assert wallet.calls == ["tip_height", "unspent_on_chain", "confirmed_output", "mempool_spender"]
+    resubmit.assert_called_once_with()
+    # Without a resubmitter the sample is still unknown.
+    assert _chain_view(_Wallet(on_chain=False), BINDING, unconfirmed_funding=True) is None  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("wallet", [_Wallet(on_chain=True), _Wallet(on_chain=False, spender=CLAIM)])
+def test_visible_funding_is_never_resubmitted(wallet: _Wallet) -> None:
+    resubmit = Mock()
+    assert _chain_view(wallet, BINDING, unconfirmed_funding=True, resubmit_funding=resubmit)  # type: ignore[arg-type]
+    resubmit.assert_not_called()
+
+
+def test_at_the_signed_depth_a_missing_output_stays_spent_and_is_not_resubmitted() -> None:
+    resubmit = Mock()
+    view = _chain_view(_Wallet(on_chain=False), BINDING, resubmit_funding=resubmit)  # type: ignore[arg-type]
+    assert view == ChainView(120, unspent_on_chain=False)
+    resubmit.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "failing", ["tip_height", "unspent_on_chain", "confirmed_output", "mempool_spender"]
 )
 def test_a_failed_read_is_no_evidence(failing: str) -> None:
-    wallet = _Wallet(on_chain=False, failing=failing)
-    assert _chain_view(wallet, BINDING, unconfirmed_funding=True) is None  # type: ignore[arg-type]
+    wallet, resubmit = _Wallet(on_chain=False, failing=failing), Mock()
+    assert _chain_view(wallet, BINDING, unconfirmed_funding=True, resubmit_funding=resubmit) is None  # type: ignore[arg-type]
+    resubmit.assert_not_called()  # absence was not established
+
+
+RAW_FUNDING = b"provider-signed funding"
+
+
+def _resubmitter(
+    confirmations: dict[str, object], *, accepted: bool = False
+) -> tuple[Any, Mock, list[str], list[SimpleNamespace]]:
+    def wallet_confirmations(txid: str) -> object:
+        answer = confirmations.get(txid)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    wallet = SimpleNamespace(wallet_confirmations=wallet_confirmations)
+    submit, reports = Mock(return_value=accepted), []
+    attempts: list[SimpleNamespace] = [SimpleNamespace(txid=CLAIM)]
+    resubmit = _funding_resubmitter(
+        wallet,  # type: ignore[arg-type]
+        BINDING,  # type: ignore[arg-type]
+        RAW_FUNDING,
+        attempts=attempts,  # type: ignore[arg-type]
+        submit=submit,
+        report=reports.append,
+    )
+    return resubmit, submit, reports, attempts
+
+
+def test_our_confirmed_claim_means_nothing_is_resubmitted_or_reported() -> None:
+    # At depth 0 funding and claim usually confirm together, emptying every view.
+    resubmit, submit, reports, _ = _resubmitter({CLAIM: 1})
+    resubmit()
+    submit.assert_not_called()
+    assert reports == []
+
+
+@pytest.mark.parametrize("confirmations", [None, 0, -1, True])
+def test_missing_funding_is_rebroadcast_and_reported_once(confirmations: object) -> None:
+    # None: unknown; 0: still unconfirmed; -1: our claim conflicted; True: malformed.
+    resubmit, submit, reports, _ = _resubmitter({CLAIM: confirmations})
+    resubmit()
+    resubmit()
+    assert submit.call_args_list == [((RAW_FUNDING, FUNDING),)] * 2
+    (line,) = reports
+    assert FUNDING in line
+    assert "evicted or double-spent" in line
+
+
+def test_an_accepted_rebroadcast_reports_a_later_eviction_again() -> None:
+    resubmit, submit, reports, _ = _resubmitter({}, accepted=True)
+    resubmit()
+    resubmit()
+    assert submit.call_count == 2
+    assert len(reports) == 2
+
+
+def test_the_watchers_later_attempts_count_as_ours() -> None:
+    bumped = "53" * 32
+    resubmit, submit, _, attempts = _resubmitter({bumped: 2})
+    attempts.append(SimpleNamespace(txid=bumped))  # a fee bump the watcher signed later
+    resubmit()
+    submit.assert_not_called()
+
+
+def test_an_unreadable_claim_status_sends_nothing_this_round() -> None:
+    resubmit, submit, reports, _ = _resubmitter({CLAIM: RuntimeError("Core down")})
+    resubmit()
+    submit.assert_not_called()
+    assert reports == []
 
 
 def test_claim_confirmations_flag_is_optional() -> None:
