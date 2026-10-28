@@ -10,7 +10,7 @@ import { handshake } from "./handshake";
 import { type RelayLink, Session, SwapError } from "./session";
 import type { SwapRequest } from "./swap";
 import { MAX_SATS, ProtocolError, requireAnnouncedDepth, requireShape, reverseClaimFeeReserveCeiling, sats } from "./wire";
-import type { PreparedReverseExecution, ReverseExecutionConfiguration } from "./reverseExecution";
+import { prepareReverseExecution, type PreparedReverseExecution, type ReverseExecutionConfiguration } from "./reverseExecution";
 
 export const REVERSE_PROFILE = "ln-to-btc/v1";
 
@@ -145,8 +145,6 @@ export async function prepareReverseQuote(
         configuration.assertCurrent();
         if (used || disposed || Math.floor(clock() / 1000) >= offer.expires_at) throw new SwapError("Estimate already used, expired, or discarded"); used = true;
         session.secret.fill(0);
-        const { prepareReverseExecution } = await import("./reverseExecution");
-        configuration.assertCurrent(); if (disposed) throw new SwapError("Estimate discarded");
         // RS-003/RS-004 require firm requests to be the first quote in a NEW
         // session. Pin the selected provider, never its indicative session key.
         firmSession = new Session(relay, network, REVERSE_PROFILE, options.replyMs ?? 15_000, clock);

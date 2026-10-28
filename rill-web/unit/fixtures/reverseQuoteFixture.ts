@@ -19,6 +19,7 @@ class FakeSession {
 mock.module("../../src/swap/session", () => ({ Session: FakeSession, SwapError: Error }));
 mock.module("../../src/swap/handshake", () => ({ handshake: async () => ({ transcript: "ab".repeat(32) }) }));
 mock.module("../../src/nostrProviderAnnouncement", () => ({ verifyNostrProviderAnnouncement: () => ({ slot: "s" }) }));
+mock.module("../../src/swap/reverseExecution", () => ({ prepareReverseExecution: () => { throw new Error("Price discovery must not start execution"); } }));
 
 const { prepareReverseQuote } = await import("../../src/swap/reverseSwap");
 const limits = { maxSuccessFeeSat: 10_000n, minClaimFeeReserveSat: 1n, maxClaimFeeSat: 100_000n, minRefundDelayBlocks: 1, maxIncomingHtlcDelayBlocks: 1000 };

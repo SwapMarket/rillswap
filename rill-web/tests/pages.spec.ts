@@ -1,6 +1,24 @@
 import { directorySettled, expect, MAINNET_RELAYS, test } from "./fixtures/swapPage";
 
 for (const prefix of ["", "repository/"]) {
+  test(`swap execution code is loaded with each page under /${prefix}`, async ({ page, request }) => {
+    for (const network of ["", "signet/"]) {
+      await page.goto(`http://127.0.0.1:18866/${prefix}${network}`);
+      const modules = await page.locator('script[type="module"][src], link[rel="modulepreload"]').evaluateAll((elements) =>
+        elements.map((element) => element instanceof HTMLScriptElement ? element.src : (element as HTMLLinkElement).href));
+      expect(modules.length).toBeGreaterThan(0);
+      for (const url of modules) {
+        const response = await request.get(url);
+        expect(response.ok()).toBe(true);
+        // Deferred browser code disappears on the next Pages deployment. The
+        // Node-only WASM loader's external-module placeholder is never run here.
+        for (const imported of (await response.text()).matchAll(/\bimport\s*\(([^)]*)\)/g)) {
+          expect(imported[1], `deferred import in ${url}`).toMatch(/^["'`]\.\/__vite-browser-external-[\w-]+\.js["'`]$/);
+        }
+      }
+    }
+  });
+
   test(`assembled mainnet and signet have independent defaults and relative navigation under /${prefix}`, async ({ page, relaySockets: sockets }) => {
     const requests: string[] = [], errors: string[] = [], violations: string[] = [];
     page.on("request", (request) => requests.push(request.url()));
