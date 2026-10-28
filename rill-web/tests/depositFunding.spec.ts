@@ -66,6 +66,10 @@ test("the default funding step shows the address and binds the deposit once it c
   expect(await page.locator("#swap-funding-qr path").getAttribute("d")).toMatch(/^(M\d+ \d+h1v1h-1z)+$/);
   await expect(page.locator("#swap-funding-advanced")).not.toHaveAttribute("open");
   await expect(page.locator("#swap-psbt")).toBeHidden(); // the PSBT path stays behind the disclosure
+  // The funding prompt leads the panel; the swap backup follows it rather than sitting above the heading.
+  await expect(page.locator("#swap-panel > :first-child")).toHaveId("swap-stage");
+  await expect(page.locator("#swap-stage h2").first()).toHaveText("Send Bitcoin to fund the swap");
+  await expect(page.locator("#swap-stage + #swap-backups > summary")).toHaveText("Swap backup");
   await expect(page.locator("#swap-deposit-status")).toHaveText(`Payment ${tx.txid} seen, waiting for its first confirmation.`);
   // The txid links to the same mempool instance the page watches.
   await expect(page.locator("#swap-deposit-status a")).toHaveAttribute("href", `http://127.0.0.1:8091/tx/${tx.txid}`);

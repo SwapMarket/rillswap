@@ -1470,17 +1470,19 @@ async function run(
   persistFunded: (file: Uint8Array) => Promise<void>,
 ): Promise<boolean> {
   let fundsMayBeCommitted = false;
-  // Backups stay visible while the stage prompts below them change.
+  // The backup stays below the stage while its prompts change, hidden until the first recovery file exists.
   const backups = node("details", "", "swap-backups"), latestBackup = node("div");
-  backups.append(node("summary", "Advanced"), latestBackup);
+  backups.append(node("summary", "Swap backup"), latestBackup);
+  backups.hidden = true;
   const updateBackup = (file: Uint8Array, kind: string): void => {
     for (const old of latestBackup.querySelectorAll<HTMLAnchorElement>("a")) if (old.href.startsWith("blob:")) URL.revokeObjectURL(old.href);
     latestBackup.replaceChildren();
     offerDownload(latestBackup, file, `rillswap-${kind}-recovery.age`);
     latestBackup.querySelector("a")!.textContent = "Download swap backup";
+    backups.hidden = false;
   };
   const stage = node("div", "", "swap-stage");
-  panel.replaceChildren(backups, stage);
+  panel.replaceChildren(stage, backups);
   panel = stage;
   try {
     report(`Selected provider ${quote.prepared.quote.providerIdentity} via ${quote.relayUrl}`);
@@ -1517,7 +1519,7 @@ async function run(
         ? "You cosigned the provider's private key-path claim, so the swap leaves no script trace on chain."
         : "The provider claims with the preimage (cooperation was skipped). Nothing else is needed from you.",
         "swap-cooperation"),
-      node("p", "Optional: keep the paid recovery file from the backups list as a record of the completed swap."),
+      node("p", "Optional: download the paid swap backup below as a record of the completed swap."),
     );
     updateBackup(outcome.paidRecovery, "paid");
     publish(outcome.paidRecovery);

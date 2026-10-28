@@ -209,7 +209,7 @@ The app creates an origin-local recovery wallet. Saving its 12 words is
 recommended, not required to swap. Tor Browser and private windows may erase
 browser storage on restart. **The words alone cannot recover a swap**: the encrypted
 swap record must also survive, in this browser, a swap link, or the optional latest
-backup under Advanced. The words encrypt records; swap secrets are independently random.
+backup download (under Swap backup, or Advanced for Lightning to BTC). The words encrypt records; swap secrets are independently random.
 
 Browser recovery keys are not encrypted at rest; same-origin scripts and
 anyone with access to browser storage can read them. Do not clear browser
