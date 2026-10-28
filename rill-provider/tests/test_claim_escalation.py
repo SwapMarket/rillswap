@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from dataclasses import dataclass, replace
 from itertools import pairwise
@@ -11,15 +12,28 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
 
 import pytest
+from rill_core.wire.settlement_messages import FundingBindingPayload
 from test_live_session_store import Harness, swaps_as_v9, without_v12_cooperation
 from test_payment_dispatch_store import _insert_funded_swap
 from test_settlement_engine import BINDING, ITEM, TERMS
 
 from rill_provider import live_session_store as live
 from rill_provider import settlement_engine
-from rill_provider.core_tx_bytes import CoreTransactionUnknownError
-from rill_provider.live_session_store import MAX_CLAIM_ATTEMPTS, ClaimAttempt
-from rill_provider.settlement_engine import CLAIM_URGENCY_BLOCKS, SettlementEngine, claim_fee_target
+from rill_provider.core_tx_bytes import (
+    CoreProtocolError,
+    CoreTransactionUnknownError,
+    CoreUnavailableError,
+    SpendObservation,
+    SpendScan,
+)
+from rill_provider.live_session_store import MAX_CLAIM_ATTEMPTS, ClaimAttempt, FundingConflict
+from rill_provider.settlement_engine import (
+    CLAIM_URGENCY_BLOCKS,
+    CONFLICT_LOSS_CONFIRMATIONS,
+    CONFLICT_SCAN_MARGIN_BLOCKS,
+    SettlementEngine,
+    claim_fee_target,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -513,3 +527,238 @@ def test_an_unavailable_fee_estimate_never_defers_the_first_claim(
         lambda *_a: SimpleNamespace(raw_transaction=b"c", txid="a0" * 32, fee_sat=300, vsize=VSIZE),
     )
     assert asyncio.run(engine._initial_claim(ITEM, TERMS, BINDING)).fee_sat == 300  # noqa: SLF001
+
+
+# A paid zero-conf deposit that never confirmed: LOST only on a deep, canonical conflict.
+
+ZERO = TERMS.model_copy(update={"funding_confirmations": 0})
+DEPOSIT_INPUTS = (("61" * 32, 0), ("62" * 32, 1))
+CONFLICT = "c1" * 32
+G_X = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+
+
+def _deposit_binding() -> bytes:
+    payload = FundingBindingPayload(
+        binding=BINDING, funding_binding_signature="00" * 64, funding_transaction="02" * 100
+    )
+    envelope = {
+        "protocol": "rillswap",
+        "wire_version": "1",
+        "profile_id": TERMS.profile_id,
+        "network_identity": TERMS.network_identity.model_dump(mode="json"),
+        "session_id": ITEM.session_id,
+        "message_id": "12" * 32,
+        "sender_session_key": G_X,
+        "sequence": 3,
+        "in_reply_to": None,
+        "contract_hash": BINDING.contract_hash,
+        "message_type": "funding_binding",
+        "payload": payload.model_dump(mode="json"),
+        "required_features": [],
+        "extensions": {},
+        "signature": None,
+    }
+    return json.dumps(envelope).encode()
+
+
+DEPOSIT_ITEM = replace(ITEM, state="CLAIMING", funding_binding=_deposit_binding())
+
+
+@dataclass
+class _Deposit:
+    """Core's view of the deposit's inputs; the contract output never existed."""
+
+    unspent: set[tuple[str, int]]
+    mined: dict[tuple[str, int], tuple[str, int]]  # input -> (spender txid, height)
+    mempool: dict[tuple[str, int], str]
+    blocks: dict[int, str]
+    scans: list[tuple[str, int, int]]  # (input txid, vout, from_height)
+    authenticated: bool = True
+
+    def block_hash(self, height: int) -> str:
+        return self.blocks.get(height, f"{height:064x}")
+
+    def outpoint_unspent(self, txid: str, vout: int) -> bool:
+        return (txid, vout) in self.unspent
+
+    def find_spender(
+        self, txid: str, vout: int, *, from_height: int, to_height: int, anchor_block: str
+    ) -> SpendScan:
+        self.scans.append((txid, vout, from_height))
+        assert anchor_block == self.block_hash(from_height - 1)  # always an anchored scan
+        if (txid, vout) in self.mempool:
+            observation = SpendObservation(self.mempool[txid, vout], (), None)
+            return SpendScan(observation, from_height - 1, anchor_block)
+        last = min(to_height, from_height + 11)
+        found = self.mined.get((txid, vout))
+        if found is not None and from_height <= found[1] <= last:
+            observation = SpendObservation(found[0], (), found[1])
+            if not self.authenticated:
+                return SpendScan(observation, from_height - 1, None)
+            return SpendScan(observation, found[1], self.block_hash(found[1]))
+        return SpendScan(None, last, self.block_hash(last))
+
+
+def _conflict_engine(
+    monkeypatch: pytest.MonkeyPatch,
+    tip: int,
+    *,
+    depths: dict[str, int] | None = None,
+    **chain: Any,  # noqa: ANN401
+) -> tuple[SettlementEngine, _Store, Mock, _Deposit]:
+    attempts = [ClaimAttempt(0, "a0" * 32, b"c0", 300, 900)]  # floor 900 - 144 = 756
+    engine, store, mock = _engine(monkeypatch, attempts, {} if depths is None else depths, tip)
+    deposit = _Deposit(
+        unspent=chain.get("unspent", {DEPOSIT_INPUTS[0]}),  # the conflict is on input 1
+        mined=chain.get("mined", {DEPOSIT_INPUTS[1]: (CONFLICT, 800)}),
+        mempool=chain.get("mempool", {}),
+        blocks=chain.get("blocks", {}),
+        scans=[],
+        authenticated=chain.get("authenticated", True),
+    )
+    mock.outpoint_unspent.side_effect = deposit.outpoint_unspent
+    mock.block_hash.side_effect = deposit.block_hash
+    mock.find_spender.side_effect = deposit.find_spender
+    mock.transaction_inputs.return_value = (BINDING.funding_txid, DEPOSIT_INPUTS)
+    return engine, store, mock, deposit
+
+
+def _sweeps(engine: SettlementEngine, store: _Store, count: int, item: Any = DEPOSIT_ITEM) -> None:  # noqa: ANN401
+    for _ in range(count):
+        assert asyncio.run(engine._claiming(item, ZERO, BINDING, 1500)) in ("CLAIMING", "LOST")  # noqa: SLF001
+        if store.moves:
+            return
+
+
+def _proof(tip: int, block: str = f"{800:064x}") -> FundingConflict:
+    return FundingConflict(
+        funding_txid=BINDING.funding_txid,
+        conflict_txid=CONFLICT,
+        conflict_input_txid=DEPOSIT_INPUTS[1][0],
+        conflict_input_vout=1,
+        conflict_height=800,
+        conflict_block=block,
+        tip_height=tip,
+        required_confirmations=CONFLICT_LOSS_CONFIRMATIONS,
+    )
+
+
+def test_a_deposit_input_spent_six_deep_by_another_transaction_closes_the_claim_as_lost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert (CONFLICT_LOSS_CONFIRMATIONS, CONFLICT_SCAN_MARGIN_BLOCKS) == (6, 144)
+    engine, store, chain, deposit = _conflict_engine(monkeypatch, 804)
+    _sweeps(engine, store, 10)
+    assert store.moves == []  # found at 800, only five deep
+    # One bounded range per sweep from the floor, the unspent input never scanned.
+    input_txid, vout = DEPOSIT_INPUTS[1]
+    assert deposit.scans == [(input_txid, vout, h) for h in (756, 768, 780, 792)]
+    chain.tip_height.return_value = 805
+    _sweeps(engine, store, 1)
+    (move,) = store.moves
+    assert (move["from_state"], move["to_state"]) == ("CLAIMING", "LOST")
+    assert move["loss_evidence"] == _proof(805)
+    assert len(deposit.scans) == 4  # the found spender is revalidated, not searched again
+    chain.transaction_inputs.assert_called_once_with(b"\x02" * 100)
+    assert engine._conflict_scans == {}  # noqa: SLF001 - the closed swap no longer searches
+
+
+def test_a_restarted_provider_searches_again_from_the_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, store, _chain, deposit = _conflict_engine(monkeypatch, 805)
+    _sweeps(engine, store, 10)
+    assert deposit.scans[0][2] == 756
+    assert store.moves[0]["loss_evidence"] == _proof(805)
+
+
+@pytest.mark.parametrize(
+    "chain",
+    [
+        {"mined": {}, "mempool": {DEPOSIT_INPUTS[1]: CONFLICT}},  # conflict still unconfirmed
+        {"mined": {DEPOSIT_INPUTS[1]: (BINDING.funding_txid, 800)}},  # the deposit itself
+        {"authenticated": False},  # its block could not be authenticated
+        {"unspent": set(DEPOSIT_INPUTS)},  # every input confirmed and unspent
+        {"mined": {DEPOSIT_INPUTS[1]: (CONFLICT, 755)}},  # below the search floor
+    ],
+)
+def test_anything_short_of_a_canonical_mined_conflict_keeps_the_claim(
+    monkeypatch: pytest.MonkeyPatch, chain: dict[str, Any]
+) -> None:
+    engine, store, _chain, deposit = _conflict_engine(monkeypatch, 900, **chain)
+    _sweeps(engine, store, 20)
+    assert store.moves == []
+    if "unspent" in chain:
+        assert deposit.scans == []
+
+
+def test_a_deposit_core_still_knows_is_never_searched(monkeypatch: pytest.MonkeyPatch) -> None:
+    depths = {BINDING.funding_txid: 0}  # in the mempool: paid from it, waiting to confirm
+    engine, store, chain, deposit = _conflict_engine(monkeypatch, 900, depths=depths)
+    _sweeps(engine, store, 3)
+    assert (store.moves, deposit.scans) == ([], [])
+    chain.transaction_inputs.assert_not_called()
+    del depths[BINDING.funding_txid]  # gone: the search starts
+    _sweeps(engine, store, 2)
+    assert [scan[2] for scan in deposit.scans] == [756, 768]
+    depths[BINDING.funding_txid] = 0  # back in the mempool: the search is dropped
+    _sweeps(engine, store, 1)
+    del depths[BINDING.funding_txid]
+    _sweeps(engine, store, 1)
+    assert deposit.scans[-1][2] == 756  # gone again: a fresh search from the floor
+    assert chain.transaction_inputs.call_count == 2
+
+
+def test_unreadable_or_mismatched_deposit_bytes_are_no_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, store, chain, deposit = _conflict_engine(monkeypatch, 900)
+    _sweeps(engine, store, 3, item=replace(DEPOSIT_ITEM, funding_binding=b"{}"))
+    chain.transaction_inputs.assert_not_called()
+    chain.transaction_inputs.return_value = ("99" * 32, DEPOSIT_INPUTS)
+    _sweeps(engine, store, 3)
+    assert (store.moves, deposit.scans) == ([], [])
+
+
+def test_a_reorged_conflict_block_restarts_the_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, store, chain, deposit = _conflict_engine(monkeypatch, 803)
+    _sweeps(engine, store, 6)  # found at 800, four deep
+    assert store.moves == []
+    deposit.blocks[800] = "ee" * 32  # the conflict's block left the active chain
+    chain.tip_height.return_value = 805
+    _sweeps(engine, store, 1)
+    assert store.moves == []  # not on the stale block: the search restarts
+    _sweeps(engine, store, 10)
+    assert deposit.scans[4][2] == 756
+    assert store.moves[0]["loss_evidence"] == _proof(805, "ee" * 32)
+
+
+@pytest.mark.parametrize(
+    ("error", "resume"), [(CoreUnavailableError("down"), 780), (CoreProtocolError("branch"), 756)]
+)
+def test_a_failed_scan_is_no_evidence(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, resume: int
+) -> None:
+    engine, store, chain, deposit = _conflict_engine(monkeypatch, 900)
+    _sweeps(engine, store, 2)
+    chain.find_spender.side_effect = error
+    _sweeps(engine, store, 1)
+    chain.find_spender.side_effect = deposit.find_spender
+    _sweeps(engine, store, 1)
+    assert store.moves == []
+    assert deposit.scans[-1][2] == resume  # unavailable resumes; a changed branch restarts
+
+
+def test_new_blocks_on_one_input_never_starve_the_search_of_another(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Input 0 was spent long before the floor, so its search never ends; a new
+    # block every sweep (a fast regtest miner) must still let input 1's search run.
+    engine, store, chain, deposit = _conflict_engine(monkeypatch, 800, unspent=set())
+    for tip in range(800, 860):
+        chain.tip_height.return_value = tip
+        _sweeps(engine, store, 1)
+        if store.moves:
+            break
+    assert store.moves[0]["loss_evidence"].conflict_input_txid == DEPOSIT_INPUTS[1][0]
+    assert {scan[0] for scan in deposit.scans} == {DEPOSIT_INPUTS[0][0], DEPOSIT_INPUTS[1][0]}

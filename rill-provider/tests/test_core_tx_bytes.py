@@ -1115,6 +1115,37 @@ def test_outpoint_unspent_reads_the_confirmed_chain_only(tmp_path: Path) -> None
             reader.outpoint_unspent("ab" * 32, 1)
 
 
+def test_transaction_inputs_names_every_spent_outpoint(tmp_path: Path) -> None:
+    _, _, network = _context()
+    requests: list[dict[str, Any]] = []
+    decoded = {
+        "txid": "ab" * 32,
+        "vin": [{"txid": "61" * 32, "vout": 0}, {"txid": "62" * 32, "vout": 1}],
+    }
+    with _server(_rpc_reply(decoded), requests) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        assert reader.transaction_inputs(b"\x02\x00") == (
+            "ab" * 32,
+            (("61" * 32, 0), ("62" * 32, 1)),
+        )
+    assert (requests[0]["method"], requests[0]["params"]) == ("decoderawtransaction", ["0200"])
+    for reply, error in (
+        ({"txid": "zz", "vin": decoded["vin"]}, CoreProtocolError),
+        ({"txid": "ab" * 32, "vin": [decoded["vin"][0]] * 2}, CoreProtocolError),  # duplicated
+        ({"txid": "ab" * 32, "vin": []}, CoreProtocolError),
+    ):
+        with _server(_rpc_reply(reply), []) as port:
+            reader = CoreTransactionReader(
+                port=port, cookie_path=_cookie(tmp_path), network=network
+            )
+            with pytest.raises(error):
+                reader.transaction_inputs(b"\x02")
+    with _server(_rpc_reply(error={"code": -22, "message": "TX decode failed"}), []) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        with pytest.raises(CoreUnavailableError):
+            reader.transaction_inputs(b"\x02")
+
+
 def test_block_hash_reads_the_active_chain(tmp_path: Path) -> None:
     _, _, network = _context()
     requests: list[dict[str, Any]] = []

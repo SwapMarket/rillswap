@@ -58,12 +58,15 @@ from rill_core.wire.settlement_messages import FundingBindingPayload
 from rill_provider.core_tx_bytes import (
     CooperativeClaimOutpoint,
     CooperativeFeePolicy,
+    CoreProtocolError,
+    CoreReadError,
     CoreTransactionUnknownError,
 )
 from rill_provider.live_session_store import (
     MAX_CLAIM_ATTEMPTS,
     CooperativeClaimObservation,
     CooperativeWinner,
+    FundingConflict,
     LiveSessionStoreError,
     PreparedFallback,
     ReadinessChallenge,
@@ -143,6 +146,10 @@ class ChainBackend(Protocol):
         """Whether the output is unspent on the confirmed chain (mempool ignored)."""
         ...
 
+    def transaction_inputs(self, raw: bytes) -> tuple[str, tuple[tuple[str, int], ...]]:
+        """Decode exact bytes into their txid and spent outpoints, or raise."""
+        ...
+
     def block_hash(self, height: int) -> str:
         """Return the active-chain block hash at ``height`` or raise."""
         ...
@@ -175,6 +182,8 @@ class ChainBackend(Protocol):
 
 
 CLAIM_PAGE = 16  # historical claims checked per tick
+CONFLICT_LOSS_CONFIRMATIONS = 6  # depth of another spend of a deposit input that proves a loss
+CONFLICT_SCAN_MARGIN_BLOCKS = 144  # search for that spend from this far below the first claim
 CLAIM_URGENCY_BLOCKS = 6  # claim at the signed maximum fee this far before refund
 CLAIM_ESTIMATE_TARGET = 6  # confirmation target asked of Core for the first claim fee
 INCREMENTAL_RELAY_SAT_VB = 1  # BIP125 rule 4 at Core's default incremental relay fee
@@ -242,6 +251,23 @@ class EngineSettings:
     allow_regtest_fixed_fee: bool = False
 
 
+@dataclass(slots=True)
+class _InputScan:
+    """Search of one deposit input: next block, its parent's hash, any spender found."""
+
+    next_height: int
+    anchor: str | None = None  # hash of block next_height - 1 once a scan authenticated it
+    conflict: tuple[str, int, str] | None = None  # spender txid, block height, block hash
+
+
+@dataclass(slots=True)
+class _ConflictScan:
+    """Memory-only search of one unknown deposit's inputs; a restart begins again."""
+
+    floor: int
+    inputs: dict[tuple[str, int], _InputScan]
+
+
 class SettlementEngine:
     """Drive every funded swap forward; safe to call repeatedly."""
 
@@ -282,6 +308,7 @@ class SettlementEngine:
         self._new_exposure_allowed = True
         self._new_featured_sessions: dict[str, tuple[str, int]] = {}
         self._claim_probes: dict[str, ClaimProbeWindow] = {}
+        self._conflict_scans: dict[str, _ConflictScan] = {}
         self._cooperative_sample_task: asyncio.Task[object] | None = None
 
     def register_new_featured_session(self, session_id: str, contract: str) -> bool:
@@ -1107,6 +1134,7 @@ class SettlementEngine:
             now=now,
             **fields,  # type: ignore[arg-type]
         )
+        self._conflict_scans.pop(item.session_id, None)  # only CLAIMING swaps search
         return to_state
 
     async def _advance(  # noqa: PLR0911, PLR0912 - one ordered lifecycle per state
@@ -1437,11 +1465,25 @@ class SettlementEngine:
         height). The first sighting is anchored to the tip block hash; the
         anchor must still be on the active chain when the wait ends, otherwise
         the spend may have been reorged and the wait restarts.
+
+        A deposit Core does not know at all (paid from the mempool, then gone)
+        is LOST only on proof that it can never confirm: see
+        ``_funding_conflict``. Anything less keeps the claim waiting.
         """
+        conflict = None
         try:
             funding_depth = await asyncio.to_thread(self._chain.confirmations, binding.funding_txid)
         except CoreTransactionUnknownError:
             funding_depth = 0
+            conflict = await self._funding_conflict(item, binding, tip)
+        else:
+            self._conflict_scans.pop(item.session_id, None)  # known again: no conflict search
+        if conflict is not None:
+            LOG.error(
+                "claim lost: a confirmed transaction double-spent the deposit; "
+                "operator attention required"
+            )
+            return self._move(item, "LOST", now, loss_evidence=conflict)
         # Paying from the mempool (0) still needs a mined funding to call it lost.
         required = max(1, terms.funding_confirmations)
         if funding_depth < required or tip <= terms.refund_lock_height:
@@ -1464,6 +1506,135 @@ class SettlementEngine:
             LOG.error("claim lost: the refund resolved; operator attention required")
             return self._move(item, "LOST", now)
         return item.state
+
+    async def _funding_conflict(
+        self, item: SettlementItem, binding: FundingBinding, tip: int
+    ) -> FundingConflict | None:
+        """Return proof that the unknown deposit can never confirm, if there is one yet.
+
+        Proof is another transaction spending one of the deposit's own inputs
+        in a block still on the active chain, ``CONFLICT_LOSS_CONFIRMATIONS``
+        deep. A mempool spender, an unauthenticated block, the deposit itself,
+        or a failed read proves nothing. The search starts
+        ``CONFLICT_SCAN_MARGIN_BLOCKS`` below the first claim (the provider
+        paid while the deposit was in its mempool) and decodes at most one
+        bounded ``find_spender`` range per sweep; a reorg restarts it.
+        """
+        try:
+            scan = self._conflict_scans.get(item.session_id)
+            if scan is None:
+                scan = await self._new_conflict_scan(item, binding, tip)
+                if scan is None:
+                    return None
+                self._conflict_scans[item.session_id] = scan
+            behind: list[tuple[tuple[str, int], _InputScan]] = []
+            for outpoint, state in scan.inputs.items():
+                if await asyncio.to_thread(self._chain.outpoint_unspent, *outpoint):
+                    state.conflict = None  # confirmed and unspent: nothing mined spends it
+                elif state.conflict is not None:
+                    proof = await self._conflict_proof(binding, outpoint, state, scan.floor, tip)
+                    if proof is not None:
+                        return proof
+                elif state.next_height <= tip:
+                    behind.append((outpoint, state))
+            if behind:  # the furthest behind, so new blocks on one input never starve another
+                outpoint, state = min(behind, key=lambda entry: entry[1].next_height)
+                await self._search_input(binding, outpoint, state, scan.floor, tip)
+                if state.conflict is not None:
+                    return await self._conflict_proof(binding, outpoint, state, scan.floor, tip)
+        except (CoreReadError, ValueError):
+            LOG.info("deposit conflict search unavailable; retrying next sweep")
+        return None
+
+    async def _new_conflict_scan(
+        self, item: SettlementItem, binding: FundingBinding, tip: int
+    ) -> _ConflictScan | None:
+        try:
+            envelope = Envelope.model_validate_json(item.funding_binding or b"", strict=True)
+            payload = parse_model_json(FundingBindingPayload, canonicalize(envelope.payload))
+            raw = bytes.fromhex(payload.funding_transaction)
+        except Exception:  # noqa: BLE001 - an unreadable binding names no inputs: no evidence
+            return None
+        if payload.binding.funding_txid != binding.funding_txid:
+            return None
+        txid, inputs = await asyncio.to_thread(self._chain.transaction_inputs, raw)
+        if txid != binding.funding_txid:
+            LOG.error("retained deposit bytes differ from the binding; operator attention required")
+            return None
+        first = min(
+            (
+                attempt.first_seen_height
+                for attempt in self._store.claim_attempts(item.session_id)
+                if attempt.first_seen_height is not None
+            ),
+            default=tip,
+        )
+        floor = max(1, first - CONFLICT_SCAN_MARGIN_BLOCKS)
+        return _ConflictScan(floor, {outpoint: _InputScan(floor) for outpoint in inputs})
+
+    async def _search_input(
+        self,
+        binding: FundingBinding,
+        outpoint: tuple[str, int],
+        state: _InputScan,
+        floor: int,
+        tip: int,
+    ) -> None:
+        """Scan the next bounded block range for a mined spender of one deposit input."""
+        txid, vout = outpoint
+        try:
+            anchor = state.anchor or await asyncio.to_thread(
+                self._chain.block_hash, state.next_height - 1
+            )
+            result = await asyncio.to_thread(
+                self._chain.find_spender,
+                txid,
+                vout,
+                from_height=state.next_height,
+                to_height=tip,
+                anchor_block=anchor,
+            )
+        except CoreProtocolError:  # e.g. the scanned branch changed: search again
+            state.next_height, state.anchor = floor, None
+            return
+        spender = result.spender
+        if spender is None:
+            state.next_height, state.anchor = result.scanned_to + 1, result.scanned_block
+        elif (
+            spender.height is not None
+            and result.scanned_block is not None
+            and spender.txid != binding.funding_txid
+        ):
+            state.conflict = (spender.txid, spender.height, result.scanned_block)
+        # Otherwise in the mempool, unauthenticated, or the deposit itself: retry.
+
+    async def _conflict_proof(
+        self,
+        binding: FundingBinding,
+        outpoint: tuple[str, int],
+        state: _InputScan,
+        floor: int,
+        tip: int,
+    ) -> FundingConflict | None:
+        """Revalidate a found spender's block; return proof once it is deep enough."""
+        assert state.conflict is not None  # noqa: S101 - caller checked
+        conflict_txid, height, block = state.conflict
+        if tip < height or await asyncio.to_thread(self._chain.block_hash, height) != block:
+            LOG.warning("deposit conflict left the active chain; searching again")
+            state.next_height, state.anchor, state.conflict = floor, None, None
+            return None
+        if tip - height + 1 < CONFLICT_LOSS_CONFIRMATIONS:
+            return None
+        return FundingConflict(
+            funding_txid=binding.funding_txid,
+            conflict_txid=conflict_txid,
+            conflict_input_txid=outpoint[0],
+            conflict_input_vout=outpoint[1],
+            conflict_height=height,
+            conflict_block=block,
+            tip_height=tip,
+            required_confirmations=CONFLICT_LOSS_CONFIRMATIONS,
+        )
 
     def _authorization(
         self, terms: ContractTerms, binding: FundingBinding

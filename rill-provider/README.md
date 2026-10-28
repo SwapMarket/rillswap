@@ -375,10 +375,16 @@ any confirmation. This is fast for the client and risky for you:
 - **Your node must see the deposit.** Payment needs the deposit in your Core
   node's mempool. A deposit your node refuses (policy, fee rate, a full
   mempool) is paid only once it confirms.
-- **A double-spent swap stays open.** It is never marked lost unless its
-  funding was mined, so it stays in `CLAIMING` and keeps its reservation in
-  `max_active_reservations`. Inspect it with `inspect-swaps` and keep the
-  store.
+- **A double-spent swap closes only on proof.** While your Core (with a
+  synced `txindex`) does not know the deposit, the provider looks for another
+  transaction spending one of the deposit's own inputs, scanning from 144
+  blocks below the first claim, 12 blocks per sweep. When that transaction is
+  6 blocks deep on the active chain, the swap becomes `LOST`, logs an error,
+  and frees its reservation in `max_active_reservations`; the store records
+  the conflicting transaction and block. A conflict still in the mempool, a
+  deposit merely evicted, or one your node still holds keeps the swap in
+  `CLAIMING`. A restart scans again from the same floor. `LOST` is final,
+  even if a reorganization deeper than 6 blocks later revives the deposit.
 
 Consider 0 only for small amounts and keep at least 1 for larger ones. An
 advertisement carries a single value, so run one maker per policy: for

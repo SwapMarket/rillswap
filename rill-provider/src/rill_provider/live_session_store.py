@@ -104,6 +104,7 @@ from rill_provider._nip59_send import _wrap_envelope
 from rill_provider.core_tx_bytes import (
     MAX_ESTIMATE_TARGET,
     MAX_SATS,
+    MAX_VOUT,
     SATS_PER_BTC,
     CooperativeClaimOutpoint,
     CooperativeFeePolicy,
@@ -835,6 +836,26 @@ class ClaimAttempt:
     raw: bytes
     fee_sat: int | None
     first_seen_height: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class FundingConflict:
+    """Proof that a paid BTC to LN deposit that never confirmed can no longer confirm.
+
+    ``conflict_txid``, a transaction other than the deposit, spends the
+    deposit's own input ``conflict_input_txid:conflict_input_vout`` in the
+    active-chain block ``conflict_block`` at ``conflict_height``, at least
+    ``required_confirmations`` deep at ``tip_height``.
+    """
+
+    funding_txid: str
+    conflict_txid: str
+    conflict_input_txid: str
+    conflict_input_vout: int
+    conflict_height: int
+    conflict_block: str
+    tip_height: int
+    required_confirmations: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -6820,6 +6841,7 @@ class LiveSessionStore:
         claim_height: int | None = None,
         failed_by_payer: str | None = None,
         observation: dict[str, Any] | None = None,
+        loss_evidence: FundingConflict | None = None,
     ) -> None:
         """Move one swap forward and record its observation in one transaction.
 
@@ -6829,6 +6851,8 @@ class LiveSessionStore:
         ``failed_by_payer`` (the node public key that attested the terminal
         failure) also releases a dispatched reservation when that key is the
         dispatch record's bound payer; any other failure keeps capacity.
+        ``CLAIMING`` to ``LOST`` closes on the anchored refund observation, or
+        on ``loss_evidence`` when the deposit itself was double-spent.
 
         Raises ``StaleSwapError`` unless the swap is still in ``from_state``,
         so a crash or a concurrent tick can never apply a transition twice.
@@ -6838,6 +6862,8 @@ class LiveSessionStore:
             raise LiveSessionStoreError("swap transition unsupported")
         if to_state in ("CLAIMING", "CLAIMED") and (claim_tx is None or claim_txid is None):
             raise LiveSessionStoreError("claim transition needs the exact claim")
+        if loss_evidence is not None and (from_state, to_state) != ("CLAIMING", "LOST"):
+            raise LiveSessionStoreError("loss evidence closes only a claim")
         try:
             with self._write() as connection:
                 if (from_state, to_state) == ("PAID", "CLAIMING") and not _immediate_claim_allowed(
@@ -6883,6 +6909,7 @@ class LiveSessionStore:
                         now,
                         failed_by_payer=failed_by_payer,
                         network=self._network,
+                        conflict=loss_evidence,
                     )
                 if observation is not None:
                     self._record_observation(connection, session_id, observation, signer, now)
@@ -8789,6 +8816,7 @@ def _release_terminal(  # noqa: PLR0913 - explicit terminal evidence
     *,
     failed_by_payer: str | None = None,
     network: NetworkIdentity | None = None,
+    conflict: FundingConflict | None = None,
 ) -> bool:
     """Release a terminal swap's reservation when its history proves closure.
 
@@ -8802,7 +8830,8 @@ def _release_terminal(  # noqa: PLR0913 - explicit terminal evidence
     only at signed claim depth) releases a DISPATCHED or UNKNOWN
     reservation: the claim proves the provider recovered its funds. LOST
     releases the same: the exposure was realized as a loss and nothing
-    further can happen to it.
+    further can happen to it, whether a refund spent the contract output or
+    a ``conflict`` double-spent the deposit that would have created it.
     """
     (offer, claim_txid) = connection.execute(
         "SELECT terms_offer, claim_txid FROM swaps WHERE session_id=?", (session_id,)
@@ -8827,6 +8856,9 @@ def _release_terminal(  # noqa: PLR0913 - explicit terminal evidence
                 "failed-after-dispatch", failed_at=int(now or 0), payer=payer.node_pubkey
             )
             allowed = ("UNSENT", "DISPATCHED")
+    elif to_state == "LOST" and conflict is not None:
+        evidence = _funding_conflict_evidence(conflict)
+        allowed = ("DISPATCHED", "UNKNOWN")
     elif to_state == "LOST":
         (spent_height, spent_block) = connection.execute(
             "SELECT outpoint_spent_height, outpoint_spent_block FROM swaps WHERE session_id=?",
@@ -8899,6 +8931,43 @@ def _offered_payment_hash(offer: bytes) -> str:
 def _release_evidence(reason: str, **facts: str | int) -> bytes:
     """Versioned, canonical closure evidence for one RELEASED reservation."""
     return canonicalize({"version": 1, "reason": reason, **facts})
+
+
+def _funding_conflict_evidence(conflict: FundingConflict) -> bytes:
+    """Closure evidence of a double-spent deposit, refused unless self-consistent."""
+    hashes = (
+        conflict.funding_txid,
+        conflict.conflict_txid,
+        conflict.conflict_input_txid,
+        conflict.conflict_block,
+    )
+    counts = (
+        conflict.conflict_input_vout,
+        conflict.conflict_height,
+        conflict.tip_height,
+        conflict.required_confirmations,
+    )
+    if (
+        any(type(value) is not str or HEX32.match(value) is None for value in hashes)
+        or any(type(value) is not int for value in counts)
+        or conflict.conflict_txid == conflict.funding_txid
+        or not 0 <= conflict.conflict_input_vout <= MAX_VOUT
+        or conflict.conflict_height < 1
+        or conflict.required_confirmations < 1
+        or conflict.tip_height - conflict.conflict_height + 1 < conflict.required_confirmations
+    ):
+        raise LiveSessionStoreError("funding conflict evidence unsupported")
+    return _release_evidence(
+        "funding-conflict",
+        funding_txid=conflict.funding_txid,
+        conflict_txid=conflict.conflict_txid,
+        conflict_input_txid=conflict.conflict_input_txid,
+        conflict_input_vout=conflict.conflict_input_vout,
+        conflict_height=conflict.conflict_height,
+        conflict_block=conflict.conflict_block,
+        tip_height=conflict.tip_height,
+        required_confirmations=conflict.required_confirmations,
+    )
 
 
 def _epoch_watermark(connection: sqlite3.Connection) -> int:

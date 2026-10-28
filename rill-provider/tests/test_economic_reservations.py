@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import secrets
 import sqlite3
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -572,6 +573,93 @@ def test_a_lost_claim_releases_the_realized_exposure(
                 b'"reason":"claim-lost","required_confirmations":4,"version":1}'
             )
         assert _swap(store) == ("LOST", 1250, "b3" * 32)
+
+
+CONFLICT = live.FundingConflict(
+    funding_txid="51" * 32,
+    conflict_txid="c1" * 32,
+    conflict_input_txid="62" * 32,
+    conflict_input_vout=1,
+    conflict_height=800,
+    conflict_block="b4" * 32,
+    tip_height=805,
+    required_confirmations=6,
+)
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [("DISPATCHED", "RELEASED"), ("UNKNOWN", "RELEASED"), ("UNSENT", "UNSENT")],
+)
+def test_a_double_spent_deposit_closes_the_claim_with_its_conflict(
+    harness: Harness, before: str, after: str
+) -> None:
+    with harness.acquire() as store:
+        session = _insert_funded_swap(store, harness, "CLAIMING")
+        _set_reservation(store, before)
+        store.advance_swap(
+            session,
+            from_state="CLAIMING",
+            to_state="LOST",
+            signer=None,  # type: ignore[arg-type]
+            now=1500,
+            loss_evidence=CONFLICT,
+        )
+        _session, state, evidence = _ledger(store)[_hash(harness)]
+        assert state == after
+        if after == "RELEASED":
+            assert evidence == (
+                b'{"conflict_block":"' + b"b4" * 32 + b'","conflict_height":800,'
+                b'"conflict_input_txid":"' + b"62" * 32 + b'","conflict_input_vout":1,'
+                b'"conflict_txid":"' + b"c1" * 32 + b'","funding_txid":"' + b"51" * 32 + b'",'
+                b'"reason":"funding-conflict","required_confirmations":6,"tip_height":805,'
+                b'"version":1}'
+            )
+        assert _swap(store) == ("LOST", None, None)  # no refund anchor is impersonated
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"tip_height": 804},  # five deep
+        {"conflict_txid": "51" * 32},  # the deposit itself
+        {"conflict_block": "B4" * 32},
+        {"conflict_input_vout": -1},
+        {"conflict_height": True},
+        {"required_confirmations": 0},
+    ],
+)
+def test_inconsistent_conflict_evidence_is_refused_atomically(
+    harness: Harness, change: dict[str, object]
+) -> None:
+    with harness.acquire() as store:
+        session = _insert_funded_swap(store, harness, "CLAIMING")
+        _set_reservation(store, "DISPATCHED")
+        with pytest.raises(live.LiveSessionStoreError, match="conflict evidence unsupported"):
+            store.advance_swap(
+                session,
+                from_state="CLAIMING",
+                to_state="LOST",
+                signer=None,  # type: ignore[arg-type]
+                now=1500,
+                loss_evidence=replace(CONFLICT, **change),  # type: ignore[arg-type]
+            )
+        assert _swap(store) == ("CLAIMING", None, None)
+        assert _ledger(store)[_hash(harness)][1] == "DISPATCHED"
+
+
+def test_conflict_evidence_closes_only_a_claim(harness: Harness) -> None:
+    with harness.acquire() as store:
+        session = _insert_funded_swap(store, harness, "PAYING")
+        with pytest.raises(live.LiveSessionStoreError, match="closes only a claim"):
+            store.advance_swap(
+                session,
+                from_state="PAYING",
+                to_state="FAILED",
+                signer=None,  # type: ignore[arg-type]
+                now=1500,
+                loss_evidence=CONFLICT,
+            )
 
 
 def _swap(store: live.LiveSessionStore) -> tuple[str, int | None, str | None]:

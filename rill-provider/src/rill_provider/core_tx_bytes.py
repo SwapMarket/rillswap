@@ -1448,6 +1448,25 @@ class CoreTransactionReader:
             raise CoreProtocolError("Core outpoint status is inconsistent")
         return True
 
+    def transaction_inputs(self, raw: bytes) -> tuple[str, tuple[tuple[str, int], ...]]:
+        """Decode exact transaction bytes into their txid and spent outpoints.
+
+        Decoding says nothing about the chain or validity; it only names inputs.
+        """
+        if not isinstance(raw, bytes) or not raw:
+            raise ValueError("transaction bytes required")
+        try:
+            with self._client() as client:
+                decoded = self._rpc(client, "decoderawtransaction", [raw.hex()], 1)
+        except CoreRpcError:
+            raise CoreUnavailableError("Core transaction decoding unavailable") from None
+        except httpx.HTTPError:
+            raise CoreUnavailableError("Core RPC transport unavailable") from None
+        txid = decoded.get("txid") if isinstance(decoded, dict) else None
+        if not _hash(txid):
+            raise CoreProtocolError("Core decoded a malformed transaction")
+        return str(txid), _funding_inputs(decoded)
+
     def observe_cooperative_fee_policy(
         self, target_blocks: int, *, allow_regtest_fixed_fee: bool = False
     ) -> CooperativeFeePolicy:
