@@ -5,7 +5,7 @@ import { BrowserHoldPayer } from "./swap/browserHoldPayer";
 import { browserCosigner } from "./swap/browserCosigner";
 import { explorerTxUrl, validateMempoolApi, type NetworkName } from "./swap/config";
 import { readBoundedChainText, readChainTip, readNextBlockFeeRate } from "./swap/chainTip";
-import { notifySwap, requestSwapNotifications } from "./swap/notifications";
+import { notifySwap } from "./swap/notifications";
 import { parseStrictEventJson } from "./strictEventJson";
 import { qrSvg } from "./qr";
 import { RecoveryFundingUnavailableError } from "./recoveryFunding";
@@ -76,14 +76,6 @@ function view(root: HTMLElement, e: ClaimExecution, options: ReverseProgressOpti
     backups.replaceChildren(); options.download(backups, file, "rillswap-ln-to-btc-backup.age");
     const link = backups.querySelector("a"); if (link) link.textContent = "Download swap backup";
     options.saved?.(file);
-  };
-  const notifications = button(advanced, "Enable notifications", "swap-reverse-notifications");
-  notifications.hidden = typeof Notification === "undefined";
-  notifications.onclick = () => {
-    notifications.disabled = true;
-    void requestSwapNotifications().then((granted) => {
-      notifications.textContent = granted ? "Notifications enabled" : "Notifications unavailable";
-    });
   };
   root.replaceChildren(screen, payment, advanced, message);
   return { screen, payment, advanced, message, fee, backup };

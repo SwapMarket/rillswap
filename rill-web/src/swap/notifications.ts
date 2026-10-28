@@ -1,4 +1,4 @@
-/** Optional tab-owned notifications. Never registers a service worker or requests permission on load. */
+/** Tab-owned notifications. Request permission at swap start, never on page load. No service worker. */
 export async function requestSwapNotifications(): Promise<boolean> {
   try {
     if (typeof Notification === "undefined") return false;

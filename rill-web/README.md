@@ -182,8 +182,10 @@ of the original quote deadline. An interruption after journaling leaves only man
 fallback export on Resume, never another automatic broadcast. Upgrades preserve
 existing records without inferring disclosure for older `claim-ready` swaps.
 Advanced holds the fee details, one optional
-latest swap backup, manual checks, and exact fallback export. Notifications are
-optional and request permission only when enabled; no service worker is installed.
+latest swap backup, manual checks, and exact fallback export. The browser asks for
+notification permission when you start a swap. Status notifications are enabled
+when permission is granted; denying or dismissing the prompt does not block the
+swap. No service worker is installed.
 
 The invoice is a hold invoice. The provider locks the Bitcoin only after your
 payment is held at its node for that exact payment hash, so an unpaid invoice

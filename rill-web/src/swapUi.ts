@@ -38,6 +38,7 @@ import { mountReverseExecution, mountResumedReverseExecution } from "./reverseEx
 import { BrowserReverseJournal } from "./browserReverseJournal";
 import { resumeBrowserReverseExecution } from "./browserReverseRecovery";
 import { decryptRecoveryContainer } from "./recoveryKeys";
+import { requestSwapNotifications } from "./swap/notifications";
 
 const NETWORKS = { mainnet, signet, testnet4, regtest } as const;
 /** How often an idle, visible page reloads the provider directory. */
@@ -751,6 +752,7 @@ function mount(root: HTMLElement): void {
       report(`refused: ${(error as Error).message}`);
       return;
     }
+    void requestSwapNotifications();
     const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button")];
     busy = true;
     for (const control of controls) (control as HTMLInputElement).disabled = true;
@@ -891,6 +893,7 @@ function mount(root: HTMLElement): void {
       if (pinned && !/^[0-9a-f]{64}$/.test(pinned)) throw new Error("Provider identity must be 64 lowercase hex characters");
       if (parseTokenAmount(amount, 18, "Amount to receive") <= 0n) throw new Error("Amount to receive must be positive");
     } catch (error) { report(`refused: ${(error as Error).message}`); return; }
+    void requestSwapNotifications();
     const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button")];
     busy = true; for (const control of controls) (control as HTMLInputElement).disabled = true;
     settingsButton.disabled = providersButton.disabled = badge.disabled = true;
@@ -1015,6 +1018,7 @@ function mount(root: HTMLElement): void {
       report(`refused: ${(error as Error).message}`);
       return;
     }
+    void requestSwapNotifications();
     // The payout address stays editable until continuation; everything else is frozen with the estimate.
     const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button")].filter((control) => control !== receiveAddress);
     busy = true;
@@ -1201,6 +1205,7 @@ function mount(root: HTMLElement): void {
       report(`refused: ${(error as Error).message}`);
       return;
     }
+    void requestSwapNotifications();
     const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button")];
     busy = true;
     for (const input of controls) {

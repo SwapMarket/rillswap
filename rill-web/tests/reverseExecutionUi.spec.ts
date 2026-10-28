@@ -155,7 +155,7 @@ test("an uncertain automatic claim is watched but never submitted again", async 
   expect(await page.evaluate(() => window.uiFixture.reverseEvents!.filter((e) => e === "broadcast"))).toHaveLength(1);
 });
 
-test("notifications require an explicit opt-in and report public swap status only", async ({ page }) => {
+test("notifications are enabled at swap start and report public swap status only", async ({ page }) => {
   await page.addInitScript(() => {
     window.notificationTest = { requests: 0, messages: [] };
     class LocalNotification {
@@ -166,10 +166,8 @@ test("notifications require an explicit opt-in and report public swap status onl
     Object.defineProperty(window, "Notification", { value: LocalNotification, configurable: true });
   });
   await mountedExecution(page);
-  expect(await page.evaluate(() => window.notificationTest.requests)).toBe(0);
-  await page.locator("#swap-reverse-advanced summary").click();
-  await page.locator("#swap-reverse-notifications").click();
-  await expect(page.locator("#swap-reverse-notifications")).toHaveText("Notifications enabled");
+  expect(await page.evaluate(() => window.notificationTest.requests)).toBe(1);
+  await expect(page.locator("#swap-reverse-notifications")).toHaveCount(0);
   await page.evaluate(() => { window.uiFixture.reverseFunded = true; window.uiFixture.reverseDepth = 2; window.uiFixture.reverseClaimConfirmed = true; });
   await page.locator("#swap-reverse-accept").click();
   await expect(page.locator("#swap-reverse-steps h2")).toHaveText("Bitcoin received");
