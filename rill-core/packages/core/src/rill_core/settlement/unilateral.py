@@ -9,7 +9,11 @@ from typing import TYPE_CHECKING, Literal, Protocol
 from rill_core.domain.amounts import MAX_SATS
 from rill_core.errors import ValidationError
 from rill_core.networks import SUPPORTED_CONSENSUS_PROFILES, require_supported_network
-from rill_core.settlement.taproot import TaprootKeyOperations, reconstruct_taproot_contract
+from rill_core.settlement.taproot import (
+    CLAIM_SCRIPT_LENGTH,
+    TaprootKeyOperations,
+    reconstruct_taproot_contract,
+)
 from rill_core.wire.hashes import tagged_hash
 
 if TYPE_CHECKING:
@@ -603,6 +607,31 @@ def _verify_signature(
         verifier.schnorr_verify(public_key, message, signature)
     except Exception as error:
         raise ValidationError("unilateral BIP340 signature is invalid") from error
+
+
+def claim_vsizes(destination_script: bytes) -> tuple[int, int]:
+    """Exact vsizes of a client claim paying ``destination_script``.
+
+    Returns ``(cooperative, unilateral)``: the key-path claim (one 64-byte
+    signature) and the script-path claim (signature, preimage, 73-byte claim
+    script, control block), each one contract input and one output. Pricing
+    the claim reserve at the cooperative size means the same absolute fee
+    pays the larger script-path fallback at a lower rate.
+    """
+    _dust_threshold(destination_script)  # P2WPKH or P2TR only
+    # version, input count, outpoint, empty scriptSig, sequence, output count,
+    # value, script length, script, locktime
+    stripped = 4 + 1 + 36 + 1 + 4 + 1 + 8 + 1 + len(destination_script) + 4
+    witnesses = (
+        1 + 1 + SIGNATURE_LENGTH,
+        1
+        + (1 + SIGNATURE_LENGTH)
+        + (1 + HASH_LENGTH)
+        + (1 + CLAIM_SCRIPT_LENGTH)
+        + (1 + CONTROL_BLOCK_LENGTH),
+    )
+    cooperative, unilateral = ((4 * stripped + 2 + witness + 3) // 4 for witness in witnesses)
+    return cooperative, unilateral
 
 
 def max_spendable_fee(authorization: UnilateralAuthorization) -> int:

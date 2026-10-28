@@ -245,6 +245,50 @@ def test_cooperative_proposal_reconstructs_fee_and_exact_sighash(profile: str) -
         assert len(plan.signature_hash) == 32
 
 
+@pytest.mark.parametrize(
+    ("destination", "expected"),
+    [("0014" + "77" * 20, (99, 143)), ("5120" + "77" * 32, (111, 155))],
+)
+def test_claim_vsizes_match_the_built_claims(destination: str, expected: tuple[int, int]) -> None:
+    case = next(
+        item
+        for item in _load("taproot-cases-v1.json")["valid"]
+        if item["contract_terms"]["profile_id"] == "ln-to-btc/v1"
+    )
+    settlement = next(
+        item
+        for item in _load("settlement-cases-v1.json")["valid"]
+        if item["taproot_vector"] == case["id"]
+    )
+    terms = _terms(case).model_copy(update={"client_destination_script": destination})
+    funding = _funding(settlement)
+    authorization = UnilateralAuthorization.from_terms(
+        terms, funding, "claim", keys=_keys(terms, case)
+    )
+    signature = b"\x11" * 64
+    cooperative = build_cooperative_claim(authorization, fee_sat=300)
+    validated = finalize_cooperative_claim(
+        cooperative,
+        signature,
+        verifier=ExpectedVerifier(funding.script_pubkey[2:], cooperative.signature_hash, signature),
+    )
+    unilateral = build_unilateral_spend(
+        authorization, fee_sat=300, claim_preimage=bytes.fromhex(case["claim_preimage"])
+    )
+    fallback = finalize_unilateral_spend(
+        unilateral,
+        signature,
+        verifier=ExpectedVerifier(_role_key(terms, "claim"), unilateral.signature_hash, signature),
+    )
+    assert tx.claim_vsizes(bytes.fromhex(destination)) == expected
+    assert (validated.vsize, fallback.vsize) == expected
+
+
+def test_claim_vsizes_refuse_unsupported_destinations() -> None:
+    with pytest.raises(ValidationError, match="destination script"):
+        tx.claim_vsizes(bytes.fromhex("0020" + "77" * 32))
+
+
 def test_cooperative_proposal_refuses_base_encoding_and_policy_escapes() -> None:
     case, terms, funding = _first_context()
     authorization = UnilateralAuthorization.from_terms(
