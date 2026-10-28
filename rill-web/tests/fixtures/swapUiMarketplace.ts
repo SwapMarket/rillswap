@@ -5,7 +5,7 @@ import { forwardRank, rank, type SortMode } from "../../src/swap/ranking";
 declare global {
   interface Window {
     uiFixture: { requests: unknown[]; executed: number; executedProviders: string[]; disposed: number;
-      fundingScript?: string; fundingSource?: { psbt: string } | { depositTxid: string };
+      fundingScript?: string; fundingDepth?: number | undefined; fundingSource?: { psbt: string } | { depositTxid: string };
       reverseEvents?: string[]; reverseFunded?: boolean; reverseDepth?: number; reverseClaimConfirmed?: boolean; reverseBroadcastUnknown?: boolean; reverseNodePayment?: boolean; reverseTransientClaimRead?: boolean; reverseClaimFeeRates?: number[];
       fundedRecovery?: number[]; fundingPublished?: boolean;
       wallet: typeof BrowserRecoveryWallet; releaseInfo?: () => void; infoPending: boolean };
@@ -61,7 +61,7 @@ export const quoteProviders = async (_providers: unknown[], request: unknown, _s
         if (window.uiFixture.fundingScript) {
           // Exercise the funding prompt with the test's contract script; record what it resolved with.
           const source = await hooks.fundingSource({ contractScript: window.uiFixture.fundingScript, amountSat: 101_000n, maxFundingFeeSat: 500n,
-            refundLockHeight: 300, successFeeSat: 100n, termsExpiry: Math.floor(Date.now() / 1000) + 3600 }) as { psbt?: string; deposit?: { transaction: { txid: string } } };
+            refundLockHeight: 300, successFeeSat: 100n, termsExpiry: Math.floor(Date.now() / 1000) + 3600, fundingConfirmations: window.uiFixture.fundingDepth }) as { psbt?: string; deposit?: { transaction: { txid: string } } };
           window.uiFixture.fundingSource = source.psbt !== undefined ? { psbt: source.psbt } : { depositTxid: source.deposit!.transaction.txid };
           throw new Error("Fixture stopped after funding");
         }

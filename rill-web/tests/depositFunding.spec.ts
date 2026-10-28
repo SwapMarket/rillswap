@@ -44,11 +44,12 @@ async function chain(page: Page, histories: unknown[][], transactions: readonly 
   return requests;
 }
 
-async function startSwap(page: Page, expectAddress = true): Promise<void> {
+async function startSwap(page: Page, expectAddress = true, fundingDepth?: number): Promise<void> {
   await page.goto(PAGE);
   const now = Math.floor(Date.now() / 1000);
   await page.locator("#swap-invoice").fill(testInvoice("deposit_funding", "1000000", now, now + 7200));
-  await page.evaluate((script) => { window.uiFixture.fundingScript = script; }, SCRIPT);
+  await page.evaluate(([script, depth]) => { window.uiFixture.fundingScript = script as string; window.uiFixture.fundingDepth = depth as number | undefined; },
+    [SCRIPT, fundingDepth] as const);
   await page.locator("#swap-start").click();
   await page.locator("#swap-quote-accept").click();
   if (expectAddress) await expect(page.locator("#swap-contract-address")).toHaveText(ADDRESS);
@@ -58,6 +59,7 @@ test("the default funding step shows the address and binds the deposit once it c
   const { parent, tx } = deposit();
   const requests = await chain(page, [[entry(tx, false)], [entry(tx, true)]], [tx, parent]);
   await startSwap(page);
+  await expect(page.locator("#swap-zero-conf-warning")).toHaveCount(0); // confirmed terms: nothing to warn about
   await expect(page.locator("#swap-funding-uri")).toHaveAttribute("href", `bitcoin:${ADDRESS}?amount=0.00101000`);
   await expect(page.locator("#swap-funding-rules")).toContainText("at most 500 sat");
   await expect(page.locator("#swap-funding-qr")).toHaveAttribute("aria-label", `QR code: bitcoin:${ADDRESS}?amount=0.00101000`);
@@ -72,6 +74,17 @@ test("the default funding step shows the address and binds the deposit once it c
   // Both the deposit and its parent were fetched by hash so the fee rests on verified bytes.
   expect(requests).toContain(`tx/${tx.txid}/hex`);
   expect(requests).toContain(`tx/${parent.txid}/hex`);
+});
+
+test("zero-confirmation terms bind the payment as soon as it is seen, with a do-not-replace warning", async ({ page }) => {
+  const { parent, tx } = deposit();
+  await chain(page, [[], [entry(tx, false)]], [tx, parent]);
+  await startSwap(page, true, 0);
+  await expect(page.locator("#swap-zero-conf-warning")).toContainText("Do not bump its fee or replace it in your wallet");
+  await expect(page.locator("#swap-zero-conf-warning")).toContainText("only refund it after block 300");
+  await expect(page.locator("#swap-funding-rules")).toContainText("until it sees the payment");
+  await expect(page.locator("#swap-error")).toHaveText("Fixture stopped after funding", { timeout: 20_000 });
+  expect(await page.evaluate(() => window.uiFixture.fundingSource)).toEqual({ depositTxid: tx.txid }); // never confirmed
 });
 
 test("the advanced PSBT path still hands the pasted PSBT to the swap", async ({ page }) => {

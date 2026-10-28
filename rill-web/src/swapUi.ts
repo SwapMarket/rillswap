@@ -1390,6 +1390,8 @@ function fundingPrompt(panel: HTMLElement, networkName: NetworkName, request: Fu
   copy.onclick = () => { void navigator.clipboard?.writeText(address).then(() => { copy.textContent = "Copied"; }, () => {}); };
   const status = node("p", "Waiting for your payment. This page checks your mempool API every 10 seconds.", "swap-deposit-status");
   status.setAttribute("role", "status");
+  // Zero-confirmation terms: the provider pays from its mempool, so the page binds the payment as soon as it sees it.
+  const zeroConf = request.fundingConfirmations === 0;
   panel.replaceChildren(
     node("h2", "Send Bitcoin to fund the swap"),
     node("p", `Send exactly ${btc(request.amountSat)} BTC (${request.amountSat.toLocaleString()} sat, ` +
@@ -1398,7 +1400,9 @@ function fundingPrompt(panel: HTMLElement, networkName: NetworkName, request: Fu
     node("pre", address, "swap-contract-address"),
     open, copy,
     node("p", `Send it in one transaction from a native segwit wallet, with a network fee of at most ` +
-      `${request.maxFundingFeeSat.toLocaleString()} sat. Keep this page open until it confirms; the swap then continues by itself.`, "swap-funding-rules"),
+      `${request.maxFundingFeeSat.toLocaleString()} sat. Keep this page open until it ${zeroConf ? "sees the payment" : "confirms"}; the swap then continues by itself.`, "swap-funding-rules"),
+    ...(zeroConf ? [node("p", "This provider pays before your payment confirms. Do not bump its fee or replace it in your wallet: " +
+      `a replaced payment is not the one bound to the swap, and you could only refund it after block ${request.refundLockHeight}.`, "swap-zero-conf-warning")] : []),
     node("p", `If the provider does not pay, you can refund after block ${request.refundLockHeight}.`),
     node("p", "Pay only once: a second payment to this address is not swapped and may be lost.", "swap-second-deposit-warning"),
     status,
@@ -1419,9 +1423,10 @@ function fundingPrompt(panel: HTMLElement, networkName: NetworkName, request: Fu
     let timer: ReturnType<typeof setTimeout> | undefined;
     const poll = async (): Promise<void> => {
       try {
-        const seen = await observeDeposit(chainApi(), { address, script: request.contractScript, amountSat: request.amountSat });
+        const seen = await observeDeposit(chainApi(), { address, script: request.contractScript, amountSat: request.amountSat },
+          { acceptUnconfirmed: zeroConf });
         if (settled) return;
-        if (seen.status === "confirmed") { finish(() => resolve({ deposit: seen.funding })); return; }
+        if (seen.status === "confirmed" || seen.status === "mempool") { finish(() => resolve({ deposit: seen.funding })); return; }
         if (seen.status === "ambiguous") {
           finish(() => reject(new Error(`Several confirmed payments reached this address (${seen.txids.join(", ")}); ` +
             "none was bound to the swap. Each is refundable after the refund block; keep the terms backup.")));

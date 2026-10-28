@@ -73,6 +73,21 @@ describe("deposit discovery through the trusted chain API", () => {
     expect(seen).toEqual({ status: "ambiguous", txids: [first.txid, second.txid] });
   });
 
+  test("zero-confirmation terms bind a lone unconfirmed payment, and several still wait for confirmation", async () => {
+    const { parent, tx } = deposit(), second = deposit({ parentValue: amount + 2_000n }).tx;
+    const zero = { acceptUnconfirmed: true } as const;
+    const seen = await observeDeposit(API, { address, script, amountSat: amount }, { ...zero, fetch: api([entry(tx, false)], [tx, parent]) });
+    if (seen.status !== "mempool") throw new Error(seen.status);
+    expect(authorizeFunding(seen.funding, terms).txid).toBe(tx.txid); // the same byte and fee checks as a confirmed one
+    expect(await observeDeposit(API, { address, script, amountSat: amount }, { ...zero, fetch: api([entry(tx, false), entry(second, false)], []) }))
+      .toEqual({ status: "unconfirmed", txid: tx.txid });
+    const confirmed = await observeDeposit(API, { address, script, amountSat: amount }, { ...zero, fetch: api([entry(tx, true), entry(second, false)], [tx, parent]) });
+    expect(confirmed.status).toBe("confirmed"); // a confirmed payment wins, as without the option
+    // Without the option (any other depth) an unconfirmed payment is never bound.
+    expect(await observeDeposit(API, { address, script, amountSat: amount }, { fetch: api([entry(tx, false)], [tx, parent]) }))
+      .toEqual({ status: "unconfirmed", txid: tx.txid });
+  });
+
   test("bytes that do not hash to the announced txid, or a missing parent, are refused", async () => {
     const { parent, tx } = deposit();
     const forged = { ...entry(tx, true), txid: "22".repeat(32) };

@@ -5,7 +5,9 @@
  * The API is asked for the address history (it learns the contract address,
  * which it would learn from the funding transaction anyway). A deposit counts
  * only once confirmed: a wallet may replace an unconfirmed transaction, and the
- * provider accepts exactly one binding (revision zero) per swap. The raw bytes
+ * provider accepts exactly one binding (revision zero) per swap. Zero-confirmation
+ * terms are the exception: the provider pays from its mempool, so waiting would
+ * only delay the swap, and a lone unconfirmed deposit is bound as seen. The raw bytes
  * of the deposit and of every parent transaction are fetched and re-hashed, so
  * input values (the fee check) rest on verified bytes, not API metadata.
  */
@@ -24,6 +26,11 @@ export type DepositObservation =
   | { readonly status: "unconfirmed"; readonly txid: string }
   /** Exactly one confirmed deposit, with verified bytes and input values. */
   | { readonly status: "confirmed"; readonly funding: FinalizedFunding }
+  /**
+   * With `acceptUnconfirmed`: the only deposit, still unconfirmed, with verified bytes.
+   * A replacement (fee bump) of it is a different transaction and is not bound.
+   */
+  | { readonly status: "mempool"; readonly funding: FinalizedFunding }
   /** Several confirmed deposits: never pick one automatically (RS-002 duplicate deposits). */
   | { readonly status: "ambiguous"; readonly txids: readonly string[] };
 
@@ -37,12 +44,13 @@ export interface DepositWatchTarget {
 /**
  * One observation of `target` through `api` (a validated mempool-style base URL).
  * Throws on API or parsing failure (unknown, not "no deposit"); throws
- * `TransactionRefusedError` when the confirmed deposit's bytes cannot be verified.
+ * `TransactionRefusedError` when the bound deposit's bytes cannot be verified.
+ * `acceptUnconfirmed` is only for signed terms with zero funding confirmations.
  */
 export async function observeDeposit(
   api: string,
   target: DepositWatchTarget,
-  options: { readonly signal?: AbortSignal; readonly fetch?: ChainFetch } = {},
+  options: { readonly signal?: AbortSignal; readonly fetch?: ChainFetch; readonly acceptUnconfirmed?: boolean } = {},
 ): Promise<DepositObservation> {
   const transport = options.fetch ?? fetch;
   const signal = options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000);
@@ -65,11 +73,13 @@ export async function observeDeposit(
   });
   const confirmed = candidates.filter((candidate) => candidate.confirmed);
   if (confirmed.length > 1) return { status: "ambiguous", txids: confirmed.map((candidate) => candidate.txid) };
-  if (confirmed.length === 0) {
+  // Several unconfirmed payments fall back to waiting: confirmation decides, as without the option.
+  const mempool = options.acceptUnconfirmed === true && confirmed.length === 0 && candidates.length === 1;
+  if (confirmed.length === 0 && !mempool) {
     const pending = candidates[0];
     return pending ? { status: "unconfirmed", txid: pending.txid } : { status: "none" };
   }
-  const txid = confirmed[0]!.txid;
+  const txid = (mempool ? candidates[0]! : confirmed[0]!).txid;
   const fetchTransaction = async (id: string) => {
     const hex = await get(`tx/${id}/hex`, MAX_TRANSACTION_BYTES * 2);
     if (!/^(?:[0-9a-f]{2})+$/.test(hex)) throw new TransactionRefusedError("chain API returned malformed transaction bytes");
@@ -85,5 +95,5 @@ export async function observeDeposit(
     if (!spent) throw new TransactionRefusedError("deposit spends an unknown output");
     inputValues.push(spent.value);
   }
-  return { status: "confirmed", funding: { transaction, inputValues } };
+  return { status: mempool ? "mempool" : "confirmed", funding: { transaction, inputValues } };
 }

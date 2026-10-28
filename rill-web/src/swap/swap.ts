@@ -72,6 +72,8 @@ export interface FundingRequest {
   readonly refundLockHeight: number;
   readonly successFeeSat: bigint;
   readonly termsExpiry?: number;
+  /** Signed depth the provider pays at; 0 lets a lone unconfirmed deposit fund the swap. Absent: wait for confirmation. */
+  readonly fundingConfirmations?: number;
 }
 
 /** Every step that needs the user; each promise resolves once the user acted. */
@@ -81,7 +83,7 @@ export interface SwapHooks {
   saveRecovery(file: Uint8Array, stage: "terms" | "funded"): Promise<void>;
   /**
    * Show the contract output; resolve with the user's funding: a finalized PSBT
-   * from the wallet, or a confirmed deposit the page found on chain (already broadcast).
+   * from the wallet, or a deposit the page found (already broadcast; confirmed unless the terms pay at 0).
    */
   fundingSource(request: FundingRequest): Promise<FundingSource>;
   /** PSBT funding only: show the signed transaction; resolve once the user broadcast it. */
@@ -301,7 +303,7 @@ export async function prepareSwap(
             await hooks.broadcast(funding.raw, funding.txid);
             hooks.report(`funding ${funding.txid} broadcast; waiting for the provider to pay (${when})`);
           } else {
-            hooks.report(`the provider acknowledged your confirmed deposit ${funding.txid}; waiting for it to pay (${when})`);
+            hooks.report(`the provider acknowledged your deposit ${funding.txid}; waiting for it to pay (${when})`);
           }
           const pendingBlocks = Math.max(0, depth - (broadcastByUser ? 0 : 1));
           const hint =
@@ -377,6 +379,7 @@ async function authorizeUserFunding(terms: BtcToLnTerms, hooks: SwapHooks): Prom
     refundLockHeight: terms.refund_lock_height,
     successFeeSat: BigInt(terms.economics.success_fee_sat),
     termsExpiry: terms.terms_expiry,
+    fundingConfirmations: terms.funding_confirmations,
   };
   for (let attempt = 1; ; attempt += 1) {
     const source = await hooks.fundingSource(request);
@@ -387,7 +390,7 @@ async function authorizeUserFunding(terms: BtcToLnTerms, hooks: SwapHooks): Prom
     } catch (error) {
       if ("deposit" in source) {
         // The deposit is already on chain: a retry cannot change it, and it was not bound to the swap.
-        throw new SwapError(`your confirmed deposit ${source.deposit.transaction.txid} cannot fund this swap (${(error as Error).message}). ` +
+        throw new SwapError(`your deposit ${source.deposit.transaction.txid} cannot fund this swap (${(error as Error).message}). ` +
           `It was not bound to the swap and is refundable after block ${terms.refund_lock_height}; keep the terms recovery file and this transaction id. ` +
           "This page cannot prepare that refund yet.");
       }
