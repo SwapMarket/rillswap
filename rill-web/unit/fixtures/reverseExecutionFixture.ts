@@ -115,12 +115,12 @@ export async function executionFixture(cooperation: "unilateral" | "signed" | "d
       check(); await authorize(); check(); events.push("payment-post"); return "IN_FLIGHT";
     },
   } as unknown as BrowserHoldPayer;
-  let posts = 0, spent = false, unconfirmed = false, tipHeight = 200, failFreshAfterCooperation = false; const postedTransactions: string[] = [];
+  let posts = 0, spent = false, unconfirmed = false, tipHeight = 200, freshFailures = 0; const postedTransactions: string[] = [];
   const fetch = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const path = String(url).split("/api/")[1]!; events.push(`api:${init?.method ?? "GET"}:${path}`);
     if (init?.method === "POST") { posts++; postedTransactions.push(init.body as string); return new Response(parseTransaction(hexToBytes(init.body as string)).txid); }
-    if (failFreshAfterCooperation && events.includes("action:cooperative_claim_complete")) {
-      failFreshAfterCooperation = false; throw new Error("Transient chain read after cooperation");
+    if (freshFailures > 0 && events.includes("action:cooperative_claim_complete")) {
+      freshFailures--; throw new Error("Transient chain read after cooperation");
     }
     const responses: Record<string, string> = { "block-height/0": source.network_identity.genesis_hash, "blocks/tip/height": String(tipHeight), "blocks/tip/hash": "a".repeat(64),
       [`tx/${funding?.payload.binding ? (funding.payload.binding as { funding_txid: string }).funding_txid : ""}/hex`]: fundingHex,
@@ -139,6 +139,7 @@ export async function executionFixture(cooperation: "unilateral" | "signed" | "d
     set spent(value: boolean) { spent = value; }, set tipHeight(value: number) { tipHeight = value; },
     /** The provider's funding is only in the mempool. */
     set unconfirmed(value: boolean) { unconfirmed = value; },
-    set failFreshAfterCooperation(value: boolean) { failFreshAfterCooperation = value; },
+    /** Fail this many chain reads after cooperation (true: one). */
+    set failFreshAfterCooperation(value: boolean | number) { freshFailures = value === true ? 1 : value === false ? 0 : value; },
   };
 }

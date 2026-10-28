@@ -5,7 +5,7 @@ import type { BrowserReverseJournal, ReverseJournalRecord } from "../browserReve
 import { parseRecoveryPlaintext } from "../recoveryDocument";
 import { inspectReverseRecoveryPlaintext, constructSelectedReverseClaim, appendReverseClaimFallback,
   verifySelectedReverseClaim, REVERSE_FALLBACK_EXTENSION } from "../recoveryInspection";
-import { observeReverseRecoveryFunding } from "../recoveryFunding";
+import { observeReverseRecoveryFunding, RecoveryFundingSpentError, RecoveryFundingUnavailableError } from "../recoveryFunding";
 import { validateMempoolApi, type NetworkName } from "./config";
 import { readBoundedChainText } from "./chainTip";
 import { buildCooperativeClaimPlan, finalizeCooperativeClaim } from "./cooperative";
@@ -30,6 +30,25 @@ const require = (ok: boolean): void => { if (!ok) throw new Error("Reverse claim
 export function effectiveClaimDepth(signed: number, requested?: number): number {
   require(Number.isSafeInteger(signed) && signed >= 1 && (requested === undefined || (Number.isSafeInteger(requested) && requested >= 0)));
   return requested === undefined ? signed : Math.min(requested, signed);
+}
+
+/** Funding reads after cooperation; a block landing mid-read (at depth 0, the funding confirming) is retried. */
+export const FRESH_READ_ATTEMPTS = 3;
+const FRESH_READ_PAUSE_MS = 500;
+
+/**
+ * Re-read the funding before exposing a cooperative claim. Only an unknown read is
+ * retried, so the signed cooperative claim survives a transient failure; a spend,
+ * a stale context, or any other refusal fails at once.
+ */
+async function freshFundingObservation(context: ClaimContext, api: string) {
+  for (let attempt = 1; ; attempt++) {
+    try { return (await observeJournaledReverseFunding(context, api)).observation; } catch (error) {
+      if (attempt >= FRESH_READ_ATTEMPTS || !(error instanceof RecoveryFundingUnavailableError) || error instanceof RecoveryFundingSpentError) throw error;
+    }
+    context.assertCurrent();
+    await new Promise((resolve) => setTimeout(resolve, FRESH_READ_PAUSE_MS));
+  }
 }
 
 export async function observeJournaledReverseFunding(context: ClaimContext, api: string) {
@@ -106,7 +125,7 @@ export async function exposeJournaledReverseClaim(context: ClaimContext, api: st
         transaction = candidate.raw;
       }
     } catch { context.assertCurrent(); /* Invalid/refused cooperation uses the already-durable fallback. */ }
-    const fresh = (await observeJournaledReverseFunding(context, api)).observation;
+    const fresh = await freshFundingObservation(context, api);
     require(fresh.confirmations >= depth && fresh.tipHeight + report.claimConfirmationBlocks < report.refundLockHeight + 1);
   }
   context.assertCurrent(); beforeExposure(); record = await context.journal.beginClaimExposure(record);

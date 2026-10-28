@@ -175,7 +175,9 @@ stops before any payment. Live swaps first attempt a cooperative
 key-path claim, keeping the script and preimage off chain. The signed unilateral
 fallback is saved before disclosure and used if cooperation fails. Transient
 chain-read failures retry before the one-shot broadcast election, never after an
-unknown submission. Cooperation cannot outlive the original payment window;
+unknown submission; the funding read right after cooperation is retried in place
+up to three times, so a block arriving then keeps the cooperative claim.
+Cooperation cannot outlive the original payment window;
 longer funding confirmations select the unilateral fallback. Advanced holds the fee details, one optional
 latest swap backup, manual checks, and exact fallback export. Notifications are
 optional and request permission only when enabled; no service worker is installed.

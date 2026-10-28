@@ -4,6 +4,7 @@ import { executionFixture } from "./fixtures/reverseExecutionFixture";
 import { inspectReverseRecoveryPlaintext } from "../src/recoveryInspection";
 import { parseTransaction } from "../src/swap/transaction";
 import { minimumClaimFeeReserveSat } from "../src/swap/reverseExecution";
+import { FRESH_READ_ATTEMPTS } from "../src/swap/reverseClaim";
 import { hexToBytes } from "@noble/hashes/utils.js";
 
 const API = "http://127.0.0.1:8091/api", BROADCAST = "http://127.0.0.1:8092/api", NODE = "http://127.0.0.1:8093";
@@ -197,11 +198,23 @@ test("cooperation still runs when the lockup confirms long after the quote deadl
   } finally { transport.mockRestore(); e.dispose(); }
 });
 
-test("a transient post-cooperation read retries the fallback without another proposal or POST authority", async () => {
+test("a transient post-cooperation read is retried in place and the cooperative claim is posted", async () => {
   const f = await executionFixture("signed"), e = await f.prepare(), transport = spyOn(globalThis, "fetch").mockImplementation(f.fetch);
   try {
     await e.accept(f.assertCurrent); await e.exposeInvoice(f.assertCurrent); await e.receiveFunding();
-    await e.prepareClaim(API, 100n, f.assertCurrent); f.failFreshAfterCooperation = true;
+    await e.prepareClaim(API, 100n, f.assertCurrent); f.failFreshAfterCooperation = FRESH_READ_ATTEMPTS - 1;
+    expect((await e.exposeClaim(API, BROADCAST, "broadcast", f.assertCurrent)).outcome).toBe("accepted");
+    expect(parseTransaction(hexToBytes(f.postedTransactions[0]!)).inputs[0]!.witness).toHaveLength(1); // key path
+    expect(f.events.filter((event) => event === "action:cooperative_claim_propose")).toHaveLength(1);
+    expect(f.posts).toBe(1);
+  } finally { transport.mockRestore(); e.dispose(); }
+});
+
+test("a persistent post-cooperation read failure retries the fallback without another proposal or POST authority", async () => {
+  const f = await executionFixture("signed"), e = await f.prepare(), transport = spyOn(globalThis, "fetch").mockImplementation(f.fetch);
+  try {
+    await e.accept(f.assertCurrent); await e.exposeInvoice(f.assertCurrent); await e.receiveFunding();
+    await e.prepareClaim(API, 100n, f.assertCurrent); f.failFreshAfterCooperation = FRESH_READ_ATTEMPTS;
     await expect(e.exposeClaim(API, BROADCAST, "broadcast", f.assertCurrent)).rejects.toThrow();
     expect(e.record.stage).toBe("claim-ready"); expect(f.posts).toBe(0);
     expect((await e.exposeClaim(API, BROADCAST, "broadcast", f.assertCurrent)).outcome).toBe("accepted");
