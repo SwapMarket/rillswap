@@ -247,6 +247,10 @@ class ClaimWallet(Protocol):
         """Whether the output is unspent in the active chain (mempool ignored)."""
         ...
 
+    def mempool_spender(self, txid: str, vout: int) -> str | None:
+        """Return the txid of a mempool transaction spending the output, or None."""
+        ...
+
     def wallet_confirmations(self, txid: str) -> int | None:
         """Depth of a wallet transaction, ``None`` when unknown."""
         ...
@@ -290,6 +294,11 @@ class ReverseSwapLimits:
     optional floor, 0 for none), whichever is higher, so the cooperative
     claim pays at least that rate too. The claim pays exactly the signed
     reserve, so the destination receives exactly the nominal payout.
+
+    ``claim_confirmations`` claims after fewer confirmations of the provider's
+    funding than the signed ``funding_confirmations`` (0: from the mempool).
+    ``None`` waits for the signed depth. Claiming earlier discloses the
+    preimage while the provider can still double-spend its funding.
     """
 
     max_success_fee_sat: int
@@ -299,6 +308,7 @@ class ReverseSwapLimits:
     max_incoming_htlc_delay_blocks: int  # how long the LN funds may stay held
     max_routing_fee_sat: int
     claim_fee_rate_sat_vb: int = 0
+    claim_confirmations: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -556,12 +566,54 @@ def _claim_signer(  # noqa: PLR0913 - explicit signing inputs
     return sign, max_spendable_fee(authorization)
 
 
-def _chain_view(wallet: ClaimWallet, binding: FundingBinding) -> ChainView | None:
+def _chain_view(
+    wallet: ClaimWallet, binding: FundingBinding, *, unconfirmed_funding: bool = False
+) -> ChainView | None:
+    """Sample whether a confirmed transaction may already spend the funding output.
+
+    ``unconfirmed_funding`` is for claims below the signed depth, where the
+    funding may still be unconfirmed: it is then absent from the chain-only
+    UTXO set, yet nothing confirmed can spend it while Core's mempool holds it
+    unspent or holds a spender (normally our claim; a confirmed output cannot
+    have one once spent on chain). The checks run in an order where a funding
+    or claim confirming between them reads as unspent or as our confirmed
+    claim, never as a foreign spend. At the signed depth only the chain counts.
+    """
+    txid, vout = binding.funding_txid, binding.contract_vout
     try:
         tip = wallet.tip_height()
-        return ChainView(tip, wallet.unspent_on_chain(binding.funding_txid, binding.contract_vout))
+        unspent = wallet.unspent_on_chain(txid, vout) or (
+            unconfirmed_funding
+            and (
+                wallet.confirmed_output(txid, vout) is not None
+                or wallet.mempool_spender(txid, vout) is not None
+            )
+        )
     except Exception:  # noqa: BLE001 - a failed sample is no evidence; wait
         return None
+    return ChainView(tip, unspent)
+
+
+def claim_depth(signed: int, requested: int | None) -> int:
+    """Return the funding depth to claim at: the signed one unless the user asked for less."""
+    if requested is None:
+        return signed
+    if type(requested) is not int or requested < 0:
+        raise SwapError("claim confirmations must be a nonnegative integer")
+    return min(requested, signed)
+
+
+def early_claim_warning(depth: int, signed: int) -> str | None:
+    """Explain the double-spend risk of claiming below the signed depth, or None."""
+    if depth >= signed:
+        return None
+    funding = "unconfirmed funding" if depth == 0 else f"funding at {depth} confirmation(s)"
+    return (
+        f"warning: claiming on {funding}, below the provider's signed {signed}. "
+        "Claiming reveals the preimage, which lets the provider settle your Lightning "
+        "payment; until its funding is buried it can still double-spend it and keep both. "
+        "Only lower this for providers and amounts you are willing to lose."
+    )
 
 
 def _submit(wallet: ClaimWallet, raw: bytes, txid: str, lifetime: _ReverseLifetime) -> bool:
@@ -1144,6 +1196,7 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
     """
     if not math.isfinite(settle_timeout) or settle_timeout <= 0:
         raise SwapError("settlement timeout must be finite and positive")
+    claim_depth(0, limits.claim_confirmations)  # refuse a malformed request before any session
     settlement_observer = _settlement_capability(wallet, await_settlement=await_settlement)
     if funding_inclusion_observer is not None and (
         not callable(funding_inclusion_observer)
@@ -1215,6 +1268,10 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
                 now=int(time.time()),
             )
             require_announced_depth(terms.funding_confirmations, advertisement)
+            depth = claim_depth(terms.funding_confirmations, limits.claim_confirmations)
+            warning = early_claim_warning(depth, terms.funding_confirmations)
+            if warning is not None:
+                report(warning)  # before paying, so the user can still stop
             economics = terms.economics
             contract = offer.terms.contract_hash
             min_incoming = int(terms.timing_policy.model_dump()["min_incoming_htlc_expiry_height"])
@@ -1313,7 +1370,7 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
                 binding=binding,
                 script=script,
                 value=value,
-                depth=terms.funding_confirmations,
+                depth=depth,
                 lock_height=terms.refund_lock_height,
                 lifetime=lifetime,
                 report=report,
@@ -1403,7 +1460,9 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
                 max_fee_sat=max(1, ceiling),
                 deadline_height=terms.refund_lock_height
                 - terms.timing_policy.claim_confirmation_blocks,
-                chain=lambda: _chain_view(wallet, binding),
+                chain=lambda: _chain_view(
+                    wallet, binding, unconfirmed_funding=depth < terms.funding_confirmations
+                ),
                 confirmations=wallet.wallet_confirmations,
                 sign=sign,
                 submit=lambda raw, txid: _submit(wallet, raw, txid, lifetime),

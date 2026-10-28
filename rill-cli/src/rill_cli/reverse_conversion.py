@@ -101,6 +101,9 @@ class _DestinationWallet:
     def unspent_on_chain(self, txid: str, vout: int) -> bool:
         return self._wallet.unspent_on_chain(txid, vout)
 
+    def mempool_spender(self, txid: str, vout: int) -> str | None:
+        return self._wallet.mempool_spender(txid, vout)
+
     def wallet_confirmations(self, txid: str) -> int | None:
         return self._wallet.wallet_confirmations(txid)
 
@@ -457,6 +460,8 @@ async def run_reserved_conversion(  # noqa: PLR0913 - one explicit original exec
             or any(
                 type(getattr(limits, field.name)) is not int or getattr(limits, field.name) < 0
                 for field in fields(limits)
+                # None (the default) waits for the signed funding depth.
+                if not (field.name == "claim_confirmations" and limits.claim_confirmations is None)
             )
             or limits.max_routing_fee_sat * 1000 > request.max_routing_fee_msat
             or not math.isfinite(timeout)

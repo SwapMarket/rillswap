@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import os
@@ -633,6 +634,36 @@ def test_locally_invalid_recovery_credentials_refuse_before_consuming_invocation
     assert failure.value.__cause__ is None
     assert failure.value.__context__ is None
     assert "SECRET_CANARY" not in str(failure.value)
+    runner.assert_not_called()
+    assert harness.journal.status(harness.request.operation_id).state == "reserved"
+
+
+@pytest.mark.parametrize("claim_confirmations", [-1, True, 1.0, 0])
+def test_claim_depth_override_is_an_exact_nonnegative_limit(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, claim_confirmations: object
+) -> None:
+    runner = Mock()
+    monkeypatch.setattr(module, "run_reverse_swap", runner)
+    # The step right after the limits check; reaching it means the limits passed.
+    credentials_checked = Mock(side_effect=ValueError("SECRET_CANARY"))
+    monkeypatch.setattr(module, "_identity", credentials_checked)
+    limits = dataclasses.replace(LIMITS, claim_confirmations=claim_confirmations)
+    with pytest.raises(module.ReverseConversionError) as failure:
+        asyncio.run(
+            module.run_reserved_conversion(
+                harness.journal,
+                harness.reservation,
+                Mock(),
+                config=harness.config,
+                limits=limits,
+                credentials=X25519Credentials("SECRET_CANARY", "SECRET_CANARY"),
+                crypto=Mock(),
+            )
+        )
+    assert "SECRET_CANARY" not in str(failure.value)
+    # Only an exact nonnegative int passes the limits check (None is the default).
+    valid = type(claim_confirmations) is int and claim_confirmations >= 0
+    assert credentials_checked.called is valid
     runner.assert_not_called()
     assert harness.journal.status(harness.request.operation_id).state == "reserved"
 

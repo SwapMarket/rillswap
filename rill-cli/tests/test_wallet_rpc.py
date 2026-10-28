@@ -371,6 +371,37 @@ def test_chain_only_spend_view_and_wallet_depth(
     assert wallet.wallet_confirmations("53" * 32) is None  # another transaction answered
 
 
+def test_mempool_spender_reads_gettxspendingprevout(
+    core: tuple[WalletRpc, list[dict[str, Any]]], answers: dict[str, Any]
+) -> None:
+    wallet, calls = core
+    answers["gettxspendingprevout"] = [{"txid": "51" * 32, "vout": 1, "spendingtxid": "52" * 32}]
+    assert wallet.mempool_spender("51" * 32, 1) == "52" * 32
+    assert (calls[-1]["path"], calls[-1]["params"]) == ("/", [[{"txid": "51" * 32, "vout": 1}]])
+    answers["gettxspendingprevout"] = [{"txid": "51" * 32, "vout": 1}]
+    assert wallet.mempool_spender("51" * 32, 1) is None  # no mempool spender
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        [],
+        None,
+        [{"txid": "53" * 32, "vout": 1}],  # another outpoint answered
+        [{"txid": "51" * 32, "vout": 0}],
+        [{"txid": "51" * 32, "vout": 1, "spendingtxid": "52"}],
+        [{"txid": "51" * 32, "vout": 1}, {"txid": "51" * 32, "vout": 1}],
+    ],
+)
+def test_unusable_mempool_spender_answers_are_errors_not_absence(
+    core: tuple[WalletRpc, list[dict[str, Any]]], answers: dict[str, Any], result: object
+) -> None:
+    wallet, _calls = core
+    answers["gettxspendingprevout"] = result
+    with pytest.raises(WalletRpcError, match="unusable"):
+        wallet.mempool_spender("51" * 32, 1)
+
+
 @pytest.mark.parametrize("depth", [-1, -3, 1])
 def test_wallet_confirmation_depth_is_not_promoted_by_watcher_truthiness(
     core: tuple[WalletRpc, list[dict[str, Any]]], answers: dict[str, Any], depth: int

@@ -99,6 +99,13 @@ def add_parser(categories: argparse._SubParsersAction[argparse.ArgumentParser]) 
         help="cap your Core's next-block estimate when pricing the claim fee reserve "
         "(for skewed estimators such as signet's; relay and mempool floors still apply)",
     )
+    reverse.add_argument(
+        "--claim-confirmations",
+        type=int,
+        help="claim after this many confirmations of the provider's funding instead of "
+        "the signed depth (0: from the mempool). Riskier: the provider can double-spend "
+        "its funding after your claim reveals the preimage",
+    )
     reverse.add_argument("--wallet", required=True, help="Core wallet receiving the payout")
     reverse.add_argument(
         "--lnd-macaroon", required=True, help="macaroon able to decode and send payments"
@@ -377,6 +384,7 @@ async def _reverse(  # noqa: PLR0913, PLR0917 - explicit already-built handles
         max_incoming_htlc_delay_blocks=args.max_incoming_htlc_delay_blocks,
         max_routing_fee_sat=args.max_routing_fee_sat,
         claim_fee_rate_sat_vb=args.fee_rate,
+        claim_confirmations=args.claim_confirmations,
     )
     proxy = require_relay_route(network, args.relay_proxy, allow_direct=args.allow_direct_relay)
     async with RelayConnection(args.relay, proxy=proxy) as connection:

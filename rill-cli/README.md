@@ -128,6 +128,17 @@ The provider settles its hold invoice with the preimage revealed by the
 claim, so the claim must confirm before the provider's refund window. Core
 needs `txindex=1` for the funding depth lookup.
 
+By default the claim waits for the funding confirmations the provider signed
+(at least 1). `--claim-confirmations N` claims earlier, after `N` confirmations
+of the provider's funding (`0`: straight from the mempool); the provider still
+cooperates. Claiming below the signed depth needs Core 24 or later. The CLI
+prints a warning before paying: the claim reveals the preimage, so the provider
+can settle your Lightning payment and then double-spend its unconfirmed or
+shallow funding, keeping both. Only lower it for providers and amounts you are
+willing to lose. If a replacement removes the funding, the swap reports the
+contract as spent by another transaction. Recovery commands keep waiting for
+the signed depth.
+
 The claim watcher keeps the initial fee for the first three quarters of the
 window before `refund_lock_height` minus the claim confirmations; in the last
 quarter it raises the fee linearly to the ceiling, so a stuck claim still beats
@@ -154,6 +165,7 @@ upgrade-triggered action or retroactive disclosure assumption.
 | `--max-routing-fee-sat` | Reverse routing fee limit, default 1,000 sat |
 | `--min-refund-delay-blocks` | Reverse minimum provider refund delay, default 72 blocks |
 | `--max-incoming-htlc-delay-blocks` | Reverse Lightning hold limit, default 432 blocks |
+| `--claim-confirmations` | Reverse: claim after this many funding confirmations instead of the signed depth (0: from the mempool), with a double-spend warning |
 | `--timeout` | Per-answer timeout, default 60 seconds |
 | `--settle-timeout` | Settlement lifetime, default 3,600 seconds |
 

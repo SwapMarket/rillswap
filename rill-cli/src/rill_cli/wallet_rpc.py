@@ -60,6 +60,7 @@ METHODS = frozenset(
         "getnewaddress",
         "gettransaction",
         "gettxout",
+        "gettxspendingprevout",
         "listunspent",
         "sendrawtransaction",
         "walletcreatefundedpsbt",
@@ -496,6 +497,22 @@ class WalletRpc:
         Our own unconfirmed spend must not look like a spend.
         """
         return self._call("gettxout", txid, vout, False, wallet=False) is not None  # noqa: FBT003
+
+    def mempool_spender(self, txid: str, vout: int) -> str | None:
+        """Return the txid of a mempool transaction spending ``txid:vout``, or None.
+
+        Needs Core 24 or later; a failed call raises rather than claiming absence.
+        """
+        result = self._call("gettxspendingprevout", [{"txid": txid, "vout": vout}], wallet=False)
+        entry = result[0] if isinstance(result, list) and len(result) == 1 else None
+        if not isinstance(entry, dict) or entry.get("txid") != txid or entry.get("vout") != vout:
+            raise WalletRpcError("Core gettxspendingprevout result unusable")
+        spender = entry.get("spendingtxid")
+        if spender is None:
+            return None
+        if type(spender) is not str or len(spender) != 64:  # noqa: PLR2004 - txid hex
+            raise WalletRpcError("Core gettxspendingprevout result unusable")
+        return spender
 
     def wallet_confirmations(self, txid: str) -> int | None:
         """Depth of a wallet transaction; ``None`` when unknown to the wallet."""

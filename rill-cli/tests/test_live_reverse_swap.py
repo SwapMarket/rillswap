@@ -269,6 +269,9 @@ class FakeChain:
     def unspent_on_chain(self, txid: str, vout: int) -> bool:
         return (txid, vout) in {(t, 0) for t in self.provider_broadcasts} and not self.claims
 
+    def mempool_spender(self, _txid: str, _vout: int) -> str | None:
+        raise AssertionError("at the signed depth the claim watcher reads the chain only")
+
     def wallet_confirmations(self, txid: str) -> int | None:
         return 1 if txid in self.claim_txids else None  # mined in the next block
 
@@ -293,10 +296,67 @@ class FakeChain:
         return txid
 
 
+class MempoolFundingChain(FakeChain):
+    """The provider's funding stays unconfirmed: only Core's mempool view holds it."""
+
+    def confirmations(self, _txid: str) -> int:
+        return 0
+
+    def observe_cooperative_claim_outpoint(
+        self,
+        binding: Any,  # noqa: ANN401
+        terms: Any,  # noqa: ANN401
+        *,
+        keys: Any,  # noqa: ANN401
+    ) -> Any:  # noqa: ANN401 - provider Core evidence double
+        from rill_core.settlement import check_funding_binding_transaction  # noqa: PLC0415
+        from rill_provider.core_tx_bytes import CooperativeClaimOutpoint  # noqa: PLC0415
+
+        assert terms.profile_id == "ln-to-btc/v1"  # only the provider's own funding, at depth 0
+        raw, _script, _value = self.funded[binding.funding_txid]
+        return CooperativeClaimOutpoint(
+            terms.network_identity,
+            check_funding_binding_transaction(raw, binding, terms, keys=keys),
+            binding.funding_txid,
+            binding.contract_vout,
+            int(binding.contract_value_sat),
+            bytes.fromhex(binding.contract_script_pubkey),
+            TIP_HASH,
+            TIP,
+            0,
+            None,
+            None,
+        )
+
+    # Before the claim, only gettxout with the mempool sees the output; the
+    # claim then confirms in the next block together with the funding.
+    def confirmed_output(self, txid: str, vout: int) -> ConfirmedOutput | None:
+        if txid not in self.provider_broadcasts or vout != 0 or self.claims:
+            return None
+        _raw, script, value = self.funded[txid]
+        return ConfirmedOutput(value, script, 0)
+
+    def unspent_on_chain(self, _txid: str, _vout: int) -> bool:
+        return False  # unconfirmed, then spent by the confirmed claim
+
+    def mempool_spender(self, _txid: str, _vout: int) -> str | None:
+        return None  # the claim never lingers in the mempool here
+
+
 @pytest.mark.native_crypto
 @NATIVE
-def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(  # noqa: PLR0915
-    tmp_path: Path,
+def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(tmp_path: Path) -> None:
+    _native_ln_to_btc_swap(tmp_path, None)
+
+
+@pytest.mark.native_crypto
+@NATIVE
+def test_native_ln_to_btc_swap_claims_unconfirmed_funding_on_request(tmp_path: Path) -> None:
+    _native_ln_to_btc_swap(tmp_path, 0)
+
+
+def _native_ln_to_btc_swap(  # noqa: PLR0915
+    tmp_path: Path, claim_confirmations: int | None
 ) -> None:
     sys.path.insert(0, str(PROVIDER_TESTS))
     from fake_relay import FakeRelay  # type: ignore[import-not-found]  # noqa: PLC0415
@@ -317,8 +377,10 @@ def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(  # noqa:
     custody, unlock = x25519.Identity.generate(), x25519.Identity.generate()
     credentials = X25519Credentials(str(unlock.to_public()), str(unlock))
     output = tmp_path / "swap.age"
-    hold, chain = FakeHold(), FakeChain()
+    hold = FakeHold()
+    chain = FakeChain() if claim_confirmations is None else MempoolFundingChain()
     recoveries: list[bytes] = []
+    reports: list[str] = []
     policy_store = HandshakePolicy(
         profile="ln-to-btc/v1",
         features=frozenset({COOPERATIVE_CLAIM_FEATURE}),
@@ -331,6 +393,7 @@ def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(  # noqa:
         new_destination_script=chain.new_destination_script,
         confirmed_output=chain.confirmed_output,
         unspent_on_chain=chain.unspent_on_chain,
+        mempool_spender=chain.mempool_spender,
         wallet_confirmations=chain.wallet_confirmations,
         broadcast=chain.broadcast_claim,
     )
@@ -434,10 +497,12 @@ def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(  # noqa:
                             min_refund_delay_blocks=72,
                             max_incoming_htlc_delay_blocks=432,
                             max_routing_fee_sat=100,
+                            claim_confirmations=claim_confirmations,
                         ),
                         crypto=crypto,
                         timeout=10,
                         settle_timeout=120,
+                        report=reports.append,
                     )
                 async with asyncio.timeout(5):
                     while not hold.settled:  # noqa: ASYNC110 - polling a fake backend
@@ -455,6 +520,16 @@ def test_native_ln_to_btc_swap_claims_and_settles_through_the_provider(  # noqa:
         outcome, final_state = asyncio.run(scenario(crypto))
 
     assert final_state == "SETTLED"
+    signed = json.loads(recoveries[0])["contract_terms"]["funding_confirmations"]
+    assert signed >= 1
+    warnings = [line for line in reports if line.startswith("warning: claiming on")]
+    if claim_confirmations is None:
+        assert warnings == []
+    else:
+        # The client claimed the unconfirmed funding cooperatively, after the warning.
+        (warning,) = warnings
+        assert f"unconfirmed funding, below the provider's signed {signed}" in warning
+        assert "double-spend" in warning
     # V = D + C: C is the 155 vB P2TR script-path claim at the 1 sat/vB relay
     # floor (above the 111 vB key-path claim at the next-block rate).
     assert outcome.payout_sat == PAYOUT + 155
