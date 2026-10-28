@@ -4931,7 +4931,12 @@ class LiveSessionStore:
                         ):
                             raise LiveSessionStoreError("readiness replay not correlated")  # noqa: TRY301
                         if readiness is None and not isinstance(
-                            replay, (CooperativeClaimSigned, CooperativeClaimDeclined)
+                            replay,
+                            (
+                                CooperativeClaimSigned,
+                                CooperativeClaimDeclined,
+                                CooperativeClaimVerified,
+                            ),
                         ):
                             raise LiveSessionStoreError("cooperative replay type unsupported")  # noqa: TRY301
                         if not isinstance(
@@ -4940,6 +4945,7 @@ class LiveSessionStore:
                                 CooperativeClaimReady,
                                 CooperativeClaimSigned,
                                 CooperativeClaimDeclined,
+                                CooperativeClaimVerified,
                             ),
                         ):
                             raise LiveSessionStoreError("cooperative replay type unsupported")  # noqa: TRY301
@@ -5001,6 +5007,30 @@ class LiveSessionStore:
                         )
                     if readiness is not None:
                         raise LiveSessionStoreError("readiness reply unsupported")  # noqa: TRY301
+                    if isinstance(payload, CooperativeClaimVerified):
+                        self._check_completion_receipt(
+                            connection, outer, payload, init_bytes, accept_bytes
+                        )
+                        connection.execute(
+                            "INSERT INTO inbox VALUES (?,?,?,?,?,?,?)",
+                            (
+                                outer.session_id,
+                                client,
+                                outer.message_id,
+                                outer.sequence,
+                                digest,
+                                document,
+                                revision + 1,
+                            ),
+                        )
+                        connection.execute(
+                            "UPDATE sessions SET next_client_seq=?,revision=?,active_at=? "
+                            "WHERE session_id=?",
+                            (client_seq + 1, revision + 1, now, outer.session_id),
+                        )
+                        return CooperativeResultAdmission(
+                            outer.session_id, outer.message_id, payload.status, replay=False
+                        )
                     if not isinstance(payload, (CooperativeClaimSigned, CooperativeClaimDeclined)):
                         raise LiveSessionStoreError("cooperative result status unsupported")  # noqa: TRY301
                     status = payload.status
@@ -5182,6 +5212,69 @@ class LiveSessionStore:
         if conflict:
             raise SessionBlockedError("conflicting signed cooperative result is durable")
         return CooperativeResultAdmission(outer.session_id, outer.message_id, status, replay=False)
+
+    def _check_completion_receipt(
+        self,
+        connection: sqlite3.Connection,
+        outer: Envelope,
+        payload: CooperativeClaimVerified,
+        init_bytes: bytes,
+        accept_bytes: bytes,
+    ) -> None:
+        """Correlate a client's verified receipt with this provider's archived completion.
+
+        The receipt grants nothing (no signing, settlement, broadcast or reply).
+        It is admitted only so the session's client sequence matches what the
+        client sent. RS-002 lets the client send it late, so neither the signing
+        window, owner generation nor native handle is required: only a COMPLETE
+        attempt of this session whose authenticated completion it answers.
+        """
+        if self._policy.profile != "btc-to-ln/v1":
+            raise LiveSessionStoreError("cooperative result status unsupported")
+        row = connection.execute(
+            "SELECT a.state,a.partial_response_id,w.terms_offer,s.provider_session_key "
+            "FROM cooperation_attempts a JOIN swaps w ON w.session_id=a.session_id "
+            "JOIN sessions s ON s.session_id=a.session_id "
+            "WHERE a.cooperation_id=? AND a.session_id=?",
+            (bytes.fromhex(payload.cooperation_id), outer.session_id),
+        ).fetchone()
+        if row is None or row[0] != "COMPLETE" or not isinstance(row[1], str):
+            raise LiveSessionStoreError("cooperative completion no longer current")
+        _, completion_id, offer_bytes, provider = row
+        saved = connection.execute(
+            "SELECT canonical_bytes FROM outbox WHERE session_id=? AND message_id=?",
+            (outer.session_id, completion_id),
+        ).fetchone()
+        if saved is None:
+            raise LiveSessionStoreError("cooperative completion transcript missing")
+        verify_static_signed_envelope(
+            saved[0],
+            expected_session_id=outer.session_id,
+            expected_profile=self._policy.profile,
+            expected_network=self._network,
+            expected_sender_key=provider,
+            supported_features=self._policy.features,
+            crypto=self._crypto,
+        )
+        completion = _canonical_envelope(saved[0])
+        original = parse_cooperative_payload("action_request", canonicalize(completion.payload))
+        if (
+            not isinstance(original, CooperativeClaimComplete)
+            or completion.message_id != completion_id
+            or original.cooperation_id != payload.cooperation_id
+        ):
+            raise LiveSessionStoreError("cooperative completion differs")
+        initiation = parse_model_json(
+            HandshakeInit, canonicalize(_canonical_envelope(init_bytes).payload)
+        )
+        acceptance = parse_model_json(
+            HandshakeAccept, canonicalize(_canonical_envelope(accept_bytes).payload["accept"])
+        )
+        checked = check_cooperative_action_context(
+            outer, _offer_terms(offer_bytes), initiation, acceptance, prior_request=completion
+        )
+        if checked != payload:
+            raise LiveSessionStoreError("cooperative result context differs")
 
     def admit_cooperative_readiness(
         self,

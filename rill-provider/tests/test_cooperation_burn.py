@@ -1315,3 +1315,275 @@ def test_native_provider_partial_requires_fresh_facts_and_durable_completion(  #
             claim_digest,
             claim_signature,
         )
+
+
+def _completed_cooperation(
+    harness: Harness,
+    store: live.LiveSessionStore,
+    crypto: Any,  # noqa: ANN401 - opt-in native Context
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    complete: bool,
+) -> tuple[str, bytes, str, str | None]:
+    """Run one real native forward cooperation to COMPLETE (or stop at SIGNING)."""
+    session, plan, funding = _featured_paid_swap(harness, store)
+    store._public_keys = crypto  # noqa: SLF001
+    store._crypto = crypto  # noqa: SLF001
+    store._connection.execute(  # noqa: SLF001 - synthetic confirmed client sequence
+        "UPDATE sessions SET next_client_seq=2 WHERE session_id=?", (session,)
+    )
+    monkeypatch.setattr(live, "_new_session_scalar", lambda: (5).to_bytes(32, "big"))
+    with store._write() as connection:  # noqa: SLF001
+        store._contract_key(connection, session)  # noqa: SLF001
+    cooperation_id = b"\xf1" * 32
+    store._burn_cooperative_claim(  # noqa: SLF001
+        session, cooperation_id, plan, now=1000, deadline_at=1020, deadline_height=1100
+    )
+    proposal_id = store._begin_and_commit_cooperative_proposal(  # noqa: SLF001
+        session, cooperation_id, now=1001
+    )
+    proposal = Envelope.model_validate_json(store.pending_outbox()[0].canonical_bytes)
+    terms = live._offer_terms(  # noqa: SLF001
+        store._connection.execute(  # noqa: SLF001
+            "SELECT terms_offer FROM swaps WHERE session_id=?", (session,)
+        ).fetchone()[0]
+    )
+    user_attempt, user_nonce = crypto.musig_begin(
+        secret_key=(4).to_bytes(32, "big"),
+        user_public_key=bytes.fromhex(terms.client_contract_compressed_key),
+        provider_public_key=bytes.fromhex(terms.provider_contract_compressed_key),
+        tap_tweak=bytes.fromhex(harness.source["taproot_contract"]["tap_tweak"]),
+        message=plan.signature_hash,
+        cooperation_id=cooperation_id,
+    )
+    with user_attempt:
+        user_partial = user_attempt.partial_sign_once(
+            bytes.fromhex(proposal.payload["public_nonce"])
+        )
+    signed = _client_result(
+        crypto,
+        harness,
+        proposal,
+        message_id="e2" * 32,
+        sequence=2,
+        in_reply_to=proposal_id,
+        payload={
+            "action": "cooperative_claim_propose",
+            "cooperation_id": cooperation_id.hex(),
+            "status": "signed",
+            "public_nonce": user_nonce.hex(),
+            "partial_signature": user_partial.hex(),
+        },
+    )
+    assert store._admit_cooperative_result(signed, now=1002).status == "signed"  # noqa: SLF001
+    if not complete:
+        return session, cooperation_id, proposal_id, None
+    observation = live.CooperativeClaimObservation(
+        network=harness.network,
+        funding_txid=funding.txid.hex(),
+        funding_vout=funding.output_index,
+        funding_value_sat=funding.value_sat,
+        funding_script_pubkey=funding.script_pubkey,
+        tip_height=1090,
+        tip_hash="19" * 32,
+        confirmations=terms.funding_confirmations,
+        sampled_at=1003,
+        mempool_unspent=True,
+        fee_floor_sat=0,
+    )
+    complete_id = store._commit_cooperative_claim_partial(  # noqa: SLF001
+        session, cooperation_id, observation, now=1003
+    )
+    return session, cooperation_id, proposal_id, complete_id
+
+
+def _client_result(  # noqa: PLR0913 - one synthetic signed client envelope
+    crypto: Any,  # noqa: ANN401 - opt-in native Context
+    harness: Harness,
+    template: Envelope,
+    *,
+    message_id: str,
+    sequence: int,
+    in_reply_to: str | None,
+    payload: dict[str, object],
+    secret: int = 2,
+    aux: bytes = b"\x11" * 32,
+    **changed: object,
+) -> bytes:
+    unsigned = template.model_copy(
+        update={
+            "message_id": message_id,
+            "sender_session_key": harness.source["verification_context"]["handshake_init"][
+                "client_session_xonly_key"
+            ],
+            "sequence": sequence,
+            "in_reply_to": in_reply_to,
+            "message_type": "action_result",
+            "payload": payload,
+            "signature": None,
+            **changed,
+        }
+    )
+    signature = crypto.schnorr_sign(
+        secret.to_bytes(32, "big"), live.unsigned_envelope_hash(unsigned), aux
+    )
+    return canonicalize(
+        unsigned.model_copy(update={"signature": signature.hex()}).model_dump(mode="json")
+    )
+
+
+def _receipt_state(store: live.LiveSessionStore, session: str) -> tuple[object, ...]:
+    connection = store._connection  # noqa: SLF001 - read-only state snapshot
+    return (
+        connection.execute("SELECT count(*) FROM inbox").fetchone(),
+        connection.execute(
+            "SELECT next_client_seq,blocked FROM sessions WHERE session_id=?", (session,)
+        ).fetchone(),
+        connection.execute(
+            "SELECT state,partial_response_id,partial_signature FROM cooperation_attempts"
+        ).fetchall(),
+        connection.execute(
+            "SELECT state,claim_txid,claim_tx FROM swaps WHERE session_id=?", (session,)
+        ).fetchone(),
+        connection.execute("SELECT * FROM claim_arbitration").fetchall(),
+        connection.execute("SELECT message_id,delivery_state FROM outbox ORDER BY seq").fetchall(),
+    )
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
+)
+@pytest.mark.parametrize(
+    "case",
+    [
+        "fresh",
+        "late_after_restart",
+        "answers_proposal",
+        "unknown_request",
+        "unknown_attempt",
+        "wrong_contract",
+        "extra_field",
+        "out_of_sequence",
+        "wrong_signer",
+        "signing_stage",
+    ],
+)
+def test_verified_completion_receipt_is_admitted_without_authority(  # noqa: PLR0915 - one native lifecycle per case
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """RS-002's client receipt answers the provider's completion and grants nothing.
+
+    It consumes the client's next sequence (the client already counted it), late
+    or after a restart. Anything else, including a receipt for a proposal or a
+    not yet complete attempt, is refused without consuming sequence.
+    """
+    from rill_crypto import Context  # noqa: PLC0415 - opt-in native dependency
+
+    harness = Harness(tmp_path, monkeypatch)
+    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.provision()
+    with (
+        Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
+        harness.acquire() as store,
+    ):
+        session, cooperation_id, proposal_id, complete_id = _completed_cooperation(
+            harness, store, crypto, monkeypatch, complete=case != "signing_stage"
+        )
+        template = Envelope.model_validate_json(store.pending_outbox()[0].canonical_bytes)
+        payload: dict[str, object] = {
+            "action": "cooperative_claim_complete",
+            "cooperation_id": cooperation_id.hex(),
+            "status": "verified",
+        }
+        changed: dict[str, object] = {}
+        reply_to = proposal_id if case in ("answers_proposal", "signing_stage") else complete_id
+        sequence, secret = 3, 2
+        if case == "unknown_request":
+            reply_to = "ee" * 32
+        elif case == "unknown_attempt":
+            payload["cooperation_id"] = "ee" * 32
+        elif case == "wrong_contract":
+            changed["contract_hash"] = "ee" * 32
+        elif case == "extra_field":
+            payload["claim_txid"] = "ee" * 32
+        elif case == "out_of_sequence":
+            sequence = 4
+        elif case == "wrong_signer":
+            secret = 3
+        receipt = _client_result(
+            crypto,
+            harness,
+            template,
+            message_id="f1" * 32,
+            sequence=sequence,
+            in_reply_to=reply_to,
+            payload=payload,
+            secret=secret,
+            **changed,
+        )
+        before = _receipt_state(store, session)
+        assert before[1] == (3, 0)
+        if case not in ("fresh", "late_after_restart"):
+            with pytest.raises(
+                live.LiveSessionStoreError,
+                match=r"result refused|status unsupported|no longer current|out of sequence",
+            ):
+                store._admit_cooperative_result(receipt, now=1004)  # noqa: SLF001
+            assert _receipt_state(store, session) == before
+            return
+        if case == "fresh":
+            admitted = store._admit_cooperative_result(receipt, now=1004)  # noqa: SLF001
+            assert (admitted.status, admitted.replay) == ("verified", False)
+            after = _receipt_state(store, session)
+            assert after[0] == (before[0][0] + 1,)  # type: ignore[index]
+            assert after[1] == (4, 0)
+            # No signing, settlement, broadcast, arbitration or reply follows a receipt.
+            assert after[2:] == before[2:]
+            assert after[2] == [("COMPLETE", complete_id, after[2][0][2])]  # type: ignore[index]
+            assert crypto._active_attempts == 0  # noqa: SLF001
+            # The same receipt again, even re-signed, is a replay that changes nothing.
+            replay = store._admit_cooperative_result(receipt, now=1100)  # noqa: SLF001
+            assert (replay.status, replay.replay) == ("verified", True)
+            resigned = _client_result(
+                crypto,
+                harness,
+                template,
+                message_id="f1" * 32,
+                sequence=3,
+                in_reply_to=complete_id,
+                payload=payload,
+                aux=b"\x22" * 32,
+            )
+            assert resigned != receipt
+            assert store._admit_cooperative_result(resigned, now=1101).replay  # noqa: SLF001
+            assert _receipt_state(store, session) == after
+            # A second distinct receipt is harmless and keeps the sequence in step.
+            second = _client_result(
+                crypto,
+                harness,
+                template,
+                message_id="f2" * 32,
+                sequence=4,
+                in_reply_to=complete_id,
+                payload=payload,
+            )
+            again = store._admit_cooperative_result(second, now=1102)  # noqa: SLF001
+            assert (again.status, again.replay) == ("verified", False)
+            assert _receipt_state(store, session)[1] == (5, 0)
+            assert _receipt_state(store, session)[2:] == before[2:]
+    with (
+        Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as verifier,
+        harness.acquire_at(harness.path, crypto=verifier, public_keys=verifier) as restarted,
+    ):
+        # Past the attempt's deadline, under a new owner generation, without a native handle.
+        result = restarted._admit_cooperative_result(receipt, now=5000)  # noqa: SLF001
+        assert result.status == "verified"
+        assert result.replay is (case == "fresh")
+        assert restarted._connection.execute(  # noqa: SLF001
+            "SELECT next_client_seq FROM sessions WHERE session_id=?", (session,)
+        ).fetchone() == ((5,) if case == "fresh" else (4,))
+        assert restarted._connection.execute(  # noqa: SLF001
+            "SELECT state,partial_response_id FROM cooperation_attempts"
+        ).fetchone() == ("COMPLETE", complete_id)
