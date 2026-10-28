@@ -103,7 +103,7 @@ try:
     async def execute(crypto):
         async with RelayConnection(value['relay_url']) as connection:
             await run_reserved_conversion(journal,reservation,connection,config=config,
-                limits=ReverseSwapLimits(max_success_fee_sat=1000,min_claim_fee_reserve_sat=500,
+                limits=ReverseSwapLimits(max_success_fee_sat=1000,min_claim_fee_reserve_sat=0,
                     max_claim_fee_sat=5000,min_refund_delay_blocks=72,
                     max_incoming_htlc_delay_blocks=432,max_routing_fee_sat=100,claim_fee_rate_sat_vb=2),
                 credentials=credentials,crypto=crypto,timeout=30,settle_timeout=150,
@@ -193,7 +193,10 @@ SDK_DEATH_RECOVERY = r"""
                 amount_bands=((1000,1000000),),base_fee_sat=50,proportional_millionths=1000,slot='owned-treasury',
                 relay_urls=(url,),provider_destination_script=data['provider_script'],
                 quote=QuoteSchedule(max_funding_fee_sat=500,max_claim_fee_sat=400,max_refund_fee_sat=600,max_refund_delay_blocks=288))
-            service=HandshakeService(store,data['signer'],crypto,policy,chain_tip=chain.tip_height,invoice_decoder=decoder.decode,settlement=engine,hold_invoices=held)
+            def claim_fee():  # the automatic reserve, sampled like rill_provider.cli
+                fee=chain.next_block_fee()
+                return ClaimFeeRate(rate_sat_kvb=fee.rate_sat_kvb,floor_sat_kvb=fee.floor_sat_kvb)
+            service=HandshakeService(store,data['signer'],crypto,policy,chain_tip=chain.tip_height,invoice_decoder=decoder.decode,settlement=engine,hold_invoices=held,claim_fee=claim_fee)
             runner=asyncio.create_task(service.run(stop,tick_seconds=0.2))
             try:
                 print('PHASE: original_sdk_child_start',file=sys.stderr)

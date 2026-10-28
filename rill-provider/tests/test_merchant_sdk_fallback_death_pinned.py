@@ -47,7 +47,7 @@ SIGNING_BOUNDARY = r"""    signer_acquisitions=0
         snapshot=await original_publish(*args,**kwargs)
         assert isinstance(snapshot,bytes)
         assert json.loads(snapshot)['extensions']['rillswap/reverse-claim-fallback']['version']==1
-        assert signer_acquisitions==1 and local_signatures==2
+        assert signer_acquisitions==1 and local_signatures==1
         print('FALLBACK_READY',flush=True)
         assert sys.stdin.buffer.read(1)==b'1'
         print('FALLBACK_ACK',flush=True)
@@ -191,7 +191,7 @@ def _program() -> str:
         program,
         "original_sdk_claim_signer_acquired=False)",
         "original_sdk_claim_signer_acquired=True,original_sdk_signed_fallback_ack=True,"
-        "original_sdk_signer_acquisitions=1,original_sdk_local_signatures=2)",
+        "original_sdk_signer_acquisitions=1,original_sdk_local_signatures=1)",
     )
     return _replace_once(
         program,
@@ -237,7 +237,7 @@ def test_fallback_death_program_preserves_original_owner_and_two_acknowledgments
     assert funding < ready < proof < acknowledgment < killed
     assert "original_sdk_claim_signer_acquired=False" not in program
     assert "await original_publish(*args,**kwargs)" in SDK_CHILD
-    assert "signer_acquisitions==1 and local_signatures==2" in SDK_CHILD
+    assert "signer_acquisitions==1 and local_signatures==1" in SDK_CHILD
     assert "live_reverse_swap._cooperative_claim=no_cooperation" in SDK_CHILD
     assert "assert raw==planned_raw" in parent
     assert "funding_recovery_path=funded_candidate" in parent
@@ -289,6 +289,6 @@ def test_pinned_original_sdk_death_after_signed_fallback_recovers_with_original_
     assert evidence["original_sdk_claim_signer_acquired"] is True
     assert evidence["original_sdk_signed_fallback_ack"] is True
     assert evidence["original_sdk_signer_acquisitions"] == 1
-    assert evidence["original_sdk_local_signatures"] == 2
+    assert evidence["original_sdk_local_signatures"] == 1  # the prepared fallback only
     assert evidence["saved_operator_cli_completion"] is True
     assert evidence["original_claim_path"] == "unilateral"
