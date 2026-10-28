@@ -392,7 +392,7 @@ class _FeaturedService:
         monkeypatch.setattr(
             service_module, "answer_client_request", lambda *_args: Answer("ack", {})
         )
-        context = Mock()
+        self.context = Mock()
         self.replay = [False]
 
         def respond(document: bytes, *, responder: object, **_kwargs: object) -> RequestAnswer:
@@ -400,7 +400,7 @@ class _FeaturedService:
 
             request = Envelope.model_validate_json(document, strict=True)
             if not self.replay[0]:
-                responder(request, (), context)  # type: ignore[operator]
+                responder(request, (), self.context)  # type: ignore[operator]
             return RequestAnswer(self.session, request.message_id, "cc" * 32, self.replay[0])
 
         self.store.answer_request.side_effect = respond

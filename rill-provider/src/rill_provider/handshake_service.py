@@ -1198,6 +1198,14 @@ class HandshakeService:
         ) -> Answer:
             answer = answer_client_request(request, prior, context, terms, self._transport)
             sent.append(answer.message_type)
+            if (
+                answer.message_type == "error"
+                and answer.payload.get("code") == "capacity_unavailable"
+                and not context.economic_capacity_available
+            ):
+                LOG.warning(
+                    "max_active_reservations reached; firm quote answered capacity_unavailable"
+                )
             return answer
 
         if operation is not None:

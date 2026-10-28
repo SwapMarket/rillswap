@@ -638,3 +638,28 @@ def test_idle_expiry_releases_a_migrated_unknown_row_without_a_contract(
         ledger = _ledger(store)
         assert ledger["a1" * 32][1] == "RELEASED"  # no swap: no contract ever existed
         assert ledger[_hash(harness)][1] == "UNKNOWN"  # accepted swaps are never idle-expired
+
+
+@pytest.mark.parametrize("capacity_available", [False, True])
+def test_a_full_reservation_budget_is_logged_for_the_operator(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    capacity_available: bool,  # noqa: FBT001 - parametrized
+) -> None:
+    """Turning clients away at max_active_reservations must not be silent."""
+    import asyncio  # noqa: PLC0415
+
+    from test_cooperative_probe_gate import _FeaturedService  # noqa: PLC0415
+
+    import rill_provider.handshake_service as service_module  # noqa: PLC0415 - request policy mock
+
+    fixture = _FeaturedService(monkeypatch)
+    fixture.context.economic_capacity_available = capacity_available
+    refused = live.Answer("error", {"code": "capacity_unavailable", "message": "fixture"})
+    monkeypatch.setattr(service_module, "answer_client_request", lambda *_args: refused)
+    with caplog.at_level("WARNING", logger="rill_provider.handshake_service"):
+        outcome = asyncio.run(fixture.service._answer(fixture.request("quote_request"), [], 1000))  # noqa: SLF001
+    assert outcome == "request-answered"
+    logged = "max_active_reservations reached; firm quote answered capacity_unavailable"
+    # Another cause (no tip, no route) is logged where it happens, not as a full budget.
+    assert (logged in caplog.messages) is not capacity_available

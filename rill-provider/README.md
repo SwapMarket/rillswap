@@ -191,7 +191,11 @@ and liquidity instead of treating the defaults as guarantees.
 
 Admission limits include `max_sessions`, `max_tombstones`,
 `new_sessions_per_minute` and `max_active_reservations`. The last one bounds
-unreleased firm offers and accepted swaps.
+unreleased firm offers and accepted swaps (default 4). A swap holds its
+reservation until the provider's claim reaches the settlement depth, so with
+slow blocks the default fills quickly. When it is full, the provider answers
+firm quotes with `capacity_unavailable` and logs `max_active_reservations
+reached`.
 
 `transport_pow_bits` (0 to 20, default 0 = off) requires RS-006 NIP-13 proof
 of work on every message a client sends. The provider drops messages without
