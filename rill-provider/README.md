@@ -272,6 +272,31 @@ If your configuration does not set `claim_fee_reserve_sat` (the examples and
 fixed 1,000 sat default to automatic pricing; swaps already signed keep their
 reserve. Set it to keep a fixed reserve instead.
 
+### BTC to LN claim fee
+
+The provider's claim fee comes out of its success fee (`V = L + S`), so set
+`terms.base_fee_sat` and `terms.proportional_millionths` to cover the claim
+and routing: a swap whose success fee is below its claim fee loses money.
+Every claim is priced for the cooperative key-path size (99 vB to a P2WPKH
+destination, 111 vB to P2TR) at the node's own evidence for the signed
+`quote.claim_confirmation_blocks` target: the highest of `minrelaytxfee`,
+`mempoolminfee` and the conservative `estimatesmartfee`, lowered to
+`bitcoin_core.max_fee_estimate_sat_vb` when set.
+
+The cooperative claim is priced from a fresh sample when it is proposed. If
+that fee exceeds the signed claim fee cap, the provider does not propose and
+keeps the unilateral fallback. A script-path claim pays the same fee (or the
+relay minimum for its larger size, if higher), and fee bumping raises it if it
+stalls, up to the signed cap before the client can refund. Fallbacks prepared
+for the cooperative window and deadline recovery never wait for Core: they use
+the latest sample this process took (one is taken before paying each swap that
+may cooperate). With no usable sample, a claim pays the signed cap rather than
+risk the refund. A selected cooperative claim cannot be fee bumped.
+
+After upgrading, claims no longer start at the former fixed 1,000 sat
+minimum; claims and fallbacks already recorded keep their fees. LN to BTC
+refunds keep their 1,000 sat minimum.
+
 Admission limits include `max_sessions`, `max_tombstones`,
 `new_sessions_per_minute` and `max_active_reservations`. The last one bounds
 unreleased firm offers and accepted swaps (default 4). A swap holds its
