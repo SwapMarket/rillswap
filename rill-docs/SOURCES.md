@@ -10,3 +10,4 @@ RillSwap specifications cite external standards by name. The main ones are:
 | Recovery files | age v1 file format |
 | EVM | ERC-20, EIP-712, EIP-7702, ERC-4337 (EntryPoint v0.7), Boltz `ERC20Swap` v6 |
 | Cryptography library | `bitcoin-core/secp256k1` (Schnorr, extrakeys and MuSig2 modules) |
+| Security advisories | [LND advisories](https://security.lightning.engineering/), [Bitcoin Core advisories](https://bitcoincore.org/en/security-advisories/), BOLT 11 single-field clarification ([lightning/bolts#1357](https://github.com/lightning/bolts/pull/1357)); see [`ATTACKS.md`](ATTACKS.md) |

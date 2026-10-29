@@ -13,6 +13,7 @@ definitions for RillSwap, plus the design document.
 | `proposals/` | BIP and NIP drafts (unassigned, not submitted) |
 | `images/` | Screenshots used by the READMEs |
 | [`SOURCES.md`](SOURCES.md) | External standards referenced by the specifications |
+| [`ATTACKS.md`](ATTACKS.md) | Known Lightning and atomic-swap attacks, status and tests |
 
 Interoperability is defined by the versioned `specs/`, `schemas/` and
 `vectors/`. The proposal drafts summarize them for the BIP and NIP processes.

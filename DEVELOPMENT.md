@@ -462,6 +462,10 @@ stays private). Run it with any Python that has
 `httpx` and `pytest`, for example `rill-cli/.venv/bin/python -m pytest dev/tests`.
 `dev/devctl smoke` is the end-to-end check.
 
+[`rill-docs/ATTACKS.md`](rill-docs/ATTACKS.md) lists the known Lightning and
+atomic-swap attacks with a reference, RillSwap's status and the test for each.
+Keep it current when a defense or a pinned dependency changes.
+
 ## Troubleshooting
 
 - **Image build hangs at `apt-get update`:** containers cannot resolve DNS.
