@@ -12,7 +12,13 @@ from pydantic import Field, model_validator
 
 from rill_core.wire.canonical import JsonValue, canonicalize
 from rill_core.wire.hashes import tagged_hash
-from rill_core.wire.types import ExactInteger, Hex32, StrictModel, validate_decimal_sats
+from rill_core.wire.types import (
+    ExactInteger,
+    Hex32,
+    StrictModel,
+    validate_decimal_sats,
+    validate_signed_sats,
+)
 
 FEE_POLICY_EXTENSION = "org.rillswap/fee-policy-v1"
 FEE_MODEL: Final = "p2tr-cooperative-1in-2out/v1"
@@ -89,7 +95,7 @@ class FeeBreakdown(StrictModel):
     def validate_estimate(self) -> FeeBreakdown:
         """Validate independently recomputable network pricing and freshness."""
         rate = validate_decimal_sats(self.feerate_sat_kvb, field="feerate_sat_kvb", positive=True)
-        validate_decimal_sats(self.service_fee_sat, field="service_fee_sat")
+        validate_signed_sats(self.service_fee_sat, field="service_fee_sat")
         network_fee = validate_decimal_sats(self.network_fee_sat, field="network_fee_sat")
         if rate > int(self.policy.max_network_feerate_sat_kvb):
             raise ValueError("network feerate exceeds the advertised maximum")
@@ -138,8 +144,9 @@ def check_fee_breakdown(  # noqa: PLR0913 - explicit signed economics and contex
             raise ValueError("provider omitted the requested fee policy")
         return None
     breakdown = FeeBreakdown.model_validate(value)
-    if int(breakdown.service_fee_sat) != breakdown.policy.service_fee(principal_sat):
-        raise ValueError("service fee differs from the advertised policy")
+    # Balance-aware providers may discount, even below zero, never surcharge.
+    if int(breakdown.service_fee_sat) > breakdown.policy.service_fee(principal_sat):
+        raise ValueError("service fee exceeds the advertised policy")
     if int(breakdown.service_fee_sat) + int(breakdown.network_fee_sat) != success_fee_sat:
         raise ValueError("fee breakdown does not sum to the success fee")
     if not 0 < expires_at - breakdown.issued_at <= QUOTE_LIFETIME_SECONDS:

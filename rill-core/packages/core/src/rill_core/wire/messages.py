@@ -22,7 +22,6 @@ from rill_core.wire.hashes import (
 from rill_core.wire.types import (
     BitcoinProfileId,
     CompressedKey,
-    DecimalTokenUnits,
     EvmAddress,
     EvmAssetIdentity,
     EvmProfileId,
@@ -45,6 +44,8 @@ from rill_core.wire.types import (
     validate_decimal_msats,
     validate_decimal_sats,
     validate_extensions,
+    validate_signed_sats,
+    validate_signed_token_units,
     validate_token_units,
 )
 
@@ -96,7 +97,7 @@ class BtcToLnEconomics(StrictModel):
             field="lightning_principal_sat",
             positive=True,
         )
-        fee = validate_decimal_sats(self.success_fee_sat, field="success_fee_sat")
+        fee = validate_signed_sats(self.success_fee_sat, field="success_fee_sat")
         contract = validate_decimal_sats(
             self.contract_amount_sat,
             field="contract_amount_sat",
@@ -135,7 +136,7 @@ class LnToBtcEconomics(StrictModel):
             self.claim_fee_reserve_sat,
             field="claim_fee_reserve_sat",
         )
-        success_fee = validate_decimal_sats(self.success_fee_sat, field="success_fee_sat")
+        success_fee = validate_signed_sats(self.success_fee_sat, field="success_fee_sat")
         prepayment = validate_decimal_sats(
             self.mining_prepayment_sat,
             field="mining_prepayment_sat",
@@ -147,8 +148,8 @@ class LnToBtcEconomics(StrictModel):
         )
         if payout + claim_reserve != contract:
             raise ValueError("LN to BTC economics must satisfy V = D + C")
-        if prepayment > success_fee:
-            raise ValueError("mining prepayment cannot exceed success fee")
+        if prepayment > max(success_fee, 0):
+            raise ValueError("mining prepayment cannot exceed a positive success fee")
         if contract + success_fee > MAX_SATS:
             raise ValueError("total LN to BTC payment exceeds the monetary maximum")
         if contract + success_fee - prepayment != hold_invoice:
@@ -337,7 +338,7 @@ class Erc20ToLnEconomics(StrictModel):
     kind: Literal["erc20-to-ln"]
     lightning_principal_sat: str
     rate_token_base_per_btc: PositiveTokenUnits
-    success_fee_token_base: DecimalTokenUnits
+    success_fee_token_base: str
     lock_amount_token_base: PositiveTokenUnits
 
     @model_validator(mode="after")
@@ -347,7 +348,9 @@ class Erc20ToLnEconomics(StrictModel):
             self.lightning_principal_sat, field="lightning_principal_sat", positive=True
         )
         rate = validate_token_units(self.rate_token_base_per_btc, field="rate_token_base_per_btc")
-        fee = validate_token_units(self.success_fee_token_base, field="success_fee_token_base")
+        fee = validate_signed_token_units(
+            self.success_fee_token_base, field="success_fee_token_base"
+        )
         lock = validate_token_units(
             self.lock_amount_token_base, field="lock_amount_token_base", positive=True
         )
@@ -376,7 +379,7 @@ class LnToErc20Economics(StrictModel):
         equivalent = validate_decimal_sats(
             self.payout_sat_equivalent, field="payout_sat_equivalent", positive=True
         )
-        fee = validate_decimal_sats(self.success_fee_sat, field="success_fee_sat")
+        fee = validate_signed_sats(self.success_fee_sat, field="success_fee_sat")
         hold = validate_decimal_sats(self.hold_invoice_sat, field="hold_invoice_sat", positive=True)
         if ceil_div(payout * SATS_PER_BTC, rate) != equivalent:
             raise ValueError("LN to ERC20 economics must satisfy E = ceil(D * 1e8 / rate)")

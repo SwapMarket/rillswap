@@ -143,6 +143,28 @@ class Extensions(StrictModel):
         return self
 
 
+def _validate_signed(value: str, *, field: str, maximum: int) -> int:
+    if isinstance(value, str) and value.startswith("-"):
+        magnitude = parse_canonical_decimal(value[1:], field=field, maximum=maximum)
+        if magnitude == 0:
+            raise ValidationError(f"{field} is not a canonical signed decimal string")
+        return -magnitude
+    return parse_canonical_decimal(value, field=field, maximum=maximum)
+
+
+def validate_signed_sats(value: str, *, field: str) -> int:
+    """Validate a canonical signed satoshi string (``-0`` forbidden) of bounded magnitude.
+
+    Only fees are signed: a provider may pay a rebate. Amounts stay unsigned.
+    """
+    return _validate_signed(value, field=field, maximum=MAX_SATS)
+
+
+def validate_signed_token_units(value: str, *, field: str) -> int:
+    """Validate a canonical signed token base-unit string of bounded magnitude."""
+    return _validate_signed(value, field=field, maximum=MAX_TOKEN_UNITS)
+
+
 def validate_decimal_sats(value: str, *, field: str, positive: bool = False) -> int:
     """Validate a canonical satoshi wire string and return its integer value."""
     parsed = parse_canonical_decimal(value, field=field, maximum=MAX_SATS)
