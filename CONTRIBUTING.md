@@ -29,6 +29,13 @@ CI pins the Ubuntu 26.04 runner rather than the moving `ubuntu-latest` label.
 GitHub Actions use immutable commit SHAs with matching release-version comments;
 update both together. The runner pin selects the OS, not a frozen weekly image.
 
+`Component source checks` automatically reruns failed jobs once, including their
+tests. First-attempt logs remain available; a failed second attempt stays failed.
+Publishing and deployment workflows are excluded. The disposable Anvil readiness
+probe separately retries connection errors with bounded timeouts. Validate
+workflow changes with `python -m pytest -q dev/tests/test_ci_workflows.py`;
+Node and curl enable the executable workflow regressions.
+
 ## Component rules
 
 **rill-docs.** Normative behavior needs byte vectors. Keep specifications,

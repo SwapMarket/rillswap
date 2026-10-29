@@ -228,6 +228,7 @@ jobs:
             --host 0.0.0.0 --chain-id 31337 --block-time 1
           trap 'docker rm -f rill-provider-anvil' EXIT
           curl --retry 20 --retry-connrefused --retry-delay 1 --fail \
+            --retry-all-errors --retry-max-time 30 --connect-timeout 2 --max-time 3 \
             -H 'Content-Type: application/json' \
             --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
             "$RILLSWAP_ANVIL_RPC"
