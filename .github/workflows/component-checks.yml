@@ -446,7 +446,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Start the regtest dev stack
-        run: dev/devctl up
+        run: |
+          docker compose -f dev/compose.yaml build
+          dev/devctl up
       - name: Swap in both directions through the real relay
         run: dev/devctl smoke
       - name: Show service logs on failure

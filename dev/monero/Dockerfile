@@ -8,7 +8,7 @@ ARG MONERO_VERSION=v0.18.5.3
 ARG MONERO_SHA256=3333d0e04c9cbe3023e7e2b6dd369c407f36bb8df5b05fb0a19d7685b3d56dfc
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bzip2 ca-certificates curl \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bzip2 ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL -o /tmp/monero.tar.bz2 \

@@ -39,7 +39,8 @@ jobs:
       - name: Build and start every Compose service with fresh isolated volumes
         timeout-minutes: 20
         run: |
-          docker compose up -d --build
+          docker compose build
+          docker compose up -d --no-build
           dev/devctl info
       - name: Check dev adapters and Compose contracts without backend access
         run: |

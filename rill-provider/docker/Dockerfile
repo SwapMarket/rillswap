@@ -9,7 +9,7 @@ FROM ghcr.io/astral-sh/uv:0.11.7@sha256:240fb85ab0f263ef12f492d8476aa3a2e4e1e333
 
 FROM ${PYTHON_IMAGE} AS build
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential cmake \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc libc6-dev make cmake \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=uv /uv /usr/local/bin/uv
 ENV UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy UV_COMPILE_BYTECODE=1
@@ -47,7 +47,7 @@ RUN uv venv --python /usr/local/bin/python3.14 /build/backend \
 
 FROM ${PYTHON_IMAGE}
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends socat tini tor \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends socat tini tor \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1000 rill \
     && useradd --uid 1000 --gid 1000 --home-dir /rill --no-create-home --shell /usr/sbin/nologin rill \
