@@ -215,6 +215,11 @@ provider stops announcing until liquidity recovers. If the source fails, the
 last cap stays (the configured bands before any reading). The Docker template
 uses one band of 10,000 to 10,000,000 sat.
 
+New Docker configurations charge a 100 sat base plus 0.1 % for BTC to LN,
+or 0.5 % for LN to BTC. Network costs are separate when `terms.network_fees`
+is enabled. Existing configurations are never overwritten by setup; update
+their service fees explicitly if desired.
+
 A request the provider can no longer fill between announcements is refused
 at quote time with `capacity_unavailable`, before the client pays anything:
 BTC to LN and ERC20 to LN need a payable route to the invoice, and LN to BTC

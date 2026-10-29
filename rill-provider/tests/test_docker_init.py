@@ -111,6 +111,17 @@ def test_bitcoin_maker_config_passes_the_provider_schema(tmp_path: Path, profile
     assert config.terms.follow_liquidity is True
 
 
+@pytest.mark.parametrize(
+    ("profile", "ppm"),
+    [("btc-to-ln", 1_000), ("ln-to-btc", 5_000), ("erc20-to-ln", 2_000), ("ln-to-erc20", 2_000)],
+)
+def test_new_makers_use_directional_service_fees(profile: str, ppm: int) -> None:
+    terms = _config(profile)["terms"]
+    assert isinstance(terms, dict)
+    assert terms["base_fee_sat"] == 100
+    assert terms["proportional_millionths"] == ppm
+
+
 def test_default_relays_match_the_web_app_and_are_all_served(tmp_path: Path) -> None:
     web = Path(__file__).parents[2] / "rill-web" / "src" / "swap" / "publicRelays.ts"
     assert tuple(re.findall(r'"(wss?://[^"]+)"', web.read_text())) == init.DEFAULT_RELAYS

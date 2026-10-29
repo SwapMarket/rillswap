@@ -183,7 +183,10 @@ def maker_config(  # noqa: PLR0913 - one flat operator choice per argument
             # The announced maximum follows liquidity below this (follow_liquidity).
             "amount_bands": [[10_000, 10_000_000]],
             "base_fee_sat": 100,
-            "proportional_millionths": 2_000,
+            "proportional_millionths": {
+                "btc-to-ln": 1_000,
+                "ln-to-btc": 5_000,
+            }.get(profile, 2_000),
             "slot": f"{network['name']}-{profile}",
         },
         "relay_urls": list(relays),
