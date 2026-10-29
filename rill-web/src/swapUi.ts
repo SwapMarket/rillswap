@@ -16,7 +16,8 @@ import { type FundingRequest, type FundingSource, type SwapRequest } from "./swa
 import { observeDeposit } from "./swap/depositWatch";
 import { qrSvg } from "./qr";
 import { TransactionRefusedError } from "./swap/transaction";
-import { explorerTxUrl, mempoolApiForNetwork, relaysForNetwork, trustedEvmAsset, validateEvmSponsor, validateMempoolApi, validateRelays, type EvmSponsorDefaults, type NetworkName } from "./swap/config";
+import { explorerTxUrl, trustedEvmAsset, validateEvmSponsor, validateMempoolApi, validateRelays, type EvmSponsorDefaults, type NetworkName } from "./swap/config";
+import { ConnectionPreferences, type ConnectionSettings, type ConnectionPreferenceState } from "./connectionPreferences";
 import { GasSponsor, newStagingSecret, stagingAddress } from "./swap/gasSponsor";
 import { readChainTip } from "./swap/chainTip";
 import { BrowserRecoveryWallet, parseWalletBackup } from "./browserRecoveryWallet";
@@ -109,6 +110,13 @@ function waitForClick(panel: HTMLElement, label: string): Promise<void> {
 }
 
 function mount(root: HTMLElement): void {
+  const link = parseSwapLink(location.hash);
+  const initialNetwork = link && Object.hasOwn(NETWORKS, link.network) ? link.network as NetworkName : __SWAP_DEFAULTS__.network;
+  const preferences = new ConnectionPreferences(location.href);
+  let connectionState = preferences.read(NETWORKS[initialNetwork], __SWAP_DEFAULTS__);
+  const assertConnections = (): void => {
+    if (connectionState.needsReset) throw new Error(connectionState.message);
+  };
   const header = node("header");
   const brand = node("a", "rill", "swap-brand");
   brand.href = "./swap.html";
@@ -158,20 +166,26 @@ function mount(root: HTMLElement): void {
   const network = node("select", "", "swap-network");
   networkLabel.htmlFor = network.id;
   for (const name of Object.keys(NETWORKS)) network.append(Object.assign(node("option", name), { value: name }));
-  network.value = __SWAP_DEFAULTS__.network;
+  network.value = initialNetwork;
   connections.append(networkLabel, network);
   const relayLabel = node("label", "Nostr relays (one per line)");
   const relay = node("textarea", "", "swap-relay");
   relayLabel.htmlFor = relay.id;
-  relay.value = __SWAP_DEFAULTS__.relays.join("\n");
+  relay.value = connectionState.values.relays.join("\n");
   relay.spellcheck = false;
   connections.append(relayLabel, relay, node("small", "Up to eight relays. Each sees your IP unless you use Tor. Onion relays only connect in Tor Browser."));
-  const chainApi = field(connections, "swap-chain-api", "Mempool API", __SWAP_DEFAULTS__.mempoolApi,
+  const chainApi = field(connections, "swap-chain-api", "Mempool API", connectionState.values.mempoolApi,
     "Any mempool or Esplora instance over https, for example https://mempool.example/api. Used for confirmations and transaction links.");
-  const broadcastApi = field(connections, "swap-broadcast-api", "Transaction broadcast API", __SWAP_DEFAULTS__.broadcastApi,
+  const broadcastApi = field(connections, "swap-broadcast-api", "Transaction broadcast API", connectionState.values.broadcastApi,
     "Where claim and refund transactions are sent. Usually the same as the mempool API.");
-  const evmRpc = field(evmSettings, "swap-evm-rpc", "EVM RPC (stablecoin swaps)", __SWAP_DEFAULTS__.evmRpc ?? "",
+  const evmRpc = field(evmSettings, "swap-evm-rpc", "EVM RPC (stablecoin swaps)", connectionState.values.evmRpc,
     "Read-only chain access for stablecoin swaps; your wallet extension signs. This operator sees your IP and the swap's addresses. Custom origins need a deployment CSP allowance.");
+  const resetConnections = node("button", "", "swap-reset-connections");
+  resetConnections.type = "button";
+  const connectionStatus = node("p", connectionState.message, "swap-connection-status");
+  connectionStatus.setAttribute("role", "status");
+  connections.append(node("small", "Valid connection edits are saved when you leave the field, for this deployment and network only. Other settings are not saved."),
+    resetConnections, connectionStatus);
   const evmSponsor = field(evmSettings, "swap-evm-sponsor", "Gas sponsor (receive stablecoins without a wallet)", __SWAP_DEFAULTS__.evmSponsor?.url ?? "",
     "Alchemy-compatible wallet API that pays claim gas. Leave empty to claim from your own wallet extension. The sponsor learns the claim preimage and your destination address.");
   const evmEntryPoint = field(evmSettings, "swap-evm-entry-point", "ERC-4337 EntryPoint v0.7", __SWAP_DEFAULTS__.evmSponsor?.entryPoint ?? "",
@@ -297,6 +311,11 @@ function mount(root: HTMLElement): void {
     const name = network.value as NetworkName;
     const generation = ++directoryGeneration; // also discards a load still running for other settings
     directoryAttemptAt = Date.now();
+    if (connectionState.needsReset) {
+      directoryLoading = false; reloadProviders.disabled = false;
+      providersStatus.textContent = connectionState.message;
+      return;
+    }
     let urls: readonly string[];
     try { urls = validateRelays(relay.value.trim(), name); } catch (error) {
       directoryLoading = false; reloadProviders.disabled = false;
@@ -366,6 +385,7 @@ function mount(root: HTMLElement): void {
       : estimatedDepth === null || (depth !== null && depth <= estimatedDepth));
   const updateEstimate = (): void => {
     estimatedTotal = null; estimatedDepth = null;
+    if (connectionState.needsReset) { estimate.textContent = connectionState.message; return; }
     const route = routeFor(fromAsset.value, toAsset.value);
     if (route.profile === null || route.unavailable) { estimate.textContent = ""; return; }
     if (route.profile === "ln-to-erc20/v1") {
@@ -572,6 +592,7 @@ function mount(root: HTMLElement): void {
   const setBusy = (value: boolean): void => {
     busy = value;
     settingsButton.disabled = providersButton.disabled = badge.disabled = value;
+    resetConnections.disabled = value;
     if (value) showUtility(undefined, false);
   };
   const showReview = (keepAddress = false): void => {
@@ -604,10 +625,10 @@ function mount(root: HTMLElement): void {
       key.file.fill(0); // This temporary key-file copy is not used for a download.
       return key.identity;
     },
-    selectedChainApi: () => validateMempoolApi(chainApi.value.trim(), network.value as NetworkName),
-    selectedBroadcastApi: () => validateMempoolApi(broadcastApi.value.trim(), network.value as NetworkName),
-    selectedRelays: () => validateRelays(relay.value.trim(), network.value as NetworkName),
-    selectedEvmRpc: () => validateMempoolApi(evmRpc.value.trim(), network.value as NetworkName),
+    selectedChainApi: () => { assertConnections(); return validateMempoolApi(chainApi.value.trim(), network.value as NetworkName); },
+    selectedBroadcastApi: () => { assertConnections(); return validateMempoolApi(broadcastApi.value.trim(), network.value as NetworkName); },
+    selectedRelays: () => { assertConnections(); return validateRelays(relay.value.trim(), network.value as NetworkName); },
+    selectedEvmRpc: () => { assertConnections(); return validateMempoolApi(evmRpc.value.trim(), network.value as NetworkName); },
     selectedEvmSponsor: selectedSponsor,
   });
   recoveryTools.append(recovery.element);
@@ -629,6 +650,30 @@ function mount(root: HTMLElement): void {
   chainApi.oninput = () => { updateDisclosure(); recovery.clearFundingObservation(); };
   broadcastApi.oninput = () => { updateDisclosure(); recovery.clearFundingObservation(); };
   relay.oninput = updateDisclosure;
+  const showConnectionState = (): void => {
+    connectionStatus.textContent = connectionState.message;
+    resetConnections.textContent = `Reset ${network.value} connection settings to defaults`;
+  };
+  const applyConnections = (state: ConnectionPreferenceState): void => {
+    connectionState = state;
+    relay.value = state.values.relays.join("\n");
+    chainApi.value = state.values.mempoolApi;
+    broadcastApi.value = state.values.broadcastApi;
+    evmRpc.value = state.values.evmRpc;
+    showConnectionState();
+  };
+  for (const [field, control] of [
+    ["relays", relay], ["mempoolApi", chainApi], ["broadcastApi", broadcastApi], ["evmRpc", evmRpc],
+  ] as const satisfies readonly (readonly [keyof ConnectionSettings, HTMLInputElement | HTMLTextAreaElement])[]) {
+    control.addEventListener("change", () => {
+      if (busy) return;
+      try {
+        connectionState = preferences.save(NETWORKS[network.value as NetworkName], __SWAP_DEFAULTS__, field, control.value);
+        showConnectionState();
+      } catch (error) { connectionStatus.textContent = `Connection edit not saved: ${(error as Error).message}`; }
+    });
+  }
+  showConnectionState();
   updateDisclosure();
   const updateNetwork = (): void => {
     const route = routeFor(fromAsset.value, toAsset.value);
@@ -678,18 +723,22 @@ function mount(root: HTMLElement): void {
     lastFrom = fromAsset.value; lastTo = toAsset.value;
     updateNetwork();
   };
-  const applyNetwork = (): void => {
-    relay.value = relaysForNetwork(network.value as NetworkName, __SWAP_DEFAULTS__).join("\n");
-    chainApi.value = mempoolApiForNetwork(network.value as NetworkName, __SWAP_DEFAULTS__);
-    broadcastApi.value = network.value === __SWAP_DEFAULTS__.network ? __SWAP_DEFAULTS__.broadcastApi :
-      (network.value === "regtest" ? "http://127.0.0.1:8092/api" : chainApi.value);
-    evmRpc.value = network.value === __SWAP_DEFAULTS__.network ? __SWAP_DEFAULTS__.evmRpc ?? "" : network.value === "regtest" ? "http://127.0.0.1:8545" : "";
-    refund.value = tip.value = age.value = "";
+  const refreshConnections = (): void => {
     updateDisclosure();
     updateNetwork();
     recovery.clearFundingObservation();
     directoryEntries = []; directoryWarnings = []; directoryLoaded = false; renderDirectory(); providersStatus.textContent = "";
     loadDirectory();
+  };
+  const applyNetwork = (): void => {
+    applyConnections(preferences.read(NETWORKS[network.value as NetworkName], __SWAP_DEFAULTS__));
+    refund.value = tip.value = age.value = "";
+    refreshConnections();
+  };
+  resetConnections.onclick = () => {
+    if (busy) return;
+    applyConnections(preferences.reset(NETWORKS[network.value as NetworkName], __SWAP_DEFAULTS__));
+    refreshConnections();
   };
   network.onchange = applyNetwork;
   badge.onchange = () => {
@@ -712,7 +761,7 @@ function mount(root: HTMLElement): void {
       directoryEntries = live; renderDirectory(); updateEstimate();
       if (!directoryLoading) showDirectoryStatus();
     }
-    if (document.visibilityState === "visible" && !busy && !directoryLoading &&
+    if (document.visibilityState === "visible" && !busy && !directoryLoading && !connectionState.needsReset &&
         Date.now() - directoryAttemptAt >= DIRECTORY_REFRESH_MS) loadDirectory();
   };
   setInterval(refreshDirectory, 60_000);
@@ -779,6 +828,7 @@ function mount(root: HTMLElement): void {
             setBusy(true); open.disabled = true;
             void (async () => {
               if (network.value !== name) { network.value = name; applyNetwork(); }
+              assertConnections();
               const api = validateMempoolApi(chainApi.value.trim(), name), broadcast = validateMempoolApi(broadcastApi.value.trim(), name);
               const relaySelection = relay.value.trim(), urls = validateRelays(relaySelection, name);
               const current = (): void => {
@@ -804,9 +854,7 @@ function mount(root: HTMLElement): void {
     } catch (error) { savedList.textContent = `Could not read saved recoveries: ${(error as Error).message}`; }
   };
   void refreshSavedRecoveries();
-  const link = parseSwapLink(location.hash);
   if (link) {
-    if (link.network in NETWORKS && network.value !== link.network) { network.value = link.network; applyNetwork(); }
     linkPublished = true;
     linkAnchor.href = location.href;
     linkBox.hidden = false;
@@ -1274,6 +1322,11 @@ function mount(root: HTMLElement): void {
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     if (busy) return;
+    if (connectionState.needsReset) {
+      report(`refused: ${connectionState.message}`);
+      showUtility(settingsButton);
+      return;
+    }
     const name = network.value as NetworkName;
     const route = routeFor(fromAsset.value, toAsset.value);
     if (route.unavailable || route.profile === null) {

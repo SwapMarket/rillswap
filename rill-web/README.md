@@ -81,6 +81,29 @@ Tabs opened before this safeguard was deployed need a manual reload to gain it.
 
 Deployment defaults are set and validated at build time.
 
+Connection edits (Nostr relays, mempool API, broadcast API and EVM RPC) are saved
+in this browser when a valid edit leaves its field. Profiles are separate for
+each deployment directory and complete Bitcoin network identity, including the
+regtest namespace. Directory, `index.html` and `swap.html` aliases share a profile;
+sibling deployments do not. Network selection and all other settings remain
+transient. A changed complete network identity selects a separate profile, without
+migrating or deleting the old one. Other tabs do not apply edits live.
+
+Only explicit overrides are stored. Untouched fields follow new defaults after
+an application update; custom values remain unchanged. A custom relay list is
+never merged with new default relays. Editing a field back to its current default
+removes its override. **Reset connection settings to defaults** restores current
+defaults for the selected profile only, without touching recovery keys, history
+or other profiles. Existing installations start with current defaults, with no
+preference migration or writes on load.
+
+Unreadable or unsupported saved settings are preserved and require an explicit
+reset before fallback connections are used. If browser storage is blocked, reset
+explicitly permits current defaults for this session; edits remain session-only
+and a warning explains that old saved settings may return after reload. Endpoint
+validation, CSP and CORS restrictions still apply. Preferences never initiate
+payments, signing or broadcasting.
+
 The swap footer shows the first seven characters of the build's Git commit,
 linked to that commit on GitHub. Builds read the local checkout's `HEAD`;
 source archives or containers without Git can set `RILLSWAP_BUILD_COMMIT` to

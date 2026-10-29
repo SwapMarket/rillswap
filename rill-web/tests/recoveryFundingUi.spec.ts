@@ -273,6 +273,23 @@ test("changing settings after approval invalidates prepared exposure controls wi
   await expect(page.locator("#swap-refund-download")).not.toBeVisible();
 });
 
+test("resetting connection settings clears funding observations and prepared exposure without broadcasting", async ({ page }) => {
+  const item = corpus()[0]!, calls = await chainApi(page, item);
+  await page.goto("http://127.0.0.1:18765/test-only/swap.html"); await importRecord(page, item);
+  await page.locator("#swap-recovery-check-funding").click();
+  await expect(page.locator("#swap-recovery-funding-result h3")).toHaveText("Funding observed by your API");
+  await page.locator("#swap-refund-prepare").click();
+  await expect(page.locator("#swap-refund-result h3")).toHaveText("Refund prepared and saved");
+  const before = calls.length;
+  await openSettings(page, "connection");
+  await page.locator("#swap-reset-connections").click();
+  await expect(page.locator("#swap-recovery-funding-result")).toBeEmpty();
+  await openRecovery(page);
+  await expect(page.locator("#swap-refund-broadcast")).not.toBeVisible();
+  await expect(page.locator("#swap-refund-download")).not.toBeVisible();
+  expect(calls).toHaveLength(before);
+});
+
 test("approval invalidated after export commitment but before its return prevents the browser download", async ({ page }) => {
   const item = corpus()[0]!; await chainApi(page, item); let downloads = 0;
   page.on("download", () => downloads++);

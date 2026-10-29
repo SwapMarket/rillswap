@@ -2,6 +2,30 @@ import { directorySettled, expect, MAINNET_RELAYS, openSettings, test } from "./
 import { buildCommit } from "../scripts/build-commit";
 
 for (const prefix of ["", "repository/"]) {
+  test(`connection profiles share filename aliases but isolate deployments under /${prefix}`, async ({ page }) => {
+    const base = `http://127.0.0.1:18866/${prefix}`;
+    await page.goto(base); await openSettings(page, "connection");
+    await page.locator("#swap-chain-api").fill("https://root-chain.example/api");
+    await page.locator("#swap-chain-api").blur();
+    for (const alias of ["index.html", "swap.html"]) {
+      await page.goto(base + alias); await openSettings(page, "connection");
+      await expect(page.locator("#swap-chain-api")).toHaveValue("https://root-chain.example/api");
+    }
+    await page.goto(base + "signet/"); await openSettings(page, "connection");
+    await page.locator("#swap-network").selectOption("mainnet");
+    await expect(page.locator("#swap-chain-api")).not.toHaveValue("https://root-chain.example/api");
+    await page.locator("#swap-chain-api").fill("https://sibling-chain.example/api");
+    await page.locator("#swap-chain-api").blur();
+    await page.goto(base); await openSettings(page, "connection");
+    await expect(page.locator("#swap-chain-api")).toHaveValue("https://root-chain.example/api");
+    const other = prefix === "" ? "repository/" : "";
+    await page.goto(`http://127.0.0.1:18866/${other}`); await openSettings(page, "connection");
+    await expect(page.locator("#swap-chain-api")).not.toHaveValue("https://root-chain.example/api");
+    await page.goto(base + "signet/"); await openSettings(page, "connection");
+    await page.locator("#swap-network").selectOption("mainnet");
+    await expect(page.locator("#swap-chain-api")).toHaveValue("https://sibling-chain.example/api");
+  });
+
   test(`both network footers link to the build commit under /${prefix}`, async ({ page }) => {
     const commit = buildCommit();
     for (const network of ["", "signet/"]) {

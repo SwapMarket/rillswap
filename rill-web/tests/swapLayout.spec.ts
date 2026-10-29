@@ -107,6 +107,8 @@ test("copying an encrypted link gives feedback and utility navigation preserves 
   await expect(page.locator("#swap-link-anchor")).toHaveAttribute("href", link);
   await expect(page.locator("#swap-recovery-toggle")).toBeEnabled();
   await expect(page.locator("#swap-settings-toggle")).toBeDisabled();
+  await expect(page.locator("#swap-reset-connections")).toBeDisabled();
+  await expect(page.locator("#swap-chain-api")).toBeDisabled();
   await expect(page.locator("#swap-refund")).toBeDisabled();
   expect(await page.evaluate(() => window.uiFixture.executed)).toBe(1);
 });
