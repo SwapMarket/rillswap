@@ -215,6 +215,24 @@ jobs:
             -m 'not native_crypto and not bitcoin_core and not lnd and not web_nip59_interop' \
             --basetemp=tmp/pytest-ci
 
+      - name: Check EVM claims and refunds against pinned Anvil
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONPATH: src:../rill-core/packages/core/src:../rill-crypto/python/src
+          RILLSWAP_RUN_ANVIL: '1'
+          RILLSWAP_ANVIL_RPC: http://127.0.0.1:18546
+        run: |
+          docker run -d --rm --name rill-provider-anvil --entrypoint anvil \
+            -p 127.0.0.1:18546:8545 \
+            ghcr.io/foundry-rs/foundry@sha256:f69e1b8d1dda17d89227a4d0513b1d86f93ece430dea8d87aaea643da3607d3e \
+            --host 0.0.0.0 --chain-id 31337 --block-time 1
+          trap 'docker rm -f rill-provider-anvil' EXIT
+          curl --retry 20 --retry-connrefused --retry-delay 1 --fail \
+            -H 'Content-Type: application/json' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
+            "$RILLSWAP_ANVIL_RPC"
+          tmp/ci-venv/bin/python -m pytest -q -m anvil --basetemp=tmp/pytest-anvil
+
   provider-native:
     runs-on: ubuntu-26.04
     timeout-minutes: 20

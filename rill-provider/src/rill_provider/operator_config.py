@@ -20,6 +20,7 @@ from rill_core.wire.hashes import (
     FEE_POLICY_FEATURE,
 )
 from rill_core.wire.types import (
+    EvmAddress,
     EvmAssetIdentity,
     NetworkIdentity,
     require_v1_destination_script,
@@ -150,6 +151,9 @@ class EvmSettings(_Strict):
     block_seconds: int = Field(ge=1, le=3600)
     deployment_namespace: str | None = None
     signer_key_file: Path  # owner-only file holding one hex secp256k1 private key
+    # Forward token recipient, typically the reverse maker's funding address.
+    # The transaction signer remains independent and pays only gas.
+    claim_address: EvmAddress | None = None
     tokens: tuple[EvmToken, ...] = Field(min_length=1, max_length=16)
     funding_confirmations: int = Field(default=1, ge=1)
     settlement_confirmations: int = Field(default=1, ge=1)
@@ -157,6 +161,13 @@ class EvmSettings(_Strict):
     reverse_timelock_delay_blocks: int = Field(ge=3)
     learn_and_claim_seconds: int = Field(ge=1)
     refund_and_ln_resolution_seconds: int = Field(ge=1)
+
+    @field_validator("claim_address")
+    @classmethod
+    def _claim_address(cls, value: str | None) -> str | None:
+        if value == "0x" + "0" * 40:
+            raise ValueError("evm.claim_address must not be the zero address")
+        return value
 
     def assets(self) -> tuple[EvmAssetIdentity, ...]:
         """Return the served asset identities exactly as terms will carry them."""
@@ -325,6 +336,12 @@ class OperatorConfig(_Strict):
             self.handshake.profile in EVM_PROFILES or self.bitcoin_core is None
         ):
             raise ValueError("terms.network_fees requires a Bitcoin profile and bitcoin_core")
+        if (
+            self.evm is not None
+            and self.evm.claim_address is not None
+            and self.handshake.profile != "erc20-to-ln/v1"
+        ):
+            raise ValueError("evm.claim_address is only allowed for erc20-to-ln/v1")
         self._check_dynamic_fees()
         return self
 

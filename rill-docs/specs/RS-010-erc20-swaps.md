@@ -37,8 +37,11 @@ event Refund(bytes32 indexed preimageHash)
 A lock is identified by `keccak256(abi.encode(preimageHash, amount,
 tokenAddress, claimAddress, refundAddress, timelock))`. `preimageHash` is the
 SHA-256 hash of the preimage, which is the Lightning payment hash of the swap
-invoice. Claim pays `amount` to `claimAddress` and requires either
-`msg.sender == claimAddress` or an EIP-712 signature by `claimAddress`.
+invoice. The six-argument claim pays `amount` to the committed `claimAddress`;
+any sender knowing the preimage can submit it, but cannot redirect that payout.
+The signed relay overload additionally requires an EIP-712 signature by
+`claimAddress` (see Recovery). Cooperative refunds also require that address's
+signature, not merely the transaction sender's.
 Refund requires `block.number >= timelock` and pays `refundAddress`.
 Every party MUST reconstruct the lock key from its own terms, never from
 counterparty-supplied call data.

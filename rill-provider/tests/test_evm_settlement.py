@@ -151,6 +151,7 @@ def _engine(  # noqa: PLR0913 - explicit fakes
     lightning: Mock | None = None,
     hold: Mock | None = None,
     btc_tip: int = 100,
+    claim_address: str | None = None,
 ) -> EvmSettlementEngine:
     return EvmSettlementEngine(
         store,
@@ -162,7 +163,36 @@ def _engine(  # noqa: PLR0913 - explicit fakes
         btc_tip=lambda: btc_tip,
         lightning=lightning,
         hold_invoices=hold,
+        claim_address=claim_address,
     )
+
+
+@pytest.mark.parametrize("receiver", [None, "0x" + "cd" * 20])
+def test_quote_context_uses_the_claim_recipient_not_the_gas_signer(
+    harness: Harness, receiver: str | None
+) -> None:
+    htlc = FakeHtlc()
+    with harness.acquire() as store:
+        engine = _engine(store, harness, htlc, claim_address=receiver)
+        assert engine.quote_context().provider_evm_address == (receiver or htlc.signer_address)
+
+
+def test_a_changed_claim_recipient_never_redirects_a_retained_swap(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    terms = _forward_terms()
+    htlc = FakeHtlc(lockups=[_lockup(terms)], active=True)
+    claim = Mock(wraps=htlc.prepare_claim)
+    monkeypatch.setattr(htlc, "prepare_claim", claim)
+    lightning = _lightning(terms, PaymentOutcome("UNKNOWN"))
+    with harness.acquire() as store:
+        session = _accept_evm_swap(store, harness, terms)
+        engine = _engine(store, harness, htlc, lightning=lightning, claim_address="0x" + "cd" * 20)
+        assert asyncio.run(engine.tick(1500)) == {session: "PAYING"}
+        lightning.track.return_value = PaymentOutcome("SUCCEEDED", preimage=PREIMAGE)
+        assert asyncio.run(engine.tick(1600)) == {session: "CLAIMING"}
+        assert claim.call_args.args[0].claim_address == terms.provider_evm_address
+        assert claim.call_args.args[0].claim_address != engine.quote_context().provider_evm_address
 
 
 def test_routing_budget_comes_from_the_normal_fee_never_a_rebate(harness: Harness) -> None:

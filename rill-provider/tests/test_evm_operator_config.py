@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import Mock
 
 import pytest
 from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE
@@ -78,6 +79,39 @@ def test_evm_section_yields_assets_rates_schedule_and_a_resolved_key_path(tmp_pa
     assert config.evm.rates() == {"0x" + "2b" * 20: 100_000_000_000}
     assert config.evm.schedule().forward_timelock_delay_blocks == 60_000
     assert read_evm_signer_key(config.evm.signer_key_file) == "0x" + KEY
+
+
+def test_a_forward_maker_can_claim_to_the_reverse_funding_wallet(tmp_path: Path) -> None:
+    receiver = "0x" + "cd" * 20
+    config = load_config(_evm_config(tmp_path, claim_address=receiver))
+    assert config.evm is not None
+    assert config.evm.claim_address == receiver
+    assert read_evm_signer_key(config.evm.signer_key_file) == "0x" + KEY
+    with pytest.raises(OperatorConfigError):
+        load_config(_evm_config(tmp_path, "ln-to-erc20/v1", claim_address=receiver))
+
+
+@pytest.mark.parametrize("address", ["0x" + "0" * 40, "0x" + "AB" * 20, "not-an-address"])
+def test_a_claim_recipient_must_be_a_canonical_nonzero_address(
+    tmp_path: Path, address: str
+) -> None:
+    with pytest.raises(OperatorConfigError):
+        load_config(_evm_config(tmp_path, claim_address=address))
+
+
+def test_the_cli_wires_a_separate_claim_recipient(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receiver = "0x" + "cd" * 20
+    config = load_config(_evm_config(tmp_path, claim_address=receiver))
+    htlc = Mock()
+    engine = Mock()
+    monkeypatch.setattr(cli, "EvmHtlcClient", Mock(return_value=htlc))
+    monkeypatch.setattr(cli, "EvmSettlementEngine", engine)
+    monkeypatch.setattr(cli, "_chain_tip", lambda _config: lambda: 100)
+    cli._evm_settlement(config, Mock(), Mock())  # noqa: SLF001
+    assert engine.call_args.kwargs["claim_address"] == receiver
+    htlc.verify_deployment.assert_called_once()
 
 
 @pytest.mark.parametrize(

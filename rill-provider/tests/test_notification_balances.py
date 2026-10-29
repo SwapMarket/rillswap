@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import grpc
 import pytest
 from test_cli import _config
-from test_evm_operator_config import EVM
+from test_evm_operator_config import EVM, _evm_config
 from test_lnd_payment_tls import OPENSSL, _certificate
 from web3 import Web3
 
@@ -109,6 +109,23 @@ def test_token_pools_are_read_once_per_token_after_verifying_the_deployment(
     with pytest.raises(EvmBackendError):
         balances.evm_token_balances(config.evm)
     assert evm.token_balance.call_count == 1  # nothing read from an unverified deployment
+
+
+def test_forward_token_reserves_and_summaries_follow_the_claim_recipient(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receiver = "0x" + "cd" * 20
+    evm = MagicMock()
+    evm.token_balance.return_value = 123
+    monkeypatch.setattr(balances, "EvmHtlcClient", MagicMock(return_value=evm))
+    monkeypatch.setattr(balances, "read_evm_signer_key", MagicMock(return_value="key"))
+    config = load_config(_evm_config(tmp_path, claim_address=receiver))
+    assert config.evm is not None
+    assert balances.evm_token_balances(config.evm) == {"0x" + "2b" * 20: 123}
+    token = config.evm.tokens[0]
+    assert balances._evm_balance(config.evm, token) == "0.000123"  # noqa: SLF001
+    assert evm.token_balance.call_count == 2
+    evm.token_balance.assert_called_with(token.token_contract, receiver)
 
 
 def _channels() -> pb.ChannelBalanceResponse:

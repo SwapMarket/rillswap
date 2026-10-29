@@ -121,6 +121,7 @@ class EvmSettlementEngine:
         hold_invoices: HoldInvoiceBackend | None = None,
         max_routing_fee_sat: int = 1_000,
         normal_fee_sat: Callable[[int], int] | None = None,
+        claim_address: str | None = None,
     ) -> None:
         """``lightning`` serves erc20-to-ln; ``hold_invoices`` serves ln-to-erc20.
 
@@ -128,6 +129,8 @@ class EvmSettlementEngine:
         undiscounted service fee; it bounds routing so that a balance-aware
         discount or rebate never shrinks the budget. Without it the budget
         falls back to the signed fee, never below zero.
+        ``claim_address`` changes only new forward quotes' HTLC recipient,
+        not the gas signer or any retained swap's committed destination.
         """
         self._store = store
         self._htlc = htlc
@@ -140,6 +143,7 @@ class EvmSettlementEngine:
         self._hold = hold_invoices
         self._max_routing_fee_sat = max_routing_fee_sat
         self._normal_fee_sat = normal_fee_sat
+        self._claim_address = claim_address
         # Nonce gate: a tick signs nothing new once any recorded transaction was
         # refused by the node, so a fresh "pending" nonce never reuses its slot.
         self._may_sign = True
@@ -163,7 +167,7 @@ class EvmSettlementEngine:
         return EvmQuoteContext(
             assets=self._assets,
             rates=self._rates(),
-            provider_evm_address=self._htlc.signer_address,
+            provider_evm_address=self._claim_address or self._htlc.signer_address,
             schedule=self._schedule,
             tip=tip,
         )

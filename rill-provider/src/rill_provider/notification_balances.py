@@ -160,10 +160,11 @@ def _evm_client(settings: EvmSettings) -> EvmHtlcClient:
 
 
 def evm_token_balances(settings: EvmSettings) -> dict[str, int]:
-    """Return the signer's base-unit balance of every configured token, by contract."""
+    """Return the reserve's base-unit balance of every configured token, by contract."""
     client = _evm_client(settings)
+    owner = settings.claim_address or client.signer_address
     return {
-        token.token_contract: client.token_balance(token.token_contract, client.signer_address)
+        token.token_contract: client.token_balance(token.token_contract, owner)
         for token in settings.tokens
     }
 
@@ -173,7 +174,8 @@ def _evm_balance(settings: EvmSettings, token: EvmToken | None) -> str:
     if token is None:
         return f"{_units(client.native_balance(client.signer_address), 0)} wei"
     return _units(
-        client.token_balance(token.token_contract, client.signer_address), token.token_decimals
+        client.token_balance(token.token_contract, settings.claim_address or client.signer_address),
+        token.token_decimals,
     )
 
 

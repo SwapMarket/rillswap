@@ -229,6 +229,63 @@ def test_anvil_lock_claim_and_refund_round_trip(anvil: dict[str, Any]) -> None: 
 
 
 @pytest.mark.anvil
+def test_anvil_claim_submitter_cannot_redirect_the_committed_recipient(
+    anvil: dict[str, Any],
+) -> None:
+    from eth_account import Account  # noqa: PLC0415
+    from web3 import Web3  # noqa: PLC0415
+
+    web3 = anvil["web3"]
+    gas_signer, funder = (
+        EvmHtlcClient(
+            rpc_url=web3.provider.endpoint_uri,
+            chain_id=31337,
+            htlc_contract=anvil["htlc"],
+            signer_private_key=key,
+        )
+        for key in ANVIL_KEYS[1:3]
+    )
+    receiver = Account.from_key(ANVIL_KEYS[0]).address.lower()
+    token = web3.eth.contract(
+        address=Web3.to_checksum_address(anvil["token"]), abi=anvil["token_abi"]
+    )
+    minter = Account.from_key(ANVIL_KEYS[0])
+    mint = token.functions.mint(Web3.to_checksum_address(funder.signer_address), 10_000_000)
+    transaction = mint.build_transaction(
+        {"from": minter.address, "nonce": web3.eth.get_transaction_count(minter.address)}
+    )
+    web3.eth.wait_for_transaction_receipt(
+        web3.eth.send_raw_transaction(minter.sign_transaction(transaction).raw_transaction)
+    )
+    terms = evm_terms(
+        "erc20-to-ln/v1",
+        htlc=anvil["htlc"],
+        token=anvil["token"],
+        client=funder.signer_address,
+        provider=receiver,
+        timelock=gas_signer.block_number() + 1000,
+    )
+    params = LockParams.from_terms(terms)
+    approval = funder.ensure_allowance(anvil["token"], params.amount)
+    assert approval is not None
+    _mined(funder, approval)
+    _mined(funder, funder.lock(params))
+    redirected = LockParams(
+        params.preimage_hash,
+        params.amount,
+        params.token,
+        gas_signer.signer_address,
+        params.refund_address,
+        params.timelock,
+    )
+    with pytest.raises(EvmBackendError, match="would revert"):
+        gas_signer.claim(redirected, PREIMAGE)
+    _mined(gas_signer, gas_signer.claim(params, PREIMAGE))
+    assert gas_signer.token_balance(anvil["token"], receiver) == params.amount
+    assert gas_signer.token_balance(anvil["token"], gas_signer.signer_address) == 0
+
+
+@pytest.mark.anvil
 def test_anvil_superseded_needs_our_nonce_mined_by_another_transaction(
     anvil: dict[str, Any],
 ) -> None:

@@ -333,6 +333,7 @@ def _evm_settlement(
         normal_fee_sat=functools.partial(
             normal_service_fee, config.terms.base_fee_sat, config.terms.proportional_millionths
         ),
+        claim_address=evm.claim_address,
     )
 
 

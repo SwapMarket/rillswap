@@ -384,10 +384,22 @@ clients check that the discounted service fee stays below the advertised one.
 The BTC reserve is the `bitcoin_core` wallet: point a BTC to LN provider's
 `provider_destination_script` at an address of the wallet the LN to BTC
 provider funds from, and both share one reserve. EVM profiles must serve only
-USD stablecoins; their reserve is the process's own signer token balance,
-converted at the configured `rate_token_base_per_btc`. Two EVM processes share
-Lightning but not tokens: move tokens between their signers yourself. Reading the
-BTC reserve uses Core's `getbalances`, as LN to BTC funding does; while a
+USD stablecoins; their reserve is the token balance of the funding signer, or
+the forward maker's configured claim recipient, converted at the configured
+`rate_token_base_per_btc`.
+
+To share a token pool without sharing keys, set `evm.claim_address` in the
+ERC20 to LN process to the LN to ERC20 maker's funding address. Forward claims
+pay that address directly; the forward signer pays gas and needs no token
+balance. The reverse process keeps its own signer and omits `claim_address`
+(it is refused outside ERC20 to LN). Use a lowercase, nonzero address whose
+key you control. Cooperative refunds require the recipient's signature; the
+forward gas signer cannot authorize them when it uses a different key.
+Changing this setting affects only new quotes: existing swaps and recovery
+transactions retain the recipient in their signed terms. Omitting it keeps
+the old signer-as-recipient behavior. Older releases refuse the new field.
+
+Reading the BTC reserve uses Core's `getbalances`, as LN to BTC funding does; while a
 backend read fails, the provider logs `liquidity sample unavailable` and
 prices the normal fee.
 
