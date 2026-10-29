@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from time import time as wall_clock
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
@@ -139,8 +138,6 @@ def _run(
     async def exercise(crypto: Context) -> tuple[NativeSdk, reverse.ReverseSwapOutcome]:
         fixture = NativeSdk(crypto, tmp_path, monkeypatch)
         _featured(fixture, monkeypatch)
-        # Snapshots are stamped by the real wall clock; keep the claimant on it.
-        monkeypatch.setattr(reverse.time, "time", wall_clock)
         if mode == "cutoff":
             _tip_once_paid(
                 fixture,

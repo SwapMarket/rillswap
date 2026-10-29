@@ -388,7 +388,6 @@ def test_native_sdk_explicit_terminal_mode_uses_original_claim_and_lifetime(  # 
             sdk.wallet.wallet_confirmations.side_effect = old_depth
         if claim_path == "cooperative":
             _featured(sdk, monkeypatch)
-            monkeypatch.setattr(reverse.time, "time", time.time)
 
             async def receive(
                 wanted: Callable[[Envelope], bool],

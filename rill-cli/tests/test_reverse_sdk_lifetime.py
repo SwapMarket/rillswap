@@ -33,7 +33,7 @@ from test_live_reverse_swap import _segwit_claim
 from test_recovery_cli import NATIVE_LIBRARY, NATIVE_ONLY, _fixture
 
 from rill_cli import live_reverse_swap as reverse
-from rill_cli import swap_command
+from rill_cli import live_swap, swap_command
 from rill_cli.live_swap import SwapError, _Session
 from rill_cli.wallet_rpc import ConfirmedOutput
 
@@ -164,6 +164,8 @@ class NativeSdk:
         monkeypatch.setattr(
             reverse, "time", Mock(time=lambda: initial["updated_at"], monotonic=self.now)
         )
+        # Funded recovery and later claimant snapshots must use the same fixture clock.
+        monkeypatch.setattr(live_swap, "time", reverse.time)
         monkeypatch.setattr(reverse, "POLL_SECONDS", 0.001)
         # A provider that announced no funding depth unless a test sets one.
         self.discover = AsyncMock(return_value={"profiles": ["ln-to-btc/v1"]})
@@ -246,6 +248,30 @@ class NativeSdk:
             settle_timeout=settle_timeout,
             report=self.reports.append,
         )
+
+
+@NATIVE_ONLY
+@pytest.mark.native_crypto
+def test_native_reverse_rejects_quote_that_expires_before_acceptance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def exercise(crypto: Context) -> None:
+        fixture = NativeSdk(crypto, tmp_path, monkeypatch)
+
+        def write(candidate: bytes, previous: bytes | None) -> None:
+            fixture.write(candidate, previous)
+            monkeypatch.setattr(reverse.time, "time", lambda: fixture.terms.terms_expiry)
+
+        with pytest.raises(SwapError, match="quote expired before acceptance"):
+            await fixture.run(write)
+        assert len(fixture.documents) == 1
+        fixture.payer.pay.assert_not_called()
+        fixture.funding.assert_not_called()
+        fixture.wallet.broadcast.assert_not_called()
+
+    with Context(library_path=NATIVE_LIBRARY) as crypto:
+        asyncio.run(exercise(crypto))
 
 
 @NATIVE_ONLY
