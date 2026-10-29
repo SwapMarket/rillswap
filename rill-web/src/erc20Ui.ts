@@ -23,6 +23,7 @@ function node<K extends keyof HTMLElementTagNameMap>(tag: K, text = "", id = "")
 
 /** `1005000` with 6 decimals is `1.005`; trailing zeros are dropped. */
 export function formatTokenAmount(base: bigint, decimals: number): string {
+  if (base < 0n) return `-${formatTokenAmount(-base, decimals)}`;
   const unit = 10n ** BigInt(decimals);
   const whole = base / unit, fraction = (base % unit).toString().padStart(decimals, "0").replace(/0+$/, "");
   return fraction ? `${whole}.${fraction}` : whole.toString();

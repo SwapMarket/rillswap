@@ -29,7 +29,7 @@ import {
 import { reconstructTaprootContract, type TaprootContract } from "./swap/taproot";
 import { MAX_TRANSACTION_BYTES, parseTransaction, serializeTransaction, type Transaction } from "./swap/transaction";
 import {
-  COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_EXTENSION, EPOCH_SESSION_FEATURE, MAX_SATS, sats,
+  COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_EXTENSION, EPOCH_SESSION_FEATURE, MAX_SATS, sats, signedSats,
   verifySchnorr, type BtcToLnTerms, type LnToBtcTerms, type HandshakeAccept, type HandshakeInit,
 } from "./swap/wire";
 
@@ -147,13 +147,13 @@ function checkTerms(terms: BtcToLnTerms | LnToBtcTerms): void {
   if (terms.profile_id === "btc-to-ln/v1") {
     require(terms.economics.kind === "btc-to-ln" && terms.timing_policy.kind === "btc-to-ln" && terms.claimant === "provider" && terms.refund_party === "client");
     principal = sats(terms.economics.lightning_principal_sat, "principal", true);
-    const fee = sats(terms.economics.success_fee_sat, "success fee");
+    const fee = signedSats(terms.economics.success_fee_sat, "success fee");
     require(principal + fee === sats(terms.economics.contract_amount_sat, "contract amount", true));
     require(terms.timing_policy.max_outgoing_htlc_expiry_height + terms.timing_policy.learn_and_claim_blocks < terms.refund_lock_height + 1);
   } else {
     require(terms.profile_id === "ln-to-btc/v1" && terms.economics.kind === "ln-to-btc" && terms.timing_policy.kind === "ln-to-btc" && terms.claimant === "client" && terms.refund_party === "provider");
     const e = terms.economics, value = sats(e.contract_amount_sat, "value", true), payout = sats(e.nominal_payout_sat, "payout", true),
-      reserve = sats(e.claim_fee_reserve_sat, "reserve"), fee = sats(e.success_fee_sat, "fee"), prepayment = sats(e.mining_prepayment_sat, "prepayment");
+      reserve = sats(e.claim_fee_reserve_sat, "reserve"), fee = signedSats(e.success_fee_sat, "fee"), prepayment = sats(e.mining_prepayment_sat, "prepayment");
     principal = sats(e.hold_invoice_sat, "hold", true);
     // This browser supports no mining prepayment, historical or live.
     require(prepayment === 0n && value === payout + reserve && value + fee <= MAX_SATS && principal === value + fee);

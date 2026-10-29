@@ -30,3 +30,15 @@ export function fundingWaitText(profile: "btc-to-ln/v1" | "ln-to-btc/v1", depth:
     ? "The provider pays as soon as it sees your deposit, before any confirmation."
     : `The provider pays after ${confirmationsLabel(depth)} of your deposit (${minutes}).`;
 }
+
+/** A negative fee is a rebate the provider pays: name it and show its magnitude. */
+export function signedFeeText(label: string, fee: bigint, format: (amount: bigint) => string): string {
+  return fee < 0n ? `${label} rebate: ${format(-fee)}` : `${label} fee: ${format(fee)}`;
+}
+
+/** The clause after "Send exactly X BTC (Y sat, ...". */
+export function fundingFeeClause(feeSat: bigint): string {
+  return feeSat < 0n
+    ? `after the ${(-feeSat).toLocaleString()} sat provider rebate`
+    : `including the ${feeSat.toLocaleString()} sat provider fee`;
+}

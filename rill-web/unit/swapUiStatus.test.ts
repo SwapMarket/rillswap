@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { confirmationsLabel, fundingWaitText, quoteSelectionLabel, stoppedSwapAdvice } from "../src/swapUiStatus";
+import {
+  confirmationsLabel, fundingFeeClause, fundingWaitText, quoteSelectionLabel, signedFeeText, stoppedSwapAdvice,
+} from "../src/swapUiStatus";
 
 test("failure before sharing does not claim independently broadcast funds are uncommitted", () => {
   const advice = stoppedSwapAdvice(false);
@@ -36,4 +38,17 @@ test("funding waits never present an unannounced depth as zero or one", () => {
   expect(fundingWaitText("btc-to-ln/v1", 0)).toContain("before any confirmation");
   expect(fundingWaitText("btc-to-ln/v1", 2)).toContain("after 2 confirmations of your deposit (about 20 min)");
   expect(fundingWaitText("ln-to-btc/v1", 1)).toBe("Payout after 1 confirmation (about 10 min).");
+});
+
+test("a negative provider fee is shown as a rebate of its magnitude", () => {
+  const sat = (value: bigint) => `${value} sat`;
+  expect(signedFeeText("Provider", 1_000n, sat)).toBe("Provider fee: 1000 sat");
+  expect(signedFeeText("Provider", 0n, sat)).toBe("Provider fee: 0 sat");
+  expect(signedFeeText("Provider", -100n, sat)).toBe("Provider rebate: 100 sat");
+  expect(signedFeeText("Service", -5n, sat)).toBe("Service rebate: 5 sat");
+});
+
+test("funding instructions explain whether the amount includes a fee or reflects a rebate", () => {
+  expect(fundingFeeClause(900n)).toBe("including the 900 sat provider fee");
+  expect(fundingFeeClause(-100n)).toBe("after the 100 sat provider rebate");
 });

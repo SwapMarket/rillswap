@@ -172,6 +172,11 @@
     }
   ],
   "$defs": {
+    "signedDecimalSats": {
+      "description": "A fee in satoshis; negative when the provider pays a rebate. No -0.",
+      "type": "string",
+      "pattern": "^(0|-?[1-9][0-9]{0,15})$"
+    },
     "invoiceBinding": {
       "type": "object",
       "additionalProperties": false,
@@ -220,7 +225,7 @@
           "$ref": "common-v1.schema.json#/$defs/decimalSats"
         },
         "success_fee_sat": {
-          "$ref": "common-v1.schema.json#/$defs/decimalSats"
+          "$ref": "#/$defs/signedDecimalSats"
         },
         "contract_amount_sat": {
           "$ref": "common-v1.schema.json#/$defs/decimalSats"
@@ -253,7 +258,7 @@
           "$ref": "common-v1.schema.json#/$defs/decimalSats"
         },
         "success_fee_sat": {
-          "$ref": "common-v1.schema.json#/$defs/decimalSats"
+          "$ref": "#/$defs/signedDecimalSats"
         },
         "mining_prepayment_sat": {
           "$ref": "common-v1.schema.json#/$defs/decimalSats"

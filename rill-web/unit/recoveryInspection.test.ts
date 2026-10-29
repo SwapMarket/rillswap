@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import canonicalize from "canonicalize";
 import { inspectRecoveryPlaintext, RecoveryInspectionRefusedError } from "../src/recoveryInspection";
 import { recoveryInspectionCases } from "./fixtures/recoveryInspectionCases";
-import { fixtureRecord, reservedRecord } from "./fixtures/recoveryInspectionFixture";
+import { fixtureRecord, reservedRecord, signRecord } from "./fixtures/recoveryInspectionFixture";
 
 const bytes = (value: unknown): Uint8Array => new TextEncoder().encode(canonicalize(value)!);
 
@@ -44,4 +44,17 @@ test("absent/invalid network expectations and malformed input fail redacted with
       expect(JSON.stringify(error)).not.toContain("private-error-canary");
     }
   }
+});
+
+test("a historical record with a provider rebate is inspected, and its equation still binds", () => {
+  const rebate = (contract: (principal: bigint) => bigint) => {
+    const record = fixtureRecord(), economics = record.contract_terms.economics;
+    economics.success_fee_sat = "-100";
+    economics.contract_amount_sat = contract(BigInt(economics.lightning_principal_sat)).toString();
+    return signRecord(record);
+  };
+  const valid = rebate((principal) => principal - 100n);
+  expect(inspectRecoveryPlaintext(bytes(valid), valid.network_identity).verification).toBe("historical-static");
+  const wrong = rebate((principal) => principal + 100n);
+  expect(() => inspectRecoveryPlaintext(bytes(wrong), wrong.network_identity)).toThrow(RecoveryInspectionRefusedError);
 });

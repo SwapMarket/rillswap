@@ -33,7 +33,7 @@ import type { PreparedReverseQuote, ReverseSwapRequest } from "./swap/reverseSwa
 import type { FeeBreakdown } from "./swap/feePolicy";
 
 import { invoiceBinding } from "./swap/bolt11";
-import { confirmationsLabel, fundingWaitText, quoteSelectionLabel, stoppedSwapAdvice } from "./swapUiStatus";
+import { confirmationsLabel, fundingFeeClause, fundingWaitText, quoteSelectionLabel, signedFeeText, stoppedSwapAdvice } from "./swapUiStatus";
 import { ASSETS, type AssetId, routeFor, STABLECOIN_SYMBOL } from "./swapPairs";
 import { recoveryPanel } from "./recoveryUi";
 import { parseSwapLink, swapLinkFragment } from "./swapLink";
@@ -50,7 +50,7 @@ const DIRECTORY_REFRESH_MS = 5 * 60_000;
 const SOURCE_CODE_URL = "https://github.com/rillswap/rillswap";
 
 const providerFeeDetails = (fee?: FeeBreakdown): string => fee
-  ? ` Service: ${fee.service_fee_sat} sat. Network estimate: ${fee.network_fee_sat} sat (154 vB at ${Number(fee.feerate_sat_kvb) / 1000} sat/vB). Advertised outbound LN cap: ${fee.policy.max_routing_fee_ppm} ppm, inside the service fee.`
+  ? ` ${signedFeeText("Service", BigInt(fee.service_fee_sat), (value) => `${value} sat`)}. Network estimate: ${fee.network_fee_sat} sat (154 vB at ${Number(fee.feerate_sat_kvb) / 1000} sat/vB). Advertised outbound LN routing cap: ${fee.policy.max_routing_fee_ppm} ppm, paid by the provider.`
   : "";
 
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, text = "", id?: string): HTMLElementTagNameMap[K] {
@@ -997,7 +997,7 @@ function mount(root: HTMLElement): void {
           priceClaim.textContent = quoteSelectionLabel(selected === arrivals[0], arrivals.length, mode);
           quoteSummary.replaceChildren(node("h2", tokenLabel(quote.lockAmountTokenBase, asset)),
             node("p", `Pays your ${principal.toLocaleString()} sat invoice at ${tokenLabel(quote.rateTokenBasePerBtc, asset)} per BTC. ` +
-              `Provider fee: ${tokenLabel(quote.successFeeTokenBase, asset)}. Your wallet's gas is extra.`),
+              `${signedFeeText("Provider", quote.successFeeTokenBase, (value) => tokenLabel(value, asset))}. Your wallet's gas is extra.`),
             node("small", `The provider pays after ${quote.fundingConfirmations} EVM block confirmation${quote.fundingConfirmations === 1 ? "" : "s"} of your lock. ` +
               `Refundable from EVM block ${quote.timelockBlock} if the provider never pays. Offer expires ${new Date(quote.expiresAt * 1000).toLocaleTimeString()}.`));
         };
@@ -1108,7 +1108,7 @@ function mount(root: HTMLElement): void {
           priceClaim.textContent = quoteSelectionLabel(selected === arrivals[0], arrivals.length, mode);
           summary.replaceChildren(node("h2", `${BigInt(offer.economics.hold_invoice_sat).toLocaleString()} sat`),
             node("p", `Pay over Lightning to receive ${tokenLabel(payoutTokenBase, asset)} on ${asset.name}. ` +
-              `Provider fee: ${offer.economics.success_fee_sat} sat. Your EVM wallet pays claim gas.`),
+              `${signedFeeText("Provider", BigInt(offer.economics.success_fee_sat), (value) => `${value} sat`)}. Your EVM wallet pays claim gas.`),
             node("small", `Claim after ${offer.funding_confirmations} EVM block confirmation${offer.funding_confirmations === 1 ? "" : "s"} of the provider's lock. ` +
               `Claim window: ${offer.timelock_delay_blocks} EVM blocks. Lightning hold budget: ${offer.incoming_htlc_expiry_delta_blocks} Bitcoin blocks.`));
         };
@@ -1249,7 +1249,7 @@ function mount(root: HTMLElement): void {
         const review = node("div", "", "swap-quote-review");
         review.append(node("p", "Estimated price", "swap-quote-kind"), node("h2", `${quote.holdInvoiceSat.toLocaleString()} sat`),
           node("p", `You pay this over Lightning (plus your wallet's routing fee) and receive ${quote.payoutSat.toLocaleString()} sat on-chain.`),
-          node("small", `Provider fee: ${quote.successFeeSat.toLocaleString()} sat. Claim fee reserve: ${quote.claimFeeReserveSat.toLocaleString()} sat. ` +
+          node("small", `${signedFeeText("Provider", quote.successFeeSat, (value) => `${value.toLocaleString()} sat`)}. Claim fee reserve: ${quote.claimFeeReserveSat.toLocaleString()} sat. ` +
             `${fundingWaitText("ln-to-btc/v1", quote.fundingConfirmations)} ` +
             `If the swap fails, your Lightning payment may stay pending for up to about ${quote.incomingHtlcExpiryDeltaBlocks} blocks. ` +
             `Estimate expires ${new Date(quote.expiresAt * 1000).toLocaleTimeString()}.`),
@@ -1471,7 +1471,7 @@ function mount(root: HTMLElement): void {
           const quote = selected.prepared.quote;
           priceClaim.textContent = quoteSelectionLabel(selected === arrivals[0], arrivals.length, mode);
           quoteSummary.replaceChildren(node("h2", `${quote.contractAmountSat.toLocaleString()} sat`),
-            node("p", `Provider fee: ${quote.successFeeSat.toLocaleString()} sat. Your wallet's network fee is extra. ` +
+            node("p", `${signedFeeText("Provider", quote.successFeeSat, (value) => `${value.toLocaleString()} sat`)}. Your wallet's network fee is extra. ` +
               fundingWaitText("btc-to-ln/v1", quote.fundingConfirmations) + providerFeeDetails(quote.feeBreakdown)),
             node("small", `Refund after block ${quote.refundLockHeight}. Offer expires ${new Date(quote.expiresAt * 1000).toLocaleTimeString()}.`));
         };
@@ -1608,7 +1608,7 @@ function fundingPrompt(panel: HTMLElement, networkName: NetworkName, request: Fu
   panel.replaceChildren(
     node("h2", "Send Bitcoin to fund the swap"),
     node("p", `Send exactly ${btc(request.amountSat)} BTC (${request.amountSat.toLocaleString()} sat, ` +
-      `including the ${request.successFeeSat.toLocaleString()} sat provider fee) from any wallet to:`),
+      `${fundingFeeClause(request.successFeeSat)}) from any wallet to:`),
     qrSvg(uri, `QR code: ${uri}`, "swap-funding-qr"),
     node("pre", address, "swap-contract-address"),
     open, copy,

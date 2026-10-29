@@ -53,6 +53,15 @@ describe("erc20-to-ln terms offer", () => {
     expect(lockAmountTokenBase(1n, 3n, 0n)).toBe(1n); // ceiling
   });
 
+  test("a signed token rebate lowers the lock, and the lock equation still holds", () => {
+    const rebate = { ...TERMS, economics: { ...TERMS.economics, success_fee_token_base: "-1000", lock_amount_token_base: "99999000" } };
+    expect(lockOf(checkErc20TermsOffer(signed(rebate), context(rebate))).amount).toBe(99_999_000n);
+    const wrong = { ...TERMS, economics: { ...rebate.economics, lock_amount_token_base: "100001000" } };
+    expect(() => checkErc20TermsOffer(signed(wrong), context(wrong))).toThrow("lock amount");
+    const negativeZero = { ...TERMS, economics: { ...TERMS.economics, success_fee_token_base: "-0", lock_amount_token_base: "100000000" } };
+    expect(() => checkErc20TermsOffer(signed(negativeZero), context(negativeZero))).toThrow(ProtocolError);
+  });
+
   test.each<[string, Partial<Erc20ToLnTerms>, string]>([
     ["lock amount", { economics: { ...TERMS.economics, lock_amount_token_base: "100200001" } }, "lock amount"],
     ["success fee", { economics: { ...TERMS.economics, success_fee_token_base: "2000000", lock_amount_token_base: "102000000" } }, "success fee"],

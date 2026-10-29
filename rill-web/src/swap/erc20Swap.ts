@@ -135,6 +135,12 @@ const tokenUnits = (value: string, what: string): bigint => {
   return BigInt(value);
 };
 
+/** A canonical signed token fee (never `-0`); negative when the provider pays a rebate. */
+const signedTokenUnits = (value: string, what: string): bigint => {
+  if (!/^(0|-?[1-9][0-9]{0,38})$/.test(value)) throw new ProtocolError(`${what} is not a signed decimal token amount`);
+  return BigInt(value);
+};
+
 /** The exact HTLC lock the signed terms describe. */
 export function lockOf(terms: EvmTerms): HtlcLock {
   const forward = terms.profile_id === ERC20_TO_LN;
@@ -160,7 +166,7 @@ export function checkErc20TermsOffer(payload: unknown, context: Erc20OfferContex
   const economics = terms.economics;
   const principal = sats(economics.lightning_principal_sat, "principal", true);
   const rate = tokenUnits(economics.rate_token_base_per_btc, "rate");
-  const fee = tokenUnits(economics.success_fee_token_base, "success fee");
+  const fee = signedTokenUnits(economics.success_fee_token_base, "success fee");
   const lock = tokenUnits(economics.lock_amount_token_base, "lock amount");
   checkEvmAddress(terms.provider_evm_address, "provider EVM address");
   const checks: [boolean, string][] = [

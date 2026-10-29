@@ -13,7 +13,7 @@ import { stagingAddress } from "./gasSponsor";
 import { clientAcceptanceHash } from "./hashes";
 import { handshake, newKeyPair } from "./handshake";
 import { Session, SwapError, type RelayLink } from "./session";
-import { checkSignedOfferBinding, MAX_SATS, ProtocolError, requireAnnouncedDepth, requireShape, same, sats } from "./wire";
+import { checkSignedOfferBinding, MAX_SATS, ProtocolError, requireAnnouncedDepth, requireShape, same, sats, signedSats } from "./wire";
 
 export const LN_TO_ERC20 = "ln-to-erc20/v1";
 export interface LnErc20Request {
@@ -57,7 +57,7 @@ export function payoutSatEquivalent(payout: bigint, rate: bigint): bigint {
 
 function checkEconomics(economics: LnToErc20Terms["economics"], payout: bigint, maxFee: bigint): void {
   const equivalent = payoutSatEquivalent(BigInt(economics.payout_token_base), BigInt(economics.rate_token_base_per_btc));
-  const fee = sats(economics.success_fee_sat, "provider fee"), hold = sats(economics.hold_invoice_sat, "hold invoice", true);
+  const fee = signedSats(economics.success_fee_sat, "provider fee"), hold = sats(economics.hold_invoice_sat, "hold invoice", true);
   if (BigInt(economics.payout_token_base) !== payout || equivalent > MAX_SATS ||
       equivalent !== sats(economics.payout_sat_equivalent, "payout equivalent", true) || fee > maxFee || equivalent + fee !== hold) {
     throw new ProtocolError("reverse stablecoin economics do not honor the requested payout and fee");

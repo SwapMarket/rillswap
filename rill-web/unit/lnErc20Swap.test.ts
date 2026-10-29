@@ -73,6 +73,17 @@ test("indicative shopping validates token economics and timing without an invoic
   }
 });
 
+test("a signed rebate lowers the hold invoice, which must still equal E + S", () => {
+  const request = { network: fixture.network_identity, payoutTokenBase: 51_000_000n, asset: ASSET,
+    limits: { maxSuccessFeeSat: 0n, minTimelockDelayBlocks: 600, maxIncomingHtlcDelayBlocks: 200 } };
+  const offer = (hold: string) => ({ kind: "ln-to-erc20", indicative: true, evm_asset: ASSET,
+    economics: { ...TERMS.economics, success_fee_sat: "-100", hold_invoice_sat: hold },
+    funding_confirmations: 2, settlement_confirmations: 2, evm_reference_block: 1000, timelock_delay_blocks: 1800,
+    incoming_htlc_expiry_delta_blocks: 200, expires_at: NOW + 600, extensions: {} });
+  expect(checkLnErc20QuoteOffer(offer("50900"), request, NOW).economics.success_fee_sat).toBe("-100");
+  expect(() => checkLnErc20QuoteOffer(offer("51000"), request, NOW)).toThrow();
+});
+
 test("reverse recovery persists invoice and preimage; malformed or partial records never authorize a claim", () => {
   const parts = { network: TERMS.network_identity, init: fixture.verification_context.handshake_init as never,
     accept: fixture.verification_context.handshake_accept as never, acceptSignature: "11".repeat(64), offer: signedReverse(),

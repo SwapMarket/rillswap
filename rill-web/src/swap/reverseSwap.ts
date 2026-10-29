@@ -10,7 +10,9 @@ import { handshake } from "./handshake";
 import { checkFeeBreakdown, FEE_POLICY_FEATURE, networkFeeRequest, type FeeBreakdown } from "./feePolicy";
 import { type RelayLink, Session, SwapError } from "./session";
 import type { SwapRequest } from "./swap";
-import { MAX_SATS, ProtocolError, requireAnnouncedDepth, requireShape, reverseClaimFeeReserveCeiling, sats } from "./wire";
+import {
+  MAX_SATS, prepaymentAllowance, ProtocolError, requireAnnouncedDepth, requireShape, reverseClaimFeeReserveCeiling, sats, signedSats,
+} from "./wire";
 import { prepareReverseExecution, type PreparedReverseExecution, type ReverseExecutionConfiguration } from "./reverseExecution";
 
 export const REVERSE_PROFILE = "ln-to-btc/v1";
@@ -78,10 +80,10 @@ export function checkReverseQuoteOffer(payload: unknown, request: Omit<ReverseSw
   const contract = sats(economics.contract_amount_sat, "contract amount", true);
   const payout = sats(economics.nominal_payout_sat, "payout", true);
   const reserve = sats(economics.claim_fee_reserve_sat, "claim fee reserve");
-  const fee = sats(economics.success_fee_sat, "success fee");
+  const fee = signedSats(economics.success_fee_sat, "success fee");
   const prepayment = sats(economics.mining_prepayment_sat, "mining prepayment");
   const hold = sats(economics.hold_invoice_sat, "hold invoice", true);
-  if (payout + reserve !== contract || prepayment > fee || contract + fee > MAX_SATS || contract + fee - prepayment !== hold) {
+  if (payout + reserve !== contract || prepayment > prepaymentAllowance(fee) || contract + fee > MAX_SATS || contract + fee - prepayment !== hold) {
     throw new ProtocolError("quote economics are inconsistent");
   }
   if (prepayment !== 0n) throw new ProtocolError("mining prepayment is not supported");

@@ -54,6 +54,17 @@ export function sats(value: string, what: string, positive = false): bigint {
   return amount;
 }
 
+/** A canonical signed fee (never `-0`); negative when the provider pays a rebate. */
+export function signedSats(value: string, what: string): bigint {
+  if (!/^(0|-?[1-9][0-9]{0,15})$/.test(value)) throw new ProtocolError(`${what} malformed`);
+  const amount = BigInt(value);
+  if (amount > MAX_SATS || -amount > MAX_SATS) throw new ProtocolError(`${what} out of range`);
+  return amount;
+}
+
+/** A mining prepayment is only allowed against a positive success fee. */
+export const prepaymentAllowance = (fee: bigint): bigint => (fee > 0n ? fee : 0n);
+
 export function verifySchnorr(key: string, digest: Uint8Array, signature: string, what: string): void {
   let ok = false;
   try {
@@ -246,7 +257,7 @@ export function checkBtcToLnTerms(terms: BtcToLnTerms): void {
   }
   if (terms.claimant !== "provider" || terms.refund_party !== "client") throw new ProtocolError("roles reversed");
   const principal = sats(economics.lightning_principal_sat, "principal", true);
-  const fee = sats(economics.success_fee_sat, "success fee");
+  const fee = signedSats(economics.success_fee_sat, "success fee");
   if (principal + fee !== sats(economics.contract_amount_sat, "contract amount", true)) {
     throw new ProtocolError("economics must satisfy V = L + S");
   }
@@ -422,11 +433,11 @@ export function checkLnToBtcTerms(terms: LnToBtcTerms): void {
   const contract = sats(economics.contract_amount_sat, "contract amount", true);
   const payout = sats(economics.nominal_payout_sat, "payout", true);
   const reserve = sats(economics.claim_fee_reserve_sat, "claim fee reserve");
-  const fee = sats(economics.success_fee_sat, "success fee");
+  const fee = signedSats(economics.success_fee_sat, "success fee");
   const prepayment = sats(economics.mining_prepayment_sat, "mining prepayment");
   const hold = sats(economics.hold_invoice_sat, "hold invoice", true);
   if (payout + reserve !== contract) throw new ProtocolError("economics must satisfy V = D + C");
-  if (prepayment > fee || contract + fee > MAX_SATS || contract + fee - prepayment !== hold) {
+  if (prepayment > prepaymentAllowance(fee) || contract + fee > MAX_SATS || contract + fee - prepayment !== hold) {
     throw new ProtocolError("economics must satisfy H = V + S - M");
   }
   // Prepayment needs a feature this client never negotiates (checkHandshakeAccept).

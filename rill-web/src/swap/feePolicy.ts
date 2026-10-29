@@ -52,6 +52,14 @@ function amount(value: unknown, positive = false): bigint {
   return result;
 }
 
+/** A signed service fee (never `-0`): a provider may discount, even below zero. */
+function signedAmount(value: unknown): bigint {
+  require(typeof value === "string" && /^(0|-?[1-9][0-9]{0,15})$/.test(value), "malformed amount");
+  const result = BigInt(value);
+  require(result <= MAX_SATS && -result <= MAX_SATS, "amount out of range");
+  return result;
+}
+
 export function parseFeePolicy(extensions: Record<string, unknown>): BtcFeePolicy | undefined {
   if (!Object.hasOwn(extensions, FEE_POLICY_EXTENSION)) return undefined;
   const policy = record(extensions[FEE_POLICY_EXTENSION], ["model", "base_sat", "proportional_millionths", "max_network_feerate_sat_kvb", "max_routing_fee_ppm"]);
@@ -100,13 +108,14 @@ export function checkFeeBreakdown(
   const entry = record(value, ["offer_event_id", "policy", "feerate_sat_kvb", "estimated_at", "issued_at", "service_fee_sat", "network_fee_sat"]);
   const policy = parseFeePolicy({ [FEE_POLICY_EXTENSION]: entry.policy })!;
   require(typeof entry.offer_event_id === "string" && HEX32.test(entry.offer_event_id), "announcement ID malformed");
-  const rate = amount(entry.feerate_sat_kvb, true), service = amount(entry.service_fee_sat), network = amount(entry.network_fee_sat);
+  const rate = amount(entry.feerate_sat_kvb, true), service = signedAmount(entry.service_fee_sat), network = amount(entry.network_fee_sat);
   const issued = integer(entry.issued_at), estimated = integer(entry.estimated_at);
   require(issued >= estimated && issued - estimated <= 10, "stale or future estimate");
   require(rate <= BigInt(policy.max_network_feerate_sat_kvb), "feerate exceeds advertised maximum");
   require(network === (NETWORK_FEE_VBYTES * rate + 999n) / 1000n, "network fee differs from transaction-size model");
   const principal = BigInt(terms.economics.kind === "btc-to-ln" ? terms.economics.lightning_principal_sat : terms.economics.nominal_payout_sat);
-  require(service === BigInt(policy.base_sat) + (principal * BigInt(policy.proportional_millionths) + 999_999n) / 1_000_000n, "service fee differs from advertised policy");
+  // The advertised formula is a ceiling: discounts (even rebates) are allowed, surcharges are not.
+  require(service <= BigInt(policy.base_sat) + (principal * BigInt(policy.proportional_millionths) + 999_999n) / 1_000_000n, "service fee exceeds advertised policy");
   require(service + network === BigInt(terms.economics.success_fee_sat), "breakdown does not sum to success fee");
   require(network <= BigInt(terms.profile_id === "btc-to-ln/v1" ? terms.max_claim_fee_sat : terms.max_funding_fee_sat), "network charge exceeds spend cap");
   require(terms.terms_expiry > issued && terms.terms_expiry - issued <= 60, "acceptance lifetime exceeds 60 seconds");

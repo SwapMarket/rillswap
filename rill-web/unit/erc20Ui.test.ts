@@ -10,6 +10,9 @@ describe("token amounts", () => {
     expect(formatTokenAmount(100_200_000n, 6)).toBe("100.2");
     expect(formatTokenAmount(0n, 6)).toBe("0");
     expect(formatTokenAmount(7n, 6)).toBe("0.000007");
+    expect(formatTokenAmount(-1_005_000n, 6)).toBe("-1.005"); // a provider rebate
+    expect(formatTokenAmount(-7n, 6)).toBe("-0.000007");
+    expect(formatTokenAmount(-2_000_000n, 6)).toBe("-2");
     expect(formatTokenAmount(10n ** 18n, 18)).toBe("1");
   });
   test("parse accepts at most the token's fraction digits", () => {
