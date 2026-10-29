@@ -5,7 +5,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { execFile, execFileSync } from "node:child_process";
 import { resolve } from "node:path";
-import { assertDisposableStack, composeEnabled } from "./stack";
+import { assertDisposableStack, composeEnabled, run } from "./stack";
 import { EvmRpc } from "../src/swap/evmHtlc";
 
 const root = resolve(import.meta.dirname, "../..");
@@ -50,6 +50,71 @@ async function disableSponsor(page: Page): Promise<void> {
   await page.locator("#swap-settings-toggle").click();
   for (const id of ["swap-evm-sponsor", "swap-evm-entry-point", "swap-evm-delegate"]) await page.locator(`#${id}`).fill("");
   await page.locator("#swap-settings-close").click();
+}
+
+for (const direction of ["erc20-to-ln", "ln-to-erc20"] as const) {
+  test(`two simultaneous browser ${direction} swaps settle independently`, async ({ context }) => {
+    test.skip(!enabled, "Explicit disposable Compose opt-in required");
+    test.setTimeout(300000);
+    const pages = await Promise.all([context.newPage(), context.newPage()]);
+    const errors: string[] = [];
+    const hashes: string[] = [];
+    await Promise.all(pages.map(async (page, index) => {
+      page.on("pageerror", (error) => errors.push(error.message));
+      await injectWallet(page);
+      await page.goto(`http://127.0.0.1:${webPort}/swap.html`);
+      if (direction === "erc20-to-ln") {
+        await page.locator("#swap-from").selectOption("usdc");
+        const invoice = command("invoice", String(20000 + index * 1000), "--node", "user");
+        hashes[index] = JSON.parse(command("lncli", "user", "decodepayreq", invoice)).payment_hash;
+        await page.locator("#swap-invoice").fill(invoice);
+      } else {
+        await disableSponsor(page);
+        await page.locator("#swap-from").selectOption("ln");
+        await page.locator("#swap-to").selectOption("usdc");
+        await page.locator("#swap-receive-amount").fill(String(20 + index));
+      }
+      await page.locator("#swap-start").click();
+      await expect(page.locator("#swap-quote-accept")).toBeVisible({ timeout: 60000 });
+    }));
+    // Both sessions have firm terms before either user commits funds.
+    await Promise.all(pages.map((page) => page.locator("#swap-quote-accept").click()));
+    if (direction === "erc20-to-ln") {
+      await Promise.all(pages.map((page) => expect(page.locator("#swap-status"))
+        .toContainText("Lightning invoice paid", { timeout: 150000 })));
+      const locks = await Promise.all(pages.map(async (page) =>
+        (await page.locator("#swap-erc20-paid").textContent())!.match(/Lock ([0-9a-f]{64})/)![1]!));
+      expect(new Set(locks).size).toBe(2);
+      for (const [index, lock] of locks.entries()) {
+        expect(JSON.parse(command("lncli", "user", "lookupinvoice", hashes[index]!)).state).toBe("SETTLED");
+        await expect.poll(() => makerState(lock), { timeout: 60000 }).toBe("CLAIMED");
+      }
+    } else {
+      const invoices = await Promise.all(pages.map(async (page) => {
+        await expect(page.locator("#swap-reverse-invoice")).toBeVisible({ timeout: 60000 });
+        return (await page.locator("#swap-reverse-invoice").textContent())!.trim();
+      }));
+      expect(new Set(invoices).size).toBe(2);
+      const payments = invoices.map((invoice) => run("pay", invoice, "--node", "user").then(
+        (output) => ({ output, error: undefined }), (error: unknown) => ({ output: "", error })));
+      await Promise.all(pages.map((page) => expect(page.locator("#swap-status"))
+        .toContainText("Stablecoins received", { timeout: 150000 })));
+      for (const result of await Promise.all(payments)) {
+        if (result.error) throw result.error;
+        expect(result.output).toContain("paid, preimage");
+      }
+      for (const invoice of invoices) {
+        const hash = JSON.parse(command("lncli", "user", "decodepayreq", invoice)).payment_hash;
+        expect(JSON.parse(command("lncli", "maker", "lookupinvoice", hash)).state).toBe("SETTLED");
+      }
+    }
+    for (const page of pages) {
+      await page.reload();
+      await expect(page.locator("#swap-recovery-result h3")).toHaveText(direction === "erc20-to-ln"
+        ? "fUSDC to Lightning recovery verified" : "Lightning to fUSDC recovery verified");
+    }
+    expect(errors).toEqual([]);
+  });
 }
 
 test("forward execution refuses changed real HTLC runtime before any approval", async ({ page }) => {

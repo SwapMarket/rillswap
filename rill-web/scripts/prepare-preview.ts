@@ -23,6 +23,10 @@ const evmJournal = await Bun.build({ entrypoints: ["src/evmClaimJournal.ts"], ou
 if (!evmJournal.success) throw new AggregateError(evmJournal.logs, "EVM journal preview build failed");
 writeFileSync("tmp/preview/test-only/evm-journal.html", '<!doctype html><script type="module">' +
   'import { EvmClaimJournal } from "./evmClaimJournal.js"; window.EvmClaimJournal = EvmClaimJournal; window.evmJournalReady = true;</script>');
+const erc20Ui = await Bun.build({ entrypoints: ["src/erc20Ui.ts"], outdir: "tmp/preview/test-only", target: "browser", format: "esm" });
+if (!erc20Ui.success) throw new AggregateError(erc20Ui.logs, "ERC20 funding lock test bundle failed");
+writeFileSync("tmp/preview/test-only/erc20-funding.html", '<!doctype html><script type="module">' +
+  'import { erc20FundingLock } from "./erc20Ui.js"; window.erc20FundingLock = erc20FundingLock;</script>');
 writeFileSync(
   "tmp/preview/test-only/journal.html",
   '<!doctype html><script type="module">import { reserveCooperation } from "./cooperationJournal.js";' +

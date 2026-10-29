@@ -291,6 +291,8 @@ export interface Erc20SwapHooks {
   saveRecovery(ciphertext: Uint8Array, stage: "terms" | "locked" | "paid"): Promise<void>;
   /** Approve the HTLC for `lock.amount` if needed and submit the lock; returns the lock tx hash. */
   lock(lock: HtlcLock, htlc: string): Promise<string>;
+  /** Hosts sharing one account must serialize funding by chain/account/token/HTLC through confirmation. */
+  withFundingLock?<T>(body: () => Promise<T>): Promise<T>;
   readonly rpc: EvmRpc;
   readonly signal?: AbortSignal;
 }
@@ -440,15 +442,21 @@ export async function prepareErc20Swap(
           await session.replyTo(accepted, "ack");
           window();
           const lock = lockOf(terms);
-          if (await hooks.rpc.chainId() !== asset.chain_id) throw new SwapError("wrong EVM RPC chain");
-          await hooks.rpc.verifyHtlc(asset.htlc_contract);
-          window();
-          const lockTxHash = await hooks.lock(lock, asset.htlc_contract);
-          const locked = { ...record, updatedAt: seconds(), lockTxHash };
-          await hooks.saveRecovery(await encryptEvmRecovery(locked, request.ageRecipient), "locked");
-          hooks.report(`lock ${lockTxHash} submitted; recovery record saved`);
-          const receipt = await awaitReceipt(hooks.rpc, lockTxHash, terms.funding_confirmations, hooks.signal ? { signal: hooks.signal } : {});
-          if (!receipt.status) throw new SwapError(`lock transaction ${lockTxHash} reverted; nothing is locked`);
+          const fund = async () => {
+            window(); // A queued wallet lock may outlive the signed funding window.
+            if (await hooks.rpc.chainId() !== asset.chain_id) throw new SwapError("wrong EVM RPC chain");
+            await hooks.rpc.verifyHtlc(asset.htlc_contract);
+            window();
+            const lockTxHash = await hooks.lock(lock, asset.htlc_contract);
+            const locked = { ...record, updatedAt: seconds(), lockTxHash };
+            await hooks.saveRecovery(await encryptEvmRecovery(locked, request.ageRecipient), "locked");
+            hooks.report(`lock ${lockTxHash} submitted; recovery record saved`);
+            const receipt = await awaitReceipt(hooks.rpc, lockTxHash, terms.funding_confirmations, hooks.signal ? { signal: hooks.signal } : {});
+            if (!receipt.status) throw new SwapError(`lock transaction ${lockTxHash} reverted; nothing is locked`);
+            return { locked, receipt };
+          };
+          const { locked, receipt } = await (hooks.withFundingLock ? hooks.withFundingLock(fund) : fund());
+          const { lockTxHash } = locked;
           hooks.report(`lock confirmed in block ${receipt.blockNumber}; waiting for the provider to pay`);
           const preimage = await awaitPayment(session, hooks, { contractHash, paymentHash: invoice.payment_hash, deadline: clock() + timeouts.settleMs, timelock: terms.htlc_timelock_block, lock, htlc: asset.htlc_contract, fromBlock: receipt.blockNumber });
           const paid = { ...locked, updatedAt: seconds(), preimage };

@@ -71,9 +71,18 @@ export interface Erc20ExecutionOptions {
   readonly signal?: AbortSignal;
 }
 
+/** Only the allowance-consuming funding step is exclusive, never Lightning settlement. */
+export function erc20FundingLock(asset: EvmAssetIdentity, account: string, signal?: AbortSignal): <T>(body: () => Promise<T>) => Promise<T> {
+  const locks = globalThis.navigator?.locks;
+  if (!locks) throw new WalletRefusedError("This browser cannot coordinate token funding across tabs. Use a browser with Web Locks support.");
+  const key = `rillswap-erc20-funding:${asset.chain_id}:${account.toLowerCase()}:${asset.token_contract.toLowerCase()}:${asset.htlc_contract.toLowerCase()}`;
+  return (body) => locks.request(key, { mode: "exclusive", ...(signal ? { signal } : {}) }, body);
+}
+
 /** Approve (if needed) and lock through the wallet, then wait for the provider's payment. */
 export async function mountErc20Execution(panel: HTMLElement, options: Erc20ExecutionOptions): Promise<Erc20SwapOutcome> {
   const { prepared, asset, rpc, wallet, account, report, status } = options;
+  const withFundingLock = erc20FundingLock(asset, account, options.signal);
   const files = node("section", "", "swap-erc20-files");
   const message = node("p", "", "swap-erc20-message");
   panel.replaceChildren(message, files);
@@ -100,6 +109,10 @@ export async function mountErc20Execution(panel: HTMLElement, options: Erc20Exec
   };
   const outcome = await prepared.execute({
     rpc,
+    withFundingLock: (body) => {
+      say("Waiting for this wallet's other swap to finish locking, if any", 2);
+      return withFundingLock(body);
+    },
     ...(options.signal ? { signal: options.signal } : {}),
     report: (line) => {
       report(line);

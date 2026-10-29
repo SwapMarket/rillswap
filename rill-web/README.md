@@ -7,6 +7,17 @@ signatures locally, and keeps encrypted recovery records in the browser.
 
 Supports mainnet, signet, testnet4, and regtest.
 
+Run simultaneous swaps in separate tabs, one active workflow per tab. Tabs
+share the recovery wallet but keep sessions, funding and recovery records
+separate. Providers can service multiple in-flight swaps.
+
+Token funding from the same account coordinates approval and lock confirmation
+across tabs using Web Locks. Other swaps can settle while a tab waits for its
+turn. Browsers without Web Locks cannot start token funding. SDK hosts sharing
+an EVM account must provide `Erc20SwapHooks.withFundingLock` to serialize that
+same funding span by chain, account, token and HTLC address. This coordination
+is origin-local, not a lock against other sites or wallet applications.
+
 <table>
   <tr>
     <td width="33%"><img src="../rill-docs/images/swap-quote.png" alt="Quote for a Bitcoin to Lightning swap"></td>
