@@ -144,16 +144,16 @@ export function checkHandshakeAccept(payload: unknown, init: HandshakeInit, send
     (init.profile_id === "btc-to-ln/v1" && !cooperative) || (init.profile_id.includes("erc20") && cooperative)) {
     throw new ProtocolError("cooperative claim must be jointly negotiated");
   }
-  if (required.has(EPOCH_SESSION_FEATURE)) {
-    const epoch = (init.extensions[EPOCH_SESSION_EXTENSION] as { epoch_inbox_xonly_key?: string } | undefined)
-      ?.epoch_inbox_xonly_key;
-    if (
-      !init.required_features.includes(EPOCH_SESSION_FEATURE) ||
-      !accept.required_features.includes(EPOCH_SESSION_FEATURE) ||
-      accept.provider_session_xonly_key === epoch
-    ) {
-      throw new ProtocolError("epoch-bound admission must be jointly negotiated");
-    }
+  // Every session is bound to one provider epoch (RS-001).
+  const epoch = (init.extensions[EPOCH_SESSION_EXTENSION] as { epoch_inbox_xonly_key?: string } | undefined)
+    ?.epoch_inbox_xonly_key;
+  if (
+    typeof epoch !== "string" ||
+    !init.required_features.includes(EPOCH_SESSION_FEATURE) ||
+    !accept.required_features.includes(EPOCH_SESSION_FEATURE) ||
+    accept.provider_session_xonly_key === epoch
+  ) {
+    throw new ProtocolError("epoch-bound admission must be jointly negotiated");
   }
   verifySchnorr(init.expected_provider_identity_xonly_key, handshakeAcceptHash(accept), signature, "handshake");
   if (accept.provider_session_xonly_key !== senderKey) {

@@ -44,13 +44,15 @@ test("an offer may wait fewer funding confirmations than announced, never more",
 describe("handshake accept", () => {
   const vector = auth.valid.find((item) => item.profile_id === "btc-to-ln/v1")!;
   const secret = hexToBytes(vector.handshake_accept.signer_secret_key);
-  // The vector predates mandatory cooperation; both halves now carry the feature.
+  // The vector is epoch-bound but predates mandatory cooperation. Each half keeps the epoch
+  // feature and gains only the listed ones.
+  const bound = (features: string[]) => [...features, EPOCH_SESSION_FEATURE].sort();
   const featured = (initFeatures: string[], acceptFeatures: string[]) => {
-    const init = { ...(vector.handshake_init.object as unknown as HandshakeInit), required_features: initFeatures };
+    const init = { ...(vector.handshake_init.object as unknown as HandshakeInit), required_features: bound(initFeatures) };
     const accept: Record<string, unknown> = {
       ...(vector.handshake_accept.object as Record<string, unknown>),
       handshake_init_hash: bytesToHex(handshakeInitHash(init)),
-      required_features: acceptFeatures,
+      required_features: bound(acceptFeatures),
     };
     const signature = bytesToHex(schnorr.sign(handshakeAcceptHash(accept), secret));
     return { init, accept, payload: { accept, provider_identity_signature: signature } };
@@ -67,8 +69,8 @@ describe("handshake accept", () => {
       accept: vector.handshake_accept.object,
       provider_identity_signature: vector.handshake_accept.signature,
     };
-    const legacy = vector.handshake_init.object as unknown as HandshakeInit;
-    expect(() => checkHandshakeAccept(unfeatured, legacy, sender)).toThrow("cooperative claim must be jointly");
+    const epochOnly = vector.handshake_init.object as unknown as HandshakeInit;
+    expect(() => checkHandshakeAccept(unfeatured, epochOnly, sender)).toThrow("cooperative claim must be jointly");
     const halves: Array<[string[], string[]]> = [[[COOPERATIVE_CLAIM_FEATURE], []], [[], [COOPERATIVE_CLAIM_FEATURE]]];
     for (const [initFeatures, acceptFeatures] of halves) {
       const half = featured(initFeatures, acceptFeatures);
@@ -110,25 +112,27 @@ describe("handshake accept", () => {
 
 describe("reverse handshake settlement selection", () => {
   const vector = auth.valid.find((item) => item.profile_id === "ln-to-btc/v1")!, secret = hexToBytes(vector.handshake_accept.signer_secret_key);
-  const selected = (initFeatures: string[], acceptFeatures: string[]) => {
+  // The vector init is bound to its epoch; `extensions` replaces that binding when given.
+  const selected = (initFeatures: string[], acceptFeatures: string[], accepted: Record<string, unknown> = {}, extensions?: object) => {
     const init = { ...(vector.handshake_init.object as unknown as HandshakeInit), required_features: initFeatures,
-      extensions: initFeatures.includes(EPOCH_SESSION_FEATURE) ? { [EPOCH_SESSION_EXTENSION]: { epoch_inbox_xonly_key: bytesToHex(schnorr.getPublicKey(hexToBytes("0".repeat(63) + "4"))) } } : {} };
-    const accept = { ...vector.handshake_accept.object, required_features: acceptFeatures, handshake_init_hash: bytesToHex(handshakeInitHash(init)) };
+      ...(extensions === undefined ? {} : { extensions }) } as HandshakeInit;
+    const accept = { ...vector.handshake_accept.object, ...accepted, required_features: acceptFeatures, handshake_init_hash: bytesToHex(handshakeInitHash(init)) };
     return { init, sender: accept.provider_session_xonly_key, payload: { accept, provider_identity_signature: bytesToHex(schnorr.sign(handshakeAcceptHash(accept), secret)) } };
   };
+  const EPOCH = [EPOCH_SESSION_FEATURE], COOPERATIVE = [COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE];
   test("unilateral and cooperative reverse commitments both require exact joint selection", () => {
-    for (const features of [[], [COOPERATIVE_CLAIM_FEATURE]]) {
+    for (const features of [EPOCH, COOPERATIVE]) {
       const { init, sender, payload } = selected(features, features); expect(checkHandshakeAccept(payload, init, sender).required_features).toEqual(features);
     }
-    for (const [a, b] of [[[], [COOPERATIVE_CLAIM_FEATURE]], [[COOPERATIVE_CLAIM_FEATURE], []]]) {
+    for (const [a, b] of [[EPOCH, COOPERATIVE], [COOPERATIVE, EPOCH]]) {
       const { init, sender, payload } = selected(a!, b!); expect(() => checkHandshakeAccept(payload, init, sender)).toThrow("cooperative claim must be jointly");
     }
   });
-  test("epoch admission stays independent of unilateral selection", () => {
-    const selectedEpoch = selected([EPOCH_SESSION_FEATURE], [EPOCH_SESSION_FEATURE]);
-    expect(checkHandshakeAccept(selectedEpoch.payload, selectedEpoch.init, selectedEpoch.sender).required_features).toEqual([EPOCH_SESSION_FEATURE]);
-    for (const [a, b] of [[[EPOCH_SESSION_FEATURE], []], [[], [EPOCH_SESSION_FEATURE]]]) {
-      const { init, sender, payload } = selected(a!, b!); expect(() => checkHandshakeAccept(payload, init, sender)).toThrow("epoch-bound admission");
+  test("every session must be jointly epoch-bound", () => {
+    const epoch = (vector.handshake_init.object.extensions[EPOCH_SESSION_EXTENSION] as { epoch_inbox_xonly_key: string }).epoch_inbox_xonly_key;
+    for (const [a, b, accepted, extensions] of [[EPOCH, []], [[], EPOCH], [[], []], [EPOCH, EPOCH, {}, {}],
+      [EPOCH, EPOCH, { provider_session_xonly_key: epoch }]] as Array<[string[], string[], Record<string, unknown>?, object?]>) {
+      const { init, sender, payload } = selected(a, b, accepted, extensions); expect(() => checkHandshakeAccept(payload, init, sender)).toThrow("epoch-bound admission");
     }
   });
 });

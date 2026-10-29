@@ -42,18 +42,12 @@ export function recoveryInspectionCases(): InspectionCase[] {
   signRecord(epoch);
   const later = reservedRecord(); appendBinding(later);
   const maxHistory = fundedRecord(); while (maxHistory.funding_history.length < 64) appendBinding(maxHistory);
-  // Unbound history is still inspected: the fixture's former unbound form with an unrelated epoch extension.
-  const ignoredEpoch = fixtureRecord(), unbound = ignoredEpoch.verification_context;
-  unbound.handshake_init.required_features = []; unbound.handshake_accept.required_features = [];
-  unbound.handshake_init.session_id = unbound.handshake_accept.session_id = "10".repeat(32);
-  unbound.handshake_init.extensions = { "rillswap/epoch-bound-session": { unrelated: true } }; signRecord(ignoredEpoch);
   const optional = fixtureRecord(); optional.extensions = { "example/info": { ignored: true } };
   const cases: InspectionCase[] = [
-    entry("original expired legacy, no binding", fixtureRecord(), true),
-    entry("expired mainnet legacy, no binding", main, true, mainnet),
+    entry("original expired session", fixtureRecord(), true),
+    entry("expired mainnet session", main, true, mainnet),
     entry("jointly cooperative, no reservation", cooperative, true),
-    entry("epoch-bound historical session", epoch, true),
-    entry("legacy does not infer epoch from optional extension", ignoredEpoch, true),
+    entry("session bound to another epoch", epoch, true),
     entry("signed funding revision zero", fundedRecord(), true),
     entry("all 64 signed revisions", maxHistory, true),
     entry("expired cooperative reservation against older revision", later, true),
@@ -63,6 +57,15 @@ export function recoveryInspectionCases(): InspectionCase[] {
     invalid("reused purpose key", (r) => { r.contract_terms.recovery_authorization_xonly_key = r.verification_context.client_session_xonly_key; r.recovery_authorization_xonly_key = r.contract_terms.recovery_authorization_xonly_key; }),
     invalid("unknown required feature", (r) => { r.contract_terms.required_features = ["unknown/v1"]; }),
     invalid("feature injection without both handshake halves", (r) => { r.contract_terms.required_features = ["cooperative-claim/v1"]; }),
+    // Every session is epoch-bound: neither an unbound session nor a binding without its feature is admitted.
+    invalid("unbound session with a random identifier", (r) => {
+      const { handshake_init: init, handshake_accept: accept } = r.verification_context;
+      init.required_features = accept.required_features = []; init.extensions = {};
+      init.session_id = accept.session_id = "10".repeat(32);
+    }),
+    invalid("epoch binding without its feature", (r) => {
+      r.verification_context.handshake_init.required_features = r.verification_context.handshake_accept.required_features = [];
+    }),
     invalid("reversed feature order", (r) => { r.verification_context.handshake_init.required_features = ["epoch-bound-session/v1", "cooperative-claim/v1"]; }),
     invalid("same session and challenge", (r) => { r.verification_context.handshake_init.client_challenge = r.verification_context.handshake_init.session_id; r.verification_context.handshake_accept.client_challenge = r.verification_context.handshake_init.session_id; }),
     invalid("selected capability not requested", (r) => { r.verification_context.handshake_accept.selected_capabilities = ["unknown/v1"]; }),

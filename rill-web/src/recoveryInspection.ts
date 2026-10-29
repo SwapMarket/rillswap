@@ -125,17 +125,17 @@ function checkHandshake(record: RecoveryRecord): void {
   require(accept.selected_capabilities.every((item) => init.requested_capabilities.includes(item)));
   for (const key of [init.client_session_xonly_key, init.expected_provider_identity_xonly_key,
     accept.client_session_xonly_key, accept.provider_session_xonly_key, accept.provider_identity_xonly_key]) curveKey(key);
-  if (init.required_features.includes(EPOCH_SESSION_FEATURE)) {
-    const extension = init.extensions[EPOCH_SESSION_EXTENSION];
-    require(extension !== null && typeof extension === "object" && !Array.isArray(extension));
-    const object = extension as Record<string, unknown>;
-    require(Object.keys(object).length === 1 && typeof object.epoch_inbox_xonly_key === "string");
-    const epoch = object.epoch_inbox_xonly_key as string;
-    require(/^[0-9a-f]{64}$/.test(epoch));
-    curveKey(epoch);
-    require(accept.provider_session_xonly_key !== epoch);
-    require(init.session_id === bytesToHex(epochBoundSessionId(init.network_identity, init.expected_provider_identity_xonly_key, epoch, init.client_session_xonly_key)));
-  }
+  // Every session is bound to one provider epoch; its session ID commits to it.
+  require(init.required_features.includes(EPOCH_SESSION_FEATURE));
+  const extension = init.extensions[EPOCH_SESSION_EXTENSION];
+  require(extension !== null && typeof extension === "object" && !Array.isArray(extension));
+  const object = extension as Record<string, unknown>;
+  require(Object.keys(object).length === 1 && typeof object.epoch_inbox_xonly_key === "string");
+  const epoch = object.epoch_inbox_xonly_key as string;
+  require(/^[0-9a-f]{64}$/.test(epoch));
+  curveKey(epoch);
+  require(accept.provider_session_xonly_key !== epoch);
+  require(init.session_id === bytesToHex(epochBoundSessionId(init.network_identity, init.expected_provider_identity_xonly_key, epoch, init.client_session_xonly_key)));
 }
 
 function checkTerms(terms: BtcToLnTerms | LnToBtcTerms): void {

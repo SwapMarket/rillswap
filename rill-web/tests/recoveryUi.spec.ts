@@ -96,7 +96,7 @@ test("the recovery panel uses the saved browser key and makes no external connec
 
 test("existing mainnet files can be inspected with their original age key while new mainnet swaps are enabled", async ({ page }) => {
   const key = await createRecoveryKey();
-  const file = await encryptCanonicalRecoveryForRecipient(plaintext("expired mainnet legacy, no binding"), key.recipient);
+  const file = await encryptCanonicalRecoveryForRecipient(plaintext("expired mainnet session"), key.recipient);
   await page.goto("http://127.0.0.1:18765/swap.html");
   await expect(page.locator("#swap-start")).toBeEnabled();
   await page.locator("#swap-recovery summary").first().click();

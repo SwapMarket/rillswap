@@ -27,7 +27,7 @@ export function signReverseRecord(record: ReverseFixtureRecord): void {
 export function reverseRecord(): ReverseFixtureRecord {
   const record = fundedRecord() as unknown as ReverseFixtureRecord, context = record.verification_context;
   record.profile_id = context.handshake_init.profile_id = context.handshake_accept.profile_id = "ln-to-btc/v1";
-  context.handshake_init.required_features = context.handshake_accept.required_features = ["cooperative-claim/v1"];
+  context.handshake_init.required_features = context.handshake_accept.required_features = ["cooperative-claim/v1", "epoch-bound-session/v1"];
   Object.assign(record.contract_terms, { profile_id: "ln-to-btc/v1", claimant: "client", refund_party: "provider", required_features: ["cooperative-claim/v1"],
     funding_confirmations: 1, max_claim_fee_sat: "1000", refund_lock_height: 220,
     economics: { kind: "ln-to-btc", contract_amount_sat: "51000", nominal_payout_sat: "50000", claim_fee_reserve_sat: "1000", success_fee_sat: "100", mining_prepayment_sat: "0", hold_invoice_sat: "51100" },

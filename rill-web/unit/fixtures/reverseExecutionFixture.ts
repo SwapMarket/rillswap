@@ -23,7 +23,8 @@ export async function executionFixture(cooperation: "unilateral" | "signed" | "d
   const source = reverseRecord();
   if (cooperation === "unilateral") {
     source.contract_terms.required_features = [];
-    source.verification_context.handshake_init.required_features = source.verification_context.handshake_accept.required_features = [];
+    // Unilateral sessions drop cooperation, never the epoch binding.
+    source.verification_context.handshake_init.required_features = source.verification_context.handshake_accept.required_features = ["epoch-bound-session/v1"];
   }
   signReverseRecord(source);
   const saved = source.verification_context, now = { seconds: 1700000000 }, transcript = bytesToHex(handshakeHash(saved.handshake_init, saved.handshake_accept));
