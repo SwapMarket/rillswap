@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spec.rillswap.invalid/schemas/wire/btc-network-fees-v1.schema.json",
+  "title": "Offer-bound Bitcoin network fee extension v1",
+  "$defs": {
+    "sats": { "type": "string", "pattern": "^(0|[1-9][0-9]{0,15})$" },
+    "rate": { "type": "string", "pattern": "^[1-9][0-9]{0,15}$" },
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "timestamp": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "base_sat", "proportional_millionths", "max_network_feerate_sat_kvb", "max_routing_fee_ppm"],
+      "properties": {
+        "model": { "const": "p2tr-cooperative-1in-2out/v1" },
+        "base_sat": { "$ref": "#/$defs/sats" },
+        "proportional_millionths": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "max_network_feerate_sat_kvb": { "$ref": "#/$defs/rate" },
+        "max_routing_fee_ppm": { "type": "integer", "minimum": 0, "maximum": 1000000 }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["offer_event_id", "policy_hash", "max_network_feerate_sat_kvb"],
+      "properties": {
+        "offer_event_id": { "$ref": "#/$defs/hash" },
+        "policy_hash": { "$ref": "#/$defs/hash" },
+        "max_network_feerate_sat_kvb": { "$ref": "#/$defs/rate" }
+      }
+    },
+    "breakdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["offer_event_id", "policy", "feerate_sat_kvb", "estimated_at", "issued_at", "service_fee_sat", "network_fee_sat"],
+      "properties": {
+        "offer_event_id": { "$ref": "#/$defs/hash" },
+        "policy": { "$ref": "#/$defs/policy" },
+        "feerate_sat_kvb": { "$ref": "#/$defs/rate" },
+        "estimated_at": { "$ref": "#/$defs/timestamp" },
+        "issued_at": { "$ref": "#/$defs/timestamp" },
+        "service_fee_sat": { "$ref": "#/$defs/sats" },
+        "network_fee_sat": { "$ref": "#/$defs/sats" }
+      }
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/policy" },
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/breakdown" }
+  ]
+}

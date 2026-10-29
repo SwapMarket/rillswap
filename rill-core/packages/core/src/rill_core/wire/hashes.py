@@ -30,6 +30,9 @@ EPOCH_SESSION_EXTENSION = "rillswap/epoch-bound-session"
 # A new cooperative swap must commit to this feature in both handshake halves
 # and in signed contract terms. Its presence does not remove unilateral paths.
 COOPERATIVE_CLAIM_FEATURE = "cooperative-claim/v1"
+FEE_POLICY_FEATURE = "btc-network-fees/v1"
+SUPPORTED_CONTRACT_FEATURES = frozenset({COOPERATIVE_CLAIM_FEATURE, FEE_POLICY_FEATURE})
+SUPPORTED_HANDSHAKE_FEATURES = SUPPORTED_CONTRACT_FEATURES | {EPOCH_SESSION_FEATURE}
 _XONLY_KEY: TypeAdapter[str] = TypeAdapter(XOnlyKey)
 
 

@@ -8,10 +8,13 @@ from pydantic import Field, model_validator
 
 from rill_core.domain.amounts import MAX_SATS
 from rill_core.wire.canonical import JsonValue  # noqa: TC001
+from rill_core.wire.fee_policy import check_fee_breakdown
 from rill_core.wire.hashes import (
     COOPERATIVE_CLAIM_FEATURE,
     EPOCH_SESSION_EXTENSION,
     EPOCH_SESSION_FEATURE,
+    FEE_POLICY_FEATURE,
+    SUPPORTED_CONTRACT_FEATURES,
     contract_hash,
     epoch_bound_session_id,
     handshake_init_hash,
@@ -233,6 +236,24 @@ class ContractTerms(StrictModel):
             self._validate_btc_to_ln(invoice_msat, first_refund_block)
         else:
             self._validate_ln_to_btc(invoice_msat, first_refund_block)
+        principal = (
+            self.economics.lightning_principal_sat
+            if isinstance(self.economics, BtcToLnEconomics)
+            else self.economics.nominal_payout_sat
+        )
+        breakdown = check_fee_breakdown(
+            self.extensions,
+            required=FEE_POLICY_FEATURE in self.required_features,
+            principal_sat=int(principal),
+            success_fee_sat=int(self.economics.success_fee_sat),
+            expires_at=self.terms_expiry,
+        )
+        if breakdown is not None and int(breakdown.network_fee_sat) > int(
+            self.max_claim_fee_sat
+            if self.profile_id == "btc-to-ln/v1"
+            else self.max_funding_fee_sat
+        ):
+            raise ValueError("network charge exceeds the provider transaction's spend cap")
         return self
 
     def _validate_key_separation(self) -> None:
@@ -716,6 +737,12 @@ class HandshakeAccept(StrictModel):
             and COOPERATIVE_CLAIM_FEATURE in self.required_features
         ):
             raise ValueError("cooperative claim must be jointly negotiated")
+        if FEE_POLICY_FEATURE in required and not (
+            FEE_POLICY_FEATURE in initiation.required_features
+            and FEE_POLICY_FEATURE in self.required_features
+            and initiation.profile_id in {"btc-to-ln/v1", "ln-to-btc/v1"}
+        ):
+            raise ValueError("fee policy must be jointly negotiated")
 
 
 class HandshakeAcceptPayload(StrictModel):
@@ -736,13 +763,20 @@ def require_supported_contract_features(
     absence in both handshakes and terms. Signed historical terms retain their
     original commitment. No local metadata selects or changes this feature.
     """
-    if set(terms.required_features) - {COOPERATIVE_CLAIM_FEATURE}:
+    if set(terms.required_features) - SUPPORTED_CONTRACT_FEATURES:
         raise ValueError("unsupported contract feature")
     cooperative = COOPERATIVE_CLAIM_FEATURE in terms.required_features
     if cooperative != (
         COOPERATIVE_CLAIM_FEATURE in initiation.required_features
     ) or cooperative != (COOPERATIVE_CLAIM_FEATURE in acceptance.required_features):
         raise ValueError("cooperative contract feature is not bound to both handshakes")
+    pricing = FEE_POLICY_FEATURE in terms.required_features
+    if pricing and not isinstance(terms, ContractTerms):
+        raise ValueError("network fee policy is only supported for Bitcoin")
+    if pricing != (FEE_POLICY_FEATURE in initiation.required_features) or pricing != (
+        FEE_POLICY_FEATURE in acceptance.required_features
+    ):
+        raise ValueError("fee policy is not bound to both handshakes")
 
 
 class HandshakeConfirm(StrictModel):

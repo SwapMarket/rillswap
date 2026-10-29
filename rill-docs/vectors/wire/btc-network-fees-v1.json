@@ -1,0 +1,33 @@
+{
+  "policy": {
+    "model": "p2tr-cooperative-1in-2out/v1",
+    "base_sat": "50",
+    "proportional_millionths": 1000,
+    "max_network_feerate_sat_kvb": "10000",
+    "max_routing_fee_ppm": 1000
+  },
+  "policy_hash": "5d8d3405a2f10c6c2df08ba29cd6553537e76320649dbe6cc1289d055315e12e",
+  "request": {
+    "offer_event_id": "1111111111111111111111111111111111111111111111111111111111111111",
+    "policy_hash": "5d8d3405a2f10c6c2df08ba29cd6553537e76320649dbe6cc1289d055315e12e",
+    "max_network_feerate_sat_kvb": "3000"
+  },
+  "breakdown": {
+    "offer_event_id": "1111111111111111111111111111111111111111111111111111111111111111",
+    "policy": {
+      "model": "p2tr-cooperative-1in-2out/v1",
+      "base_sat": "50",
+      "proportional_millionths": 1000,
+      "max_network_feerate_sat_kvb": "10000",
+      "max_routing_fee_ppm": 1000
+    },
+    "feerate_sat_kvb": "2500",
+    "estimated_at": 998,
+    "issued_at": 1000,
+    "service_fee_sat": "150",
+    "network_fee_sat": "385"
+  },
+  "principal_sat": "100000",
+  "success_fee_sat": "535",
+  "expires_at": 1060
+}

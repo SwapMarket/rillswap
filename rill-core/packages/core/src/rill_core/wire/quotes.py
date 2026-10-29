@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Literal, cast
 from pydantic import Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 from rill_core.wire.canonical import JsonValue, canonicalize, parse_json_strict
+from rill_core.wire.fee_policy import check_fee_breakdown, parse_fee_request
+from rill_core.wire.hashes import FEE_POLICY_FEATURE
 from rill_core.wire.messages import BtcToLnEconomics, ContractTerms, InvoiceBinding, ProviderTerms
 from rill_core.wire.types import (
     CompressedKey,
@@ -80,6 +82,7 @@ class IndicativeQuoteRequest(StrictModel):
             self.lightning_principal_sat, field="lightning_principal_sat", positive=True
         )
         validate_extensions(self.extensions)
+        parse_fee_request(self.extensions)
         return self
 
 
@@ -108,6 +111,7 @@ class FirmQuoteRequest(StrictModel):
             self.client_destination_script, field="client_destination_script"
         )
         validate_extensions(self.extensions)
+        parse_fee_request(self.extensions)
         return self
 
 
@@ -235,6 +239,7 @@ def check_terms_offer(
     *,
     handshake_hash: str,
     invoice_binding: InvoiceBinding,
+    now: int | None = None,
 ) -> None:
     """Raise ValueError unless ``offer`` honors ``request`` (RS-003).
 
@@ -275,6 +280,15 @@ def check_terms_offer(
         if not ok:
             raise ValueError(f"terms offer does not honor request: {what}")
     assert isinstance(economics, BtcToLnEconomics)  # noqa: S101 - checked above
+    check_fee_breakdown(
+        terms.extensions,
+        required=FEE_POLICY_FEATURE in terms.required_features,
+        principal_sat=int(economics.lightning_principal_sat),
+        success_fee_sat=int(economics.success_fee_sat),
+        expires_at=terms.terms_expiry,
+        request_extensions=request.extensions,
+        now=now,
+    )
     for offered, ceiling, what in (
         (economics.success_fee_sat, limits.max_success_fee_sat, "success fee"),
         (terms.max_funding_fee_sat, limits.max_funding_fee_sat, "funding fee"),

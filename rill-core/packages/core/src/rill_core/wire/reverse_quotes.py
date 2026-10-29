@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import Field, model_validator
 
 from rill_core.wire.canonical import JsonValue  # noqa: TC001 - pydantic resolves at runtime
+from rill_core.wire.fee_policy import check_fee_breakdown, parse_fee_request
+from rill_core.wire.hashes import FEE_POLICY_FEATURE
 from rill_core.wire.messages import ContractTerms, InvoiceBinding, LnToBtcEconomics, LnToBtcTiming
 from rill_core.wire.types import (
     CompressedKey,
@@ -67,6 +69,7 @@ class ReverseIndicativeQuoteRequest(StrictModel):
         """Require a positive payout and valid extensions."""
         validate_decimal_sats(self.nominal_payout_sat, field="nominal_payout_sat", positive=True)
         validate_extensions(self.extensions)
+        parse_fee_request(self.extensions)
         return self
 
 
@@ -91,6 +94,7 @@ class ReverseFirmQuoteRequest(StrictModel):
             self.client_destination_script, field="client_destination_script"
         )
         validate_extensions(self.extensions)
+        parse_fee_request(self.extensions)
         return self
 
 
@@ -129,6 +133,7 @@ def check_reverse_terms_offer(
     *,
     handshake_hash: str,
     invoice_binding: InvoiceBinding,
+    now: int | None = None,
 ) -> None:
     """Raise ValueError unless ``offer`` honors ``request`` (RS-004).
 
@@ -179,6 +184,15 @@ def check_reverse_terms_offer(
         if not ok:
             raise ValueError(f"terms offer does not honor request: {what}")
     assert isinstance(economics, LnToBtcEconomics)  # noqa: S101 - checked above
+    check_fee_breakdown(
+        terms.extensions,
+        required=FEE_POLICY_FEATURE in terms.required_features,
+        principal_sat=int(economics.nominal_payout_sat),
+        success_fee_sat=int(economics.success_fee_sat),
+        expires_at=terms.terms_expiry,
+        request_extensions=request.extensions,
+        now=now,
+    )
     if int(economics.success_fee_sat) > int(limits.max_success_fee_sat):
         raise ValueError("terms offer does not honor request: success fee")
     if int(economics.claim_fee_reserve_sat) < int(limits.min_claim_fee_reserve_sat):

@@ -38,8 +38,7 @@ from rill_core.wire.cooperative_messages import (
 )
 from rill_core.wire.envelope_authentication import verify_static_signed_envelope
 from rill_core.wire.hashes import (
-    COOPERATIVE_CLAIM_FEATURE,
-    EPOCH_SESSION_FEATURE,
+    SUPPORTED_HANDSHAKE_FEATURES,
     client_acceptance_hash,
     contract_hash,
     funding_binding_hash,
@@ -729,9 +728,7 @@ def _inspect(
     )
     _require(record.profile_id == terms.profile_id == initiation.profile_id, "profile")
     require_supported_contract_features(terms, initiation, acceptance)
-    acceptance.validate_against(
-        initiation, supported_features=frozenset({EPOCH_SESSION_FEATURE, COOPERATIVE_CLAIM_FEATURE})
-    )
+    acceptance.validate_against(initiation, supported_features=SUPPORTED_HANDSHAKE_FEATURES)
     _require(context.client_session_xonly_key == initiation.client_session_xonly_key, "session")
     _require(context.provider_session_xonly_key == acceptance.provider_session_xonly_key, "session")
     _require(
@@ -954,7 +951,7 @@ def _inspect_reverse_disclosure(
         expected_profile=record.profile_id,
         expected_network=record.network_identity,
         expected_sender_key=context.client_session_xonly_key,
-        supported_features={EPOCH_SESSION_FEATURE, COOPERATIVE_CLAIM_FEATURE},
+        supported_features=SUPPORTED_HANDSHAKE_FEATURES,
         crypto=crypto,
     )
     payload = check_cooperative_action_context(
@@ -1012,7 +1009,7 @@ def _inspect_cooperative_reservation(record: _RecoveryPlaintext, crypto: Recover
         expected_profile=record.profile_id,
         expected_network=record.network_identity,
         expected_sender_key=context.provider_session_xonly_key,
-        supported_features={EPOCH_SESSION_FEATURE, COOPERATIVE_CLAIM_FEATURE},
+        supported_features=SUPPORTED_HANDSHAKE_FEATURES,
         crypto=crypto,
     )
     payload = check_cooperative_action_context(

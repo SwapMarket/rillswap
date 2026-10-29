@@ -15,6 +15,7 @@ from rill_core.wire.canonical import canonicalize, parse_json_strict
 from rill_core.wire.hashes import (
     COOPERATIVE_CLAIM_FEATURE,
     EPOCH_SESSION_FEATURE,
+    SUPPORTED_HANDSHAKE_FEATURES,
     contract_hash,
 )
 from rill_core.wire.messages import (
@@ -159,9 +160,7 @@ def check_cooperative_action_context(  # noqa: PLR0912 - one closed role/reply p
     halves MUST come from its retained signed transcript, not the request.
     """
     require_supported_contract_features(terms, initiation, acceptance)
-    acceptance.validate_against(
-        initiation, supported_features={EPOCH_SESSION_FEATURE, COOPERATIVE_CLAIM_FEATURE}
-    )
+    acceptance.validate_against(initiation, supported_features=SUPPORTED_HANDSHAKE_FEATURES)
     if (
         COOPERATIVE_CLAIM_FEATURE not in terms.required_features
         or COOPERATIVE_CLAIM_FEATURE not in envelope.required_features
