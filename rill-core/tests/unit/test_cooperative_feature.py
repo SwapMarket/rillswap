@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE, handshake_init_hash
+from rill_core.wire.hashes import (
+    COOPERATIVE_CLAIM_FEATURE,
+    EPOCH_SESSION_FEATURE,
+    handshake_init_hash,
+)
 from rill_core.wire.messages import (
     ContractTerms,
     HandshakeAccept,
@@ -24,11 +28,12 @@ def _handshake(
     client_features: tuple[str, ...], provider_features: tuple[str, ...]
 ) -> tuple[HandshakeInit, HandshakeAccept]:
     init_document = copy.deepcopy(CONTEXT["handshake_init"])
-    init_document["required_features"] = list(client_features)
+    # Every session is epoch-bound; only the cooperative feature varies.
+    init_document["required_features"] = sorted({EPOCH_SESSION_FEATURE, *client_features})
     init = HandshakeInit.model_validate_json(json.dumps(init_document), strict=True)
     accept_document = copy.deepcopy(CONTEXT["handshake_accept"])
     accept_document["handshake_init_hash"] = handshake_init_hash(init).hex()
-    accept_document["required_features"] = list(provider_features)
+    accept_document["required_features"] = sorted({EPOCH_SESSION_FEATURE, *provider_features})
     accept = HandshakeAccept.model_validate_json(json.dumps(accept_document), strict=True)
     return init, accept
 
@@ -42,7 +47,9 @@ def test_cooperation_cannot_be_injected_or_stripped(
 ) -> None:
     init, accept = _handshake(client_features, provider_features)
     with pytest.raises(ValueError, match="jointly negotiated"):
-        accept.validate_against(init, supported_features={COOPERATIVE_CLAIM_FEATURE})
+        accept.validate_against(
+            init, supported_features={COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE}
+        )
 
 
 def test_old_client_cannot_accept_unknown_cooperation_and_both_can_negotiate() -> None:
@@ -51,10 +58,12 @@ def test_old_client_cannot_accept_unknown_cooperation_and_both_can_negotiate() -
         provider_features=(COOPERATIVE_CLAIM_FEATURE,),
     )
     with pytest.raises(ValueError, match="unknown feature"):
-        accept.validate_against(init, supported_features=set())
-    accept.validate_against(init, supported_features={COOPERATIVE_CLAIM_FEATURE})
+        accept.validate_against(init, supported_features={EPOCH_SESSION_FEATURE})
+    accept.validate_against(
+        init, supported_features={COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE}
+    )
     legacy_init, legacy_accept = _handshake(client_features=(), provider_features=())
-    legacy_accept.validate_against(legacy_init, supported_features=set())
+    legacy_accept.validate_against(legacy_init, supported_features={EPOCH_SESSION_FEATURE})
     assert legacy_init.model_dump(mode="json") == CONTEXT["handshake_init"]
     assert legacy_accept.model_dump(mode="json") == CONTEXT["handshake_accept"]
 

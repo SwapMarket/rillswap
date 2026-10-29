@@ -1,8 +1,7 @@
 {
   "source_repository": "rill-docs",
-  "source_commit": "0ceff7f",
   "source_path": "vectors/recovery/initial-btc-to-ln-v1.json",
   "fixture_path": "initial-btc-to-ln-v1.json",
-  "sha256": "c30fd383eb769973976f5600a05e0f3883d50bb3486a375131659b3be03b09eb",
+  "sha256": "7805b5c0efd48794cd706bb62de70a837af38dd68f17c41c235761683a33c88b",
   "warning": "Synthetic public test keys. The pretty-printed fixture is not canonical plaintext."
 }

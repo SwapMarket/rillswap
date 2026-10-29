@@ -7,12 +7,12 @@
       {
         "acceptance": {
           "contract_hash": "35fdbb89024750e8c84833e730e4395cd8745e00ee59c24b668c880f1880cb54",
-          "handshake_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8",
-          "session_id": "1010101010101010101010101010101010101010101010101010101010101010",
+          "handshake_hash": "5b2158f43d856f9a236bd3f10261ff8c8d58be07c22914acad7c8a4272b01581",
+          "session_id": "e421eba4a80eb7025c22790cf4ab18dea58ffcf3fe1794fdd31177a1ac0babfe",
           "client_session_xonly_key": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
           "provider_session_xonly_key": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
         },
-        "client_acceptance_signature": "48784189fe96d08f9175d239058c4226ba508ba67df9ff41e014606322934c29c8d358ae491ab9cfeb2f5469a114534860cddccea2e7b9210ca4f896e4c3d246"
+        "client_acceptance_signature": "900a0935f6b417d9c5570ee1a32669d76676c474c9ad78690f1a51843b00cf0e05e12eee12702332f26f2e69214f50c6fb80fd48d488111090178a7df32d8c8e"
       }
     ],
     "fundingBindingMessage": [
@@ -59,8 +59,8 @@
       {
         "acceptance": {
           "contract_hash": "35fdbb89024750e8c84833e730e4395cd8745e00ee59c24b668c880f1880cb54",
-          "handshake_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8",
-          "session_id": "1010101010101010101010101010101010101010101010101010101010101010",
+          "handshake_hash": "5b2158f43d856f9a236bd3f10261ff8c8d58be07c22914acad7c8a4272b01581",
+          "session_id": "e421eba4a80eb7025c22790cf4ab18dea58ffcf3fe1794fdd31177a1ac0babfe",
           "client_session_xonly_key": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
           "provider_session_xonly_key": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
         }
@@ -68,12 +68,12 @@
       {
         "acceptance": {
           "contract_hash": "35fdbb89024750e8c84833e730e4395cd8745e00ee59c24b668c880f1880cb54",
-          "handshake_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8",
+          "handshake_hash": "5b2158f43d856f9a236bd3f10261ff8c8d58be07c22914acad7c8a4272b01581",
           "session_id": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
           "client_session_xonly_key": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
           "provider_session_xonly_key": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
         },
-        "client_acceptance_signature": "48784189fe96d08f9175d239058c4226ba508ba67df9ff41e014606322934c29c8d358ae491ab9cfeb2f5469a114534860cddccea2e7b9210ca4f896e4c3d246"
+        "client_acceptance_signature": "900a0935f6b417d9c5570ee1a32669d76676c474c9ad78690f1a51843b00cf0e05e12eee12702332f26f2e69214f50c6fb80fd48d488111090178a7df32d8c8e"
       }
     ],
     "fundingBindingMessage": [

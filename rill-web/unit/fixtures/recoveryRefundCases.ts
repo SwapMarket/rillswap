@@ -5,7 +5,7 @@ import { buildCooperativeClaimPlan } from "../../src/swap/cooperative";
 import { unsignedEnvelopeHash } from "../../src/swap/hashes";
 import { parseTransaction, serializeTransaction, type Transaction } from "../../src/swap/transaction";
 import {
-  appendBinding, fundedRecord, providerSessionSecret, reservedRecord, signDigest, signRecord, type FixtureRecord,
+  appendBinding, fundedRecord, moveToNetwork, providerSessionSecret, reservedRecord, signDigest, signRecord, type FixtureRecord,
 } from "./recoveryInspectionFixture";
 
 export interface RecoveryRefundCase {
@@ -70,11 +70,7 @@ function changedFunding(name: string, edit: (tx: FundingTransaction, record: Fix
 
 export function recoveryRefundCases(): RecoveryRefundCase[] {
   const p2tr = fundedRecord(); p2tr.contract_terms.client_destination_script = "5120" + "44".repeat(32); signRecord(p2tr);
-  const main = fundedRecord(); main.network_identity = mainnet as unknown as FixtureRecord["network_identity"];
-  main.contract_terms.network_identity = mainnet;
-  main.verification_context.handshake_init.network_identity = main.network_identity;
-  main.verification_context.handshake_accept.network_identity = main.network_identity;
-  signRecord(main);
+  const main = fundedRecord(); moveToNetwork(main, mainnet); signRecord(main);
   const paid = reservedRecord(); paid.monotonic_knowledge.dangerous_signature_issued = true;
   const earlier = refundCase("explicit older revision selection"); appendBinding(earlier.record);
   const latest = structuredClone(earlier);
@@ -114,10 +110,7 @@ export function recoveryRefundCases(): RecoveryRefundCase[] {
     ["unsupported execution consensus profile", "rillswap-e2e-v1", "unknown-profile", false],
   ] as const) {
     const record = fundedRecord();
-    record.network_identity = { ...record.network_identity, deployment_namespace: namespace, consensus_profile: profile };
-    record.contract_terms.network_identity = record.network_identity;
-    record.verification_context.handshake_init.network_identity = record.network_identity;
-    record.verification_context.handshake_accept.network_identity = record.network_identity;
+    moveToNetwork(record, { ...record.network_identity, deployment_namespace: namespace, consensus_profile: profile });
     signRecord(record);
     cases.push({ ...refundCase(name, record), accepted });
   }

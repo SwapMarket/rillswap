@@ -21,6 +21,7 @@ from tests.vendor.bip340_reference import sign, tagged_hash, verify
 
 ROOT = Path(__file__).parents[1]
 FIXTURE = ROOT / "vectors" / "recovery" / "initial-btc-to-ln-v1.json"
+EPOCH_SESSION_FEATURE = "epoch-bound-session/v1"
 
 
 def build_initial_fixture() -> dict[str, Any]:
@@ -140,8 +141,9 @@ def build_ln_no_prepayment_fixture() -> dict[str, Any]:
 
     initiation = copy.deepcopy(auth["handshake_init"]["object"])
     acceptance = copy.deepcopy(auth["handshake_accept"]["object"])
-    initiation["required_features"] = []
-    acceptance["required_features"] = []
+    # Only the prepayment feature is dropped; the session stays epoch-bound.
+    initiation["required_features"] = [EPOCH_SESSION_FEATURE]
+    acceptance["required_features"] = [EPOCH_SESSION_FEATURE]
     acceptance["handshake_init_hash"] = tagged_hash(
         "RillSwap/handshake-init/v1", rfc8785.dumps(initiation)
     ).hex()
@@ -336,8 +338,8 @@ def test_initial_ln_no_prepayment_fixture_has_real_signatures_and_user_preimage(
     terms = package["contract_terms"]
     assert terms["required_features"] == []
     context = package["verification_context"]
-    assert context["handshake_init"]["required_features"] == []
-    assert context["handshake_accept"]["required_features"] == []
+    assert context["handshake_init"]["required_features"] == [EPOCH_SESSION_FEATURE]
+    assert context["handshake_accept"]["required_features"] == [EPOCH_SESSION_FEATURE]
     assert context["handshake_hash"] != next(
         case["transcript"]["tagged_hash"]
         for case in load_json(ROOT / "vectors" / "authentication" / "cases-v1.json")["valid"]

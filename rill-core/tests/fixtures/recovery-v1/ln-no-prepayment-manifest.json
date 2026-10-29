@@ -1,8 +1,7 @@
 {
   "source_repository": "rill-docs",
-  "source_commit": "aca511b",
   "source_path": "vectors/recovery/initial-ln-to-btc-no-prepayment-v1.json",
   "fixture_path": "initial-ln-to-btc-no-prepayment-v1.json",
-  "sha256": "41ec77f4c4adf3383b96a58d4fdf799ad8ee922deccd69bcc9e5d7cba69a43c3",
+  "sha256": "690cbc5cb586e1a12ca227b60c41e0e5873732f800dfb97c2b053cf21891f974",
   "warning": "Synthetic public test keys and a decoded invoice binding, not canonical age plaintext."
 }

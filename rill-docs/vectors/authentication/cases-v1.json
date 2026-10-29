@@ -19,7 +19,7 @@
             "consensus_profile": "bitcoin-core-v30.0-regtest-default",
             "deployment_namespace": "rillswap-e2e-v1"
           },
-          "session_id": "1010101010101010101010101010101010101010101010101010101010101010",
+          "session_id": "e421eba4a80eb7025c22790cf4ab18dea58ffcf3fe1794fdd31177a1ac0babfe",
           "client_challenge": "1111111111111111111111111111111111111111111111111111111111111111",
           "client_session_xonly_key": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
           "expected_provider_identity_xonly_key": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
@@ -30,16 +30,22 @@
             "core/v1",
             "recovery/v1"
           ],
-          "required_features": [],
-          "extensions": {}
+          "required_features": [
+            "epoch-bound-session/v1"
+          ],
+          "extensions": {
+            "rillswap/epoch-bound-session": {
+              "epoch_inbox_xonly_key": "d7924d4f7d43ea965a465ae3095ff41131e5946f3c85f79e44adbcf8e27e080e"
+            }
+          }
         },
-        "canonical_utf8": "{\"client_challenge\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"client_session_xonly_key\":\"c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5\",\"expected_provider_identity_xonly_key\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"extensions\":{},\"network_identity\":{\"consensus_profile\":\"bitcoin-core-v30.0-regtest-default\",\"deployment_namespace\":\"rillswap-e2e-v1\",\"family\":\"bitcoin\",\"genesis_hash\":\"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206\",\"name\":\"regtest\",\"signet_challenge\":null},\"profile_id\":\"btc-to-ln/v1\",\"protocol\":\"rillswap\",\"requested_capabilities\":[\"core/v1\",\"recovery/v1\"],\"requested_encryption_suites\":[\"noise-xk-secp256k1-chachapoly-sha256/v1\"],\"required_features\":[],\"session_id\":\"1010101010101010101010101010101010101010101010101010101010101010\",\"wire_version\":\"1\"}",
+        "canonical_utf8": "{\"client_challenge\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"client_session_xonly_key\":\"c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5\",\"expected_provider_identity_xonly_key\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"extensions\":{\"rillswap/epoch-bound-session\":{\"epoch_inbox_xonly_key\":\"d7924d4f7d43ea965a465ae3095ff41131e5946f3c85f79e44adbcf8e27e080e\"}},\"network_identity\":{\"consensus_profile\":\"bitcoin-core-v30.0-regtest-default\",\"deployment_namespace\":\"rillswap-e2e-v1\",\"family\":\"bitcoin\",\"genesis_hash\":\"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206\",\"name\":\"regtest\",\"signet_challenge\":null},\"profile_id\":\"btc-to-ln/v1\",\"protocol\":\"rillswap\",\"requested_capabilities\":[\"core/v1\",\"recovery/v1\"],\"requested_encryption_suites\":[\"noise-xk-secp256k1-chachapoly-sha256/v1\"],\"required_features\":[\"epoch-bound-session/v1\"],\"session_id\":\"e421eba4a80eb7025c22790cf4ab18dea58ffcf3fe1794fdd31177a1ac0babfe\",\"wire_version\":\"1\"}",
         "tag": "RillSwap/handshake-init/v1",
-        "tagged_hash": "5cac6f54747b33bf968bff61048f21f56e06d0c295b999def1b37fc0b171434c"
+        "tagged_hash": "7c916975dc6ac890d86516c0259982b631059840fa15541c52850b1014985627"
       },
       "handshake_accept": {
         "object": {
-          "handshake_init_hash": "5cac6f54747b33bf968bff61048f21f56e06d0c295b999def1b37fc0b171434c",
+          "handshake_init_hash": "7c916975dc6ac890d86516c0259982b631059840fa15541c52850b1014985627",
           "protocol": "rillswap",
           "wire_version": "1",
           "profile_id": "btc-to-ln/v1",
@@ -51,7 +57,7 @@
             "consensus_profile": "bitcoin-core-v30.0-regtest-default",
             "deployment_namespace": "rillswap-e2e-v1"
           },
-          "session_id": "1010101010101010101010101010101010101010101010101010101010101010",
+          "session_id": "e421eba4a80eb7025c22790cf4ab18dea58ffcf3fe1794fdd31177a1ac0babfe",
           "client_challenge": "1111111111111111111111111111111111111111111111111111111111111111",
           "provider_challenge": "1212121212121212121212121212121212121212121212121212121212121212",
           "client_session_xonly_key": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
@@ -65,21 +71,23 @@
           "transport_endpoints": [
             "wss://provider.rillswap.invalid/v1"
           ],
-          "required_features": [],
+          "required_features": [
+            "epoch-bound-session/v1"
+          ],
           "extensions": {}
         },
-        "canonical_utf8": "{\"client_challenge\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"client_session_xonly_key\":\"c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5\",\"extensions\":{},\"handshake_init_hash\":\"5cac6f54747b33bf968bff61048f21f56e06d0c295b999def1b37fc0b171434c\",\"network_identity\":{\"consensus_profile\":\"bitcoin-core-v30.0-regtest-default\",\"deployment_namespace\":\"rillswap-e2e-v1\",\"family\":\"bitcoin\",\"genesis_hash\":\"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206\",\"name\":\"regtest\",\"signet_challenge\":null},\"profile_id\":\"btc-to-ln/v1\",\"protocol\":\"rillswap\",\"provider_challenge\":\"1212121212121212121212121212121212121212121212121212121212121212\",\"provider_identity_xonly_key\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"provider_session_xonly_key\":\"f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9\",\"required_features\":[],\"selected_capabilities\":[\"core/v1\",\"recovery/v1\"],\"selected_encryption_suite\":\"noise-xk-secp256k1-chachapoly-sha256/v1\",\"session_id\":\"1010101010101010101010101010101010101010101010101010101010101010\",\"transport_endpoints\":[\"wss://provider.rillswap.invalid/v1\"],\"wire_version\":\"1\"}",
+        "canonical_utf8": "{\"client_challenge\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"client_session_xonly_key\":\"c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5\",\"extensions\":{},\"handshake_init_hash\":\"7c916975dc6ac890d86516c0259982b631059840fa15541c52850b1014985627\",\"network_identity\":{\"consensus_profile\":\"bitcoin-core-v30.0-regtest-default\",\"deployment_namespace\":\"rillswap-e2e-v1\",\"family\":\"bitcoin\",\"genesis_hash\":\"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206\",\"name\":\"regtest\",\"signet_challenge\":null},\"profile_id\":\"btc-to-ln/v1\",\"protocol\":\"rillswap\",\"provider_challenge\":\"1212121212121212121212121212121212121212121212121212121212121212\",\"provider_identity_xonly_key\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"provider_session_xonly_key\":\"f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9\",\"required_features\":[\"epoch-bound-session/v1\"],\"selected_capabilities\":[\"core/v1\",\"recovery/v1\"],\"selected_encryption_suite\":\"noise-xk-secp256k1-chachapoly-sha256/v1\",\"session_id\":\"e421eba4a80eb7025c22790cf4ab18dea58ffcf3fe1794fdd31177a1ac0babfe\",\"transport_endpoints\":[\"wss://provider.rillswap.invalid/v1\"],\"wire_version\":\"1\"}",
         "tag": "RillSwap/handshake/v1",
-        "tagged_hash": "2be8fa7345966208b3fa43e34e698b9c59a79996a8f140af342c4391e8475dfc",
+        "tagged_hash": "4a1344ec4beaae57a83d6bfc3344dd52e4ea8fff3044893a9d89ef2e2d4ac95c",
         "signer_secret_key": "0000000000000000000000000000000000000000000000000000000000000001",
         "signer_xonly_key": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
         "auxiliary_random": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
-        "signature": "8c172467734c4a3bd9abfd9fdd66b05c10e1bf12d96843011e191f18cd95fdd55de57287073b1ff5f6d5346ae7b8f196d3ec09e61f3fe6dde2caf69762b05e9f"
+        "signature": "3558162a83717010cd201609413d72aa90c17eb5a31a13800025a41083cfeb93b9f1a7c94dc595d97971accf529eb1ce183722451e6ba00fbd7e8e008041f858"
       },
       "transcript": {
         "object": {
           "accept": {
-            "handshake_init_hash": "5cac6f54747b33bf968bff61048f21f56e06d0c295b999def1b37fc0b171434c",
+            "handshake_init_hash": "7c916975dc6ac890d86516c0259982b631059840fa15541c52850b1014985627",
             "protocol": "rillswap",
             "wire_version": "1",
             "profile_id": "btc-to-ln/v1",
@@ -91,7 +99,7 @@
               "consensus_profile": "bitcoin-core-v30.0-regtest-default",
               "deployment_namespace": "rillswap-e2e-v1"
             },
-            "session_id": "1010101010101010101010101010101010101010101010101010101010101010",
+            "session_id": "e421eba4a80eb7025c22790cf4ab18dea58ffcf3fe1794fdd31177a1ac0babfe",
             "client_challenge": "1111111111111111111111111111111111111111111111111111111111111111",
             "provider_challenge": "1212121212121212121212121212121212121212121212121212121212121212",
             "client_session_xonly_key": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
@@ -105,7 +113,9 @@
             "transport_endpoints": [
               "wss://provider.rillswap.invalid/v1"
             ],
-            "required_features": [],
+            "required_features": [
+              "epoch-bound-session/v1"
+            ],
             "extensions": {}
           },
           "init": {
@@ -120,7 +130,7 @@
               "consensus_profile": "bitcoin-core-v30.0-regtest-default",
               "deployment_namespace": "rillswap-e2e-v1"
             },
-            "session_id": "1010101010101010101010101010101010101010101010101010101010101010",
+            "session_id": "e421eba4a80eb7025c22790cf4ab18dea58ffcf3fe1794fdd31177a1ac0babfe",
             "client_challenge": "1111111111111111111111111111111111111111111111111111111111111111",
             "client_session_xonly_key": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
             "expected_provider_identity_xonly_key": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
@@ -131,18 +141,24 @@
               "core/v1",
               "recovery/v1"
             ],
-            "required_features": [],
-            "extensions": {}
+            "required_features": [
+              "epoch-bound-session/v1"
+            ],
+            "extensions": {
+              "rillswap/epoch-bound-session": {
+                "epoch_inbox_xonly_key": "d7924d4f7d43ea965a465ae3095ff41131e5946f3c85f79e44adbcf8e27e080e"
+              }
+            }
           }
         },
-        "canonical_utf8": "{\"accept\":{\"client_challenge\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"client_session_xonly_key\":\"c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5\",\"extensions\":{},\"handshake_init_hash\":\"5cac6f54747b33bf968bff61048f21f56e06d0c295b999def1b37fc0b171434c\",\"network_identity\":{\"consensus_profile\":\"bitcoin-core-v30.0-regtest-default\",\"deployment_namespace\":\"rillswap-e2e-v1\",\"family\":\"bitcoin\",\"genesis_hash\":\"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206\",\"name\":\"regtest\",\"signet_challenge\":null},\"profile_id\":\"btc-to-ln/v1\",\"protocol\":\"rillswap\",\"provider_challenge\":\"1212121212121212121212121212121212121212121212121212121212121212\",\"provider_identity_xonly_key\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"provider_session_xonly_key\":\"f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9\",\"required_features\":[],\"selected_capabilities\":[\"core/v1\",\"recovery/v1\"],\"selected_encryption_suite\":\"noise-xk-secp256k1-chachapoly-sha256/v1\",\"session_id\":\"1010101010101010101010101010101010101010101010101010101010101010\",\"transport_endpoints\":[\"wss://provider.rillswap.invalid/v1\"],\"wire_version\":\"1\"},\"init\":{\"client_challenge\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"client_session_xonly_key\":\"c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5\",\"expected_provider_identity_xonly_key\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"extensions\":{},\"network_identity\":{\"consensus_profile\":\"bitcoin-core-v30.0-regtest-default\",\"deployment_namespace\":\"rillswap-e2e-v1\",\"family\":\"bitcoin\",\"genesis_hash\":\"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206\",\"name\":\"regtest\",\"signet_challenge\":null},\"profile_id\":\"btc-to-ln/v1\",\"protocol\":\"rillswap\",\"requested_capabilities\":[\"core/v1\",\"recovery/v1\"],\"requested_encryption_suites\":[\"noise-xk-secp256k1-chachapoly-sha256/v1\"],\"required_features\":[],\"session_id\":\"1010101010101010101010101010101010101010101010101010101010101010\",\"wire_version\":\"1\"}}",
+        "canonical_utf8": "{\"accept\":{\"client_challenge\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"client_session_xonly_key\":\"c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5\",\"extensions\":{},\"handshake_init_hash\":\"7c916975dc6ac890d86516c0259982b631059840fa15541c52850b1014985627\",\"network_identity\":{\"consensus_profile\":\"bitcoin-core-v30.0-regtest-default\",\"deployment_namespace\":\"rillswap-e2e-v1\",\"family\":\"bitcoin\",\"genesis_hash\":\"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206\",\"name\":\"regtest\",\"signet_challenge\":null},\"profile_id\":\"btc-to-ln/v1\",\"protocol\":\"rillswap\",\"provider_challenge\":\"1212121212121212121212121212121212121212121212121212121212121212\",\"provider_identity_xonly_key\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"provider_session_xonly_key\":\"f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9\",\"required_features\":[\"epoch-bound-session/v1\"],\"selected_capabilities\":[\"core/v1\",\"recovery/v1\"],\"selected_encryption_suite\":\"noise-xk-secp256k1-chachapoly-sha256/v1\",\"session_id\":\"e421eba4a80eb7025c22790cf4ab18dea58ffcf3fe1794fdd31177a1ac0babfe\",\"transport_endpoints\":[\"wss://provider.rillswap.invalid/v1\"],\"wire_version\":\"1\"},\"init\":{\"client_challenge\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"client_session_xonly_key\":\"c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5\",\"expected_provider_identity_xonly_key\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"extensions\":{\"rillswap/epoch-bound-session\":{\"epoch_inbox_xonly_key\":\"d7924d4f7d43ea965a465ae3095ff41131e5946f3c85f79e44adbcf8e27e080e\"}},\"network_identity\":{\"consensus_profile\":\"bitcoin-core-v30.0-regtest-default\",\"deployment_namespace\":\"rillswap-e2e-v1\",\"family\":\"bitcoin\",\"genesis_hash\":\"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206\",\"name\":\"regtest\",\"signet_challenge\":null},\"profile_id\":\"btc-to-ln/v1\",\"protocol\":\"rillswap\",\"requested_capabilities\":[\"core/v1\",\"recovery/v1\"],\"requested_encryption_suites\":[\"noise-xk-secp256k1-chachapoly-sha256/v1\"],\"required_features\":[\"epoch-bound-session/v1\"],\"session_id\":\"e421eba4a80eb7025c22790cf4ab18dea58ffcf3fe1794fdd31177a1ac0babfe\",\"wire_version\":\"1\"}}",
         "tag": "RillSwap/transcript/v1",
-        "tagged_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8"
+        "tagged_hash": "5b2158f43d856f9a236bd3f10261ff8c8d58be07c22914acad7c8a4272b01581"
       },
       "handshake_confirm": {
         "object": {
-          "handshake_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8",
-          "session_id": "1010101010101010101010101010101010101010101010101010101010101010",
+          "handshake_hash": "5b2158f43d856f9a236bd3f10261ff8c8d58be07c22914acad7c8a4272b01581",
+          "session_id": "e421eba4a80eb7025c22790cf4ab18dea58ffcf3fe1794fdd31177a1ac0babfe",
           "client_session_xonly_key": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
           "provider_session_xonly_key": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
         }
@@ -160,7 +176,7 @@
             "consensus_profile": "bitcoin-core-v30.0-regtest-default",
             "deployment_namespace": "rillswap-e2e-v1"
           },
-          "session_id": "1010101010101010101010101010101010101010101010101010101010101010",
+          "session_id": "e421eba4a80eb7025c22790cf4ab18dea58ffcf3fe1794fdd31177a1ac0babfe",
           "message_id": "1313131313131313131313131313131313131313131313131313131313131313",
           "sender_session_key": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
           "sequence": 1,
@@ -168,22 +184,22 @@
           "contract_hash": null,
           "message_type": "handshake_confirm",
           "payload": {
-            "handshake_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8",
-            "session_id": "1010101010101010101010101010101010101010101010101010101010101010",
+            "handshake_hash": "5b2158f43d856f9a236bd3f10261ff8c8d58be07c22914acad7c8a4272b01581",
+            "session_id": "e421eba4a80eb7025c22790cf4ab18dea58ffcf3fe1794fdd31177a1ac0babfe",
             "client_session_xonly_key": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
             "provider_session_xonly_key": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
           },
           "required_features": [],
           "extensions": {},
-          "signature": "d8a7339977e4673e215e61339386e8208b0c6d1ecbe01621e985fe3d6c1399384f7b321a32c9ddf5363cb484e78561b3fb6aa65e686a076fcf95c7263a13c3bb"
+          "signature": "35359913a9d74ebdfac2c32bbc877a8816d4d080a17a7e0534c6eb3e4f6b01a54a3b0e647681c065e3dfd12a2727d7a3ed6bc96984f60a660885c1fe43931bed"
         },
-        "canonical_unsigned_utf8": "{\"contract_hash\":null,\"extensions\":{},\"in_reply_to\":\"1414141414141414141414141414141414141414141414141414141414141414\",\"message_id\":\"1313131313131313131313131313131313131313131313131313131313131313\",\"message_type\":\"handshake_confirm\",\"network_identity\":{\"consensus_profile\":\"bitcoin-core-v30.0-regtest-default\",\"deployment_namespace\":\"rillswap-e2e-v1\",\"family\":\"bitcoin\",\"genesis_hash\":\"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206\",\"name\":\"regtest\",\"signet_challenge\":null},\"payload\":{\"client_session_xonly_key\":\"c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5\",\"handshake_hash\":\"5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8\",\"provider_session_xonly_key\":\"f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9\",\"session_id\":\"1010101010101010101010101010101010101010101010101010101010101010\"},\"profile_id\":\"btc-to-ln/v1\",\"protocol\":\"rillswap\",\"required_features\":[],\"sender_session_key\":\"c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5\",\"sequence\":1,\"session_id\":\"1010101010101010101010101010101010101010101010101010101010101010\",\"wire_version\":\"1\"}",
+        "canonical_unsigned_utf8": "{\"contract_hash\":null,\"extensions\":{},\"in_reply_to\":\"1414141414141414141414141414141414141414141414141414141414141414\",\"message_id\":\"1313131313131313131313131313131313131313131313131313131313131313\",\"message_type\":\"handshake_confirm\",\"network_identity\":{\"consensus_profile\":\"bitcoin-core-v30.0-regtest-default\",\"deployment_namespace\":\"rillswap-e2e-v1\",\"family\":\"bitcoin\",\"genesis_hash\":\"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206\",\"name\":\"regtest\",\"signet_challenge\":null},\"payload\":{\"client_session_xonly_key\":\"c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5\",\"handshake_hash\":\"5b2158f43d856f9a236bd3f10261ff8c8d58be07c22914acad7c8a4272b01581\",\"provider_session_xonly_key\":\"f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9\",\"session_id\":\"e421eba4a80eb7025c22790cf4ab18dea58ffcf3fe1794fdd31177a1ac0babfe\"},\"profile_id\":\"btc-to-ln/v1\",\"protocol\":\"rillswap\",\"required_features\":[],\"sender_session_key\":\"c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5\",\"sequence\":1,\"session_id\":\"e421eba4a80eb7025c22790cf4ab18dea58ffcf3fe1794fdd31177a1ac0babfe\",\"wire_version\":\"1\"}",
         "tag": "RillSwap/envelope/v1",
-        "tagged_hash": "eef562447f6afa99cc8e9c949c72b37613488e1b061a01207fa51bca349eb20b",
+        "tagged_hash": "e05af7ef41d99d23cffff80d1ee959a8d482f4e1cec1f9cd7b9c153796ead472",
         "signer_secret_key": "0000000000000000000000000000000000000000000000000000000000000002",
         "signer_xonly_key": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
         "auxiliary_random": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
-        "signature": "d8a7339977e4673e215e61339386e8208b0c6d1ecbe01621e985fe3d6c1399384f7b321a32c9ddf5363cb484e78561b3fb6aa65e686a076fcf95c7263a13c3bb"
+        "signature": "35359913a9d74ebdfac2c32bbc877a8816d4d080a17a7e0534c6eb3e4f6b01a54a3b0e647681c065e3dfd12a2727d7a3ed6bc96984f60a660885c1fe43931bed"
       }
     },
     {
@@ -202,7 +218,7 @@
             "consensus_profile": "bitcoin-core-v30.0-regtest-default",
             "deployment_namespace": "rillswap-e2e-v1"
           },
-          "session_id": "2020202020202020202020202020202020202020202020202020202020202020",
+          "session_id": "ad65eb07f6dd489b072217dc5496d8172048961a26d94562ff9073dc258b2b66",
           "client_challenge": "2121212121212121212121212121212121212121212121212121212121212121",
           "client_session_xonly_key": "2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01",
           "expected_provider_identity_xonly_key": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
@@ -214,17 +230,22 @@
             "recovery/v1"
           ],
           "required_features": [
+            "epoch-bound-session/v1",
             "org.rillswap/mining-prepayment/v1"
           ],
-          "extensions": {}
+          "extensions": {
+            "rillswap/epoch-bound-session": {
+              "epoch_inbox_xonly_key": "d7924d4f7d43ea965a465ae3095ff41131e5946f3c85f79e44adbcf8e27e080e"
+            }
+          }
         },
-        "canonical_utf8": "{\"client_challenge\":\"2121212121212121212121212121212121212121212121212121212121212121\",\"client_session_xonly_key\":\"2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01\",\"expected_provider_identity_xonly_key\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"extensions\":{},\"network_identity\":{\"consensus_profile\":\"bitcoin-core-v30.0-regtest-default\",\"deployment_namespace\":\"rillswap-e2e-v1\",\"family\":\"bitcoin\",\"genesis_hash\":\"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206\",\"name\":\"regtest\",\"signet_challenge\":null},\"profile_id\":\"ln-to-btc/v1\",\"protocol\":\"rillswap\",\"requested_capabilities\":[\"core/v1\",\"recovery/v1\"],\"requested_encryption_suites\":[\"noise-xk-secp256k1-chachapoly-sha256/v1\"],\"required_features\":[\"org.rillswap/mining-prepayment/v1\"],\"session_id\":\"2020202020202020202020202020202020202020202020202020202020202020\",\"wire_version\":\"1\"}",
+        "canonical_utf8": "{\"client_challenge\":\"2121212121212121212121212121212121212121212121212121212121212121\",\"client_session_xonly_key\":\"2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01\",\"expected_provider_identity_xonly_key\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"extensions\":{\"rillswap/epoch-bound-session\":{\"epoch_inbox_xonly_key\":\"d7924d4f7d43ea965a465ae3095ff41131e5946f3c85f79e44adbcf8e27e080e\"}},\"network_identity\":{\"consensus_profile\":\"bitcoin-core-v30.0-regtest-default\",\"deployment_namespace\":\"rillswap-e2e-v1\",\"family\":\"bitcoin\",\"genesis_hash\":\"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206\",\"name\":\"regtest\",\"signet_challenge\":null},\"profile_id\":\"ln-to-btc/v1\",\"protocol\":\"rillswap\",\"requested_capabilities\":[\"core/v1\",\"recovery/v1\"],\"requested_encryption_suites\":[\"noise-xk-secp256k1-chachapoly-sha256/v1\"],\"required_features\":[\"epoch-bound-session/v1\",\"org.rillswap/mining-prepayment/v1\"],\"session_id\":\"ad65eb07f6dd489b072217dc5496d8172048961a26d94562ff9073dc258b2b66\",\"wire_version\":\"1\"}",
         "tag": "RillSwap/handshake-init/v1",
-        "tagged_hash": "473344213678cade434e92f3b3ec24f2efb56cf1295e2a85edc94dbf474be060"
+        "tagged_hash": "aa8c5933250b0abce14115e9d1b7cc0d1fffa7151d9ce23c897993d2758f4514"
       },
       "handshake_accept": {
         "object": {
-          "handshake_init_hash": "473344213678cade434e92f3b3ec24f2efb56cf1295e2a85edc94dbf474be060",
+          "handshake_init_hash": "aa8c5933250b0abce14115e9d1b7cc0d1fffa7151d9ce23c897993d2758f4514",
           "protocol": "rillswap",
           "wire_version": "1",
           "profile_id": "ln-to-btc/v1",
@@ -236,7 +257,7 @@
             "consensus_profile": "bitcoin-core-v30.0-regtest-default",
             "deployment_namespace": "rillswap-e2e-v1"
           },
-          "session_id": "2020202020202020202020202020202020202020202020202020202020202020",
+          "session_id": "ad65eb07f6dd489b072217dc5496d8172048961a26d94562ff9073dc258b2b66",
           "client_challenge": "2121212121212121212121212121212121212121212121212121212121212121",
           "provider_challenge": "2222222222222222222222222222222222222222222222222222222222222222",
           "client_session_xonly_key": "2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01",
@@ -251,22 +272,23 @@
             "wss://provider.rillswap.invalid/v1"
           ],
           "required_features": [
+            "epoch-bound-session/v1",
             "org.rillswap/mining-prepayment/v1"
           ],
           "extensions": {}
         },
-        "canonical_utf8": "{\"client_challenge\":\"2121212121212121212121212121212121212121212121212121212121212121\",\"client_session_xonly_key\":\"2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01\",\"extensions\":{},\"handshake_init_hash\":\"473344213678cade434e92f3b3ec24f2efb56cf1295e2a85edc94dbf474be060\",\"network_identity\":{\"consensus_profile\":\"bitcoin-core-v30.0-regtest-default\",\"deployment_namespace\":\"rillswap-e2e-v1\",\"family\":\"bitcoin\",\"genesis_hash\":\"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206\",\"name\":\"regtest\",\"signet_challenge\":null},\"profile_id\":\"ln-to-btc/v1\",\"protocol\":\"rillswap\",\"provider_challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"provider_identity_xonly_key\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"provider_session_xonly_key\":\"acd484e2f0c7f65309ad178a9f559abde09796974c57e714c35f110dfc27ccbe\",\"required_features\":[\"org.rillswap/mining-prepayment/v1\"],\"selected_capabilities\":[\"core/v1\",\"recovery/v1\"],\"selected_encryption_suite\":\"noise-xk-secp256k1-chachapoly-sha256/v1\",\"session_id\":\"2020202020202020202020202020202020202020202020202020202020202020\",\"transport_endpoints\":[\"wss://provider.rillswap.invalid/v1\"],\"wire_version\":\"1\"}",
+        "canonical_utf8": "{\"client_challenge\":\"2121212121212121212121212121212121212121212121212121212121212121\",\"client_session_xonly_key\":\"2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01\",\"extensions\":{},\"handshake_init_hash\":\"aa8c5933250b0abce14115e9d1b7cc0d1fffa7151d9ce23c897993d2758f4514\",\"network_identity\":{\"consensus_profile\":\"bitcoin-core-v30.0-regtest-default\",\"deployment_namespace\":\"rillswap-e2e-v1\",\"family\":\"bitcoin\",\"genesis_hash\":\"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206\",\"name\":\"regtest\",\"signet_challenge\":null},\"profile_id\":\"ln-to-btc/v1\",\"protocol\":\"rillswap\",\"provider_challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"provider_identity_xonly_key\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"provider_session_xonly_key\":\"acd484e2f0c7f65309ad178a9f559abde09796974c57e714c35f110dfc27ccbe\",\"required_features\":[\"epoch-bound-session/v1\",\"org.rillswap/mining-prepayment/v1\"],\"selected_capabilities\":[\"core/v1\",\"recovery/v1\"],\"selected_encryption_suite\":\"noise-xk-secp256k1-chachapoly-sha256/v1\",\"session_id\":\"ad65eb07f6dd489b072217dc5496d8172048961a26d94562ff9073dc258b2b66\",\"transport_endpoints\":[\"wss://provider.rillswap.invalid/v1\"],\"wire_version\":\"1\"}",
         "tag": "RillSwap/handshake/v1",
-        "tagged_hash": "55f73409110992fc1045650a23b53ccd2b8232cfd585d6c3f4c820aaa3c660b9",
+        "tagged_hash": "87086a51d1eb12381614e432b2942428b6f44a1fd911f39a72ed7fa6edcc4c6e",
         "signer_secret_key": "0000000000000000000000000000000000000000000000000000000000000001",
         "signer_xonly_key": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
         "auxiliary_random": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
-        "signature": "88ac87da27aaac3e96eeba5113bd7e6621f6d0b03127cd40cb8740d639ed02e8f7d6e140d44338f4272aa8d267579fb4cf70cc7ac0ad7214c80e3540f5a3b00e"
+        "signature": "f18560d8bcba110aa532d6ffbd611c5ead92f1648c606d11372e07d34accdc951f925acd74e756c3d012cf4efef21fb1eddcfb8348ac31d4b2abe63c30942792"
       },
       "transcript": {
         "object": {
           "accept": {
-            "handshake_init_hash": "473344213678cade434e92f3b3ec24f2efb56cf1295e2a85edc94dbf474be060",
+            "handshake_init_hash": "aa8c5933250b0abce14115e9d1b7cc0d1fffa7151d9ce23c897993d2758f4514",
             "protocol": "rillswap",
             "wire_version": "1",
             "profile_id": "ln-to-btc/v1",
@@ -278,7 +300,7 @@
               "consensus_profile": "bitcoin-core-v30.0-regtest-default",
               "deployment_namespace": "rillswap-e2e-v1"
             },
-            "session_id": "2020202020202020202020202020202020202020202020202020202020202020",
+            "session_id": "ad65eb07f6dd489b072217dc5496d8172048961a26d94562ff9073dc258b2b66",
             "client_challenge": "2121212121212121212121212121212121212121212121212121212121212121",
             "provider_challenge": "2222222222222222222222222222222222222222222222222222222222222222",
             "client_session_xonly_key": "2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01",
@@ -293,6 +315,7 @@
               "wss://provider.rillswap.invalid/v1"
             ],
             "required_features": [
+              "epoch-bound-session/v1",
               "org.rillswap/mining-prepayment/v1"
             ],
             "extensions": {}
@@ -309,7 +332,7 @@
               "consensus_profile": "bitcoin-core-v30.0-regtest-default",
               "deployment_namespace": "rillswap-e2e-v1"
             },
-            "session_id": "2020202020202020202020202020202020202020202020202020202020202020",
+            "session_id": "ad65eb07f6dd489b072217dc5496d8172048961a26d94562ff9073dc258b2b66",
             "client_challenge": "2121212121212121212121212121212121212121212121212121212121212121",
             "client_session_xonly_key": "2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01",
             "expected_provider_identity_xonly_key": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
@@ -321,19 +344,24 @@
               "recovery/v1"
             ],
             "required_features": [
+              "epoch-bound-session/v1",
               "org.rillswap/mining-prepayment/v1"
             ],
-            "extensions": {}
+            "extensions": {
+              "rillswap/epoch-bound-session": {
+                "epoch_inbox_xonly_key": "d7924d4f7d43ea965a465ae3095ff41131e5946f3c85f79e44adbcf8e27e080e"
+              }
+            }
           }
         },
-        "canonical_utf8": "{\"accept\":{\"client_challenge\":\"2121212121212121212121212121212121212121212121212121212121212121\",\"client_session_xonly_key\":\"2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01\",\"extensions\":{},\"handshake_init_hash\":\"473344213678cade434e92f3b3ec24f2efb56cf1295e2a85edc94dbf474be060\",\"network_identity\":{\"consensus_profile\":\"bitcoin-core-v30.0-regtest-default\",\"deployment_namespace\":\"rillswap-e2e-v1\",\"family\":\"bitcoin\",\"genesis_hash\":\"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206\",\"name\":\"regtest\",\"signet_challenge\":null},\"profile_id\":\"ln-to-btc/v1\",\"protocol\":\"rillswap\",\"provider_challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"provider_identity_xonly_key\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"provider_session_xonly_key\":\"acd484e2f0c7f65309ad178a9f559abde09796974c57e714c35f110dfc27ccbe\",\"required_features\":[\"org.rillswap/mining-prepayment/v1\"],\"selected_capabilities\":[\"core/v1\",\"recovery/v1\"],\"selected_encryption_suite\":\"noise-xk-secp256k1-chachapoly-sha256/v1\",\"session_id\":\"2020202020202020202020202020202020202020202020202020202020202020\",\"transport_endpoints\":[\"wss://provider.rillswap.invalid/v1\"],\"wire_version\":\"1\"},\"init\":{\"client_challenge\":\"2121212121212121212121212121212121212121212121212121212121212121\",\"client_session_xonly_key\":\"2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01\",\"expected_provider_identity_xonly_key\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"extensions\":{},\"network_identity\":{\"consensus_profile\":\"bitcoin-core-v30.0-regtest-default\",\"deployment_namespace\":\"rillswap-e2e-v1\",\"family\":\"bitcoin\",\"genesis_hash\":\"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206\",\"name\":\"regtest\",\"signet_challenge\":null},\"profile_id\":\"ln-to-btc/v1\",\"protocol\":\"rillswap\",\"requested_capabilities\":[\"core/v1\",\"recovery/v1\"],\"requested_encryption_suites\":[\"noise-xk-secp256k1-chachapoly-sha256/v1\"],\"required_features\":[\"org.rillswap/mining-prepayment/v1\"],\"session_id\":\"2020202020202020202020202020202020202020202020202020202020202020\",\"wire_version\":\"1\"}}",
+        "canonical_utf8": "{\"accept\":{\"client_challenge\":\"2121212121212121212121212121212121212121212121212121212121212121\",\"client_session_xonly_key\":\"2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01\",\"extensions\":{},\"handshake_init_hash\":\"aa8c5933250b0abce14115e9d1b7cc0d1fffa7151d9ce23c897993d2758f4514\",\"network_identity\":{\"consensus_profile\":\"bitcoin-core-v30.0-regtest-default\",\"deployment_namespace\":\"rillswap-e2e-v1\",\"family\":\"bitcoin\",\"genesis_hash\":\"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206\",\"name\":\"regtest\",\"signet_challenge\":null},\"profile_id\":\"ln-to-btc/v1\",\"protocol\":\"rillswap\",\"provider_challenge\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"provider_identity_xonly_key\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"provider_session_xonly_key\":\"acd484e2f0c7f65309ad178a9f559abde09796974c57e714c35f110dfc27ccbe\",\"required_features\":[\"epoch-bound-session/v1\",\"org.rillswap/mining-prepayment/v1\"],\"selected_capabilities\":[\"core/v1\",\"recovery/v1\"],\"selected_encryption_suite\":\"noise-xk-secp256k1-chachapoly-sha256/v1\",\"session_id\":\"ad65eb07f6dd489b072217dc5496d8172048961a26d94562ff9073dc258b2b66\",\"transport_endpoints\":[\"wss://provider.rillswap.invalid/v1\"],\"wire_version\":\"1\"},\"init\":{\"client_challenge\":\"2121212121212121212121212121212121212121212121212121212121212121\",\"client_session_xonly_key\":\"2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01\",\"expected_provider_identity_xonly_key\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"extensions\":{\"rillswap/epoch-bound-session\":{\"epoch_inbox_xonly_key\":\"d7924d4f7d43ea965a465ae3095ff41131e5946f3c85f79e44adbcf8e27e080e\"}},\"network_identity\":{\"consensus_profile\":\"bitcoin-core-v30.0-regtest-default\",\"deployment_namespace\":\"rillswap-e2e-v1\",\"family\":\"bitcoin\",\"genesis_hash\":\"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206\",\"name\":\"regtest\",\"signet_challenge\":null},\"profile_id\":\"ln-to-btc/v1\",\"protocol\":\"rillswap\",\"requested_capabilities\":[\"core/v1\",\"recovery/v1\"],\"requested_encryption_suites\":[\"noise-xk-secp256k1-chachapoly-sha256/v1\"],\"required_features\":[\"epoch-bound-session/v1\",\"org.rillswap/mining-prepayment/v1\"],\"session_id\":\"ad65eb07f6dd489b072217dc5496d8172048961a26d94562ff9073dc258b2b66\",\"wire_version\":\"1\"}}",
         "tag": "RillSwap/transcript/v1",
-        "tagged_hash": "7ca6ab68f6476f27c0d8188676e72f1f44c75edb9a76709be6e5f48a39e2b089"
+        "tagged_hash": "a370eb220056b51818f640d6ddb6bae9dbc8a4551d07786c38d4b17778e6310c"
       },
       "handshake_confirm": {
         "object": {
-          "handshake_hash": "7ca6ab68f6476f27c0d8188676e72f1f44c75edb9a76709be6e5f48a39e2b089",
-          "session_id": "2020202020202020202020202020202020202020202020202020202020202020",
+          "handshake_hash": "a370eb220056b51818f640d6ddb6bae9dbc8a4551d07786c38d4b17778e6310c",
+          "session_id": "ad65eb07f6dd489b072217dc5496d8172048961a26d94562ff9073dc258b2b66",
           "client_session_xonly_key": "2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01",
           "provider_session_xonly_key": "acd484e2f0c7f65309ad178a9f559abde09796974c57e714c35f110dfc27ccbe"
         }
@@ -351,7 +379,7 @@
             "consensus_profile": "bitcoin-core-v30.0-regtest-default",
             "deployment_namespace": "rillswap-e2e-v1"
           },
-          "session_id": "2020202020202020202020202020202020202020202020202020202020202020",
+          "session_id": "ad65eb07f6dd489b072217dc5496d8172048961a26d94562ff9073dc258b2b66",
           "message_id": "2323232323232323232323232323232323232323232323232323232323232323",
           "sender_session_key": "2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01",
           "sequence": 1,
@@ -359,22 +387,22 @@
           "contract_hash": null,
           "message_type": "handshake_confirm",
           "payload": {
-            "handshake_hash": "7ca6ab68f6476f27c0d8188676e72f1f44c75edb9a76709be6e5f48a39e2b089",
-            "session_id": "2020202020202020202020202020202020202020202020202020202020202020",
+            "handshake_hash": "a370eb220056b51818f640d6ddb6bae9dbc8a4551d07786c38d4b17778e6310c",
+            "session_id": "ad65eb07f6dd489b072217dc5496d8172048961a26d94562ff9073dc258b2b66",
             "client_session_xonly_key": "2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01",
             "provider_session_xonly_key": "acd484e2f0c7f65309ad178a9f559abde09796974c57e714c35f110dfc27ccbe"
           },
           "required_features": [],
           "extensions": {},
-          "signature": "4c171a209f47f753bb89b22d6b0373bbbb1470bafbbbca1efd02bc448a2c13fb82ea0a6c008c0c440f447592071e2aa9ab4595e23832c15e82e31ffac5dfc375"
+          "signature": "86f8e99bc15751a32a01f8a9478b2c20777ad3c40d027ce657d092d84575d4899ceae0b2af61a12e43e28380e45e81bc1e01e550833e5a43c00ae1ac5103e937"
         },
-        "canonical_unsigned_utf8": "{\"contract_hash\":null,\"extensions\":{},\"in_reply_to\":\"2424242424242424242424242424242424242424242424242424242424242424\",\"message_id\":\"2323232323232323232323232323232323232323232323232323232323232323\",\"message_type\":\"handshake_confirm\",\"network_identity\":{\"consensus_profile\":\"bitcoin-core-v30.0-regtest-default\",\"deployment_namespace\":\"rillswap-e2e-v1\",\"family\":\"bitcoin\",\"genesis_hash\":\"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206\",\"name\":\"regtest\",\"signet_challenge\":null},\"payload\":{\"client_session_xonly_key\":\"2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01\",\"handshake_hash\":\"7ca6ab68f6476f27c0d8188676e72f1f44c75edb9a76709be6e5f48a39e2b089\",\"provider_session_xonly_key\":\"acd484e2f0c7f65309ad178a9f559abde09796974c57e714c35f110dfc27ccbe\",\"session_id\":\"2020202020202020202020202020202020202020202020202020202020202020\"},\"profile_id\":\"ln-to-btc/v1\",\"protocol\":\"rillswap\",\"required_features\":[],\"sender_session_key\":\"2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01\",\"sequence\":1,\"session_id\":\"2020202020202020202020202020202020202020202020202020202020202020\",\"wire_version\":\"1\"}",
+        "canonical_unsigned_utf8": "{\"contract_hash\":null,\"extensions\":{},\"in_reply_to\":\"2424242424242424242424242424242424242424242424242424242424242424\",\"message_id\":\"2323232323232323232323232323232323232323232323232323232323232323\",\"message_type\":\"handshake_confirm\",\"network_identity\":{\"consensus_profile\":\"bitcoin-core-v30.0-regtest-default\",\"deployment_namespace\":\"rillswap-e2e-v1\",\"family\":\"bitcoin\",\"genesis_hash\":\"0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206\",\"name\":\"regtest\",\"signet_challenge\":null},\"payload\":{\"client_session_xonly_key\":\"2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01\",\"handshake_hash\":\"a370eb220056b51818f640d6ddb6bae9dbc8a4551d07786c38d4b17778e6310c\",\"provider_session_xonly_key\":\"acd484e2f0c7f65309ad178a9f559abde09796974c57e714c35f110dfc27ccbe\",\"session_id\":\"ad65eb07f6dd489b072217dc5496d8172048961a26d94562ff9073dc258b2b66\"},\"profile_id\":\"ln-to-btc/v1\",\"protocol\":\"rillswap\",\"required_features\":[],\"sender_session_key\":\"2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01\",\"sequence\":1,\"session_id\":\"ad65eb07f6dd489b072217dc5496d8172048961a26d94562ff9073dc258b2b66\",\"wire_version\":\"1\"}",
         "tag": "RillSwap/envelope/v1",
-        "tagged_hash": "ecd152caffe57e4e2a877a1582d05cdfcce5e42d4914593a7e7a3d92a7e94e05",
+        "tagged_hash": "78e3ef50b12b5be16c1b0e6cc7bbd2336aff759929b128146a3e437cae37f48d",
         "signer_secret_key": "0000000000000000000000000000000000000000000000000000000000000008",
         "signer_xonly_key": "2f01e5e15cca351daff3843fb70f3c2f0a1bdd05e5af888a67784ef3e10a2a01",
         "auxiliary_random": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
-        "signature": "4c171a209f47f753bb89b22d6b0373bbbb1470bafbbbca1efd02bc448a2c13fb82ea0a6c008c0c440f447592071e2aa9ab4595e23832c15e82e31ffac5dfc375"
+        "signature": "86f8e99bc15751a32a01f8a9478b2c20777ad3c40d027ce657d092d84575d4899ceae0b2af61a12e43e28380e45e81bc1e01e550833e5a43c00ae1ac5103e937"
       }
     }
   ],

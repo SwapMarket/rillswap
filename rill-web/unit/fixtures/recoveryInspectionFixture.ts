@@ -3,8 +3,8 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import {
-  clientAcceptanceHash, contractHash, fundingBindingHash, handshakeAcceptHash, handshakeHash, handshakeInitHash,
-  providerTermsHash, unsignedEnvelopeHash,
+  clientAcceptanceHash, contractHash, epochBoundSessionId, fundingBindingHash, handshakeAcceptHash, handshakeHash,
+  handshakeInitHash, providerTermsHash, unsignedEnvelopeHash,
 } from "../../src/swap/hashes";
 import { reconstructTaprootContract } from "../../src/swap/taproot";
 import { buildCooperativeClaimPlan } from "../../src/swap/cooperative";
@@ -30,6 +30,18 @@ export type FixtureRecord = Omit<typeof original, "contract_terms" | "verificati
 };
 export const fixtureRecord = (): FixtureRecord => structuredClone(original) as unknown as FixtureRecord;
 export const signDigest = (digest: Uint8Array, secret: Uint8Array): string => bytesToHex(schnorr.sign(digest, secret));
+
+/** Move a record to another network; its epoch-bound session ID commits to the network, so it is rederived. */
+export function moveToNetwork(record: FixtureRecord, network: unknown): void {
+  const identity = structuredClone(network) as FixtureRecord["network_identity"];
+  record.network_identity = identity;
+  record.contract_terms.network_identity = structuredClone(identity) as FixtureRecord["contract_terms"]["network_identity"];
+  const { handshake_init: init, handshake_accept: accept } = record.verification_context;
+  init.network_identity = accept.network_identity = identity;
+  const { epoch_inbox_xonly_key: epoch } = init.extensions["rillswap/epoch-bound-session"] as { epoch_inbox_xonly_key: string };
+  init.session_id = accept.session_id = bytesToHex(
+    epochBoundSessionId(identity, init.expected_provider_identity_xonly_key, epoch, init.client_session_xonly_key));
+}
 
 /** Re-sign after a mutation so semantic rejection tests do not merely exercise broken signatures. */
 export function signRecord(record: FixtureRecord): FixtureRecord {
@@ -75,8 +87,8 @@ export function appendBinding(record: FixtureRecord): void {
 export function reservedRecord(): FixtureRecord {
   const record = fundedRecord();
   const context = record.verification_context;
-  context.handshake_init.required_features = ["cooperative-claim/v1"];
-  context.handshake_accept.required_features = ["cooperative-claim/v1"];
+  context.handshake_init.required_features = ["cooperative-claim/v1", "epoch-bound-session/v1"];
+  context.handshake_accept.required_features = ["cooperative-claim/v1", "epoch-bound-session/v1"];
   record.contract_terms.required_features = ["cooperative-claim/v1"];
   record.contract_terms.invoice_binding.payment_hash = bytesToHex(sha256(hexToBytes(testPreimage)));
   record.monotonic_knowledge = { ...record.monotonic_knowledge, preimage_known: true, preimage: testPreimage };

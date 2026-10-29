@@ -1,14 +1,12 @@
 {
   "source_repository": "rill-docs",
-  "btc_source_commit": "0ceff7f",
   "btc_fixture": "initial-btc-to-ln-v1.json",
-  "btc_sha256": "c30fd383eb769973976f5600a05e0f3883d50bb3486a375131659b3be03b09eb",
-  "ln_source_commit": "aca511b",
+  "btc_sha256": "7805b5c0efd48794cd706bb62de70a837af38dd68f17c41c235761683a33c88b",
   "ln_fixture": "initial-ln-to-btc-no-prepayment-v1.json",
-  "ln_sha256": "41ec77f4c4adf3383b96a58d4fdf799ad8ee922deccd69bcc9e5d7cba69a43c3",
+  "ln_sha256": "690cbc5cb586e1a12ca227b60c41e0e5873732f800dfb97c2b053cf21891f974",
   "scrypt_source": "Go filippo.io/age v1.3.1, tests/fixtures/scrypt-generator/main.go, logN=19",
   "scrypt_fixture": "initial-ln-to-btc-scrypt19.age",
-  "scrypt_sha256": "4811fd59941a988ab30089b7ebcc2ac754fa850e9663cf5c6c1cca6ea5b89de9",
+  "scrypt_sha256": "fb75c4f42a855ce7b8df0254cd3f82037a6a3568d911356f11bdf758c0efbc01",
   "scrypt_passphrase": "rillswap-test-only-age19-passphrase",
   "warning": "Synthetic public test keys and decoded invoice bindings, not real age plaintext or BOLT11 invoices."
 }

@@ -4,8 +4,8 @@ import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import mainnet from "../../src/networks/mainnet.json" with { type: "json" };
 import { epochBoundSessionId, fundingBindingHash, unsignedEnvelopeHash } from "../../src/swap/hashes";
 import {
-  appendBinding, clientSessionSecret, fixtureRecord, fundedRecord, providerSessionSecret, reservedRecord, signDigest,
-  signRecord, type FixtureRecord,
+  appendBinding, clientSessionSecret, fixtureRecord, fundedRecord, moveToNetwork, providerSessionSecret, reservedRecord,
+  signDigest, signRecord, type FixtureRecord,
 } from "./recoveryInspectionFixture";
 
 export interface InspectionCase { readonly name: string; readonly record: FixtureRecord; readonly accepted: boolean; readonly expectedNetwork: unknown }
@@ -28,15 +28,10 @@ const reservationCase = (name: string, edit: (m: ReturnType<typeof marker>, r: F
 export function recoveryInspectionCases(): InspectionCase[] {
   const cooperative = fixtureRecord();
   cooperative.contract_terms.required_features = ["cooperative-claim/v1"];
-  cooperative.verification_context.handshake_init.required_features = ["cooperative-claim/v1"];
-  cooperative.verification_context.handshake_accept.required_features = ["cooperative-claim/v1"];
+  cooperative.verification_context.handshake_init.required_features = ["cooperative-claim/v1", "epoch-bound-session/v1"];
+  cooperative.verification_context.handshake_accept.required_features = ["cooperative-claim/v1", "epoch-bound-session/v1"];
   signRecord(cooperative);
-  const main = fixtureRecord();
-  main.network_identity = structuredClone(mainnet) as unknown as FixtureRecord["network_identity"];
-  main.contract_terms.network_identity = structuredClone(mainnet);
-  main.verification_context.handshake_init.network_identity = main.network_identity;
-  main.verification_context.handshake_accept.network_identity = main.network_identity;
-  signRecord(main);
+  const main = fixtureRecord(); moveToNetwork(main, mainnet); signRecord(main);
   const epoch = fixtureRecord();
   const epochKey = bytesToHex(schnorr.getPublicKey(hexToBytes("0".repeat(63) + "9")));
   const init = epoch.verification_context.handshake_init, accept = epoch.verification_context.handshake_accept;
@@ -47,7 +42,11 @@ export function recoveryInspectionCases(): InspectionCase[] {
   signRecord(epoch);
   const later = reservedRecord(); appendBinding(later);
   const maxHistory = fundedRecord(); while (maxHistory.funding_history.length < 64) appendBinding(maxHistory);
-  const ignoredEpoch = fixtureRecord(); ignoredEpoch.verification_context.handshake_init.extensions = { "rillswap/epoch-bound-session": { unrelated: true } }; signRecord(ignoredEpoch);
+  // Unbound history is still inspected: the fixture's former unbound form with an unrelated epoch extension.
+  const ignoredEpoch = fixtureRecord(), unbound = ignoredEpoch.verification_context;
+  unbound.handshake_init.required_features = []; unbound.handshake_accept.required_features = [];
+  unbound.handshake_init.session_id = unbound.handshake_accept.session_id = "10".repeat(32);
+  unbound.handshake_init.extensions = { "rillswap/epoch-bound-session": { unrelated: true } }; signRecord(ignoredEpoch);
   const optional = fixtureRecord(); optional.extensions = { "example/info": { ignored: true } };
   const cases: InspectionCase[] = [
     entry("original expired legacy, no binding", fixtureRecord(), true),

@@ -14,8 +14,8 @@ import {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const CASES = [
-  ["initial-btc-to-ln-v1.json", "c30fd383eb769973976f5600a05e0f3883d50bb3486a375131659b3be03b09eb"],
-  ["initial-ln-to-btc-no-prepayment-v1.json", "41ec77f4c4adf3383b96a58d4fdf799ad8ee922deccd69bcc9e5d7cba69a43c3"],
+  ["initial-btc-to-ln-v1.json", "7805b5c0efd48794cd706bb62de70a837af38dd68f17c41c235761683a33c88b"],
+  ["initial-ln-to-btc-no-prepayment-v1.json", "690cbc5cb586e1a12ca227b60c41e0e5873732f800dfb97c2b053cf21891f974"],
 ] as const;
 
 function fixture(name: string): Uint8Array {

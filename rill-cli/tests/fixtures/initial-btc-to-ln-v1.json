@@ -80,7 +80,7 @@
         "consensus_profile": "bitcoin-core-v30.0-regtest-default",
         "deployment_namespace": "rillswap-e2e-v1"
       },
-      "session_id": "1010101010101010101010101010101010101010101010101010101010101010",
+      "session_id": "e421eba4a80eb7025c22790cf4ab18dea58ffcf3fe1794fdd31177a1ac0babfe",
       "client_challenge": "1111111111111111111111111111111111111111111111111111111111111111",
       "client_session_xonly_key": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
       "expected_provider_identity_xonly_key": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
@@ -91,11 +91,17 @@
         "core/v1",
         "recovery/v1"
       ],
-      "required_features": [],
-      "extensions": {}
+      "required_features": [
+        "epoch-bound-session/v1"
+      ],
+      "extensions": {
+        "rillswap/epoch-bound-session": {
+          "epoch_inbox_xonly_key": "d7924d4f7d43ea965a465ae3095ff41131e5946f3c85f79e44adbcf8e27e080e"
+        }
+      }
     },
     "handshake_accept": {
-      "handshake_init_hash": "5cac6f54747b33bf968bff61048f21f56e06d0c295b999def1b37fc0b171434c",
+      "handshake_init_hash": "7c916975dc6ac890d86516c0259982b631059840fa15541c52850b1014985627",
       "protocol": "rillswap",
       "wire_version": "1",
       "profile_id": "btc-to-ln/v1",
@@ -107,7 +113,7 @@
         "consensus_profile": "bitcoin-core-v30.0-regtest-default",
         "deployment_namespace": "rillswap-e2e-v1"
       },
-      "session_id": "1010101010101010101010101010101010101010101010101010101010101010",
+      "session_id": "e421eba4a80eb7025c22790cf4ab18dea58ffcf3fe1794fdd31177a1ac0babfe",
       "client_challenge": "1111111111111111111111111111111111111111111111111111111111111111",
       "provider_challenge": "1212121212121212121212121212121212121212121212121212121212121212",
       "client_session_xonly_key": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
@@ -121,19 +127,21 @@
       "transport_endpoints": [
         "wss://provider.rillswap.invalid/v1"
       ],
-      "required_features": [],
+      "required_features": [
+        "epoch-bound-session/v1"
+      ],
       "extensions": {}
     },
-    "provider_identity_signature": "8c172467734c4a3bd9abfd9fdd66b05c10e1bf12d96843011e191f18cd95fdd55de57287073b1ff5f6d5346ae7b8f196d3ec09e61f3fe6dde2caf69762b05e9f",
-    "handshake_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8",
+    "provider_identity_signature": "3558162a83717010cd201609413d72aa90c17eb5a31a13800025a41083cfeb93b9f1a7c94dc595d97971accf529eb1ce183722451e6ba00fbd7e8e008041f858",
+    "handshake_hash": "5b2158f43d856f9a236bd3f10261ff8c8d58be07c22914acad7c8a4272b01581",
     "client_session_xonly_key": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
     "provider_session_xonly_key": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
     "expected_provider_identity_source": {
       "kind": "manual",
       "advertisement_digest": null
     },
-    "provider_terms_signature": "84666843d34e78e411e4d79fd1430393feae262402ca69f8e7567942bcbbe5debe7f51ab59b5230204744b5150d55decd935548fe77115541765a133ac45fa95",
-    "client_acceptance_signature": "48784189fe96d08f9175d239058c4226ba508ba67df9ff41e014606322934c29c8d358ae491ab9cfeb2f5469a114534860cddccea2e7b9210ca4f896e4c3d246"
+    "provider_terms_signature": "8da9ffe5d060b1e5ac2438755f6efd4c2fdbadbd6d773ede865cdfc1d4d138169010d148d00d19157bc1ba0a705591d3155e22f11ac82643d118d8d52ff50e16",
+    "client_acceptance_signature": "900a0935f6b417d9c5570ee1a32669d76676c474c9ad78690f1a51843b00cf0e05e12eee12702332f26f2e69214f50c6fb80fd48d488111090178a7df32d8c8e"
   },
   "taproot_contract": {
     "internal_xonly_key": "44f5d5da9470c2bd7587ac59b16ec81e7777d9f5ad0599756a285c89ae690865",

@@ -20,7 +20,15 @@ from rill_core.wire.types import NetworkIdentity
 
 FIXTURE = Path(__file__).parents[1] / "fixtures/recovery-v1/initial-btc-to-ln-v1.json"
 CONTEXT = json.loads(FIXTURE.read_text())["verification_context"]
-LEGACY = CONTEXT["handshake_init"]
+# The fixture is epoch-bound. Core still parses unbound initiations, so this is
+# the fixture's former unbound form with its original random identifier.
+LEGACY = {
+    **copy.deepcopy(CONTEXT["handshake_init"]),
+    "session_id": "10" * 32,
+    "required_features": [],
+    "extensions": {},
+}
+LEGACY_INIT_HASH = "5cac6f54747b33bf968bff61048f21f56e06d0c295b999def1b37fc0b171434c"
 NETWORK = NetworkIdentity.model_validate(LEGACY["network_identity"])
 PROVIDER = LEGACY["expected_provider_identity_xonly_key"]
 CLIENT = LEGACY["client_session_xonly_key"]
@@ -102,7 +110,7 @@ def test_legacy_transcript_bytes_and_random_identifier_remain_unchanged() -> Non
     legacy = HandshakeInit.model_validate_json(json.dumps(LEGACY), strict=True)
     assert legacy.model_dump(mode="json") == LEGACY
     assert legacy.epoch_inbox_xonly_key is None
-    assert handshake_init_hash(legacy).hex() == CONTEXT["handshake_accept"]["handshake_init_hash"]
+    assert handshake_init_hash(legacy).hex() == LEGACY_INIT_HASH
 
 
 def test_optional_extension_does_not_reclassify_legacy_admission() -> None:

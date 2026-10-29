@@ -27,6 +27,7 @@ from rill_core.settlement import (
 from rill_core.wire.canonical import canonicalize, parse_json_strict
 from rill_core.wire.hashes import (
     COOPERATIVE_CLAIM_FEATURE,
+    EPOCH_SESSION_FEATURE,
     client_acceptance_hash,
     contract_hash,
     funding_binding_hash,
@@ -820,8 +821,10 @@ def test_pinned_signed_ln_no_prepayment_object_is_accepted_only_with_preimage() 
     assert hashlib.sha256(contents).hexdigest() == manifest["sha256"]
     document: dict[str, Any] = json.loads(contents)
     assert document["contract_terms"]["required_features"] == []
-    assert document["verification_context"]["handshake_init"]["required_features"] == []
-    assert document["verification_context"]["handshake_accept"]["required_features"] == []
+    for half in ("handshake_init", "handshake_accept"):
+        assert document["verification_context"][half]["required_features"] == [
+            EPOCH_SESSION_FEATURE
+        ]
     original_taproot = next(
         item["artifacts"]
         for item in json.loads(TAPROOT.read_text())["valid"]

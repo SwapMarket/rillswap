@@ -152,9 +152,9 @@
             "required_features": [],
             "extensions": {}
           },
-          "handshake_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8"
+          "handshake_hash": "5b2158f43d856f9a236bd3f10261ff8c8d58be07c22914acad7c8a4272b01581"
         },
-        "provider_terms_signature": "84666843d34e78e411e4d79fd1430393feae262402ca69f8e7567942bcbbe5debe7f51ab59b5230204744b5150d55decd935548fe77115541765a133ac45fa95"
+        "provider_terms_signature": "8da9ffe5d060b1e5ac2438755f6efd4c2fdbadbd6d773ede865cdfc1d4d138169010d148d00d19157bc1ba0a705591d3155e22f11ac82643d118d8d52ff50e16"
       }
     ],
     "error": [
@@ -276,9 +276,9 @@
             "required_features": [],
             "extensions": {}
           },
-          "handshake_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8"
+          "handshake_hash": "5b2158f43d856f9a236bd3f10261ff8c8d58be07c22914acad7c8a4272b01581"
         },
-        "provider_terms_signature": "84666843d34e78e411e4d79fd1430393feae262402ca69f8e7567942bcbbe5debe7f51ab59b5230204744b5150d55decd935548fe77115541765a133ac45fa95",
+        "provider_terms_signature": "8da9ffe5d060b1e5ac2438755f6efd4c2fdbadbd6d773ede865cdfc1d4d138169010d148d00d19157bc1ba0a705591d3155e22f11ac82643d118d8d52ff50e16",
         "hold_invoice": "lnbcrt1020u1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
       }
     ]
@@ -451,7 +451,7 @@
             "required_features": [],
             "extensions": {}
           },
-          "handshake_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8"
+          "handshake_hash": "5b2158f43d856f9a236bd3f10261ff8c8d58be07c22914acad7c8a4272b01581"
         }
       }
     ],
@@ -746,9 +746,9 @@
             "required_features": [],
             "extensions": {}
           },
-          "handshake_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8"
+          "handshake_hash": "5b2158f43d856f9a236bd3f10261ff8c8d58be07c22914acad7c8a4272b01581"
         },
-        "provider_terms_signature": "84666843d34e78e411e4d79fd1430393feae262402ca69f8e7567942bcbbe5debe7f51ab59b5230204744b5150d55decd935548fe77115541765a133ac45fa95"
+        "provider_terms_signature": "8da9ffe5d060b1e5ac2438755f6efd4c2fdbadbd6d773ede865cdfc1d4d138169010d148d00d19157bc1ba0a705591d3155e22f11ac82643d118d8d52ff50e16"
       },
       {
         "terms": {
@@ -809,9 +809,9 @@
             "required_features": [],
             "extensions": {}
           },
-          "handshake_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8"
+          "handshake_hash": "5b2158f43d856f9a236bd3f10261ff8c8d58be07c22914acad7c8a4272b01581"
         },
-        "provider_terms_signature": "84666843d34e78e411e4d79fd1430393feae262402ca69f8e7567942bcbbe5debe7f51ab59b5230204744b5150d55decd935548fe77115541765a133ac45fa95",
+        "provider_terms_signature": "8da9ffe5d060b1e5ac2438755f6efd4c2fdbadbd6d773ede865cdfc1d4d138169010d148d00d19157bc1ba0a705591d3155e22f11ac82643d118d8d52ff50e16",
         "hold_invoice": "LNBCRT1"
       },
       {
@@ -870,9 +870,9 @@
             "required_features": [],
             "extensions": {}
           },
-          "handshake_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8"
+          "handshake_hash": "5b2158f43d856f9a236bd3f10261ff8c8d58be07c22914acad7c8a4272b01581"
         },
-        "provider_terms_signature": "84666843d34e78e411e4d79fd1430393feae262402ca69f8e7567942bcbbe5debe7f51ab59b5230204744b5150d55decd935548fe77115541765a133ac45fa95",
+        "provider_terms_signature": "8da9ffe5d060b1e5ac2438755f6efd4c2fdbadbd6d773ede865cdfc1d4d138169010d148d00d19157bc1ba0a705591d3155e22f11ac82643d118d8d52ff50e16",
         "hold_invoice": "lnbcrt1020u1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
       },
       {
@@ -934,9 +934,9 @@
             "required_features": [],
             "extensions": {}
           },
-          "handshake_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8"
+          "handshake_hash": "5b2158f43d856f9a236bd3f10261ff8c8d58be07c22914acad7c8a4272b01581"
         },
-        "provider_terms_signature": "84666843d34e78e411e4d79fd1430393feae262402ca69f8e7567942bcbbe5debe7f51ab59b5230204744b5150d55decd935548fe77115541765a133ac45fa95",
+        "provider_terms_signature": "8da9ffe5d060b1e5ac2438755f6efd4c2fdbadbd6d773ede865cdfc1d4d138169010d148d00d19157bc1ba0a705591d3155e22f11ac82643d118d8d52ff50e16",
         "hold_invoice": "lnbcrt1020u1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
       }
     ]

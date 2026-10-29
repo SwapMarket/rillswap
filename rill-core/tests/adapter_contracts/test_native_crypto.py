@@ -34,7 +34,11 @@ from rill_core.settlement import (
 from rill_core.wire.canonical import canonicalize, parse_json_strict
 from rill_core.wire.envelope_authentication import verify_static_signed_envelope
 from rill_core.wire.handshake_authentication import verify_static_handshake_transcript
-from rill_core.wire.hashes import funding_binding_hash, unsigned_envelope_hash
+from rill_core.wire.hashes import (
+    EPOCH_SESSION_FEATURE,
+    funding_binding_hash,
+    unsigned_envelope_hash,
+)
 from rill_core.wire.messages import (
     ContractTerms,
     Envelope,
@@ -76,12 +80,13 @@ def test_pinned_rs001_client_confirm_envelope_signature_with_native_crypto() -> 
         )
     )
     sender = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+    session_id = "e421eba4a80eb7025c22790cf4ab18dea58ffcf3fe1794fdd31177a1ac0babfe"
     signed: dict[str, Any] = {
         "protocol": "rillswap",
         "wire_version": "1",
         "profile_id": "btc-to-ln/v1",
         "network_identity": network.model_dump(mode="json"),
-        "session_id": "10" * 32,
+        "session_id": session_id,
         "message_id": "13" * 32,
         "sender_session_key": sender,
         "sequence": 1,
@@ -89,8 +94,8 @@ def test_pinned_rs001_client_confirm_envelope_signature_with_native_crypto() -> 
         "contract_hash": None,
         "message_type": "handshake_confirm",
         "payload": {
-            "handshake_hash": "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8",
-            "session_id": "10" * 32,
+            "handshake_hash": "5b2158f43d856f9a236bd3f10261ff8c8d58be07c22914acad7c8a4272b01581",
+            "session_id": session_id,
             "client_session_xonly_key": sender,
             "provider_session_xonly_key": (
                 "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
@@ -99,13 +104,13 @@ def test_pinned_rs001_client_confirm_envelope_signature_with_native_crypto() -> 
         "required_features": [],
         "extensions": {},
         "signature": (
-            "d8a7339977e4673e215e61339386e8208b0c6d1ecbe01621e985fe3d6c1399"
-            "384f7b321a32c9ddf5363cb484e78561b3fb6aa65e686a076fcf95c7263a13c3bb"
+            "35359913a9d74ebdfac2c32bbc877a8816d4d080a17a7e0534c6eb3e4f6b01"
+            "a54a3b0e647681c065e3dfd12a2727d7a3ed6bc96984f60a660885c1fe43931bed"
         ),
     }
     envelope = Envelope.model_validate_json(json.dumps(signed))
     expected_digest = bytes.fromhex(
-        "eef562447f6afa99cc8e9c949c72b37613488e1b061a01207fa51bca349eb20b"
+        "e05af7ef41d99d23cffff80d1ee959a8d482f4e1cec1f9cd7b9c153796ead472"
     )
     assert unsigned_envelope_hash(envelope) == expected_digest
     context = json.loads(RECOVERY.read_text())["verification_context"]
@@ -147,7 +152,7 @@ def test_pinned_rs001_client_confirm_envelope_signature_with_native_crypto() -> 
     def check() -> bytes:
         return verify_static_signed_envelope(
             json.dumps(signed).encode(),
-            expected_session_id="10" * 32,
+            expected_session_id=session_id,
             expected_profile="btc-to-ln/v1",
             expected_network=network,
             expected_sender_key=sender,
@@ -164,7 +169,7 @@ def test_pinned_rs001_client_confirm_envelope_signature_with_native_crypto() -> 
             expected_provider_identity=initiation["expected_provider_identity_xonly_key"],
             expected_profile="btc-to-ln/v1",
             expected_network=network,
-            supported_features=frozenset(),
+            supported_features=frozenset({EPOCH_SESSION_FEATURE}),
             supported_encryption_suites=frozenset({"noise-xk-secp256k1-chachapoly-sha256/v1"}),
             supported_capabilities=frozenset({"core/v1", "recovery/v1"}),
             crypto=crypto,
@@ -172,7 +177,7 @@ def test_pinned_rs001_client_confirm_envelope_signature_with_native_crypto() -> 
         signed["payload"]["session_id"] = "20" * 32
         with pytest.raises(ValidationError, match="invalid static signed envelope"):
             check()
-        signed["payload"]["session_id"] = "10" * 32
+        signed["payload"]["session_id"] = session_id
         signed["signature"] = "00" * 64
         with pytest.raises(ValidationError, match="invalid static signed envelope"):
             check()

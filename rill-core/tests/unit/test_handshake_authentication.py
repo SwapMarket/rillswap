@@ -11,17 +11,21 @@ import pytest
 
 from rill_core.errors import ValidationError
 from rill_core.wire import verify_static_handshake_accept, verify_static_handshake_transcript
-from rill_core.wire.hashes import handshake_accept_hash, unsigned_envelope_hash
+from rill_core.wire.hashes import (
+    EPOCH_SESSION_FEATURE,
+    handshake_accept_hash,
+    unsigned_envelope_hash,
+)
 from rill_core.wire.messages import Envelope, HandshakeAccept
 from rill_core.wire.types import NetworkIdentity
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "recovery-v1" / "initial-btc-to-ln-v1.json"
 CLIENT_CONFIRM_SIGNATURE = (
-    "d8a7339977e4673e215e61339386e8208b0c6d1ecbe01621e985fe3d6c1399"
-    "384f7b321a32c9ddf5363cb484e78561b3fb6aa65e686a076fcf95c7263a13c3bb"
+    "35359913a9d74ebdfac2c32bbc877a8816d4d080a17a7e0534c6eb3e4f6b01"
+    "a54a3b0e647681c065e3dfd12a2727d7a3ed6bc96984f60a660885c1fe43931bed"
 )
 TRANSCRIPT_DIGEST = bytes.fromhex(
-    "5fbb869c7f2df70b939d7c370478c06f5819f287351c1d19b4921fe95aa156c8"
+    "5b2158f43d856f9a236bd3f10261ff8c8d58be07c22914acad7c8a4272b01581"
 )
 
 
@@ -117,7 +121,7 @@ def _verify(
         "expected_network": NetworkIdentity.model_validate_json(
             json.dumps(init["network_identity"])
         ),
-        "supported_features": frozenset(),
+        "supported_features": frozenset({EPOCH_SESSION_FEATURE}),
         "supported_encryption_suites": frozenset({"noise-xk-secp256k1-chachapoly-sha256/v1"}),
         "supported_capabilities": frozenset({"core/v1", "recovery/v1"}),
         "crypto": crypto,
@@ -132,7 +136,7 @@ def test_pinned_static_transcript_accepts_historical_replay_without_admission() 
     source, envelopes = _data()
     crypto = PinnedCrypto(source, envelopes)
     assert unsigned_envelope_hash(Envelope.model_validate_json(json.dumps(envelopes[2]))) == (
-        bytes.fromhex("eef562447f6afa99cc8e9c949c72b37613488e1b061a01207fa51bca349eb20b")
+        bytes.fromhex("e05af7ef41d99d23cffff80d1ee959a8d482f4e1cec1f9cd7b9c153796ead472")
     )
     assert _verify(source, envelopes, crypto) == TRANSCRIPT_DIGEST
     assert _verify(source, envelopes, crypto) == TRANSCRIPT_DIGEST
@@ -267,7 +271,7 @@ def test_boolean_verifier_and_noncanonical_duplicate_key_are_rejected() -> None:
             expected_network=NetworkIdentity.model_validate_json(
                 json.dumps(source["network_identity"])
             ),
-            supported_features=frozenset(),
+            supported_features=frozenset({EPOCH_SESSION_FEATURE}),
             supported_encryption_suites=frozenset({"noise-xk-secp256k1-chachapoly-sha256/v1"}),
             supported_capabilities=frozenset({"core/v1", "recovery/v1"}),
             crypto=crypto,
@@ -284,7 +288,7 @@ def test_static_accept_pair_returns_transcript_digest_only_for_signed_accept() -
         "expected_network": NetworkIdentity.model_validate_json(
             json.dumps(init["network_identity"])
         ),
-        "supported_features": frozenset(),
+        "supported_features": frozenset({EPOCH_SESSION_FEATURE}),
         "supported_encryption_suites": frozenset({"noise-xk-secp256k1-chachapoly-sha256/v1"}),
         "supported_capabilities": frozenset({"core/v1", "recovery/v1"}),
         "crypto": crypto,
