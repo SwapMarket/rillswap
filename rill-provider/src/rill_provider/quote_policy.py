@@ -20,8 +20,15 @@ from typing import TYPE_CHECKING, Any, Literal
 from rill_core.domain.amounts import MAX_SATS
 from rill_core.errors import ValidationError
 from rill_core.settlement import claim_vsizes
-from rill_core.wire.canonical import canonicalize, parse_model_json
-from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE, contract_hash
+from rill_core.wire.canonical import JsonValue, canonicalize, parse_model_json
+from rill_core.wire.fee_policy import (
+    FEE_POLICY_EXTENSION,
+    QUOTE_LIFETIME_SECONDS,
+    BtcFeePolicy,
+    FeeBreakdown,
+    parse_fee_request,
+)
+from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE, FEE_POLICY_FEATURE, contract_hash
 from rill_core.wire.messages import ContractTerms, InvoiceBinding, ProviderTerms
 from rill_core.wire.quotes import (
     MAX_INDICATIVE_REQUESTS_PER_SESSION,
@@ -172,6 +179,8 @@ class QuoteTerms:
     hold: HoldOutcome = None
     evm: EvmQuoteContext | None = None  # RS-010 profiles only
     claim_fee: ClaimFeeRate | None = None  # this tick's sample; LN to BTC only
+    fee_policy: BtcFeePolicy | None = None
+    fee_breakdown: FeeBreakdown | None = None
 
 
 def _error(code: str, message: str) -> Answer:
@@ -179,8 +188,50 @@ def _error(code: str, message: str) -> Answer:
 
 
 def success_fee(terms: QuoteTerms, principal: int) -> int:
-    """Return the base fee plus the proportional fee, rounded up."""
-    return terms.base_fee_sat + -(-principal * terms.proportional_millionths // MILLIONTHS)
+    """Return service pricing plus the frozen, separately disclosed network charge."""
+    service = terms.base_fee_sat + -(-principal * terms.proportional_millionths // MILLIONTHS)
+    network = 0 if terms.fee_breakdown is None else int(terms.fee_breakdown.network_fee_sat)
+    return service + network
+
+
+def _fee_extensions(terms: QuoteTerms) -> dict[str, Any]:
+    return (
+        {}
+        if terms.fee_breakdown is None
+        else {FEE_POLICY_EXTENSION: terms.fee_breakdown.model_dump(mode="json")}
+    )
+
+
+def _quote_expiry(terms: QuoteTerms, lifetime: int) -> int:
+    deadline = terms.now + lifetime
+    if terms.fee_breakdown is not None:
+        deadline = min(deadline, terms.fee_breakdown.issued_at + QUOTE_LIFETIME_SECONDS)
+    return deadline
+
+
+def _pricing_problem(
+    extensions: dict[str, JsonValue], context: RequestContext, terms: QuoteTerms
+) -> Answer | None:
+    requested_policy = parse_fee_request(extensions)
+    if terms.fee_policy is not None:
+        if not context.network_fees or requested_policy is None:
+            return _error("request_unacceptable", "network fee policy must be negotiated and bound")
+        if requested_policy.policy_hash != terms.fee_policy.commitment():
+            return _error("request_unacceptable", "selected fee policy is no longer offered")
+        if terms.fee_breakdown is None or terms.now >= _quote_expiry(
+            terms, terms.schedule.terms_lifetime
+        ):
+            return _error("capacity_unavailable", "fresh network fee quote unavailable")
+        if (
+            terms.fee_breakdown.offer_event_id != requested_policy.offer_event_id
+            or terms.fee_breakdown.policy != terms.fee_policy
+            or int(terms.fee_breakdown.feerate_sat_kvb)
+            > int(requested_policy.max_network_feerate_sat_kvb)
+        ):
+            return _error("limits_unsatisfiable", "network fee limits cannot be met")
+    elif context.network_fees or requested_policy is not None:
+        return _error("unsupported_request", "network fee policy is not offered")
+    return None
 
 
 def answer_quote(  # noqa: PLR0911 - one closed answer per rule
@@ -196,6 +247,9 @@ def answer_quote(  # noqa: PLR0911 - one closed answer per rule
         return _error("request_unacceptable", "malformed quote request")
     if parsed.kind != terms.profile.split("/")[0]:
         return _error("unsupported_request", "profile not served in this session")
+    pricing_problem = _pricing_problem(parsed.extensions, context, terms)
+    if pricing_problem is not None:
+        return pricing_problem
     if isinstance(parsed, FirmQuoteRequest | ReverseFirmQuoteRequest):
         if earlier:
             return _error("unsupported_request", "a firm request must open a fresh session")
@@ -232,8 +286,8 @@ def answer_quote(  # noqa: PLR0911 - one closed answer per rule
         "max_claim_fee_sat": str(schedule.max_claim_fee_sat),
         "max_refund_fee_sat": str(schedule.max_refund_fee_sat),
         "minimum_invoice_remaining_seconds": schedule.minimum_invoice_remaining_seconds,
-        "expires_at": terms.now + schedule.lifetime,
-        "extensions": {},
+        "expires_at": _quote_expiry(terms, schedule.lifetime),
+        "extensions": _fee_extensions(terms),
     }
     try:  # never sign a payload the wire model would refuse (e.g. overflow)
         parse_model_json(QuoteOffer, canonicalize(offer))
@@ -321,7 +375,7 @@ def _firm(  # noqa: PLR0911 - one closed answer per rule
         "recovery_authorization_xonly_key": request.recovery_authorization_xonly_key,
         # Never outlive the invoice time the payment still needs.
         "terms_expiry": min(
-            terms.now + schedule.terms_lifetime,
+            _quote_expiry(terms, schedule.terms_lifetime),
             binding.expires_at - schedule.minimum_invoice_remaining_seconds,
         ),
         "timing_policy": {
@@ -331,8 +385,11 @@ def _firm(  # noqa: PLR0911 - one closed answer per rule
             "client_response_blocks": schedule.client_response_blocks,
             "claim_confirmation_blocks": schedule.claim_confirmation_blocks,
         },
-        "required_features": [COOPERATIVE_CLAIM_FEATURE] if context.cooperative else [],
-        "extensions": {},
+        "required_features": sorted(
+            ([COOPERATIVE_CLAIM_FEATURE] if context.cooperative else [])
+            + ([FEE_POLICY_FEATURE] if context.network_fees else [])
+        ),
+        "extensions": _fee_extensions(terms),
     }
     try:
         contract_terms = parse_model_json(ContractTerms, canonicalize(contract))
@@ -432,8 +489,8 @@ def _reverse_indicative(request: ReverseIndicativeQuoteRequest, terms: QuoteTerm
         "max_funding_fee_sat": str(schedule.max_funding_fee_sat),
         "max_claim_fee_sat": str(schedule.max_claim_fee_sat),
         "max_refund_fee_sat": str(schedule.max_refund_fee_sat),
-        "expires_at": terms.now + schedule.lifetime,
-        "extensions": {},
+        "expires_at": _quote_expiry(terms, schedule.lifetime),
+        "extensions": _fee_extensions(terms),
     }
     try:
         parse_model_json(ReverseQuoteOffer, canonicalize(offer))
@@ -512,7 +569,7 @@ def _reverse_firm(  # noqa: PLR0911 - one closed answer per rule
         "recovery_authorization_xonly_key": request.recovery_authorization_xonly_key,
         # The client must pay before the hold invoice expires with margin.
         "terms_expiry": min(
-            terms.now + schedule.terms_lifetime,
+            _quote_expiry(terms, schedule.terms_lifetime),
             binding.expires_at - schedule.minimum_invoice_remaining_seconds,
         ),
         "timing_policy": {
@@ -522,8 +579,11 @@ def _reverse_firm(  # noqa: PLR0911 - one closed answer per rule
             "client_response_blocks": schedule.client_response_blocks,
             "claim_confirmation_blocks": schedule.claim_confirmation_blocks,
         },
-        "required_features": [COOPERATIVE_CLAIM_FEATURE] if context.cooperative else [],
-        "extensions": {},
+        "required_features": sorted(
+            ([COOPERATIVE_CLAIM_FEATURE] if context.cooperative else [])
+            + ([FEE_POLICY_FEATURE] if context.network_fees else [])
+        ),
+        "extensions": _fee_extensions(terms),
     }
     try:
         contract_terms = parse_model_json(ContractTerms, canonicalize(contract))

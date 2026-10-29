@@ -171,12 +171,14 @@ def _chain_tip(config: OperatorConfig) -> Callable[[], int] | None:
 
 
 def _claim_fee(config: OperatorConfig) -> Callable[[], ClaimFeeRate] | None:
-    """Return next-block claim pricing for LN to BTC with an automatic reserve."""
+    """Return node pricing for automatic claims or opted-in network charges."""
     core = config.bitcoin_core
-    if (
-        core is None
-        or config.handshake.profile != "ln-to-btc/v1"
-        or config.quote.claim_fee_reserve_sat is not None
+    if core is None or (
+        config.terms.network_fees is None
+        and (
+            config.handshake.profile != "ln-to-btc/v1"
+            or config.quote.claim_fee_reserve_sat is not None
+        )
     ):
         return None
     try:

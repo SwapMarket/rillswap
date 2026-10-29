@@ -19,6 +19,12 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from rill_core.wire.canonical import canonicalize, parse_model_json
 from rill_core.wire.evm_quotes import LnToErc20FirmQuoteRequest
+from rill_core.wire.fee_policy import (
+    NETWORK_FEE_VBYTES,
+    BtcFeePolicy,
+    FeeBreakdown,
+    parse_fee_request,
+)
 from rill_core.wire.hashes import canonical_model
 from rill_core.wire.messages import Envelope, InvoiceBinding
 from rill_core.wire.quotes import QuoteError, parse_quote_request
@@ -140,6 +146,7 @@ class ServicePolicy:
     # With a liquidity source: announce this random percent range below it.
     follow_liquidity: bool = True
     liquidity_margin_percent: tuple[int, int] = (10, 20)
+    fee_policy: BtcFeePolicy | None = None
 
     def __post_init__(self) -> None:
         """Refuse schedules that would leave advertised epochs undecodable."""
@@ -231,6 +238,8 @@ class HandshakeService:
         ``claim_fee`` (blocking, next-block fee evidence) is sampled once per
         tick like the tip and prices LN to BTC claim reserves; without a
         sample, quotes with an automatic reserve answer ``capacity_unavailable``.
+        With network pricing enabled it is additionally sampled per request,
+        outside store transactions, to freeze the provider's mining charge.
         """
         self._store = store
         self._identity = identity
@@ -813,6 +822,7 @@ class HandshakeService:
                 evm_assets=policy.evm_assets,
                 transport_pow_bits=policy.transport_pow_bits,
                 funding_confirmations=policy.funding_confirmations,
+                fee_policy=policy.fee_policy,
             )
         )
         if bands != state.bands:
@@ -1299,12 +1309,23 @@ class HandshakeService:
         if not self._store.firm_capacity_available():
             return terms  # already full: the quote rules refuse without a route query
         try:
+            routing_limits = (
+                {}
+                if terms.fee_policy is None
+                else {
+                    "routing_fee_limit_sat": min(
+                        terms.fee_policy.service_fee(principal),
+                        principal * terms.fee_policy.max_routing_fee_ppm // 1_000_000,
+                    )
+                }
+            )
             await asyncio.to_thread(
                 lambda: settlement.route_ready(
                     json.loads(document)["payload"]["invoice"],
                     invoice_binding=binding,
                     success_fee_sat=success_fee(terms, principal),
                     max_expiry_height=tip + terms.schedule.outgoing_cltv_budget_blocks,
+                    **routing_limits,
                 )
             )
         except InvoiceRejectedError:
@@ -1321,6 +1342,54 @@ class HandshakeService:
             )
             return replace(terms, invoice="unavailable")
         return terms
+
+    async def _network_pricing(self, document: bytes, terms: QuoteTerms) -> QuoteTerms:
+        """Freeze one independently bounded fee sample before any hold is opened."""
+        policy = terms.fee_policy
+        if policy is None or self._claim_fee is None:
+            return terms
+        try:
+            request = parse_quote_request(canonicalize(json.loads(document)["payload"]))
+            binding = parse_fee_request(request.extensions)
+            if binding is None or binding.policy_hash != policy.commitment():
+                return terms
+            if request.kind == "btc-to-ln":
+                principal = int(request.lightning_principal_sat)
+            elif request.kind == "ln-to-btc":
+                principal = int(request.nominal_payout_sat)
+            else:
+                raise ValueError("Bitcoin profile required for network fees")  # noqa: TRY301
+            sampled_at = max(terms.now, self._deadline_now())
+            fee = await asyncio.wait_for(
+                asyncio.to_thread(self._claim_fee), timeout=CLAIM_FEE_WAIT_SECONDS
+            )
+            rate = max(fee.rate_sat_kvb, fee.floor_sat_kvb)
+            if rate > min(
+                int(policy.max_network_feerate_sat_kvb),
+                int(binding.max_network_feerate_sat_kvb),
+            ):
+                return terms
+            issued_at = max(sampled_at, self._deadline_now())
+            breakdown = FeeBreakdown(
+                offer_event_id=binding.offer_event_id,
+                policy=policy,
+                feerate_sat_kvb=str(rate),
+                estimated_at=sampled_at,
+                issued_at=issued_at,
+                service_fee_sat=str(policy.service_fee(principal)),
+                network_fee_sat=str(-(-NETWORK_FEE_VBYTES * rate // 1000)),
+            )
+            spend_cap = (
+                terms.schedule.max_claim_fee_sat
+                if request.kind == "btc-to-ln"
+                else terms.schedule.max_funding_fee_sat
+            )
+            if int(breakdown.network_fee_sat) > spend_cap:
+                return terms
+        except Exception as error:  # noqa: BLE001 - failures grant no hold or pricing authority
+            LOG.warning("network fee quote unavailable (%s)", type(error).__name__)
+            return terms
+        return replace(terms, now=issued_at, fee_breakdown=breakdown)
 
     async def _prepare_answer(
         self,
@@ -1350,18 +1419,22 @@ class HandshakeService:
             invoice=invoice,
             profile=policy.profile,
             claim_fee=self._state.claim_fee,
+            fee_policy=policy.fee_policy,
         )
         if policy.profile in EVM_PROFILES:
             evm = self._evm_settlement
             terms = replace(
                 terms, evm=await asyncio.to_thread(evm.quote_context) if evm is not None else None
             )
-        terms = await self._route_ready(document, terms)
-        if operation is not None:
+        terms = await self._network_pricing(document, terms)
+        pricing_ready = policy.fee_policy is None or terms.fee_breakdown is not None
+        if pricing_ready:
+            terms = await self._route_ready(document, terms)
+        if operation is not None and pricing_ready:
             terms = replace(terms, hold=await self._open_hold(document, terms, operation=operation))
         # Core/LND preparation can consume wall time; it cannot reserve an old
         # timestamp or renew a request's existing signed deadline.
-        if operation is not None:
+        if operation is not None or policy.fee_policy is not None:
             now = max(now, self._deadline_now())
             terms = replace(terms, now=now)
         sent: list[str] = []

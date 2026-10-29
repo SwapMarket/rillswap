@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Protocol
 from rill_core.settlement.funding import check_funding_binding_transaction
 from rill_core.settlement.taproot import TaprootKeyOperations
 from rill_core.wire.canonical import canonicalize, parse_model_json
-from rill_core.wire.hashes import client_acceptance_hash, funding_binding_hash
+from rill_core.wire.hashes import FEE_POLICY_FEATURE, client_acceptance_hash, funding_binding_hash
 from rill_core.wire.messages import AnyContractTerms, ContractTerms, Envelope
 from rill_core.wire.quotes import TermsOfferPayload
 from rill_core.wire.settlement_messages import FundingBindingPayload, TermsAcceptPayload
@@ -116,7 +116,9 @@ def answer_acceptance(
     except Exception:  # noqa: BLE001 - no parsing or signature oracle
         return _error("request_unacceptable", "acceptance refused")
     # terms_expiry is capped at the invoice's needed remaining time when offered.
-    if now > terms.terms_expiry:
+    if now > terms.terms_expiry or (
+        FEE_POLICY_FEATURE in terms.required_features and now == terms.terms_expiry
+    ):
         return _error("request_unacceptable", "terms expired")
     return _ack(request, offer.contract_hash, AcceptSwap(offer.contract_hash))
 

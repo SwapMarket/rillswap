@@ -272,9 +272,60 @@ If your configuration does not set `claim_fee_reserve_sat` (the examples and
 fixed 1,000 sat default to automatic pricing; swaps already signed keep their
 reserve. Set it to keep a fixed reserve instead.
 
+### Dynamic Bitcoin network fees
+
+Opt in by adding this object under `terms` in a Bitcoin provider's config:
+
+```json
+"network_fees": {
+  "max_feerate_sat_kvb": 10000,
+  "max_routing_fee_ppm": 1000
+}
+```
+
+The example caps quoted estimates at 10 sat/vB. The signed offer keeps
+`base_fee_sat` and `proportional_millionths` as service pricing and advertises
+both new limits. Each request samples Core's next-block estimate and adds
+`ceil(154 * rate_sat_kvb / 1000)` sat: a cooperative one-input, two-P2TR-output
+transaction. Actual wallet/input costs can differ; the provider absorbs that
+difference. The client's reverse claim reserve is separate and unchanged.
+
+Quotes commit the selected signed offer, fee breakdown and **60-second
+acceptance expiry**. Clients verify the formula and cap the rate independently
+(currently at twice their own trusted node/API estimate, also bounded by the
+advertised ceiling and their total fee limit). A provider cannot change the
+size or introduce an unadvertised multiplier. Quotes may be refused when
+estimators disagree or estimates are unavailable; missing evidence never means
+an unlimited fee. Accepted prices do not change after a spike or restart.
+
+Routing remains inside the service fee. Provider-originated Lightning payments
+use no more than the advertised principal-based ppm budget, the service fee,
+or the existing absolute operator cap (whichever is lowest). The mining charge
+cannot be spent as a routing allowance. This does not cap the client's wallet
+fees for paying a reverse invoice.
+
+**Upgrade:** absent `network_fees` keeps existing behavior and stores unchanged.
+Enabling it changes the immutable handshake policy: drain the old provider,
+retain its store/recovery material, choose a new `store_path` and explicitly
+run `provision-store`. Do not copy or reset the old store. Disabling it on the
+new store is also refused. Update clients and recovery tools first: old tools
+fail closed on the new required feature. Pricing coefficient changes alone do
+not require a new store, but requests bound to the previous policy are refused
+rather than silently repriced.
+
+Only featured offers have a client-verified service/network formula. Legacy
+prices remain indicative, protected by the client's total cap and the browser's
+review step when the firm price exceeds its preview.
+
+For a fresh disposable dev stack, `RILL_DEV_NETWORK_FEES=1` opts only the two
+Bitcoin configs into this pricing model during bootstrap. It never edits an
+existing config or store. Compose CI runs separate legacy and fee-enabled
+variants, including real CLI/browser swaps in both Bitcoin directions.
+
 ### BTC to LN claim fee
 
-The provider's claim fee comes out of its success fee (`V = L + S`), so set
+Without dynamic network pricing, the provider's claim fee comes out of its
+success fee (`V = L + S`), so set
 `terms.base_fee_sat` and `terms.proportional_millionths` to cover the claim
 and routing: a swap whose success fee is below its claim fee loses money.
 Every claim is priced for the cooperative key-path size (99 vB to a P2WPKH

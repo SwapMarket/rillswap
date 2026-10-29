@@ -51,7 +51,8 @@ from rill_core.settlement.unilateral import (
     verify_cooperative_claim_proposal,
 )
 from rill_core.wire.canonical import canonicalize, parse_json_strict, parse_model_json
-from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE, contract_hash
+from rill_core.wire.fee_policy import FEE_POLICY_EXTENSION, FeeBreakdown
+from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE, FEE_POLICY_FEATURE, contract_hash
 from rill_core.wire.messages import Envelope
 from rill_core.wire.settlement_messages import FundingBindingPayload
 
@@ -775,8 +776,16 @@ class SettlementEngine:
             session_id, cooperation_id, now=effect_clock, tip_height=sample.tip_height
         )
 
-    def _fee_limit(self, success_fee_sat: int) -> int:
+    def _fee_limit(self, success_fee_sat: int, terms: ContractTerms | None = None) -> int:
         """Routing fees may use at most the success fee and the operator cap."""
+        if terms is not None and FEE_POLICY_FEATURE in terms.required_features:
+            breakdown = FeeBreakdown.model_validate(terms.extensions[FEE_POLICY_EXTENSION])
+            principal = int(terms.invoice_binding.amount_msat) // 1000
+            return min(
+                self._settings.max_routing_fee_sat,
+                int(breakdown.service_fee_sat),
+                principal * breakdown.policy.max_routing_fee_ppm // 1_000_000,
+            )
         return min(self._settings.max_routing_fee_sat, success_fee_sat)
 
     def select_due_fallbacks(
@@ -990,6 +999,7 @@ class SettlementEngine:
         invoice_binding: InvoiceBinding,
         success_fee_sat: int,
         max_expiry_height: int,
+        routing_fee_limit_sat: int | None = None,
     ) -> None:
         """Raise unless LND can route this invoice within the payment's own bounds now.
 
@@ -1008,7 +1018,10 @@ class SettlementEngine:
                 self._lightning.prepare(
                     invoice,
                     invoice_binding=invoice_binding,
-                    fee_limit_sat=self._fee_limit(success_fee_sat),
+                    fee_limit_sat=min(
+                        self._fee_limit(success_fee_sat),
+                        success_fee_sat if routing_fee_limit_sat is None else routing_fee_limit_sat,
+                    ),
                     max_expiry_height=max_expiry_height,
                     deadline_seconds=max(0.1, remaining),
                 )
@@ -1397,7 +1410,7 @@ class SettlementEngine:
         tip = await asyncio.to_thread(self._chain.tip_height)
         if expiry_height - tip <= invoice.min_final_cltv_delta:
             return None
-        fee_limit = self._fee_limit(int(terms.economics.success_fee_sat))
+        fee_limit = self._fee_limit(int(terms.economics.success_fee_sat), terms)
         try:
             payment = await asyncio.to_thread(
                 lambda: self._lightning.prepare(

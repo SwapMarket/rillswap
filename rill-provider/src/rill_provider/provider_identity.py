@@ -22,6 +22,7 @@ from pyrage import x25519
 from rill_core.errors import ValidationError
 from rill_core.networks import require_supported_network
 from rill_core.wire.canonical import canonicalize
+from rill_core.wire.fee_policy import FEE_POLICY_EXTENSION, BtcFeePolicy
 from rill_core.wire.hashes import (
     handshake_accept_hash,
     provider_terms_hash,
@@ -71,6 +72,7 @@ class AnnouncementTerms:
     transport_pow_bits: int = 0  # RS-006 transport proof of work; 0 = not required
     # RS-005: the funding_confirmations every quote carries; 0 only for btc-to-ln.
     funding_confirmations: int = 1
+    fee_policy: BtcFeePolicy | None = None
 
 
 EVM_ASSETS_EXTENSION = "rillswap/evm-assets-v1"
@@ -265,6 +267,12 @@ def _advertisement(identity: str, terms: AnnouncementTerms) -> dict[str, Any]:
         and 0 < terms.created_at < terms.expires_at <= nip01.MAX_SAFE_TIMESTAMP
     ):
         raise ProviderIdentityError("announcement terms unsupported")
+    if terms.fee_policy is not None and (
+        int(terms.fee_policy.base_sat) != terms.base_fee_sat
+        or terms.fee_policy.proportional_millionths != terms.proportional_millionths
+        or any(profile not in {"btc-to-ln/v1", "ln-to-btc/v1"} for profile in terms.profiles)
+    ):
+        raise ProviderIdentityError("network fee policy differs from announcement terms")
     return {
         "protocol": "rillswap",
         "binding_version": BINDING_VERSION,
@@ -286,6 +294,11 @@ def _advertisement(identity: str, terms: AnnouncementTerms) -> dict[str, Any]:
         "created_at": terms.created_at,
         "expires_at": terms.expires_at,
         "extensions": {
+            **(
+                {FEE_POLICY_EXTENSION: terms.fee_policy.model_dump(mode="json")}
+                if terms.fee_policy is not None
+                else {}
+            ),
             **(
                 {EVM_ASSETS_EXTENSION: [a.model_dump(mode="json") for a in terms.evm_assets]}
                 if terms.evm_assets

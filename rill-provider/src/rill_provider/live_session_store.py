@@ -72,6 +72,7 @@ from rill_core.wire.envelope_authentication import verify_static_signed_envelope
 from rill_core.wire.hashes import (
     COOPERATIVE_CLAIM_FEATURE,
     EPOCH_SESSION_FEATURE,
+    FEE_POLICY_FEATURE,
     client_acceptance_hash,
     contract_hash,
     funding_binding_hash,
@@ -740,6 +741,7 @@ class RequestContext:
     economic_capacity_available: bool = True
     # Whether both handshakes committed cooperative claims; new terms match it.
     cooperative: bool = False
+    network_fees: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -2063,7 +2065,7 @@ class LiveSessionStore:
             raise LiveSessionStoreError("untrusted or unsupported handshake initiation")
         return outer, init
 
-    def reserve(  # noqa: PLR0912 - replay, provenance, and capacity share one transaction
+    def reserve(  # noqa: PLR0912, PLR0915 - replay, provenance, capacity share one transaction
         self, initiation: EpochInitiation, *, now: int | None = None
     ) -> SessionReservation:
         """Reserve one fresh provider challenge per session; replay is stable.
@@ -2120,6 +2122,11 @@ class LiveSessionStore:
                     blocked = True
                 else:
                     blocked = False
+                    if (
+                        FEE_POLICY_FEATURE in self._policy.features
+                        and FEE_POLICY_FEATURE not in init.required_features
+                    ):
+                        raise LiveSessionStoreError("new session requires network fee policy")  # noqa: TRY301
                     if (
                         COOPERATIVE_CLAIM_FEATURE in self._policy.features
                         and COOPERATIVE_CLAIM_FEATURE not in init.required_features
@@ -2528,6 +2535,9 @@ class LiveSessionStore:
             if not suites or not capabilities:
                 raise LiveSessionStoreError("no mutually supported selection")  # noqa: TRY301
             cooperative = COOPERATIVE_CLAIM_FEATURE in init.required_features
+            network_fees = FEE_POLICY_FEATURE in init.required_features
+            if FEE_POLICY_FEATURE in policy.features and not network_fees:
+                raise LiveSessionStoreError("new session requires network fee policy")  # noqa: TRY301
             if (
                 COOPERATIVE_CLAIM_FEATURE in policy.features
                 and not cooperative
@@ -2554,6 +2564,7 @@ class LiveSessionStore:
                     sorted(
                         {EPOCH_SESSION_FEATURE}
                         | ({COOPERATIVE_CLAIM_FEATURE} if cooperative else set())
+                        | ({FEE_POLICY_FEATURE} if network_fees else set())
                     )
                 ),
                 extensions={},
@@ -3065,12 +3076,10 @@ class LiveSessionStore:
                         "SELECT accept_bytes FROM sessions WHERE session_id=?",
                         (outer.session_id,),
                     ).fetchone()
-                    cooperative = (
-                        COOPERATIVE_CLAIM_FEATURE
-                        in HandshakeAcceptPayload.model_validate_json(
-                            canonicalize(_canonical_envelope(accept_bytes).payload), strict=True
-                        ).accept.required_features
-                    )
+                    negotiated = HandshakeAcceptPayload.model_validate_json(
+                        canonicalize(_canonical_envelope(accept_bytes).payload), strict=True
+                    ).accept.required_features
+                    cooperative = COOPERATIVE_CLAIM_FEATURE in negotiated
                     if (
                         outer.message_type == "quote_request"
                         and COOPERATIVE_CLAIM_FEATURE in self._policy.features
@@ -3103,6 +3112,7 @@ class LiveSessionStore:
                             is not None
                         ),
                         cooperative=cooperative,
+                        network_fees=FEE_POLICY_FEATURE in negotiated,
                     )
                     reply = responder(outer, prior, context)
                     if reply.effect is not None:

@@ -13,7 +13,12 @@ from pathlib import Path  # noqa: TC003 - pydantic resolves field types at runti
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from rill_core.domain.amounts import MAX_SATS
-from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE
+from rill_core.wire.fee_policy import FEE_MODEL, BtcFeePolicy
+from rill_core.wire.hashes import (
+    COOPERATIVE_CLAIM_FEATURE,
+    EPOCH_SESSION_FEATURE,
+    FEE_POLICY_FEATURE,
+)
 from rill_core.wire.types import (
     EvmAssetIdentity,
     NetworkIdentity,
@@ -180,6 +185,13 @@ class EvmSettings(_Strict):
         )
 
 
+class BitcoinNetworkFees(_Strict):
+    """Explicit opt-in to offer-bound, per-request Bitcoin mining estimates."""
+
+    max_feerate_sat_kvb: int = Field(gt=0, le=MAX_FEE_ESTIMATE_CEILING_SAT_VB * 1000)
+    max_routing_fee_ppm: int = Field(ge=0, le=1_000_000)
+
+
 class PublicTerms(_Strict):
     """RS-005 announcement terms."""
 
@@ -188,6 +200,7 @@ class PublicTerms(_Strict):
     base_fee_sat: int
     proportional_millionths: int
     slot: str
+    network_fees: BitcoinNetworkFees | None = None
     # Announce and admit at most the payout liquidity less a random margin in
     # this percent range (never above amount_bands), where the profile has a
     # liquidity source: LND channels to pay out, or the Core funding wallet.
@@ -280,18 +293,40 @@ class OperatorConfig(_Strict):
         # would let this provider double-spend its own unconfirmed lockup.
         if self.quote.funding_confirmations == 0 and self.handshake.profile != "btc-to-ln/v1":
             raise ValueError("quote.funding_confirmations 0 is only allowed for btc-to-ln/v1")
+        if self.terms.network_fees is not None and (
+            self.handshake.profile in EVM_PROFILES or self.bitcoin_core is None
+        ):
+            raise ValueError("terms.network_fees requires a Bitcoin profile and bitcoin_core")
         return self
+
+    def bitcoin_fee_policy(self) -> BtcFeePolicy | None:
+        """Build the announcement policy without binding coefficients to the store."""
+        terms = self.terms
+        fees = terms.network_fees
+        if fees is None:
+            return None
+        return BtcFeePolicy(
+            model=FEE_MODEL,
+            base_sat=str(terms.base_fee_sat),
+            proportional_millionths=terms.proportional_millionths,
+            max_network_feerate_sat_kvb=str(fees.max_feerate_sat_kvb),
+            max_routing_fee_ppm=fees.max_routing_fee_ppm,
+        )
 
     def handshake_policy(self) -> HandshakePolicy:
         """Return the store-bound negotiation policy."""
         h = self.handshake
-        # Features are protocol requirements, never operator toggles: every
-        # session is epoch-bound, and cooperative MuSig2 claims are mandatory
-        # for the Bitcoin profiles (EVM HTLC profiles have no key-path claim).
+        # Base features are intrinsic. Opting into network pricing additionally
+        # requires its enforcement feature and a separately provisioned store.
         cooperative = set() if h.profile in EVM_PROFILES else {COOPERATIVE_CLAIM_FEATURE}
+        pricing = (
+            {FEE_POLICY_FEATURE}
+            if getattr(getattr(self, "terms", None), "network_fees", None) is not None
+            else set()
+        )
         return HandshakePolicy(
             profile=h.profile,  # type: ignore[arg-type]
-            features=frozenset({EPOCH_SESSION_FEATURE, *cooperative}),
+            features=frozenset({EPOCH_SESSION_FEATURE, *cooperative, *pricing}),
             encryption_suites=frozenset(h.encryption_suites),
             capabilities=frozenset(h.capabilities),
         )
@@ -326,6 +361,7 @@ class OperatorConfig(_Strict):
             transport_pow_bits=self.transport_pow_bits,
             follow_liquidity=t.follow_liquidity,
             liquidity_margin_percent=t.liquidity_margin_percent,
+            fee_policy=self.bitcoin_fee_policy(),
         )
 
 
