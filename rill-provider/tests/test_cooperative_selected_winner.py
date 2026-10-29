@@ -566,9 +566,7 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0911, P
                 )
             chain.observe_cooperative_claim_outpoint.return_value = output
             chain.observe_cooperative_fee_policy.return_value = policy
-            engine = SettlementEngine(
-                store, chain, Mock(), crypto, EngineSettings(claim_fee_sat=300)
-            )
+            engine = SettlementEngine(store, chain, Mock(), crypto, EngineSettings())
             if winner in {"runtime_service_completion", "runtime_service_commit_uncertain"}:
                 service_policy = ServicePolicy(
                     network=harness.network,

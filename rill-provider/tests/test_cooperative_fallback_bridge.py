@@ -22,7 +22,11 @@ from test_live_session_store import Harness
 from rill_provider import live_session_store as live
 from rill_provider import settlement_engine as engine_module
 from rill_provider._nip59_send import _wrap_envelope
-from rill_provider.core_tx_bytes import CooperativeClaimOutpoint, CoreTransactionUnknownError
+from rill_provider.core_tx_bytes import (
+    CooperativeClaimOutpoint,
+    CooperativeFeePolicy,
+    CoreTransactionUnknownError,
+)
 from rill_provider.handshake_service import HandshakeService
 from rill_provider.live_session_store import LiveSessionStoreError, ReadinessChallenge
 from rill_provider.lnd_payment_send import PaymentOutcome
@@ -94,9 +98,7 @@ def test_signed_echo_enters_waiting_only_via_original_live_service(  # noqa: PLR
             )
         chain = Mock()
         lightning = Mock(track=Mock(return_value=PaymentOutcome("SUCCEEDED", "42" * 32)))
-        engine = SettlementEngine(
-            store, chain, lightning, crypto, EngineSettings(claim_fee_sat=300)
-        )
+        engine = SettlementEngine(store, chain, lightning, crypto, EngineSettings())
         assert engine.register_new_featured_session(session, digest)
         assert asyncio.run(engine._advance(store.settlement_work(session_id=session)[0], 1002)) == (  # noqa: SLF001
             "PAID"
@@ -126,6 +128,16 @@ def test_signed_echo_enters_waiting_only_via_original_live_service(  # noqa: PLR
             terms.funding_confirmations,
             1091 - terms.funding_confirmations,
             "bb" * 32,
+        )
+        chain.observe_cooperative_fee_policy.return_value = CooperativeFeePolicy(
+            terms.network_identity,
+            "aa" * 32,
+            1090,
+            terms.timing_policy.claim_confirmation_blocks,
+            1000,
+            1000,
+            2000,
+            1,
         )
         initiate = AsyncMock(wraps=engine.initiate_cooperative_proposal)
         monkeypatch.setattr(engine, "initiate_cooperative_proposal", initiate)
@@ -411,7 +423,7 @@ def test_echo_prepares_exact_fallback_with_original_deadlines_or_refuses(  # noq
             )
         chain = Mock()
         chain.tip_height.side_effect = RuntimeError("Core tip unavailable")
-        chain.fee_rate_sat_vb.side_effect = RuntimeError("fee estimate unavailable")
+        chain.observe_cooperative_fee_policy.side_effect = RuntimeError("fee evidence unavailable")
         chain.broadcast.side_effect = RuntimeError("network unavailable")
         payment = Mock(track=Mock(return_value=PaymentOutcome("SUCCEEDED", "42" * 32)))
         engine = SettlementEngine(store, chain, payment, crypto)
@@ -475,5 +487,5 @@ def test_echo_prepares_exact_fallback_with_original_deadlines_or_refuses(  # noq
                 "SELECT state FROM claim_arbitration WHERE session_id=?", (session,)
             ).fetchone() == ("ADMITTED",)
         chain.tip_height.assert_not_called()
-        chain.fee_rate_sat_vb.assert_not_called()
+        chain.observe_cooperative_fee_policy.assert_not_called()
         chain.broadcast.assert_not_called()

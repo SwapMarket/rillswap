@@ -432,43 +432,6 @@ def test_a_sighting_is_cleared_when_the_output_returns_or_an_attempt_is_mined(
     assert (store.spent, store.moves) == ([None], [])  # our own mined claim spent it
 
 
-@pytest.mark.parametrize(
-    ("rate", "expected"),
-    [(None, 300), (1.0, 300), (2.5, 375), (1_000.0, int(TERMS.max_claim_fee_sat))],
-)
-def test_the_first_claim_fee_follows_the_estimate_between_floor_and_ceiling(
-    monkeypatch: pytest.MonkeyPatch, rate: float | None, expected: int
-) -> None:
-    engine, _store, chain = _engine(monkeypatch, [], {}, 1000)
-    engine._settings = replace(engine._settings, claim_fee_sat=300)  # noqa: SLF001
-    chain.fee_rate_sat_vb.return_value = rate
-    built: list[int] = []
-
-    def claim(_item: object, _terms: object, _binding: object, fee: int) -> SimpleNamespace:
-        built.append(fee)
-        return SimpleNamespace(raw_transaction=b"c", txid="a0" * 32, fee_sat=fee, vsize=VSIZE)
-
-    monkeypatch.setattr(engine, "_claim", claim)
-    spend = asyncio.run(engine._initial_claim(ITEM, TERMS, BINDING))  # noqa: SLF001
-    assert spend.fee_sat == expected
-    assert built == [300] if expected == 300 else [300, expected]
-    chain.fee_rate_sat_vb.assert_called_once_with(settlement_engine.CLAIM_ESTIMATE_TARGET)
-
-
-def test_an_unavailable_fee_estimate_never_defers_the_first_claim(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    engine, _store, chain = _engine(monkeypatch, [], {}, 1000)
-    engine._settings = replace(engine._settings, claim_fee_sat=300)  # noqa: SLF001
-    chain.fee_rate_sat_vb.side_effect = RuntimeError("estimatesmartfee unavailable")
-    monkeypatch.setattr(
-        engine,
-        "_claim",
-        lambda *_a: SimpleNamespace(raw_transaction=b"c", txid="a0" * 32, fee_sat=300, vsize=VSIZE),
-    )
-    assert asyncio.run(engine._initial_claim(ITEM, TERMS, BINDING)).fee_sat == 300  # noqa: SLF001
-
-
 # A paid zero-conf deposit that never confirmed: LOST only on a deep, canonical conflict.
 
 ZERO = TERMS.model_copy(update={"funding_confirmations": 0})

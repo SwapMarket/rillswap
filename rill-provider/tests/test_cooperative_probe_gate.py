@@ -201,7 +201,7 @@ def test_due_probe_records_real_unilateral_before_any_core_rpc(  # noqa: PLR0915
             )
         chain = Mock()
         chain.tip_height.side_effect = RuntimeError("Core tip hung")
-        chain.fee_rate_sat_vb.side_effect = RuntimeError("Core fee hung")
+        chain.observe_cooperative_fee_policy.side_effect = RuntimeError("Core fee hung")
         chain.broadcast.side_effect = RuntimeError("Core broadcast hung")
         lightning = Mock(track=Mock(return_value=PaymentOutcome("SUCCEEDED", "42" * 32)))
         engine = SettlementEngine(store, chain, lightning, crypto)
@@ -227,7 +227,7 @@ def test_due_probe_records_real_unilateral_before_any_core_rpc(  # noqa: PLR0915
         assert engine.probe_window(session) is None
         assert engine.expired_probe_windows() == ()
         chain.tip_height.assert_not_called()
-        chain.fee_rate_sat_vb.assert_not_called()
+        chain.observe_cooperative_fee_policy.assert_not_called()
         chain.broadcast.assert_not_called()
         selected = engine.recorded_unilateral_claims()
         assert len(selected) == 1

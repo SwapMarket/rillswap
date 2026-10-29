@@ -12,6 +12,11 @@ from unittest.mock import Mock
 
 import pytest
 from rill_core.settlement.funding import FundingBindingTransactionMatch
+from rill_core.settlement.unilateral import (
+    claim_vsizes,
+    validate_unilateral_spend,
+    verify_cooperative_claim_proposal,
+)
 from rill_core.wire.canonical import canonicalize, parse_model_json
 from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE
 from rill_core.wire.messages import Envelope
@@ -21,7 +26,12 @@ from test_live_session_store import Harness
 
 from rill_provider import live_session_store as live
 from rill_provider import settlement_engine as engine_module
-from rill_provider.core_tx_bytes import CooperativeClaimOutpoint, CoreTransactionUnknownError
+from rill_provider.core_tx_bytes import (
+    CooperativeClaimOutpoint,
+    CooperativeFeePolicy,
+    CoreTransactionUnknownError,
+    CoreUnavailableError,
+)
 from rill_provider.live_session_store import LiveSessionStoreError, SettlementItem
 from rill_provider.settlement_engine import EngineSettings, SettlementEngine
 from rill_provider.settlement_policy import offered_terms
@@ -102,8 +112,21 @@ def runtime(
             1091 - terms.funding_confirmations,
             "bb" * 32,
         )
-        chain = Mock(observe_cooperative_claim_outpoint=Mock(return_value=sample))
-        engine = SettlementEngine(store, chain, Mock(), crypto, EngineSettings(claim_fee_sat=300))
+        policy = CooperativeFeePolicy(  # 2 sat/vB at the sampled tip
+            terms.network_identity,
+            "aa" * 32,
+            1090,
+            terms.timing_policy.claim_confirmation_blocks,
+            1000,
+            1000,
+            2000,
+            1,
+        )
+        chain = Mock(
+            observe_cooperative_claim_outpoint=Mock(return_value=sample),
+            observe_cooperative_fee_policy=Mock(return_value=policy),
+        )
+        engine = SettlementEngine(store, chain, Mock(), crypto, EngineSettings())
         fallback = engine._claim(item, terms, binding, 300)  # noqa: SLF001 - native stored fallback
         with store._connection as connection:  # noqa: SLF001 - fixture admitted featured contract
             connection.execute(
@@ -157,21 +180,41 @@ def test_proposal_is_durable_before_its_message_id_is_returned(runtime: tuple) -
     assert proposal.payload["payment_preimage"] == fallback.preimage
     engine._chain.broadcast.assert_not_called()  # noqa: SLF001
     assert store.pending_sendable(proposal_id, now=1001, tip_height=sample.tip_height)
+    # Priced from the fresh sample at the key-path size, not copied from the fallback.
+    terms, binding = _fallback_contract(store)
+    authorization = engine._authorization(terms, binding)  # noqa: SLF001
+    key_path, script_path = claim_vsizes(authorization.destination_script)
+    plan = verify_cooperative_claim_proposal(
+        bytes.fromhex(proposal.payload["unsigned_transaction"]), authorization
+    )
+    assert plan.fee_sat == (2000 * key_path + 999) // 1000 != fallback.fee_sat == 300
+    assert (4 * len(plan.base_transaction) + 68 + 3) // 4 == key_path  # completion's vsize
+    assert (
+        validate_unilateral_spend(fallback.raw, authorization, verifier=store._crypto).vsize  # noqa: SLF001
+        == script_path
+    )
+    policy = engine._chain.observe_cooperative_fee_policy.return_value  # noqa: SLF001
+    engine._chain.observe_cooperative_fee_policy.assert_called_once_with(  # noqa: SLF001
+        terms.timing_policy.claim_confirmation_blocks, allow_regtest_fixed_fee=False
+    )
+    assert engine._claim_fee_evidence == {policy.confirmation_blocks: policy}  # noqa: SLF001
 
 
-def test_signed_fee_cap_below_configured_floor_still_cooperates(
-    runtime: tuple, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(("spare", "cooperates"), [(0, True), (-1, False)])
+def test_cooperative_fee_must_fit_the_signed_cap(
+    runtime: tuple, monkeypatch: pytest.MonkeyPatch, *, spare: int, cooperates: bool
 ) -> None:
-    """The fallback already pays the capped fee; refusing would only cost privacy."""
+    """A fresh fee the cap cannot carry is refused before burning: completion would refuse it."""
     engine, store, _ = runtime
-    engine._settings = EngineSettings(claim_fee_sat=1_000)  # noqa: SLF001 - operator floor
-    monkeypatch.setattr(engine_module, "max_spendable_fee", lambda _authorization: 300)
+    authorization = engine._authorization(*_fallback_contract(store))  # noqa: SLF001
+    fee = (2000 * claim_vsizes(authorization.destination_script)[0] + 999) // 1000
+    monkeypatch.setattr(engine_module, "max_spendable_fee", lambda _authorization: fee + spare)
     proposal_id = asyncio.run(
         engine.initiate_cooperative_proposal(_session(store), now=lambda: 1001)
     )
-    assert proposal_id is not None
-    monkeypatch.setattr(engine_module, "max_spendable_fee", lambda _authorization: 301)
-    assert engine._claim_fee_floor(*_fallback_contract(store)) == 301  # noqa: SLF001
+    assert (proposal_id is not None) is cooperates
+    if not cooperates:
+        _assert_no_attempt(store)
 
 
 def _fallback_contract(store: LiveSessionStore) -> tuple:
@@ -236,7 +279,12 @@ def test_proposal_clock_return_is_fenced_before_burn(
         "wrong type",
         "core spent",
         "wall cutoff",
-        "floor exceeds fee",
+        "fee unavailable",
+        "fee wrong type",
+        "fee tip mismatch",
+        "fee target expanded",
+        "fee estimate missing",
+        "fee above cap",
         "revoked",
         "missing",
     ],
@@ -270,8 +318,23 @@ def test_unsafe_preflight_never_burns(runtime: tuple, case: str) -> None:
         engine._chain.observe_cooperative_claim_outpoint.side_effect = CoreTransactionUnknownError(  # noqa: SLF001
             "spent"
         )
-    if case == "floor exceeds fee":
-        engine._settings = EngineSettings(claim_fee_sat=301)  # noqa: SLF001
+    policy = engine._chain.observe_cooperative_fee_policy.return_value  # noqa: SLF001
+    fee_changes = {
+        "fee tip mismatch": {"tip_hash": "cc" * 32},
+        "fee target expanded": {"estimate_blocks": policy.confirmation_blocks + 1},
+        "fee estimate missing": {"estimate_sat_kvb": None},
+        "fee above cap": {"estimate_sat_kvb": 10_000_000},
+    }
+    if case in fee_changes:
+        engine._chain.observe_cooperative_fee_policy.return_value = replace(  # noqa: SLF001
+            policy, **fee_changes[case]
+        )
+    if case == "fee unavailable":
+        engine._chain.observe_cooperative_fee_policy.side_effect = CoreUnavailableError(  # noqa: SLF001
+            "estimate unavailable"
+        )
+    if case == "fee wrong type":
+        engine._chain.observe_cooperative_fee_policy.return_value = Mock()  # noqa: SLF001
     if case == "revoked":
         engine.disable_new_exposure()
     if case == "missing":
@@ -291,11 +354,9 @@ def test_unsafe_preflight_never_burns(runtime: tuple, case: str) -> None:
 def test_sampling_does_not_preserve_stale_initiation_authority(runtime: tuple, case: str) -> None:
     engine, store, _ = runtime
     clock_now = 1001
-    original_sample = engine._sample_cooperative_outpoint  # noqa: SLF001
+    original_sample = engine._sample_cooperative  # noqa: SLF001
 
-    async def sample_then_change(
-        *args: object, **kwargs: object
-    ) -> CooperativeClaimOutpoint | None:
+    async def sample_then_change(*args: object, **kwargs: object) -> object | None:
         nonlocal clock_now
         result = await original_sample(*args, **kwargs)
         if case == "selected":
@@ -307,7 +368,7 @@ def test_sampling_does_not_preserve_stale_initiation_authority(runtime: tuple, c
             clock_now = 1020
         return result
 
-    engine._sample_cooperative_outpoint = sample_then_change  # noqa: SLF001
+    engine._sample_cooperative = sample_then_change  # noqa: SLF001
     session = _session(store)
     if case == "selected":
         with pytest.raises(LiveSessionStoreError, match="window unavailable"):

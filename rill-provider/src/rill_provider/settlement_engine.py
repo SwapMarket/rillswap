@@ -29,11 +29,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import math
 import secrets
 import time
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, TypeGuard
 
 from rill_core.settlement.funding import FundingBindingTransactionMatch
 from rill_core.settlement.taproot import reconstruct_taproot_contract
@@ -44,6 +43,7 @@ from rill_core.settlement.unilateral import (
     ValidatedUnilateralSpend,
     build_cooperative_claim,
     build_unilateral_spend,
+    claim_vsizes,
     finalize_unilateral_spend,
     max_spendable_fee,
     validate_cooperative_claim,
@@ -184,7 +184,6 @@ class ChainBackend(Protocol):
 CONFLICT_LOSS_CONFIRMATIONS = 6  # depth of another spend of a deposit input that proves a loss
 CONFLICT_SCAN_MARGIN_BLOCKS = 144  # search for that spend from this far below the first claim
 CLAIM_URGENCY_BLOCKS = 6  # claim at the signed maximum fee this far before refund
-CLAIM_ESTIMATE_TARGET = 6  # confirmation target asked of Core for the first claim fee
 INCREMENTAL_RELAY_SAT_VB = 1  # BIP125 rule 4 at Core's default incremental relay fee
 READINESS_BUDGET_SECONDS = 10.0  # one shared bound for the whole offer preflight
 READINESS_SYNC_DELAY = 1.0
@@ -241,11 +240,13 @@ class EngineCrypto(SettlementCrypto, Protocol):
 class EngineSettings:
     """Operator limits for settlement."""
 
-    claim_fee_sat: int = 1_000
+    # LN to BTC refunds only: the lowest fee of the provider's first refund.
+    # BTC to LN claims are priced from the node's fee evidence instead.
+    refund_fee_floor_sat: int = 1_000
     max_routing_fee_sat: int = 1_000
-    # Absolute minimum fee a client's LN to BTC cooperative claim must pay,
-    # on top of the fresh Core estimate. Regtest may explicitly accept a fixed
-    # fee when Core has no estimate; other networks never do.
+    # Absolute minimum fee any cooperative claim must pay, on top of the
+    # fresh Core estimate and admission floors. Regtest may explicitly accept
+    # a fixed fee when Core has no estimate; other networks never do.
     cooperative_fee_floor_sat: int = 1
     allow_regtest_fixed_fee: bool = False
 
@@ -298,7 +299,7 @@ class SettlementEngine:
                 chain,
                 hold_invoices,
                 crypto,
-                refund_fee_floor_sat=self._settings.claim_fee_sat,
+                refund_fee_floor_sat=self._settings.refund_fee_floor_sat,
                 cooperative_fee_floor_sat=self._settings.cooperative_fee_floor_sat,
                 allow_regtest_fixed_fee=self._settings.allow_regtest_fixed_fee,
             )
@@ -308,6 +309,9 @@ class SettlementEngine:
         self._claim_probes: dict[str, ClaimProbeWindow] = {}
         self._conflict_scans: dict[str, _ConflictScan] = {}
         self._cooperative_sample_task: asyncio.Task[object] | None = None
+        # Latest usable claim fee evidence per signed confirmation target, for
+        # claims that must be signed without waiting on Core (memory only).
+        self._claim_fee_evidence: dict[int, CooperativeFeePolicy] = {}
 
     def register_new_featured_session(self, session_id: str, contract: str) -> bool:
         """Remember one current-process original session, not a stored ADMITTED row.
@@ -367,7 +371,7 @@ class SettlementEngine:
         return True
 
     async def recover_expired_probe(self, window: ClaimProbeWindow, now: int) -> None:
-        """Durably select a floor-fee claim without Core or Lightning RPC waits."""
+        """Durably select a claim on remembered fee evidence, without Core or LN RPC waits."""
         current = self.probe_window(window.session_id)
         if current != window or window not in self.expired_probe_windows():
             return
@@ -397,7 +401,7 @@ class SettlementEngine:
             != terms.invoice_binding.payment_hash
         ):
             raise LiveSessionStoreError("due probe binding changed")
-        spend = await self._initial_claim(item, terms, binding, use_estimate=False)
+        spend = await self._initial_claim(item, terms, binding, fresh=False)
         self._move(
             item,
             "CLAIMING",
@@ -459,7 +463,7 @@ class SettlementEngine:
             != terms.invoice_binding.payment_hash
         ):
             raise LiveSessionStoreError("cooperative fallback binding changed")
-        spend = await self._initial_claim(item, terms, binding, use_estimate=False)
+        spend = await self._initial_claim(item, terms, binding, fresh=False)
         tip = await sample_tip()
         committed_at = now()
         if (
@@ -487,17 +491,6 @@ class SettlementEngine:
     def disable_new_exposure(self) -> None:
         """Latch off new BTC-to-LN sends after deadline supervision fails."""
         self._new_exposure_allowed = False
-
-    async def _sample_cooperative_outpoint(
-        self, binding: FundingBinding, terms: ContractTerms, *, budget: float
-    ) -> CooperativeClaimOutpoint | None:
-        sample = await self._sample_cooperative(
-            lambda: self._chain.observe_cooperative_claim_outpoint(
-                binding, terms, keys=self._crypto
-            ),
-            budget=budget,
-        )
-        return sample if type(sample) is CooperativeClaimOutpoint else None
 
     async def _sample_cooperative(
         self, operation: Callable[[], object], *, budget: float
@@ -641,37 +634,18 @@ class SettlementEngine:
             output, policy = sampled
             if (
                 type(output) is not CooperativeClaimOutpoint
-                or type(policy) is not CooperativeFeePolicy
+                or not _fee_policy_usable(
+                    policy, terms, allow_regtest_fixed_fee=allow_regtest_fixed_fee
+                )
                 or not _cooperative_outpoint_matches(
                     output, binding, terms, fallback.deadline_height
                 )
-                or policy.network_identity != terms.network_identity
                 or (policy.tip_hash, policy.tip_height) != (output.tip_hash, output.tip_height)
-                or policy.confirmation_blocks != terms.timing_policy.claim_confirmation_blocks
-                or (policy.estimate_sat_kvb is None and not allow_regtest_fixed_fee)
-                or any(
-                    type(rate) is not int or rate < 0
-                    for rate in (
-                        policy.min_relay_sat_kvb,
-                        policy.mempool_min_sat_kvb,
-                    )
-                )
-                or (
-                    policy.estimate_sat_kvb is not None
-                    and (
-                        type(policy.estimate_sat_kvb) is not int
-                        or policy.estimate_sat_kvb <= 0
-                        or type(policy.estimate_blocks) is not int
-                        or not 1
-                        <= policy.estimate_blocks
-                        <= terms.timing_policy.claim_confirmation_blocks
-                    )
-                )
             ):
                 return None
             vsize = (4 * len(plan.base_transaction) + 68 + 3) // 4
             fee_floor = policy.fee_floor_sat(
-                vsize=vsize, configured_floor_sat=self._claim_fee_floor(terms, binding)
+                vsize=vsize, configured_floor_sat=self._settings.cooperative_fee_floor_sat
             )
             if plan.fee_sat < fee_floor:
                 return None
@@ -697,7 +671,7 @@ class SettlementEngine:
             session_id, cooperation_id, observation, now=effect_clock
         )
 
-    async def initiate_cooperative_proposal(
+    async def initiate_cooperative_proposal(  # noqa: PLR0911 - preflight refusals before the burn
         self, session_id: str, *, now: Callable[[], int]
     ) -> str | None:
         """Queue one BTC-to-LN nonce proposal after fresh bounded preflight.
@@ -726,27 +700,54 @@ class SettlementEngine:
         if (
             terms.network_identity != self._store.network_identity
             or COOPERATIVE_CLAIM_FEATURE not in terms.required_features
-            or candidate.fee_sat < self._claim_fee_floor(terms, binding)
         ):
             return None
-        plan = build_cooperative_claim(
-            self._authorization(terms, binding), fee_sat=candidate.fee_sat
-        )
+        allow_regtest_fixed_fee = self._settings.allow_regtest_fixed_fee
+
+        def observe() -> tuple[CooperativeClaimOutpoint, CooperativeFeePolicy]:
+            output = self._chain.observe_cooperative_claim_outpoint(
+                binding, terms, keys=self._crypto
+            )
+            policy = self._chain.observe_cooperative_fee_policy(
+                terms.timing_policy.claim_confirmation_blocks,
+                allow_regtest_fixed_fee=allow_regtest_fixed_fee,
+            )
+            return output, policy
+
         sample_deadline = time.monotonic() + COOPERATIVE_SAMPLE_SECONDS
-        sample = await self._sample_cooperative_outpoint(
-            binding,
-            terms,
-            budget=min(COOPERATIVE_SAMPLE_SECONDS, candidate.deadline_at - started_at),
+        sampled = await self._sample_cooperative(
+            observe, budget=min(COOPERATIVE_SAMPLE_SECONDS, candidate.deadline_at - started_at)
         )
         checked_at = now()
         if (
             not self._new_exposure_allowed
             or type(checked_at) is not int
             or not started_at <= checked_at < candidate.deadline_at
-            or type(sample) is not CooperativeClaimOutpoint
-            or not _cooperative_outpoint_matches(sample, binding, terms, candidate.deadline_height)
+            or not isinstance(sampled, tuple)
+            or len(sampled) != 2  # noqa: PLR2004 - own two-part sample
         ):
             return None
+        sample, policy = sampled
+        if (
+            type(sample) is not CooperativeClaimOutpoint
+            or not _cooperative_outpoint_matches(sample, binding, terms, candidate.deadline_height)
+            or not _fee_policy_usable(
+                policy, terms, allow_regtest_fixed_fee=allow_regtest_fixed_fee
+            )
+            or (policy.tip_hash, policy.tip_height) != (sample.tip_hash, sample.tip_height)
+        ):
+            return None
+        self._claim_fee_evidence[policy.confirmation_blocks] = policy
+        # Priced fresh, independent of the fallback: the same key-path floor
+        # completion re-checks, and the client checks, against new evidence.
+        authorization = self._authorization(terms, binding)
+        fee = policy.fee_floor_sat(
+            vsize=claim_vsizes(authorization.destination_script)[0],
+            configured_floor_sat=self._settings.cooperative_fee_floor_sat,
+        )
+        if fee > max_spendable_fee(authorization):
+            return None
+        plan = build_cooperative_claim(authorization, fee_sat=fee)
 
         def effect_clock() -> int:
             # SQLite/native work must not turn bounded-age height evidence
@@ -1181,7 +1182,7 @@ class SettlementEngine:
             if not self._store.immediate_claim_allowed(item.session_id):
                 return item.state  # selection/recovery owns every prepared window
             tip = await asyncio.to_thread(self._chain.tip_height)
-            spend = await self._initial_claim(item, terms, binding)
+            spend = await self._initial_claim(item, terms, binding, fresh=True)
             self._move(
                 item,
                 "CLAIMING",
@@ -1383,6 +1384,10 @@ class SettlementEngine:
         # payment against a stale confirmation or newly blocked session.
         if item.blocked or item.payment_dispatch != "UNSENT" or not self._new_exposure_allowed:
             return outcome
+        if item.session_id in self._new_featured_sessions:
+            # A cooperative probe may follow; its fallback is signed without
+            # waiting on Core, so remember fee evidence before paying.
+            await self._sample_claim_fee(terms)
         if await self._funded_tip(binding, terms) is None:
             return outcome
         if now >= invoice.expires_at or (
@@ -1635,40 +1640,61 @@ class SettlementEngine:
         terms: ContractTerms,
         binding: FundingBinding,
         *,
-        use_estimate: bool = True,
+        fresh: bool,
     ) -> ValidatedUnilateralSpend:
-        """Build attempt 0 at the node's feerate estimate, never below the configured floor.
+        """Build attempt 0 from the node's claim fee evidence.
 
-        ``claim_fee_sat`` is the floor and the fallback when Core has no
-        estimate; the ceiling is the signed cap or the dust floor. Escalation
-        takes over from whatever this chooses.
+        ``fresh`` samples Core first. Deadline recovery and fallback
+        preparation never wait for fee advice: they use the latest evidence
+        this process remembers. Escalation takes over from whatever this
+        chooses.
         """
-        ceiling = max_spendable_fee(self._authorization(terms, binding))
-        floor = self._claim_fee_floor(terms, binding)
-        spend = self._claim(item, terms, binding, floor)
-        if not use_estimate:
-            return spend  # deadline recovery never waits for fee advice
+        policy = await self._sample_claim_fee(terms) if fresh else None
+        if policy is None:
+            policy = self._claim_fee_evidence.get(terms.timing_policy.claim_confirmation_blocks)
+        fee = self._unilateral_claim_fee(self._authorization(terms, binding), policy)
+        return self._claim(item, terms, binding, fee)
+
+    async def _sample_claim_fee(self, terms: ContractTerms) -> CooperativeFeePolicy | None:
+        """Sample and remember fresh claim fee evidence, or None (advice only)."""
+        allow_regtest_fixed_fee = self._settings.allow_regtest_fixed_fee
         try:
-            rate = await asyncio.to_thread(self._chain.fee_rate_sat_vb, CLAIM_ESTIMATE_TARGET)
+            policy = await asyncio.to_thread(
+                lambda: self._chain.observe_cooperative_fee_policy(
+                    terms.timing_policy.claim_confirmation_blocks,
+                    allow_regtest_fixed_fee=allow_regtest_fixed_fee,
+                )
+            )
         except Exception:  # noqa: BLE001 - advice only; never defer a timelocked spend for it
-            LOG.warning("fee estimate unavailable; signing at the floor fee")
-            rate = None
-        if rate is None:
-            return spend
-        wanted = min(ceiling, max(floor, math.ceil(rate * spend.vsize)))
-        return spend if wanted == floor else self._claim(item, terms, binding, wanted)
+            LOG.warning("claim fee evidence unavailable")
+            return None
+        if not _fee_policy_usable(policy, terms, allow_regtest_fixed_fee=allow_regtest_fixed_fee):
+            return None
+        self._claim_fee_evidence[policy.confirmation_blocks] = policy
+        return policy
 
-    def _claim_fee_floor(self, terms: ContractTerms, binding: FundingBinding) -> int:
-        """Return the configured claim floor, lowered only to what the signed terms allow.
+    def _unilateral_claim_fee(
+        self, authorization: UnilateralAuthorization, policy: CooperativeFeePolicy | None
+    ) -> int:
+        """Price a script-path claim like the key-path claim it stands in for.
 
-        The fallback claim and the cooperative claim share this one floor, so
-        a signed cap below the configured floor cannot silently disable
-        cooperation while the fallback pays that same capped fee.
+        The provider prices its claim into the success fee, so every claim
+        pays the cooperative (key-path) size at the node's evidence: relay and
+        mempool floors and the capped estimate for the signed confirmation
+        target. The larger script-path claim then only has to relay;
+        escalation bumps it if it stalls. Without evidence a timelocked claim
+        never underpays: it pays the signed ceiling.
         """
-        return min(
-            self._settings.claim_fee_sat,
-            max_spendable_fee(self._authorization(terms, binding)),
+        ceiling = max_spendable_fee(authorization)
+        if policy is None:
+            LOG.warning("no claim fee evidence; signing at the signed ceiling")
+            return ceiling
+        key_path, script_path = claim_vsizes(authorization.destination_script)
+        relay = max(policy.min_relay_sat_kvb, policy.mempool_min_sat_kvb)
+        priced = policy.fee_floor_sat(
+            vsize=key_path, configured_floor_sat=self._settings.cooperative_fee_floor_sat
         )
+        return min(ceiling, max(priced, (relay * script_path + 999) // 1000))
 
     def _claim(
         self, item: SettlementItem, terms: ContractTerms, binding: FundingBinding, fee: int
@@ -1681,6 +1707,36 @@ class SettlementEngine:
             item.session_id, plan.signature_hash, self._crypto
         )
         return finalize_unilateral_spend(plan, signature, verifier=self._crypto)
+
+
+def _fee_policy_usable(
+    policy: object, terms: ContractTerms, *, allow_regtest_fixed_fee: bool
+) -> TypeGuard[CooperativeFeePolicy]:
+    """Check fee evidence for the signed network and confirmation target.
+
+    Public networks need an affirmative estimate within the target; only an
+    explicit regtest policy accepts an unavailable one (relay floors only).
+    """
+    target = terms.timing_policy.claim_confirmation_blocks
+    return (
+        type(policy) is CooperativeFeePolicy
+        and policy.network_identity == terms.network_identity
+        and policy.confirmation_blocks == target
+        and all(
+            type(rate) is int and rate >= 0
+            for rate in (policy.min_relay_sat_kvb, policy.mempool_min_sat_kvb)
+        )
+        and (
+            allow_regtest_fixed_fee
+            if policy.estimate_sat_kvb is None
+            else (
+                type(policy.estimate_sat_kvb) is int
+                and policy.estimate_sat_kvb > 0
+                and type(policy.estimate_blocks) is int
+                and 1 <= policy.estimate_blocks <= target
+            )
+        )
+    )
 
 
 def _cooperative_outpoint_matches(
