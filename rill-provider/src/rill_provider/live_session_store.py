@@ -2063,7 +2063,7 @@ class LiveSessionStore:
             raise LiveSessionStoreError("untrusted or unsupported handshake initiation")
         return outer, init
 
-    def reserve(  # noqa: PLR0912, PLR0915 - replay, provenance, and capacity share one transaction
+    def reserve(  # noqa: PLR0912 - replay, provenance, and capacity share one transaction
         self, initiation: EpochInitiation, *, now: int | None = None
     ) -> SessionReservation:
         """Reserve one fresh provider challenge per session; replay is stable.
@@ -2083,9 +2083,7 @@ class LiveSessionStore:
             with self._write() as connection:
                 if _session_expired(connection, init.session_id):
                     raise SessionExpiredError("session expired")  # noqa: TRY301
-                epoch = init.epoch_inbox_xonly_key
-                if epoch is None:
-                    raise LiveSessionStoreError("new session requires epoch-bound admission")  # noqa: TRY301
+                epoch = init.epoch_inbox_xonly_key  # Core refuses an unbound init
                 if initiation.epoch_key != epoch:
                     raise LiveSessionStoreError("epoch admission provenance unavailable")  # noqa: TRY301
                 epoch_row = connection.execute(

@@ -27,7 +27,6 @@ if TYPE_CHECKING:
 
 EPOCH_SESSION_FEATURE = "epoch-bound-session/v1"
 EPOCH_SESSION_EXTENSION = "rillswap/epoch-bound-session"
-HANDSHAKE_FEATURES_EXTENSION = "rillswap/handshake-required-features"
 # A new cooperative swap must commit to this feature in both handshake halves
 # and in signed contract terms. Its presence does not remove unilateral paths.
 COOPERATIVE_CLAIM_FEATURE = "cooperative-claim/v1"

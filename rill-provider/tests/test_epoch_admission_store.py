@@ -52,7 +52,10 @@ def _init(harness: Harness, epoch: str, client: int = 2) -> live.EpochInitiation
 
 
 def _unbound(harness: Harness, session: str, epoch: str) -> live.EpochInitiation:
-    """An unbound init (no epoch feature) delivered with valid epoch provenance."""
+    """An unbound init (no epoch feature) delivered with valid epoch provenance.
+
+    Core refuses to parse it, so the store reports a generic refusal.
+    """
     envelope = copy.deepcopy(harness.envelopes[0])
     envelope["session_id"] = session
     envelope["payload"].update(session_id=session, required_features=[], extensions={})
@@ -72,7 +75,7 @@ def test_epoch_binding_requires_provenance_and_refuses_unbound_ids(harness: Harn
             store.reserve(init.document, now=1000)
         with pytest.raises(live.LiveSessionStoreError, match="provenance"):
             store.reserve(replace(init, epoch_key=harness.identity), now=1000)
-        with pytest.raises(live.LiveSessionStoreError, match="requires epoch-bound"):
+        with pytest.raises(live.LiveSessionStoreError, match="session reservation refused"):
             store.reserve(_unbound(harness, "10" * 32, epoch), now=1000)
         assert store._connection.execute("SELECT * FROM sessions").fetchall() == []  # noqa: SLF001
         reserved = store.reserve(init, now=1000)
@@ -104,7 +107,7 @@ def test_tombstone_is_temporary_but_not_before_durable_epoch_retirement(harness:
         new_epoch = _epoch(store, now=1200)
         with pytest.raises(live.LiveSessionStoreError, match="provenance"):
             store.reserve(replace(init, epoch_key=new_epoch), now=1200)
-        with pytest.raises(live.LiveSessionStoreError, match="requires epoch-bound"):
+        with pytest.raises(live.LiveSessionStoreError, match="session reservation refused"):
             store.reserve(_unbound(harness, session, new_epoch), now=1200)
         store.reserve(_init(harness, new_epoch), now=1200)
 

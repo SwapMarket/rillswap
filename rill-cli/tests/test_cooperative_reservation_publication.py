@@ -26,6 +26,7 @@ from rill_core.settlement.unilateral import (
 from rill_core.wire.canonical import canonicalize
 from rill_core.wire.hashes import (
     COOPERATIVE_CLAIM_FEATURE,
+    EPOCH_SESSION_FEATURE,
     client_acceptance_hash,
     contract_hash,
     handshake_accept_hash,
@@ -68,8 +69,14 @@ def _snapshots(crypto: Context) -> tuple[dict[str, Any], ...]:
     initial, _ = _fixture("btc-to-ln")
     context = initial["verification_context"]
     feature = [COOPERATIVE_CLAIM_FEATURE]
-    context["handshake_init"]["required_features"] = feature
-    context["handshake_accept"]["required_features"] = feature
+    context["handshake_init"]["required_features"] = [
+        COOPERATIVE_CLAIM_FEATURE,
+        EPOCH_SESSION_FEATURE,
+    ]
+    context["handshake_accept"]["required_features"] = [
+        COOPERATIVE_CLAIM_FEATURE,
+        EPOCH_SESSION_FEATURE,
+    ]
     init = HandshakeInit.model_validate_json(canonicalize(context["handshake_init"]), strict=True)
     context["handshake_accept"]["handshake_init_hash"] = handshake_init_hash(init).hex()
     accept = HandshakeAccept.model_validate_json(

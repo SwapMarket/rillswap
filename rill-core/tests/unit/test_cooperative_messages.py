@@ -22,6 +22,7 @@ from rill_core.wire.cooperative_messages import (
 )
 from rill_core.wire.hashes import (
     COOPERATIVE_CLAIM_FEATURE,
+    EPOCH_SESSION_FEATURE,
     contract_hash,
     handshake_init_hash,
 )
@@ -165,10 +166,10 @@ def _signed_context(profile: str) -> tuple[ContractTerms, HandshakeInit, Handsha
     record = json.loads((FIXTURES / fixture).read_text())
     context = record["verification_context"]
     init_document = context["handshake_init"]
-    init_document["required_features"] = [COOPERATIVE_CLAIM_FEATURE]
+    init_document["required_features"] = [COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE]
     init = HandshakeInit.model_validate_json(json.dumps(init_document), strict=True)
     accept_document = context["handshake_accept"]
-    accept_document["required_features"] = [COOPERATIVE_CLAIM_FEATURE]
+    accept_document["required_features"] = [COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE]
     accept_document["handshake_init_hash"] = handshake_init_hash(init).hex()
     accept = HandshakeAccept.model_validate_json(json.dumps(accept_document), strict=True)
     terms_document = record["contract_terms"]

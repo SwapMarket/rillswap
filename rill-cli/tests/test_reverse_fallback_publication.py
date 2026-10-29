@@ -13,6 +13,7 @@ import pytest
 from rill_core.recovery import REVERSE_FALLBACK_EXTENSION, inspect_recovery_successor
 from rill_core.wire.hashes import (
     COOPERATIVE_CLAIM_FEATURE,
+    EPOCH_SESSION_FEATURE,
     contract_hash,
     funding_binding_hash,
     handshake_accept_hash,
@@ -35,10 +36,11 @@ if TYPE_CHECKING:
 def _featured(fixture: NativeSdk, monkeypatch: pytest.MonkeyPatch) -> None:
     """Authentic synthetic featured transcript; discovery/negotiation remain stubbed."""
     feature = (COOPERATIVE_CLAIM_FEATURE,)
-    fixture.init = fixture.init.model_copy(update={"required_features": feature})
+    bound = (COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE)  # every session is epoch-bound
+    fixture.init = fixture.init.model_copy(update={"required_features": bound})
     fixture.accept = fixture.accept.model_copy(
         update={
-            "required_features": feature,
+            "required_features": bound,
             "handshake_init_hash": handshake_init_hash(fixture.init).hex(),
         }
     )

@@ -20,6 +20,7 @@ from rill_core.settlement import (
 from rill_core.wire.canonical import canonicalize
 from rill_core.wire.cooperative_messages import COOPERATIVE_CLAIM_FEATURE
 from rill_core.wire.hashes import (
+    EPOCH_SESSION_FEATURE,
     client_acceptance_hash,
     contract_hash,
     funding_binding_hash,
@@ -61,8 +62,14 @@ class ReservedDisclosure(PreparedFallback):
         prepared = copy.deepcopy(self.next)
         context = prepared["verification_context"]
         features = [COOPERATIVE_CLAIM_FEATURE]
-        context["handshake_init"]["required_features"] = features
-        context["handshake_accept"]["required_features"] = features
+        context["handshake_init"]["required_features"] = [
+            COOPERATIVE_CLAIM_FEATURE,
+            EPOCH_SESSION_FEATURE,
+        ]
+        context["handshake_accept"]["required_features"] = [
+            COOPERATIVE_CLAIM_FEATURE,
+            EPOCH_SESSION_FEATURE,
+        ]
         init = HandshakeInit.model_validate_json(
             canonicalize(context["handshake_init"]), strict=True
         )

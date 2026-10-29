@@ -1,4 +1,4 @@
-"""Versioned epoch binding without reinterpreting legacy handshake identifiers."""
+"""Every handshake session is bound to one provider epoch."""
 
 from __future__ import annotations
 
@@ -20,25 +20,23 @@ from rill_core.wire.types import NetworkIdentity
 
 FIXTURE = Path(__file__).parents[1] / "fixtures/recovery-v1/initial-btc-to-ln-v1.json"
 CONTEXT = json.loads(FIXTURE.read_text())["verification_context"]
-# The fixture is epoch-bound. Core still parses unbound initiations, so this is
-# the fixture's former unbound form with its original random identifier.
-LEGACY = {
+# The fixture init without its epoch binding and with a random identifier.
+UNBOUND = {
     **copy.deepcopy(CONTEXT["handshake_init"]),
     "session_id": "10" * 32,
     "required_features": [],
     "extensions": {},
 }
-LEGACY_INIT_HASH = "5cac6f54747b33bf968bff61048f21f56e06d0c295b999def1b37fc0b171434c"
-NETWORK = NetworkIdentity.model_validate(LEGACY["network_identity"])
-PROVIDER = LEGACY["expected_provider_identity_xonly_key"]
-CLIENT = LEGACY["client_session_xonly_key"]
+NETWORK = NetworkIdentity.model_validate(UNBOUND["network_identity"])
+PROVIDER = UNBOUND["expected_provider_identity_xonly_key"]
+CLIENT = UNBOUND["client_session_xonly_key"]
 EPOCH = CONTEXT["handshake_accept"]["provider_session_xonly_key"]
 VECTOR = "6abb41432e6c051dc91efba1426d2dbc2ec44e6dd174b086f229981121e6dcea"
 PROVIDER_SESSION = "e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13"
 
 
 def _fresh() -> dict:
-    document = copy.deepcopy(LEGACY)
+    document = copy.deepcopy(UNBOUND)
     document["required_features"] = [EPOCH_SESSION_FEATURE]
     document["extensions"] = {EPOCH_SESSION_EXTENSION: {"epoch_inbox_xonly_key": EPOCH}}
     document["session_id"] = VECTOR
@@ -90,7 +88,7 @@ def test_required_epoch_feature_refuses_absent_partial_or_unknown_binding(
 
 def test_required_epoch_feature_cannot_keep_a_random_or_older_epoch_id() -> None:
     document = _fresh()
-    document["session_id"] = LEGACY["session_id"]
+    document["session_id"] = UNBOUND["session_id"]
     with pytest.raises(ValueError, match="session_id does not bind"):
         HandshakeInit.model_validate_json(json.dumps(document), strict=True)
 
@@ -106,19 +104,14 @@ def test_epoch_context_keys_must_be_distinct() -> None:
         epoch_bound_session_id(NETWORK, PROVIDER, PROVIDER, CLIENT)
 
 
-def test_legacy_transcript_bytes_and_random_identifier_remain_unchanged() -> None:
-    legacy = HandshakeInit.model_validate_json(json.dumps(LEGACY), strict=True)
-    assert legacy.model_dump(mode="json") == LEGACY
-    assert legacy.epoch_inbox_xonly_key is None
-    assert handshake_init_hash(legacy).hex() == LEGACY_INIT_HASH
-
-
-def test_optional_extension_does_not_reclassify_legacy_admission() -> None:
-    document = copy.deepcopy(LEGACY)
-    document["extensions"] = {EPOCH_SESSION_EXTENSION: {"epoch_inbox_xonly_key": EPOCH}}
-    init = HandshakeInit.model_validate_json(json.dumps(document), strict=True)
-    assert init.session_id == LEGACY["session_id"]
-    assert init.epoch_inbox_xonly_key is None
+@pytest.mark.parametrize("extension", [False, True])
+def test_initiation_without_the_epoch_feature_is_refused(*, extension: bool) -> None:
+    document = copy.deepcopy(UNBOUND)
+    if extension:  # the binding alone does not make the feature optional
+        document["extensions"] = {EPOCH_SESSION_EXTENSION: {"epoch_inbox_xonly_key": EPOCH}}
+        document["session_id"] = VECTOR
+    with pytest.raises(ValidationError, match="must require epoch-bound sessions"):
+        HandshakeInit.model_validate_json(json.dumps(document), strict=True)
 
 
 def _accept(init: HandshakeInit, *, required: tuple[str, ...]) -> HandshakeAccept:
@@ -132,15 +125,9 @@ def _accept(init: HandshakeInit, *, required: tuple[str, ...]) -> HandshakeAccep
     return HandshakeAccept.model_validate_json(json.dumps(document), strict=True)
 
 
-@pytest.mark.parametrize("initiator_selected", [True, False])
-def test_epoch_feature_cannot_be_introduced_or_dropped_by_one_party(
-    *,
-    initiator_selected: bool,
-) -> None:
-    init = HandshakeInit.model_validate_json(
-        json.dumps(_fresh() if initiator_selected else LEGACY), strict=True
-    )
-    accept = _accept(init, required=() if initiator_selected else (EPOCH_SESSION_FEATURE,))
+def test_provider_cannot_drop_the_epoch_feature() -> None:
+    init = HandshakeInit.model_validate_json(json.dumps(_fresh()), strict=True)
+    accept = _accept(init, required=())
     with pytest.raises(ValueError, match="jointly negotiated"):
         accept.validate_against(init, supported_features={EPOCH_SESSION_FEATURE})
 

@@ -585,10 +585,10 @@ class HandshakeInit(StrictModel):
     extensions: dict[str, JsonValue]
 
     @property
-    def epoch_inbox_xonly_key(self) -> str | None:
-        """Return the feature-bound epoch, never infer one for legacy inits."""
+    def epoch_inbox_xonly_key(self) -> str:
+        """Return the provider epoch this session is bound to."""
         if EPOCH_SESSION_FEATURE not in self.required_features:
-            return None
+            raise ValueError("handshake initiation must require epoch-bound sessions")
         binding = self.extensions.get(EPOCH_SESSION_EXTENSION)
         if not isinstance(binding, dict) or set(binding) != {"epoch_inbox_xonly_key"}:
             raise ValueError("epoch-bound session requires its exact epoch extension")
@@ -611,14 +611,12 @@ class HandshakeInit(StrictModel):
             raise ValueError("session_id and client_challenge must be independent")
         if self.client_session_xonly_key == self.expected_provider_identity_xonly_key:
             raise ValueError("client session and provider identity keys must be distinct")
-        epoch = self.epoch_inbox_xonly_key
         if (
-            epoch is not None
-            and self.session_id
+            self.session_id
             != epoch_bound_session_id(
                 self.network_identity,
                 self.expected_provider_identity_xonly_key,
-                epoch,
+                self.epoch_inbox_xonly_key,
                 self.client_session_xonly_key,
             ).hex()
         ):
@@ -709,14 +707,10 @@ class HandshakeAccept(StrictModel):
         required = set(initiation.required_features) | set(self.required_features)
         if not required.issubset(supported_features):
             raise ValueError("handshake requires an unknown feature")
-        if EPOCH_SESSION_FEATURE in required:
-            if not (
-                EPOCH_SESSION_FEATURE in initiation.required_features
-                and EPOCH_SESSION_FEATURE in self.required_features
-            ):
-                raise ValueError("epoch-bound admission must be jointly negotiated")
-            if self.provider_session_xonly_key == initiation.epoch_inbox_xonly_key:
-                raise ValueError("provider session and epoch inbox keys must be distinct")
+        if EPOCH_SESSION_FEATURE not in self.required_features:
+            raise ValueError("epoch-bound admission must be jointly negotiated")
+        if self.provider_session_xonly_key == initiation.epoch_inbox_xonly_key:
+            raise ValueError("provider session and epoch inbox keys must be distinct")
         if COOPERATIVE_CLAIM_FEATURE in required and not (
             COOPERATIVE_CLAIM_FEATURE in initiation.required_features
             and COOPERATIVE_CLAIM_FEATURE in self.required_features

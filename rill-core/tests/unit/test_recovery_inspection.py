@@ -1078,8 +1078,14 @@ def test_jointly_signed_cooperation_does_not_block_unilateral_recovery(
         artifacts = old_crypto.artifacts
     context = document["verification_context"]
     feature = [COOPERATIVE_CLAIM_FEATURE]
-    context["handshake_init"]["required_features"] = feature
-    context["handshake_accept"]["required_features"] = feature
+    context["handshake_init"]["required_features"] = [
+        COOPERATIVE_CLAIM_FEATURE,
+        EPOCH_SESSION_FEATURE,
+    ]
+    context["handshake_accept"]["required_features"] = [
+        COOPERATIVE_CLAIM_FEATURE,
+        EPOCH_SESSION_FEATURE,
+    ]
     init = HandshakeInit.model_validate_json(json.dumps(context["handshake_init"]))
     context["handshake_accept"]["handshake_init_hash"] = handshake_init_hash(init).hex()
     accept = HandshakeAccept.model_validate_json(json.dumps(context["handshake_accept"]))

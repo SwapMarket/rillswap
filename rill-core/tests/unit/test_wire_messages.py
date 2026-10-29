@@ -11,8 +11,11 @@ from rill_core.domain.amounts import MAX_SATS
 from rill_core.errors import CanonicalizationError
 from rill_core.wire import parse_model_json
 from rill_core.wire.hashes import (
+    EPOCH_SESSION_EXTENSION,
+    EPOCH_SESSION_FEATURE,
     canonical_model,
     contract_hash,
+    epoch_bound_session_id,
     funding_binding_hash,
     handshake_accept_hash,
     handshake_hash,
@@ -29,6 +32,7 @@ from rill_core.wire.messages import (
     HandshakeInit,
     ProviderTerms,
 )
+from rill_core.wire.types import NetworkIdentity
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -135,20 +139,28 @@ def terms_data(profile_id: str = "btc-to-ln/v1") -> dict[str, object]:
     return common
 
 
+EPOCH = G5  # provider epoch inbox key of the handshake builders
+SUPPORTED = frozenset({EPOCH_SESSION_FEATURE})
+
+
+def handshake_session_id() -> str:
+    return epoch_bound_session_id(NetworkIdentity.model_validate(network()), G, EPOCH, G2).hex()
+
+
 def handshake_init_data() -> dict[str, object]:
     return {
         "protocol": "rillswap",
         "wire_version": "1",
         "profile_id": "btc-to-ln/v1",
         "network_identity": network(),
-        "session_id": "10" * 32,
+        "session_id": handshake_session_id(),
         "client_challenge": "11" * 32,
         "client_session_xonly_key": G2,
         "expected_provider_identity_xonly_key": G,
         "requested_encryption_suites": ("noise-xk/v1",),
         "requested_capabilities": ("core/v1", "recovery/v1"),
-        "required_features": (),
-        "extensions": {},
+        "required_features": (EPOCH_SESSION_FEATURE,),
+        "extensions": {EPOCH_SESSION_EXTENSION: {"epoch_inbox_xonly_key": EPOCH}},
     }
 
 
@@ -168,7 +180,7 @@ def handshake_accept_data(initiation: HandshakeInit) -> dict[str, object]:
         "selected_encryption_suite": "noise-xk/v1",
         "selected_capabilities": ("core/v1",),
         "transport_endpoints": ("wss://provider.invalid/rillswap",),
-        "required_features": (),
+        "required_features": (EPOCH_SESSION_FEATURE,),
         "extensions": {},
     }
 
@@ -319,7 +331,7 @@ def test_provider_terms_recomputes_contract_hash() -> None:
 def test_handshake_validates_selection_and_signed_payload_shape() -> None:
     initiation = HandshakeInit.model_validate(handshake_init_data())
     acceptance = HandshakeAccept.model_validate(handshake_accept_data(initiation))
-    acceptance.validate_against(initiation, supported_features=set())
+    acceptance.validate_against(initiation, supported_features=SUPPORTED)
     payload = HandshakeAcceptPayload(
         accept=acceptance,
         provider_identity_signature="06" * 64,
@@ -337,7 +349,7 @@ def test_handshake_preserves_preference_order_and_counts_endpoint_characters() -
     acceptance_data["selected_capabilities"] = ("recovery/v1", "core/v1")
     acceptance_data["transport_endpoints"] = ("é" * 1_100,)
     acceptance = HandshakeAccept.model_validate(acceptance_data)
-    acceptance.validate_against(initiation, supported_features=set())
+    acceptance.validate_against(initiation, supported_features=SUPPORTED)
     assert acceptance.selected_capabilities == ("recovery/v1", "core/v1")
     assert b'"requested_encryption_suites":["noise-xx/v1","noise-xk/v1"]' in canonical_model(
         initiation
@@ -359,7 +371,7 @@ def test_handshake_rejects_mismatched_echo_or_selection(field: str, value: objec
     acceptance_data[field] = value
     acceptance = HandshakeAccept.model_validate(acceptance_data)
     with pytest.raises(ValueError, match=r"handshake|provider"):
-        acceptance.validate_against(initiation, supported_features=set())
+        acceptance.validate_against(initiation, supported_features=SUPPORTED)
 
 
 def test_handshake_rejects_empty_oversized_and_invalid_collections() -> None:
@@ -380,12 +392,12 @@ def test_handshake_rejects_empty_oversized_and_invalid_collections() -> None:
 
 def test_handshake_rejects_unknown_required_feature() -> None:
     initiation_data = handshake_init_data()
-    initiation_data["required_features"] = ("required/v1",)
+    initiation_data["required_features"] = (EPOCH_SESSION_FEATURE, "required/v1")
     initiation = HandshakeInit.model_validate(initiation_data)
     acceptance = HandshakeAccept.model_validate(handshake_accept_data(initiation))
     with pytest.raises(ValueError, match="unknown feature"):
-        acceptance.validate_against(initiation, supported_features=set())
-    acceptance.validate_against(initiation, supported_features={"required/v1"})
+        acceptance.validate_against(initiation, supported_features=SUPPORTED)
+    acceptance.validate_against(initiation, supported_features=SUPPORTED | {"required/v1"})
 
 
 def funding_binding_data() -> dict[str, object]:
@@ -454,13 +466,15 @@ def test_unsigned_envelope_hash_omits_signature_member() -> None:
 def test_strict_json_model_parsing_rejects_duplicates_and_floats() -> None:
     encoded = json.dumps(handshake_init_data()).encode()
     parsed = parse_model_json(HandshakeInit, encoded)
-    assert parsed.session_id == "10" * 32
+    assert parsed.session_id == handshake_session_id()
     with pytest.raises(CanonicalizationError, match="duplicate"):
         parse_model_json(
             HandshakeInit,
             b'{"protocol":"rillswap","protocol":"rillswap"}',
         )
-    float_document = encoded.replace(b'"extensions": {}', b'"extensions": {"org.test/x": 1.5}')
+    with_float = handshake_init_data()
+    with_float["extensions"] = {**with_float["extensions"], "org.test/x": 1.5}  # type: ignore[dict-item]
+    float_document = json.dumps(with_float).encode()
     with pytest.raises(CanonicalizationError, match="floating-point"):
         parse_model_json(HandshakeInit, float_document)
 

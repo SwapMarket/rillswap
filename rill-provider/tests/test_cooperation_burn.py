@@ -23,6 +23,7 @@ from rill_core.settlement import (
 from rill_core.wire.canonical import canonicalize, parse_json_strict
 from rill_core.wire.hashes import (
     COOPERATIVE_CLAIM_FEATURE,
+    EPOCH_SESSION_FEATURE,
     contract_hash,
     handshake_hash,
     handshake_init_hash,
@@ -118,9 +119,10 @@ def _featured_paid_swap(
     source = copy.deepcopy(harness.source)
     context = source["verification_context"]
     features = [COOPERATIVE_CLAIM_FEATURE] if with_feature else []
-    context["handshake_init"]["required_features"] = features
+    bound = sorted({*features, EPOCH_SESSION_FEATURE})  # every session is epoch-bound
+    context["handshake_init"]["required_features"] = bound
     init = HandshakeInit.model_validate_json(json.dumps(context["handshake_init"]), strict=True)
-    context["handshake_accept"]["required_features"] = features
+    context["handshake_accept"]["required_features"] = bound
     context["handshake_accept"]["handshake_init_hash"] = handshake_init_hash(init).hex()
     accept = HandshakeAccept.model_validate_json(
         json.dumps(context["handshake_accept"]), strict=True

@@ -71,7 +71,7 @@ def test_unilateral_reverse_does_not_waive_epoch_admission(harness: Harness) -> 
     harness.init = _bytes(harness.envelopes[0])
     harness.provision()
     with harness.acquire() as store:
-        with pytest.raises(LiveSessionStoreError, match="epoch-bound"):
+        with pytest.raises(LiveSessionStoreError, match="session reservation refused"):
             store.reserve(harness.initiation)
         assert store._connection.execute("SELECT count(*) FROM sessions").fetchone() == (0,)
 

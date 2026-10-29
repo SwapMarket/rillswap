@@ -129,10 +129,12 @@ def test_untrusted_accept_does_not_bind_a_provider_or_poison_replay(
 def _context() -> tuple[ContractTerms, HandshakeInit, HandshakeAccept]:
     original = json.loads(FIXTURE.read_text())
     context = original["verification_context"]
-    init_data = context["handshake_init"] | {"required_features": [COOPERATIVE_CLAIM_FEATURE]}
+    init_data = context["handshake_init"] | {
+        "required_features": [COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE]
+    }
     init = HandshakeInit.model_validate_json(json.dumps(init_data), strict=True)
     accept_data = context["handshake_accept"] | {
-        "required_features": [COOPERATIVE_CLAIM_FEATURE],
+        "required_features": [COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE],
         "handshake_init_hash": handshake_init_hash(init).hex(),
     }
     accept = HandshakeAccept.model_validate_json(json.dumps(accept_data), strict=True)
