@@ -362,6 +362,8 @@ from rill_provider.lnd_invoice_observation import LndInvoiceObserver
 from rill_provider.lnd_payment_observation import (
     LndInfoObserver, LndPaymentObserver, LndUnavailableError,
 )
+from rill_provider.notification_balances import channel_amount_msat, lnd_channel_balance
+from rill_provider.operator_config import Lnd
 import walletunlocker_pb2 as unlock
 
 print('PHASE: certificate', file=sys.stderr)
@@ -519,6 +521,18 @@ network = NetworkIdentity.model_validate(json.loads(
 )['contract_terms']['network_identity'])
 observer = LndPaymentObserver(host='127.0.0.1', port=10009,
     tls_certificate_path='/work/public/tls.cert', read_macaroon_path=private, network=network)
+print('PHASE: channel_balance', file=sys.stderr)
+raw_balance = unary(channel, '/lnrpc.Lightning/ChannelBalance',
+    lightning_pb2.ChannelBalanceRequest, lightning_pb2.ChannelBalanceResponse)(
+        lightning_pb2.ChannelBalanceRequest(), metadata=metadata(restricted), timeout=3)
+assert raw_balance.custom_channel_data == bytes((0, 0))
+sampled_balance = lnd_channel_balance(Lnd(port=10009,
+    tls_certificate=Path('/work/public/tls.cert'), macaroon=private))
+assert sampled_balance == raw_balance
+for field in ('local_balance', 'remote_balance', 'unsettled_local_balance',
+    'unsettled_remote_balance', 'pending_open_local_balance', 'pending_open_remote_balance'):
+    assert channel_amount_msat(sampled_balance, field) == 0
+print('PHASE: btc_only_channel_balance_passed', file=sys.stderr)
 try:
     print('PHASE: observer_track', file=sys.stderr)
     observer.track(payment_hash, deadline_seconds=3)
@@ -651,12 +665,14 @@ def test_pinned_lnd_restricted_read_diagnostic(tmp_path: Path) -> None:
             "--mount",
             f"type=bind,src={CORE},dst=/work/core,readonly",
             "--mount",
+            f"type=bind,src={ROOT.parent / 'rill-crypto'},dst=/work/crypto,readonly",
+            "--mount",
             f"type=bind,src={base},dst=/work/public,readonly",
             "--mount",
             f"type=bind,src={generated},dst=/work/generated,readonly",
             "--env",
             "PYTHONPATH=/work/provider/.venv/lib/python3.14/site-packages:"
-            "/work/provider/src:/work/core/packages/core/src:/work/generated",
+            "/work/provider/src:/work/core/packages/core/src:/work/crypto/python/src:/work/generated",
             PYTHON_IMAGE,
             "python",
             "-c",

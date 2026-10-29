@@ -91,6 +91,36 @@ def _lnd_read[Response: Message](
     return result
 
 
+def _only_empty_custom_blobs(data: bytes) -> bool:  # noqa: PLR0911 - fail-closed parsing boundaries
+    """Accept legacy absence or LND's open/pending counts of empty commitment blobs."""
+    if not data:
+        return True
+    if len(data) > MAX_MESSAGE_BYTES:
+        return False
+    offset = 0
+    for _ in range(2):
+        if offset >= len(data):
+            return False
+        marker = data[offset]
+        offset += 1
+        wide = {0xFD: (2, 0xFD), 0xFE: (4, 0x10000), 0xFF: (8, 0x100000000)}.get(marker)
+        count = marker
+        if wide is not None:
+            width, minimum = wide
+            if offset + width > len(data):
+                return False
+            count = int.from_bytes(data[offset : offset + width], "little")
+            offset += width
+            if count < minimum:
+                return False
+        # Each canonical zero-length blob occupies exactly one zero byte.
+        # Bound the count before reading; custom contents and unknown formats stay refused.
+        if count > len(data) - offset or any(data[offset : offset + count]):
+            return False
+        offset += count
+    return offset == len(data)
+
+
 def lnd_channel_balance(settings: Lnd) -> lightning_pb2.ChannelBalanceResponse:
     """Read LND's channel totals; validate each field used with ``channel_amount_msat``."""
     response = _lnd_read(
@@ -99,7 +129,7 @@ def lnd_channel_balance(settings: Lnd) -> lightning_pb2.ChannelBalanceResponse:
         lightning_pb2.ChannelBalanceRequest(),
         lightning_pb2.ChannelBalanceResponse,
     )
-    if response.custom_channel_data:
+    if not _only_empty_custom_blobs(response.custom_channel_data):
         raise LndProtocolError("LND custom channel balances unsupported")
     return response
 

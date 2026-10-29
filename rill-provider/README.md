@@ -413,6 +413,12 @@ Reading the BTC reserve uses Core's `getbalances`, as LN to BTC funding does; wh
 backend read fails, the provider logs `liquidity sample unavailable` and
 prices the normal fee.
 
+Ordinary BTC-only LND responses include an open/pending-channel envelope even
+when every custom commitment blob is empty; these envelopes are supported.
+Nonempty custom blobs, malformed envelopes and auxiliary-parser JSON remain
+unsupported and select the normal fee. This handling changes neither existing
+stores nor credential permissions.
+
 **Upgrade:** absent `dynamic_fees` keeps existing behavior. Enabling or
 disabling it changes neither the handshake policy nor the store. An older
 release refuses a config that contains it.

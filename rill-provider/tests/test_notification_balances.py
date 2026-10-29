@@ -137,6 +137,81 @@ def _channels() -> pb.ChannelBalanceResponse:
     )
 
 
+@pytest.mark.parametrize(
+    "custom_data",
+    [
+        pytest.param(b"", id="legacy-empty"),
+        pytest.param(b"\x00\x00", id="no-channels"),
+        pytest.param(b"\x01\x00\x00", id="one-open-channel"),
+        pytest.param(b"\x0d" + b"\x00" * 14, id="ordinary-signet-node"),
+        pytest.param(b"\x00\x01\x00", id="pending-channel"),
+        pytest.param(b"\xfd\xfd\x00" + b"\x00" * 254, id="compactsize-16-bit"),
+        pytest.param(b"\xfe\x00\x00\x01\x00" + b"\x00" * 65537, id="compactsize-32-bit"),
+    ],
+)
+def test_channel_balances_accept_only_empty_lnd_commitment_envelopes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, custom_data: bytes
+) -> None:
+    response = _channels()
+    response.custom_channel_data = custom_data
+    monkeypatch.setattr(balances, "_lnd_read", lambda *_: response)
+    settings = Lnd(port=10009, tls_certificate=tmp_path / "tls", macaroon=tmp_path / "mac")
+    assert balances.lnd_channel_balance(settings) is response
+    assert balances._channel_balances(settings) == (  # noqa: SLF001
+        "local 1,234.567 sat, remote 500 sat (peer-owned), "
+        "unsettled local 0.001 sat, pending local 0 sat"
+    )
+
+
+@pytest.mark.parametrize(
+    "custom_data",
+    [
+        pytest.param(b"\x01\x01\x00\x00", id="open-custom-blob"),
+        pytest.param(b"\x00\x01\x01\x00", id="pending-custom-blob"),
+        pytest.param(b"\x00", id="missing-pending-group"),
+        pytest.param(b"\x01", id="missing-blob"),
+        pytest.param(b"\x02\x00", id="truncated-blobs"),
+        pytest.param(b"\x00\x00\x00", id="trailing-bytes"),
+        pytest.param(b"\xfd", id="missing-wide-count"),
+        pytest.param(b"\xfd\x00", id="truncated-16-bit-count"),
+        pytest.param(b"\xfe\x00\x00", id="truncated-32-bit-count"),
+        pytest.param(b"\xff\x00\x00\x00\x00", id="truncated-64-bit-count"),
+        pytest.param(b"\xfd\x00\x00\x00", id="noncanonical-16-bit-count"),
+        pytest.param(b"\xfe\xfd\x00\x00\x00\x00", id="noncanonical-32-bit-count"),
+        pytest.param(b"\xff\x00\x00\x01\x00\x00\x00\x00\x00\x00", id="noncanonical-64-bit-count"),
+        pytest.param(b"\xff" + b"\xff" * 8 + b"\x00", id="unbounded-count"),
+        pytest.param(b"[]", id="aux-parser-array"),
+        pytest.param(b"{}", id="aux-parser-object"),
+        pytest.param(b"custom", id="unknown-format"),
+    ],
+)
+def test_channel_balances_reject_custom_or_malformed_commitment_envelopes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, custom_data: bytes
+) -> None:
+    response = _channels()
+    response.custom_channel_data = custom_data
+    monkeypatch.setattr(balances, "_lnd_read", lambda *_: response)
+    settings = Lnd(port=10009, tls_certificate=tmp_path / "tls", macaroon=tmp_path / "mac")
+    with pytest.raises(LndProtocolError, match="LND custom channel balances unsupported"):
+        balances.lnd_channel_balance(settings)
+
+
+@pytest.mark.parametrize("fault", ["missing", "inconsistent"])
+def test_empty_commitment_envelope_does_not_relax_amount_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    response = _channels()
+    response.custom_channel_data = b"\x01\x00\x00"
+    if fault == "missing":
+        response.ClearField("local_balance")
+    else:
+        response.local_balance.sat = 0
+    monkeypatch.setattr(balances, "_lnd_read", lambda *_: response)
+    settings = Lnd(port=10009, tls_certificate=tmp_path / "tls", macaroon=tmp_path / "mac")
+    with pytest.raises(LndProtocolError, match="LND channel balance invalid"):
+        balances._channel_balances(settings)  # noqa: SLF001
+
+
 @pytest.mark.parametrize("fault", ["missing", "inconsistent", "custom"])
 def test_channel_balances_reject_incomplete_or_inconsistent_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
