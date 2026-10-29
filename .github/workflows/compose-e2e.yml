@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   compose-e2e:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     env:
       COMPOSE_PROJECT_NAME: rill-reverse-browser-ci-${{ github.run_id }}-${{ github.run_attempt }}

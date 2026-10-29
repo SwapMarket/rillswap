@@ -25,6 +25,10 @@ normative behavior. Report vulnerabilities privately as described in
   of each component you touch. The per-component commands are in its README
   and in `.github/workflows/component-checks.yml`.
 
+CI pins the Ubuntu 26.04 runner rather than the moving `ubuntu-latest` label.
+GitHub Actions use immutable commit SHAs with matching release-version comments;
+update both together. The runner pin selects the OS, not a frozen weekly image.
+
 ## Component rules
 
 **rill-docs.** Normative behavior needs byte vectors. Keep specifications,

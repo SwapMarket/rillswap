@@ -26,3 +26,10 @@ def test_action_versions_are_consistent_across_workflows() -> None:
             r"^\s+(?:- )?uses: ([\w./-]+)@(\S+)", workflow.read_text(), re.M
         ):
             assert references.setdefault(action, reference) == reference, action
+
+
+@pytest.mark.parametrize("workflow", WORKFLOWS, ids=lambda path: path.stem)
+def test_jobs_pin_the_ubuntu_image(workflow: Path) -> None:
+    runners = re.findall(r"^\s+runs-on: (\S+)$", workflow.read_text(), re.M)
+    assert runners
+    assert set(runners) == {"ubuntu-26.04"}

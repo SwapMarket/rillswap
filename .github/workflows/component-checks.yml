@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   contracts:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     defaults:
       run:
@@ -25,7 +25,7 @@ jobs:
       - name: Check the vendored contract artifact is fresh
         run: bun run check
   payments:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     defaults:
       run:
@@ -60,7 +60,7 @@ jobs:
 
   woocommerce-conformance:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     defaults:
       run:
@@ -76,7 +76,7 @@ jobs:
         run: bun run test:woocommerce
 
   core:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     defaults:
       run:
@@ -105,7 +105,7 @@ jobs:
           tmp/ci-venv/bin/python -m pytest -q -m 'not native_crypto' --basetemp=tmp/pytest-ci
 
   web:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     defaults:
       run:
@@ -137,7 +137,7 @@ jobs:
           python3 scripts/check_release_bundle.py dist tmp/release tmp/pages-candidate
 
   crypto:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     defaults:
       run:
@@ -183,7 +183,7 @@ jobs:
           bun run test:wasm-verify
 
   provider:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     defaults:
       run:
@@ -213,7 +213,7 @@ jobs:
             --basetemp=tmp/pytest-ci
 
   provider-native:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     defaults:
       run:
@@ -254,7 +254,7 @@ jobs:
             --basetemp=tmp/pytest-ci-native
 
   provider-lnd:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     defaults:
       run:
@@ -361,7 +361,7 @@ jobs:
             --basetemp=tmp/pytest-ci-treasury-cli
 
   cli:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     defaults:
       run:
@@ -420,7 +420,7 @@ jobs:
             --basetemp=tmp/pytest-ci-wallet-history
 
   dev-stack:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -435,7 +435,7 @@ jobs:
 
   dev-stack-smoke:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
