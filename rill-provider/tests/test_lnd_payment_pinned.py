@@ -30,10 +30,10 @@ if TYPE_CHECKING:
 
 CORE_IMAGE = (
     "docker.io/bitcoin/bitcoin@"
-    "sha256:49b55ea5c949a9ceff50786ee678d53f2728a4daa40a8139e3ee20243d24f281"
+    "sha256:ca69e5a5e316cdde3334b277caff687dd07b8c322f208063aa29a976132fca34"
 )
 LND_IMAGE = (
-    "lightninglabs/lnd@sha256:60fca3f409cf3d500db1d15c9965678a4b5a60758ff30863d52b02529c18be8b"
+    "lightninglabs/lnd@sha256:ca3477292ae8805d4d49d99c70f492c56bd001f2f464c482cd58de9443f56930"
 )
 PYTHON_IMAGE = "python@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4"
 GENESIS = "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"
@@ -1042,6 +1042,8 @@ for label, port in (('a', 10009), ('b', 10010)):
     assert len(info.chains) == 1
     assert info.chains[0].chain == 'bitcoin' and info.chains[0].network == 'regtest'
     assert info.block_height == 101 and info.synced_to_chain
+    # LND_IMAGE's release: every advisory in rill-docs/ATTACKS.md is fixed in it.
+    assert info.version.split()[0] == '0.21.5-beta'
     nodes[label] = (channel, initiated.admin_macaroon, info.identity_pubkey)
 assert nodes['a'][2] != nodes['b'][2]
 a, a_secret, a_key = nodes['a']

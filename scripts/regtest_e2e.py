@@ -46,8 +46,8 @@ from typing import Any
 from pyrage import x25519
 
 ROOT = Path(__file__).resolve().parents[1]
-CORE_IMAGE = "sha256:49b55ea5c949a9ceff50786ee678d53f2728a4daa40a8139e3ee20243d24f281"
-LND_IMAGE = "sha256:60fca3f409cf3d500db1d15c9965678a4b5a60758ff30863d52b02529c18be8b"
+CORE_IMAGE = "sha256:ca69e5a5e316cdde3334b277caff687dd07b8c322f208063aa29a976132fca34"
+LND_IMAGE = "sha256:ca3477292ae8805d4d49d99c70f492c56bd001f2f464c482cd58de9443f56930"
 NETWORK_FIXTURE = (
     ROOT / "rill-provider" / "tests" / "fixtures" / "initial-btc-to-ln-v1.json"
 )

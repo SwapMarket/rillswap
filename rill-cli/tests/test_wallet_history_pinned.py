@@ -17,7 +17,7 @@ import pytest
 ROOT = Path(__file__).parents[1]
 CORE_IMAGE = (
     "docker.io/bitcoin/bitcoin@"
-    "sha256:49b55ea5c949a9ceff50786ee678d53f2728a4daa40a8139e3ee20243d24f281"
+    "sha256:ca69e5a5e316cdde3334b277caff687dd07b8c322f208063aa29a976132fca34"
 )
 PYTHON_IMAGE = "python@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4"
 NETWORK = {
@@ -124,7 +124,7 @@ def test_pinned_core_historical_spent_and_public_only_recognition(tmp_path: Path
             except AssertionError:
                 time.sleep(0.2)
             else:
-                assert info["version"] == 300000
+                assert info["version"] == 300400
                 break
         else:
             raise AssertionError("owned pinned Core did not become ready")

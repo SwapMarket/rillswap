@@ -21,7 +21,7 @@ ROOT = Path(__file__).parents[1]
 TAPROOT_PATH = ROOT / "vectors" / "taproot" / "cases-v1.json"
 IMAGE = (
     "docker.io/bitcoin/bitcoin@"
-    "sha256:49b55ea5c949a9ceff50786ee678d53f2728a4daa40a8139e3ee20243d24f281"
+    "sha256:ca69e5a5e316cdde3334b277caff687dd07b8c322f208063aa29a976132fca34"
 )
 REFUND_HEIGHT = 1100
 SATOSHIS_PER_BTC = Decimal(100_000_000)
@@ -365,8 +365,8 @@ def test_unilateral_spends_execute_at_refund_height_boundaries() -> None:
         chain_info = rpc.call("getblockchaininfo")
         network_info = rpc.call("getnetworkinfo")
         assert chain_info["chain"] == "regtest"
-        assert network_info["version"] == 300000
-        assert network_info["subversion"] == "/Satoshi:30.0.0/"
+        assert network_info["version"] == 300400
+        assert network_info["subversion"] == "/Satoshi:30.4.0/"
 
         wallet = "fund"
         rpc.call("createwallet", wallet)

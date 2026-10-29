@@ -97,7 +97,7 @@ def test_pinned_block_bytes_without_txindex_after_funding_spent(tmp_path: Path) 
             except AssertionError:
                 time.sleep(0.2)
             else:
-                assert version == 300000
+                assert version == 300400
                 break
         else:
             raise AssertionError("owned Core did not become ready")

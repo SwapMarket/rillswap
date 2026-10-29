@@ -172,7 +172,7 @@ def test_pinned_native_funding_without_txindex_then_confirmed_spent_refusal(tmp_
             except AssertionError:
                 time.sleep(0.2)
             else:
-                assert version == 300000
+                assert version == 300400
                 break
         else:
             raise AssertionError("owned Core did not become ready")

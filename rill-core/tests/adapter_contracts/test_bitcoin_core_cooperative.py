@@ -29,7 +29,7 @@ from rill_core.wire.messages import ContractTerms
 
 IMAGE = (
     "docker.io/bitcoin/bitcoin@"
-    "sha256:49b55ea5c949a9ceff50786ee678d53f2728a4daa40a8139e3ee20243d24f281"
+    "sha256:ca69e5a5e316cdde3334b277caff687dd07b8c322f208063aa29a976132fca34"
 )
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "settlement-v1" / "taproot-cases-v1.json"
 SATOSHIS_PER_BTC = Decimal(100_000_000)
@@ -157,7 +157,7 @@ def test_core_accepts_only_exact_tweaked_musig_key_path_claim() -> None:  # noqa
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(1)
-        assert _rpc(name, password, "getnetworkinfo")["version"] == 300000
+        assert _rpc(name, password, "getnetworkinfo")["version"] == 300400
         _rpc(name, password, "createwallet", "fund")
         miner = _rpc(name, password, "getnewaddress", "", "bech32m", wallet="fund")
         _rpc(name, password, "generatetoaddress", 101, miner, wallet="fund", timeout=180)
