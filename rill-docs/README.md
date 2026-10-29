@@ -20,6 +20,12 @@ Interoperability is defined by the versioned `specs/`, `schemas/` and
 Published versions are never rewritten; corrections receive a new version or
 an explicit erratum.
 
+For Nostr event kinds, JSON layouts and the provider/client relay and handshake
+flow, start with the [RS-006 protocol overview](specs/RS-006-nostr-transport.md#protocol-overview)
+and [RS-005 announcement format](specs/RS-005-discovery.md#nostr-announcement-format).
+These distinguish RillSwap's experimental kinds `39417` and `21417` from
+NIP-59's seal `13` and gift wrap `1059`, with links to the relevant NIPs.
+
 | Spec | Topic |
 |---|---|
 | [RS-000](specs/RS-000-scope-and-security.md) | Scope and security boundary |

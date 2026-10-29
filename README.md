@@ -100,6 +100,12 @@ The protocol is specified in [`rill-docs/specs/`](rill-docs/specs/), with JSON
 schemas and byte-level test vectors. [ARCHITECTURE.md](rill-docs/ARCHITECTURE.md)
 explains the design, state machines and security invariants.
 
+For the Nostr wire protocol, see the [event kinds, formats and message flow](rill-docs/specs/RS-006-nostr-transport.md#protocol-overview).
+Public provider announcements use experimental kind `39417`; private swap
+envelopes use experimental rumor kind `21417` inside NIP-59 seals (`13`) and
+gift wraps (`1059`), encrypted with NIP-44 v2. Only announcements and outer
+gift wraps are published to relays.
+
 ## Components
 
 | Directory | Language | What it is |

@@ -4,6 +4,61 @@ Status: draft
 
 Version: `0.1.0-pre.1`
 
+## Nostr announcement format
+
+The public discovery event is kind **39417**, signed by the provider's stable
+identity key. It follows the event and addressable-kind rules in
+[NIP-01](https://github.com/nostr-protocol/nips/blob/master/01.md#kinds)
+(formerly [NIP-33](https://github.com/nostr-protocol/nips/blob/master/33.md)).
+The kind and application tags are RillSwap's experimental choices, not kinds
+assigned by either NIP. An announcement is public and unencrypted; private
+client requests use [RS-006 gift wraps](RS-006-nostr-transport.md#protocol-overview),
+not announcement events.
+
+Schematic event (placeholders are not valid wire values):
+
+```json
+{
+  "id": "<NIP-01 event hash>",
+  "pubkey": "<stable provider identity x-only public key>",
+  "created_at": 1703021488,
+  "kind": 39417,
+  "tags": [
+    ["rillswap", "nostr-experimental-1"],
+    ["network", "regtest"],
+    ["d", "<SHA256 of the canonical protocol/binding/network/slot tuple>"]
+  ],
+  "content": "<JCS serialization of the signed advertisement object>",
+  "sig": "<NIP-01 signature by the provider identity key>"
+}
+```
+
+The decoded `content` is exactly `{"advertisement":{...},"signature":"..."}`,
+using the [advertisement schema](../schemas/advertisements/advertisement-v1.schema.json).
+The inner `advertisement` has these actual wire member names:
+
+```text
+protocol, binding_version, provider_identity_xonly_key, network_identities,
+profiles, amount_bands, indicative_fee_policy, communication_suites,
+transport_endpoints, epoch_inbox_xonly_keys, slot, revision, created_at,
+expires_at, extensions
+```
+
+The inner `signature` is the RS-001 `RillSwap/advertisement/v1` application
+signature, distinct from the outer NIP-01 event `sig`. Both use the provider
+identity key and both are verified. `content` is serialized once to a canonical
+JSON string, then escaped as a string when serializing the outer event.
+The [regtest announcement vector](../vectors/discovery/nostr-announcement-regtest-v1.json)
+and its linked application vector give exact bytes, ID and signatures.
+
+Clients fetch announcements with NIP-01 `REQ`, for example
+`["REQ","providers",{"kinds":[39417]}]`, and validate them locally as specified
+below. The addressable event's `d` distinguishes network/slot advertisements
+by the same provider; relay replacement by timestamp does not replace the
+application's revision and expiry checks.
+
+## Validation and discovery policy
+
 Discovery returns authenticated advertisements, not trusted liquidity,
 solvency, routing, availability, or reputation evidence. Discovery is
 permissionless: a client MAY list every valid announcement on its selected

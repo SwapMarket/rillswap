@@ -136,6 +136,71 @@ Provider messages are hints until independently verified where funds are at risk
 
 Fees, lockup, and availability are distinct from principal safety. Optional prepayments MUST be separately identified, capped, and disclosed as potentially irrecoverable. No implementation may advertise safety against arbitrary censorship, unbounded fees, arbitrary reorgs, or missed monitoring deadlines on the basis of this profile.
 
+### 11. Discovery and provider/client wire protocol
+
+The Bitcoin construction above does not require Nostr. The accompanying
+RillSwap binding uses ordinary [NIP-01 events and relay WebSocket
+messages](https://github.com/nostr-protocol/nips/blob/master/01.md),
+[NIP-44 v2 encryption](https://github.com/nostr-protocol/nips/blob/master/44.md#version-2),
+and [NIP-59 gift wrapping](https://github.com/nostr-protocol/nips/blob/master/59.md#protocol-description).
+The current binding is `nostr-experimental-1`, with communication suite
+`nostr-nip44v2-nip59/v1` in the advertisement's `communication_suites`:
+
+| Kind | Purpose and format | Published to relays? |
+|---|---|---|
+| `39417` | Provider-identity-signed addressable announcement. Tags are exactly `[["rillswap","nostr-experimental-1"],["network",N],["d",D]]`; `content` is the canonical JSON string of `{"advertisement":{...},"signature":"..."}`. | Yes, public discovery. |
+| `21417` | Unsigned application rumor, with tags exactly `[["rillswap","nostr-experimental-1"]]` and the canonical RS-001 envelope JSON string in `content`. | No, encrypted inside the seal. |
+| `13` | Sender-session-key-signed NIP-59 seal, empty tags, NIP-44 v2 encrypted rumor JSON in `content`. | No, encrypted inside the gift wrap. |
+| `1059` | NIP-59 gift wrap signed by a fresh one-time key, recipient `p` routing tag, NIP-44 v2 encrypted seal JSON in `content`. | Yes, encrypted session traffic. |
+
+Kinds `39417` and `21417` are project-local experimental choices, not NIP
+allocations or collision-free reservations. Kinds `13` and `1059` are defined
+by NIP-59. Announcement addressing uses NIP-01's `(kind, pubkey, d)` semantics
+(formerly [NIP-33](https://github.com/nostr-protocol/nips/blob/master/33.md)).
+Here `N` is the coarse network name and `D` is the SHA256 of the canonical
+`["rillswap", binding_version, network_identity, slot]` tuple; clients still
+verify the complete signed network identity. See [RS-005](../specs/RS-005-discovery.md)
+for the exact advertisement schema, signatures, expiry and revision rules.
+
+The client subscribes to announcements with a NIP-01 `REQ` filter such as
+`{"kinds":[39417]}`. Each peer subscribes to its own encrypted inbox using
+`{"kinds":[1059],"#p":["<recipient-xonly-key>"]}`. Senders publish
+`["EVENT",event]`; relays deliver `["EVENT",subscription_id,event]`.
+Neither relay `OK` nor the end-of-stored-events marker `EOSE` means that the
+counterparty processed a swap message.
+
+The client sends `handshake_init` from a fresh session key to an advertised
+provider epoch inbox, without an invoice or payment hash. The provider sends
+`handshake_accept` from its fresh session mailbox to the client's mailbox;
+an application signature by the previously advertised provider identity binds
+the handshake and both session keys. The client sends `handshake_confirm` to
+that provider session mailbox. Only then may they exchange `quote_request`,
+`quote_offer`, `terms_offer`, `terms_accept`, and profile-specific funding,
+observation and action messages inside kind-1059 gift wraps.
+
+The handshake's `requested_encryption_suites` and `selected_encryption_suite`
+are separate from the advertised communication suite. Reference handshakes
+currently use `noise-xk-secp256k1-chachapoly-sha256/v1` as their negotiation
+token, but do not run a Noise handshake or ratchet. Actual wire encryption is
+NIP-44 v2 inside NIP-59; that token does not add security properties.
+
+After decryption, the rumor's `content` is an RS-001 envelope binding protocol
+and wire version, profile, complete network, session and logical message IDs,
+sender session key, sequence, reply correlation, contract hash, message type,
+payload, required features, extensions and application signature. NIP-59's
+unsigned rumor does not remove RillSwap's application signatures. Application
+retransmissions keep the same logical message and sequence but use fresh
+encryption and wrappers; relay delivery never authorizes a financial effect
+on its own.
+
+[RS-001](../specs/RS-001-wire-and-types.md) defines the exact application
+objects, authentication and replay rules.
+[RS-006](../specs/RS-006-nostr-transport.md#protocol-overview) gives the
+event layouts, relay frames, mailbox routing and handshake sequence, including
+the optional [NIP-13](https://github.com/nostr-protocol/nips/blob/master/13.md)
+outer-event proof of work. The accompanying [NIP draft](nip-rillswap.md)
+summarizes this application binding; it is not an assigned NIP.
+
 ## Security considerations
 
 The security model includes malicious counterparties, relays, chain-data services, compromised UI delivery, and accidental crashes. It excludes compromised signing devices/keys and assumes the stated chain, fee, Lightning, and monitoring conditions.
