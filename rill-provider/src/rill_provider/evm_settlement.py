@@ -120,8 +120,15 @@ class EvmSettlementEngine:
         lightning: LightningBackend | None = None,
         hold_invoices: HoldInvoiceBackend | None = None,
         max_routing_fee_sat: int = 1_000,
+        normal_fee_sat: Callable[[int], int] | None = None,
     ) -> None:
-        """``lightning`` serves erc20-to-ln; ``hold_invoices`` serves ln-to-erc20."""
+        """``lightning`` serves erc20-to-ln; ``hold_invoices`` serves ln-to-erc20.
+
+        ``normal_fee_sat`` prices a Lightning principal at the operator's
+        undiscounted service fee; it bounds routing so that a balance-aware
+        discount or rebate never shrinks the budget. Without it the budget
+        falls back to the signed fee, never below zero.
+        """
         self._store = store
         self._htlc = htlc
         self._signer = signer
@@ -132,9 +139,17 @@ class EvmSettlementEngine:
         self._lightning = lightning
         self._hold = hold_invoices
         self._max_routing_fee_sat = max_routing_fee_sat
+        self._normal_fee_sat = normal_fee_sat
         # Nonce gate: a tick signs nothing new once any recorded transaction was
         # refused by the node, so a fresh "pending" nonce never reuses its slot.
         self._may_sign = True
+
+    def _routing_budget(self, principal_sat: int, signed_fee_sat: int) -> int:
+        """Bound routing by the operator cap and the normal fee, never a discounted fee."""
+        fee = (
+            signed_fee_sat if self._normal_fee_sat is None else self._normal_fee_sat(principal_sat)
+        )
+        return min(self._max_routing_fee_sat, max(fee, 0))
 
     # -- quoting support -------------------------------------------------
 
@@ -173,7 +188,9 @@ class EvmSettlementEngine:
                 self._lightning.prepare(
                     invoice,
                     invoice_binding=invoice_binding,
-                    fee_limit_sat=min(self._max_routing_fee_sat, success_fee_sat),
+                    fee_limit_sat=self._routing_budget(
+                        int(invoice_binding.amount_msat) // 1000, success_fee_sat
+                    ),
                     max_expiry_height=max_expiry_height,
                     deadline_seconds=max(0.1, remaining),
                 )
@@ -440,8 +457,8 @@ class EvmSettlementEngine:
         if timing.max_outgoing_htlc_expiry_height - btc_tip <= invoice.min_final_cltv_delta:
             return None
         economics = terms.economics.model_dump()
-        fee_limit = min(
-            self._max_routing_fee_sat,
+        fee_limit = self._routing_budget(
+            int(economics["lightning_principal_sat"]),
             _token_fee_as_sats(
                 int(economics["success_fee_token_base"]), int(economics["rate_token_base_per_btc"])
             ),
@@ -674,7 +691,7 @@ class EvmSettlementEngine:
 
 
 def _token_fee_as_sats(fee_token_base: int, rate: int) -> int:
-    """Return the success fee in satoshis (rounded down) as the routing fee budget."""
+    """Return the signed success fee in satoshis, rounded toward minus infinity."""
     return fee_token_base * 100_000_000 // rate
 
 

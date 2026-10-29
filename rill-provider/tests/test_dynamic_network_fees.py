@@ -201,6 +201,20 @@ def test_routing_cannot_spend_network_component_or_exceed_advertised_ppm() -> No
     assert engine._fee_limit(354) == 354  # noqa: SLF001 - unchanged legacy contract
 
 
+def test_a_discount_or_rebate_never_shrinks_the_routing_budget() -> None:
+    _, offer = forward_offer()
+    terms = offer.terms.contract_terms
+    breakdown = dict(terms.extensions[FEE_POLICY_EXTENSION])  # type: ignore[arg-type]
+    engine = object.__new__(SettlementEngine)
+    engine._settings = EngineSettings(max_routing_fee_sat=1000)  # noqa: SLF001
+    for service in ("-100", "0", "60"):
+        rebated = terms.model_copy(
+            update={"extensions": {FEE_POLICY_EXTENSION: {**breakdown, "service_fee_sat": service}}}
+        )
+        assert engine._fee_limit(-1, rebated) == 100  # noqa: SLF001 - the advertised ppm cap
+    assert engine._fee_limit(-50) == 0  # noqa: SLF001 - never a negative LND fee limit
+
+
 def test_new_pricing_store_never_silently_upgrades_or_downgrades(harness: Harness) -> None:
     harness.provision()
     original = harness.policy

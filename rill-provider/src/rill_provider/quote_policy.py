@@ -187,9 +187,14 @@ def _error(code: str, message: str) -> Answer:
     return Answer("error", {"code": code, "message": message})
 
 
+def normal_service_fee(base_fee_sat: int, proportional_millionths: int, principal: int) -> int:
+    """Return the advertised, undiscounted service fee: base plus the proportional ceiling."""
+    return base_fee_sat + -(-principal * proportional_millionths // MILLIONTHS)
+
+
 def success_fee(terms: QuoteTerms, principal: int) -> int:
     """Return service pricing plus the frozen, separately disclosed network charge."""
-    service = terms.base_fee_sat + -(-principal * terms.proportional_millionths // MILLIONTHS)
+    service = normal_service_fee(terms.base_fee_sat, terms.proportional_millionths, principal)
     network = 0 if terms.fee_breakdown is None else int(terms.fee_breakdown.network_fee_sat)
     return service + network
 

@@ -165,6 +165,16 @@ def _engine(  # noqa: PLR0913 - explicit fakes
     )
 
 
+def test_routing_budget_comes_from_the_normal_fee_never_a_rebate(harness: Harness) -> None:
+    with harness.acquire() as store:
+        legacy = _engine(store, harness, FakeHtlc())
+        assert legacy._routing_budget(100_000, 300) == 300  # noqa: SLF001
+        assert legacy._routing_budget(100_000, -300) == 0  # noqa: SLF001
+        legacy._normal_fee_sat = lambda principal: 100 + principal // 1000  # noqa: SLF001
+        assert legacy._routing_budget(100_000, -300) == 200  # noqa: SLF001
+        assert legacy._routing_budget(10_000_000, 5) == 1_000  # noqa: SLF001 - operator cap
+
+
 def _state(store: live.LiveSessionStore) -> str:
     (item,) = store.evm_settlement_work()
     return item.state

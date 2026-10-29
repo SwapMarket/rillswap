@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import json
 import logging
 import signal
@@ -42,7 +43,7 @@ from rill_provider.operator_config import (
 )
 from rill_provider.payment_reconciliation import reconcile_payment
 from rill_provider.provider_identity import ProviderIdentity, ProviderIdentityError
-from rill_provider.quote_policy import ClaimFeeRate
+from rill_provider.quote_policy import ClaimFeeRate, normal_service_fee
 from rill_provider.relay_client import (
     RelayConnection,
     RelayError,
@@ -270,6 +271,9 @@ def _evm_settlement(
         btc_tip=tip,
         lightning=_payment_sender(config),
         hold_invoices=_hold_invoices(config),
+        normal_fee_sat=functools.partial(
+            normal_service_fee, config.terms.base_fee_sat, config.terms.proportional_millionths
+        ),
     )
 
 

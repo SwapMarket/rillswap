@@ -777,16 +777,22 @@ class SettlementEngine:
         )
 
     def _fee_limit(self, success_fee_sat: int, terms: ContractTerms | None = None) -> int:
-        """Routing fees may use at most the success fee and the operator cap."""
+        """Routing fees may use at most the operator caps and the normal service fee.
+
+        A balance-aware discount, even a rebate, never shrinks the budget: it is
+        bounded by the committed policy's undiscounted fee, not the signed one.
+        Legacy terms carry no policy and are never discounted; a negative fee
+        there yields no budget rather than a negative one.
+        """
         if terms is not None and FEE_POLICY_FEATURE in terms.required_features:
             breakdown = FeeBreakdown.model_validate(terms.extensions[FEE_POLICY_EXTENSION])
             principal = int(terms.invoice_binding.amount_msat) // 1000
             return min(
                 self._settings.max_routing_fee_sat,
-                int(breakdown.service_fee_sat),
+                breakdown.policy.service_fee(principal),
                 principal * breakdown.policy.max_routing_fee_ppm // 1_000_000,
             )
-        return min(self._settings.max_routing_fee_sat, success_fee_sat)
+        return min(self._settings.max_routing_fee_sat, max(success_fee_sat, 0))
 
     def select_due_fallbacks(
         self, now: int, *, closed_only: bool = False, height: int | None = None
@@ -1018,9 +1024,10 @@ class SettlementEngine:
                 self._lightning.prepare(
                     invoice,
                     invoice_binding=invoice_binding,
-                    fee_limit_sat=min(
-                        self._fee_limit(success_fee_sat),
-                        success_fee_sat if routing_fee_limit_sat is None else routing_fee_limit_sat,
+                    fee_limit_sat=(
+                        self._fee_limit(success_fee_sat)
+                        if routing_fee_limit_sat is None
+                        else min(self._fee_limit(success_fee_sat), routing_fee_limit_sat)
                     ),
                     max_expiry_height=max_expiry_height,
                     deadline_seconds=max(0.1, remaining),
