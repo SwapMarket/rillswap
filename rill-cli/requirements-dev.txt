@@ -185,8 +185,6 @@ segno==1.6.6
     # via rill-cli
 toolz==1.2.0
     # via cytoolz
-types-requests==2.33.0.20261006
-    # via web3
 typing-extensions==4.16.0
     # via
     #   anyio
@@ -196,14 +194,11 @@ typing-extensions==4.16.0
     #   pydantic
     #   pydantic-core
     #   typing-inspection
-    #   web3
 typing-inspection==0.4.4
     # via pydantic
 urllib3==2.8.0
-    # via
-    #   requests
-    #   types-requests
-web3==7.16.0
+    # via requests
+web3==8.0.0
     # via rill-provider
 websockets==15.0.1
     # via web3

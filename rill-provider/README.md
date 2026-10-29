@@ -613,6 +613,12 @@ and cancellation after a completed worker may still require operator inspection.
 
 ### Upgrades
 
+The Web3 7.16 to 8.0 dependency update adds upstream Python 3.14 support without
+changing the store schema or recorded EVM transaction bytes and hashes. Existing
+supported stores resume normally; missing, malformed and unsupported stores retain
+their existing refusal behavior. This update requires no reprovisioning, migration
+or re-signing of pending transactions.
+
 Stop the service before installing a new version. Stores are never upgraded in
 place. A store of any other schema version (including v19 and earlier) is
 refused with its contents unchanged, with

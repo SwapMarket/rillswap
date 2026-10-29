@@ -20,7 +20,7 @@ dependencies = [
     "pycryptodomex==3.23.0",
     "aiohttp==3.14.3",
     "pydantic==2.13.5",
-    "web3==7.16.0",
+    "web3==8.0.0",
 ]
 
 [project.optional-dependencies]
