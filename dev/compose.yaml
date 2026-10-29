@@ -432,6 +432,7 @@ services:
     volumes:
       - state:/state:ro
       - ../rill-web/src:/src/rill-web/src:ro
+      - ../rill-web/scripts:/src/rill-web/scripts:ro
       - ../rill-web/index.html:/src/rill-web/index.html:ro
       - ../rill-web/swap.html:/src/rill-web/swap.html:ro
       - ../rill-web/public:/src/rill-web/public:ro
