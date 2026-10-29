@@ -12,17 +12,19 @@ distance into scarcity:
 
 A swap's balance adjustment is the change in total potential it causes,
 ``Phi(after) - Phi(before)``, i.e. the trade-average of the marginal price
-along the way, not the marginal price at either end. Pricing the whole path
-makes the result path independent: splitting a swap, or worsening a balance
-and then repairing it, can never earn more than the normal fees it pays. A
-swap that deepens a shortage pays a surcharge, a swap that repairs one earns a
-discount that may take the service fee below zero, down to the operator's
-floor and the remaining rebate allowance. Healthy balances keep normal fees.
+along the way, not the marginal price at either end. Fees are discounts only:
+a swap that repairs a shortage on balance earns a discount that may take the
+service fee below zero, down to the operator's floor and the remaining rebate
+allowance; every other swap pays the normal fee, never more. A swap that
+repairs one component while deepening another is discounted only by the net
+change. With a positive base fee and a floor no deeper than the smallest
+proportional fee, draining the provider at normal fees and refilling it at the
+deepest discount still pays the provider at least the base fees.
 
 Balances are intervals, not points. The low end debits every pending output
 and the high end credits every pending input, never netting the two. Each
 component is priced at whichever end is worse for the trader, so a quote,
-open offer or unresolved HTLC can only make later quotes more expensive, never
+open offer or unresolved HTLC can only shrink later discounts, never
 manufacture a shortage that earns a rebate. Because each potential is convex,
 the worst point of an interval is always one of its ends.
 
@@ -37,7 +39,7 @@ from fractions import Fraction
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
 
 MILLIONTHS = 1_000_000
 # Marginal adjustment, per moved satoshi, at full depletion of a component.
@@ -179,10 +181,19 @@ def service_fee_floor_sat(principal_sat: int, min_service_fee_ppm: int) -> int:
     return -((-min_service_fee_ppm * principal_sat) // MILLIONTHS)
 
 
-def check_min_service_fee_ppm(value: int) -> int:
-    """Return ``value`` if it is an allowed floor, in signed millionths."""
+def check_min_service_fee_ppm(value: int, *, normal_fee_ppms: Iterable[int] = ()) -> int:
+    """Return ``value`` if it is an allowed floor, in signed millionths.
+
+    ``normal_fee_ppms`` are the proportional normal fees of every direction
+    sharing the liquidity; a floor deeper than any of them would let a round
+    trip through that direction earn more in rebates than it pays.
+    """
     if not (type(value) is int and MIN_SERVICE_FEE_PPM_LIMIT <= value <= 0):
         raise BalancePricingError("minimum service fee must be between -10000 and 0 ppm")
+    if any(value + ppm < 0 for ppm in normal_fee_ppms):
+        raise BalancePricingError(
+            "minimum service fee must not be deeper than the smallest proportional fee"
+        )
     return value
 
 
@@ -194,11 +205,12 @@ def dynamic_service_fee(
     min_service_fee_ppm: int,
     rebate_allowance_sat: int,
 ) -> int:
-    """Return the signed service fee: normal fee plus adjustment, bounded below.
+    """Return the signed service fee: the normal fee less any discount, bounded below.
 
-    The floor applies to the service component only; expected network costs
-    are charged on top by the caller and never discounted. A positive
-    ``normal_fee_sat`` is required so every round trip pays a strict margin.
+    A positive ``adjustment_sat`` (a swap that deepens shortages on balance)
+    is not charged. The floor applies to the service component only; expected
+    network costs are charged on top by the caller and never discounted. A
+    positive ``normal_fee_sat`` is required so every round trip pays a margin.
     """
     if not (
         _is_int(normal_fee_sat, principal_sat, adjustment_sat, rebate_allowance_sat)
@@ -208,4 +220,4 @@ def dynamic_service_fee(
     ):
         raise BalancePricingError("service fee inputs unsupported")
     floor = max(service_fee_floor_sat(principal_sat, min_service_fee_ppm), -rebate_allowance_sat)
-    return max(normal_fee_sat + adjustment_sat, floor)
+    return max(normal_fee_sat + min(adjustment_sat, 0), floor)

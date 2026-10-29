@@ -13,6 +13,7 @@ from rill_provider.balance_pricing import (
     Reserve,
     Trade,
     balance_adjustment_sat,
+    check_min_service_fee_ppm,
     dynamic_service_fee,
     service_fee_floor_sat,
 )
@@ -55,10 +56,10 @@ def fee(normal: int, adjustment: int, *, allowance: int = 10**9, floor_ppm: int 
     ("outbound", "btc", "forward_fee", "reverse_fee"),
     [
         (2_000_000, 2_000_000, 200, 600),  # healthy: normal fees both ways
-        (2_000_000, 900_000, 170, 690),  # BTC slightly short
-        (2_000_000, 200_000, -100, 1_110),  # BTC deeply short: rebate hits the floor
-        (400_000, 2_000_000, 684, 150),  # outbound short: forward surcharged
-        (400_000, 200_000, 234, 660),  # both short: the two pressures offset
+        (2_000_000, 900_000, 170, 600),  # BTC slightly short: refilling it is discounted
+        (2_000_000, 200_000, -100, 600),  # BTC deeply short: the rebate hits the floor
+        (400_000, 2_000_000, 200, 150),  # outbound short: draining it costs no more
+        (400_000, 200_000, 200, 600),  # both short: the two pressures offset
     ],
 )
 def test_worked_examples_with_default_fees(
@@ -81,6 +82,69 @@ def test_crossing_into_scarcity_pays_only_for_the_part_beyond_the_threshold() ->
     assert adjustment == 25  # ceil(0.006 * 90_000**2 / (2 * 1_000_000)) = ceil(24.3)
 
 
+def normal(amount: int, ppm: int) -> int:
+    return 100 + -(-amount * ppm // 1_000_000)
+
+
+def test_fees_never_exceed_the_normal_fee() -> None:
+    rng = random.Random(4)  # noqa: S311 - reproducible fixtures, not keys
+    for _ in range(1_000):
+        state, amount = random_state(rng), rng.randrange(1, 500_000)
+        for trade, ppm in ((forward(amount), 1_000), (reverse(amount), 5_000)):
+            fee_sat = dynamic_service_fee(
+                normal_fee_sat=normal(amount, ppm),
+                principal_sat=amount,
+                adjustment_sat=balance_adjustment_sat(state, trade),
+                min_service_fee_ppm=-1_000,
+                rebate_allowance_sat=10**9,
+            )
+            assert fee_sat <= normal(amount, ppm)
+
+
+def test_draining_and_refilling_pays_at_least_one_base_fee() -> None:
+    """With the floor no deeper than either proportional fee, round trips cost the trader."""
+    rng = random.Random(5)  # noqa: S311 - reproducible fixtures, not keys
+    for _ in range(2_000):
+        state, amount = random_state(rng), rng.randrange(1, 500_000)
+        position, btc = state.channels.outbound_low_sat, state.reserves["btc"].low_sat
+        legs = (
+            (
+                state,
+                forward(amount),
+                1_000,
+                view(position - amount, btc + amount),
+                reverse(amount),
+                5_000,
+            ),
+            (
+                state,
+                reverse(amount),
+                5_000,
+                view(position + amount, btc - amount),
+                forward(amount),
+                1_000,
+            ),
+        )
+        for first, out, out_ppm, second, back, back_ppm in legs:
+            total = sum(
+                dynamic_service_fee(
+                    normal_fee_sat=normal(amount, ppm),
+                    principal_sat=amount,
+                    adjustment_sat=balance_adjustment_sat(where, trade),
+                    min_service_fee_ppm=-1_000,
+                    rebate_allowance_sat=10**9,
+                )
+                for where, trade, ppm in ((first, out, out_ppm), (second, back, back_ppm))
+            )
+            assert total >= 100
+
+
+def test_floor_may_not_be_deeper_than_a_proportional_fee() -> None:
+    assert check_min_service_fee_ppm(-1_000, normal_fee_ppms=(1_000, 5_000)) == -1_000
+    with pytest.raises(BalancePricingError, match="smallest proportional fee"):
+        check_min_service_fee_ppm(-1_001, normal_fee_ppms=(1_000, 5_000))
+
+
 def test_floor_rounds_toward_zero_and_allowance_bounds_the_rebate() -> None:
     assert service_fee_floor_sat(99_999, -1_000) == -99
     assert service_fee_floor_sat(100_000, 0) == 0
@@ -89,6 +153,7 @@ def test_floor_rounds_toward_zero_and_allowance_bounds_the_rebate() -> None:
     assert fee(FORWARD_NORMAL, -10_000, allowance=0) == 0
     assert fee(FORWARD_NORMAL, -10_000, floor_ppm=0) == 0
     assert fee(FORWARD_NORMAL, -150) == 50  # above the floor: unchanged
+    assert fee(FORWARD_NORMAL, 10_000) == FORWARD_NORMAL  # no surcharge
 
 
 def random_state(rng: random.Random) -> BalanceView:
@@ -126,7 +191,7 @@ def test_splitting_a_swap_never_earns_a_larger_discount() -> None:
 
 
 @pytest.mark.parametrize("trade", [forward(), reverse()])
-def test_pending_amounts_only_ever_make_a_quote_more_expensive(trade: Trade) -> None:
+def test_pending_amounts_only_ever_shrink_a_discount(trade: Trade) -> None:
     """An attacker's open offers cannot fake a shortage that earns a rebate."""
     rng = random.Random(3)  # noqa: S311 - reproducible fixtures, not keys
     for _ in range(1_000):
