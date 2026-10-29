@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from rill_core.wire.canonical import canonicalize
-from rill_core.wire.hashes import handshake_accept_hash
+from rill_core.wire.hashes import EPOCH_SESSION_FEATURE, handshake_accept_hash
 from rill_core.wire.messages import HandshakeAccept
 from rill_core.wire.types import NetworkIdentity
 
@@ -98,7 +98,7 @@ def _inputs() -> tuple[
     network = NetworkIdentity.model_validate(package["network_identity"])
     policy = HandshakePolicy(
         profile="btc-to-ln/v1",
-        features=frozenset(),
+        features=frozenset({EPOCH_SESSION_FEATURE}),
         encryption_suites=frozenset({"noise-xk-secp256k1-chachapoly-sha256/v1"}),
         capabilities=frozenset({"core/v1", "recovery/v1"}),
     )

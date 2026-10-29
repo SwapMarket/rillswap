@@ -326,7 +326,7 @@ def test_only_a_firm_terms_offer_records_an_offer(harness: Harness, firm: bool) 
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
         harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store,
     ):
-        session = store.reserve(harness.init, now=1000).session_id
+        session = store.reserve(harness.initiation, now=1000).session_id
         store.commit_accept(harness.accept)
         store.admit_confirm(harness.confirm)
         request = _signed_request(harness, crypto, 2, "21" * 32)

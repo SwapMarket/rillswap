@@ -23,8 +23,6 @@ from rill_core.errors import ValidationError
 from rill_core.networks import require_supported_network
 from rill_core.wire.canonical import canonicalize
 from rill_core.wire.hashes import (
-    EPOCH_SESSION_FEATURE,
-    HANDSHAKE_FEATURES_EXTENSION,
     handshake_accept_hash,
     provider_terms_hash,
     tagged_hash,
@@ -69,7 +67,6 @@ class AnnouncementTerms:
     slot: str
     created_at: int
     expires_at: int
-    epoch_bound_sessions: bool = False
     evm_assets: tuple[EvmAssetIdentity, ...] = ()  # RS-010 served assets
     transport_pow_bits: int = 0  # RS-006 transport proof of work; 0 = not required
     # RS-005: the funding_confirmations every quote carries; 0 only for btc-to-ln.
@@ -241,8 +238,7 @@ def _advertisement(identity: str, terms: AnnouncementTerms) -> dict[str, Any]:
     epochs = terms.epoch_inbox_xonly_keys
     bands = terms.amount_bands
     if not (
-        type(terms.epoch_bound_sessions) is bool
-        and type(terms.transport_pow_bits) is int
+        type(terms.transport_pow_bits) is int
         and 0 <= terms.transport_pow_bits <= transport_pow.MAX_WORK_BITS
         and type(terms.funding_confirmations) is int
         and 0 <= terms.funding_confirmations <= MAX_ANNOUNCED_CONFIRMATIONS
@@ -290,11 +286,6 @@ def _advertisement(identity: str, terms: AnnouncementTerms) -> dict[str, Any]:
         "created_at": terms.created_at,
         "expires_at": terms.expires_at,
         "extensions": {
-            **(
-                {HANDSHAKE_FEATURES_EXTENSION: [EPOCH_SESSION_FEATURE]}
-                if terms.epoch_bound_sessions
-                else {}
-            ),
             **(
                 {EVM_ASSETS_EXTENSION: [a.model_dump(mode="json") for a in terms.evm_assets]}
                 if terms.evm_assets

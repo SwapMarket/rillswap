@@ -27,13 +27,11 @@ from rill_provider import live_session_store as live
 if TYPE_CHECKING:
     from pathlib import Path
 
-EPOCH_POLICY = replace(POLICY, features=frozenset({EPOCH_SESSION_FEATURE}))
-
 
 @pytest.fixture
 def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
     result = Harness(tmp_path, monkeypatch)
-    result.policy = EPOCH_POLICY
+    assert EPOCH_SESSION_FEATURE in POLICY.features
     monkeypatch.setattr(live, "_new_challenge", lambda: secrets.token_hex(32))
     monkeypatch.setattr(live, "_new_session_scalar", lambda: secrets.token_bytes(32))
     return result
@@ -53,12 +51,20 @@ def _init(harness: Harness, epoch: str, client: int = 2) -> live.EpochInitiation
     return live.EpochInitiation(canonicalize(envelope), epoch)
 
 
+def _unbound(harness: Harness, session: str, epoch: str) -> live.EpochInitiation:
+    """An unbound init (no epoch feature) delivered with valid epoch provenance."""
+    envelope = copy.deepcopy(harness.envelopes[0])
+    envelope["session_id"] = session
+    envelope["payload"].update(session_id=session, required_features=[], extensions={})
+    return live.EpochInitiation(canonicalize(envelope), epoch)
+
+
 def _epoch(store: live.LiveSessionStore, now: int = 1000) -> str:
     return store.rotate_epochs(now=now, period=100, retention=100, advertise_for=0)[0]
 
 
-def test_epoch_binding_requires_provenance_and_rejects_legacy_new_ids(harness: Harness) -> None:
-    harness.provision()
+def test_epoch_binding_requires_provenance_and_refuses_unbound_ids(harness: Harness) -> None:
+    harness.provision(fixture_epoch=False)  # these tests own every epoch
     with harness.acquire() as store:
         epoch = _epoch(store)
         init = _init(harness, epoch)
@@ -67,13 +73,14 @@ def test_epoch_binding_requires_provenance_and_rejects_legacy_new_ids(harness: H
         with pytest.raises(live.LiveSessionStoreError, match="provenance"):
             store.reserve(replace(init, epoch_key=harness.identity), now=1000)
         with pytest.raises(live.LiveSessionStoreError, match="requires epoch-bound"):
-            store.reserve(harness.init, now=1000)
+            store.reserve(_unbound(harness, "10" * 32, epoch), now=1000)
+        assert store._connection.execute("SELECT * FROM sessions").fetchall() == []  # noqa: SLF001
         reserved = store.reserve(init, now=1000)
         assert store.reserve(init, now=1000) == reserved
 
 
 def test_tombstone_is_temporary_but_not_before_durable_epoch_retirement(harness: Harness) -> None:
-    harness.provision()
+    harness.provision(fixture_epoch=False)  # these tests own every epoch
     with harness.acquire() as store:
         epoch = _epoch(store)
         init = _init(harness, epoch)
@@ -86,7 +93,6 @@ def test_tombstone_is_temporary_but_not_before_durable_epoch_retirement(harness:
         ).fetchone() == (1,)
         assert store.expire_idle(now=1200, idle_timeout=100) == 0
         assert store._connection.execute("SELECT * FROM epoch_admissions").fetchall() == []  # noqa: SLF001
-        assert store._connection.execute("SELECT * FROM expired").fetchall() == []  # noqa: SLF001
         assert store.receiving_epochs(now=1000) == ()
     with harness.acquire() as store:
         with pytest.raises(live.SessionExpiredError, match="epoch retired"):
@@ -98,19 +104,14 @@ def test_tombstone_is_temporary_but_not_before_durable_epoch_retirement(harness:
         new_epoch = _epoch(store, now=1200)
         with pytest.raises(live.LiveSessionStoreError, match="provenance"):
             store.reserve(replace(init, epoch_key=new_epoch), now=1200)
-        legacy = copy.deepcopy(harness.envelopes[0])
-        legacy["session_id"] = legacy["payload"]["session_id"] = session
         with pytest.raises(live.LiveSessionStoreError, match="requires epoch-bound"):
-            store.reserve(canonicalize(legacy), now=1200)
+            store.reserve(_unbound(harness, session, new_epoch), now=1200)
         store.reserve(_init(harness, new_epoch), now=1200)
 
 
-def test_temporary_capacity_recovers_and_legacy_tombstones_do_not_consume_it(
-    harness: Harness,
-) -> None:
-    harness.provision()
+def test_temporary_tombstone_capacity_recovers(harness: Harness) -> None:
+    harness.provision(fixture_epoch=False)  # these tests own every epoch
     with harness.acquire_at(harness.path, max_sessions=1, max_tombstones=1) as store:
-        store._connection.execute("INSERT INTO expired VALUES (?, 1)", ("aa" * 32,))  # noqa: SLF001
         epoch = _epoch(store)
         store.reserve(_init(harness, epoch), now=1000)
         store.expire_idle(now=1100, idle_timeout=100)
@@ -118,11 +119,10 @@ def test_temporary_capacity_recovers_and_legacy_tombstones_do_not_consume_it(
             store.reserve(_init(harness, epoch, client=4), now=1100)
         store.expire_idle(now=1200, idle_timeout=100)
         store.reserve(_init(harness, _epoch(store, now=1200)), now=1200)
-        assert store._connection.execute("SELECT * FROM expired").fetchall() == [("aa" * 32, 1)]  # noqa: SLF001
 
 
 def test_accepted_session_custody_survives_epoch_and_idle_expiry(harness: Harness) -> None:
-    harness.provision()
+    harness.provision(fixture_epoch=False)  # these tests own every epoch
     with harness.acquire() as store:
         session = store.reserve(_init(harness, _epoch(store)), now=1000).session_id
         store._connection.execute(  # noqa: SLF001 - construct accepted retention boundary
@@ -137,7 +137,7 @@ def test_accepted_session_custody_survives_epoch_and_idle_expiry(harness: Harnes
 
 
 def test_absent_epoch_retirement_marker_is_not_repaired(harness: Harness) -> None:
-    harness.provision()
+    harness.provision(fixture_epoch=False)  # these tests own every epoch
     with sqlite3.connect(harness.path) as connection:
         connection.execute("DELETE FROM epoch_retirement")
     with pytest.raises(live.LiveSessionStoreError, match="retirement custody"):
@@ -147,7 +147,7 @@ def test_absent_epoch_retirement_marker_is_not_repaired(harness: Harness) -> Non
 
 
 def test_missing_known_session_provenance_never_backfills_admission(harness: Harness) -> None:
-    harness.provision()
+    harness.provision(fixture_epoch=False)  # these tests own every epoch
     with harness.acquire() as store:
         init = _init(harness, _epoch(store))
         store.reserve(init, now=1000)
@@ -159,7 +159,7 @@ def test_missing_known_session_provenance_never_backfills_admission(harness: Har
 def test_repeated_epoch_scalar_cannot_reopen_pruned_id(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    harness.provision()
+    harness.provision(fixture_epoch=False)  # these tests own every epoch
     monkeypatch.setattr(live, "_new_epoch_scalar", lambda: (10).to_bytes(32, "big"))
     with harness.acquire() as store:
         epoch = _epoch(store)
@@ -175,21 +175,10 @@ def test_repeated_epoch_scalar_cannot_reopen_pruned_id(
         assert store._connection.execute("SELECT * FROM epoch_key_history").fetchall() == [(epoch,)]  # noqa: SLF001
 
 
-def test_existing_store_never_gains_epoch_binding_in_place(harness: Harness) -> None:
-    harness.policy = POLICY
-    harness.provision()
-    harness.policy = EPOCH_POLICY
-    with pytest.raises(live.LiveSessionStoreError, match="policy mismatch"):
-        harness.acquire()
-    harness.policy = POLICY
-    with harness.acquire() as store:
-        assert not store.requires_epoch_bound_sessions
-
-
 def test_interrupted_retirement_never_leaves_pruned_history_with_reopened_epoch(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    harness.provision()
+    harness.provision(fixture_epoch=False)  # these tests own every epoch
     with harness.acquire() as store:
         epoch = _epoch(store)
         init = _init(harness, epoch)
@@ -214,7 +203,7 @@ def test_interrupted_retirement_never_leaves_pruned_history_with_reopened_epoch(
 
 
 def test_partial_key_history_is_refused_instead_of_reconstructed(harness: Harness) -> None:
-    harness.provision()
+    harness.provision(fixture_epoch=False)  # these tests own every epoch
     with harness.acquire() as store:
         _epoch(store)
     with sqlite3.connect(harness.path) as connection:
@@ -238,7 +227,7 @@ def test_native_epoch_ingress_accept_confirm_and_retirement(
     from rill_provider._nip59_send import _wrap_envelope  # noqa: PLC0415
     from rill_provider.provider_identity import ProviderIdentity  # noqa: PLC0415
 
-    harness.provision()
+    harness.provision(fixture_epoch=False)  # these tests own every epoch
     with (
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
         harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store,
@@ -310,7 +299,7 @@ def test_forged_epoch_frame_is_refused_before_custody_decryption(
 
     from rill_provider._nip59_send import _wrap_envelope  # noqa: PLC0415
 
-    harness.provision()
+    harness.provision(fixture_epoch=False)  # these tests own every epoch
     with (
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
         harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store,

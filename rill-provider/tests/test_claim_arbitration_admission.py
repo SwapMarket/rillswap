@@ -12,6 +12,7 @@ import pytest
 from rill_core.wire.canonical import canonicalize
 from rill_core.wire.hashes import (
     COOPERATIVE_CLAIM_FEATURE,
+    EPOCH_SESSION_FEATURE,
     client_acceptance_hash,
     contract_hash,
     handshake_accept_hash,
@@ -58,11 +59,12 @@ def _featured_handshake(
 ) -> tuple[bytes, bytes, bytes, str]:
     init_envelope, accept_envelope, confirm_envelope = copy.deepcopy(harness.envelopes)
     features = [COOPERATIVE_CLAIM_FEATURE] if featured else []
+    bound = sorted({*features, EPOCH_SESSION_FEATURE})  # every session is epoch-bound
     init_envelope["required_features"] = features
-    init_envelope["payload"]["required_features"] = features
+    init_envelope["payload"]["required_features"] = bound
     initiation = HandshakeInit.model_validate_json(json.dumps(init_envelope["payload"]))
     accept_envelope["required_features"] = features
-    accept_envelope["payload"]["accept"]["required_features"] = features
+    accept_envelope["payload"]["accept"]["required_features"] = bound
     accept_envelope["payload"]["accept"]["handshake_init_hash"] = handshake_init_hash(
         initiation
     ).hex()
@@ -131,7 +133,9 @@ def test_featured_new_acceptance_admits_once_and_replays_without_second_effect( 
     from rill_crypto import Context  # noqa: PLC0415 - opt-in native dependency
 
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with (
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
@@ -144,8 +148,10 @@ def test_featured_new_acceptance_admits_once_and_replays_without_second_effect( 
         if variant in ("no_handshake_feature", "legacy"):
             # Unfeatured sessions and their quotes exist only from before
             # cooperation was mandatory; acceptance runs under today's policy.
-            store._policy = replace(policy, features=frozenset())  # noqa: SLF001
-        session = store.reserve(init).session_id
+            store._policy = replace(  # noqa: SLF001
+                policy, features=policy.features - {COOPERATIVE_CLAIM_FEATURE}
+            )
+        session = store.reserve(harness.received(init)).session_id
         if variant == "no_handshake_feature":
             store._policy = policy  # noqa: SLF001
         store.commit_accept(accept)

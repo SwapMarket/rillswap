@@ -150,7 +150,7 @@ def test_offer_reservations_refuse_over_budget_and_release_on_expiry(
             harness.path, crypto=crypto, public_keys=crypto, max_active_reservations=2
         ) as store,
     ):
-        session = store.reserve(harness.init, now=1000).session_id
+        session = store.reserve(harness.initiation, now=1000).session_id
         store.commit_accept(harness.accept)
         store.admit_confirm(harness.confirm)
         _foreign(store, "cd" * 32)

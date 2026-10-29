@@ -30,7 +30,9 @@ def test_unselected_window_cannot_sign_or_record_an_immediate_claim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str | None
 ) -> None:
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with harness.acquire() as store:
         session, _, _ = _featured_paid_swap(harness, store)
@@ -111,7 +113,9 @@ def test_exact_prepared_fallback_is_selected_atomically(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str
 ) -> None:
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with harness.acquire() as store:
         session, _, _ = _featured_paid_swap(harness, store)
@@ -185,7 +189,9 @@ def test_preparation_refuses_absent_or_nonadmitted_arbitration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with harness.acquire() as store:
         session, _, _ = _featured_paid_swap(harness, store)
@@ -240,7 +246,9 @@ def test_restart_validates_signed_fallback_before_selecting(  # noqa: PLR0915 - 
     from rill_crypto import Context  # noqa: PLC0415 - opt-in native dependency
 
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with (
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,

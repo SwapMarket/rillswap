@@ -13,8 +13,10 @@ from typing import TYPE_CHECKING
 import pytest
 from rill_core.wire.canonical import canonicalize
 from rill_core.wire.hashes import (
+    EPOCH_SESSION_EXTENSION,
     EPOCH_SESSION_FEATURE,
     client_acceptance_hash,
+    epoch_bound_session_id,
     handshake_accept_hash,
     handshake_hash,
     handshake_init_hash,
@@ -28,6 +30,7 @@ from rill_core.wire.messages import (
     HandshakeInit,
     ProviderTerms,
 )
+from rill_core.wire.types import NetworkIdentity
 from test_live_session_store import Harness
 from test_reverse_proposal_reservation import reserved as reserved  # noqa: PLC0414 - pytest fixture
 from test_reverse_settlement_intent import _funded
@@ -41,11 +44,12 @@ if TYPE_CHECKING:
     from test_reverse_proposal_reservation import ReservationCase
 
 # ruff: noqa: SLF001 - authoritative-store archive/corruption test seams
+# A valid x-only key other than the fixture epoch (synthetic scalar 3).
+OTHER_EPOCH = "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
 
 
-@pytest.mark.parametrize("epoch", [False, True])
 def test_exact_known_legacy_features_preserve_opaque_acceptance_repayment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, epoch: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = Harness(tmp_path, monkeypatch)
     harness.provision()
@@ -54,17 +58,11 @@ def test_exact_known_legacy_features_preserve_opaque_acceptance_repayment(
         store.record_reverse_settlement_preimage(
             session, from_state="FUNDED", preimage=PREIMAGE, now=2001
         )
-        if epoch:
-            init, accept = store._connection.execute(
-                "SELECT init_bytes,accept_bytes FROM sessions"
-            ).fetchone()
-            initiation, acceptance = json.loads(init), json.loads(accept)
-            initiation["payload"]["required_features"] = [EPOCH_SESSION_FEATURE]
-            acceptance["payload"]["accept"]["required_features"] = [EPOCH_SESSION_FEATURE]
-            store._connection.execute(
-                "UPDATE sessions SET init_bytes=?,accept_bytes=?",
-                (canonicalize(initiation), canonicalize(acceptance)),
-            )
+        init, accept = store._connection.execute(
+            "SELECT init_bytes,accept_bytes FROM sessions"
+        ).fetchone()
+        for half in (json.loads(init)["payload"], json.loads(accept)["payload"]["accept"]):
+            assert half["required_features"] == [EPOCH_SESSION_FEATURE]
         before = store._connection.execute("SELECT * FROM swaps").fetchall()
         assert store._connection.execute("SELECT terms_accept FROM swaps").fetchone() == (
             b"accepted",
@@ -83,6 +81,7 @@ def test_exact_known_legacy_features_preserve_opaque_acceptance_repayment(
         "outer accept missing",
         "outer offer missing",
         "mixed epoch",
+        "unbound",
         "unknown inner",
         "cooperative outer",
         "unknown outer",
@@ -117,7 +116,10 @@ def test_missing_mixed_or_unknown_commitments_never_infer_legacy(
         elif fault == "outer offer missing":
             del offer["required_features"]
         elif fault == "mixed epoch":
-            initiation["payload"]["required_features"] = [EPOCH_SESSION_FEATURE]
+            acceptance["payload"]["accept"]["required_features"] = []
+        elif fault == "unbound":
+            initiation["payload"]["required_features"] = []
+            acceptance["payload"]["accept"]["required_features"] = []
         elif fault == "unknown inner":
             initiation["payload"]["required_features"] = ["unknown/v1"]
             acceptance["payload"]["accept"]["required_features"] = ["unknown/v1"]
@@ -221,11 +223,24 @@ def test_signed_internally_consistent_transcript_cannot_cross_external_agreement
     ).fetchone()
     init_doc, accept_doc = json.loads(init), json.loads(accept)
     offer_doc, accepted_doc = json.loads(offer), json.loads(accepted)
-    changed = "ab" * 32 if anchor == "session_id" else "btc-to-ln/v1"
-    if anchor == "network_identity":
-        changed = {**init_doc["payload"][anchor], "deployment_namespace": "wrong-retained-v1"}
-    init_doc["payload"][anchor] = changed
-    accept_doc["payload"]["accept"][anchor] = copy.deepcopy(changed)
+    payload = init_doc["payload"]
+    if anchor == "profile_id":
+        payload[anchor] = accept_doc["payload"]["accept"][anchor] = "btc-to-ln/v1"
+    else:
+        # The session ID commits to the network and the epoch, so a signed
+        # transcript for another network or session must rederive it.
+        if anchor == "network_identity":
+            payload[anchor] = {**payload[anchor], "deployment_namespace": "wrong-retained-v1"}
+            accept_doc["payload"]["accept"][anchor] = copy.deepcopy(payload[anchor])
+        else:
+            payload["extensions"][EPOCH_SESSION_EXTENSION]["epoch_inbox_xonly_key"] = OTHER_EPOCH
+        payload["session_id"] = epoch_bound_session_id(
+            NetworkIdentity.model_validate(payload["network_identity"]),
+            payload["expected_provider_identity_xonly_key"],
+            payload["extensions"][EPOCH_SESSION_EXTENSION]["epoch_inbox_xonly_key"],
+            payload["client_session_xonly_key"],
+        ).hex()
+        accept_doc["payload"]["accept"]["session_id"] = payload["session_id"]
     initiation = HandshakeInit.model_validate_json(canonicalize(init_doc["payload"]), strict=True)
     accept_doc["payload"]["accept"]["handshake_init_hash"] = handshake_init_hash(initiation).hex()
     acceptance = HandshakeAccept.model_validate_json(

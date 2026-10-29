@@ -26,9 +26,10 @@ from test_handshake_service import (
     _signed_confirm,
     _signed_quote_request,
 )
-from test_live_session_store import Harness, _bytes
+from test_live_session_store import EPOCH_SECRET, Harness, _bytes
 
 from rill_provider import handshake_service
+from rill_provider import live_session_store as live
 from rill_provider.handshake_service import HandshakeService, ServicePolicy
 
 if TYPE_CHECKING:
@@ -64,7 +65,7 @@ def test_store_reports_only_unblocked_sessions_awaiting_their_confirm(harness: H
     session_id = json.loads(harness.init)["session_id"]
     with harness.acquire() as store:
         assert store.session_awaiting_confirm(session_id) is False  # unknown
-        store.reserve(harness.init, now=1000)
+        store.reserve(harness.initiation, now=1000)
         store.commit_accept(harness.accept)
         assert store.session_awaiting_confirm(session_id) is True
         store._connection.execute(  # noqa: SLF001 - fixture-only conflict evidence
@@ -140,7 +141,9 @@ def test_request_before_confirm_is_answered_once_the_confirm_arrives(
     from rill_provider.provider_identity import ProviderIdentity  # noqa: PLC0415
 
     harness = Harness(tmp_path, monkeypatch)
-    harness.provision()
+    # The service's first rotation creates the epoch the fixture init commits to.
+    harness.provision(fixture_epoch=False)
+    monkeypatch.setattr(live, "_new_epoch_scalar", lambda: EPOCH_SECRET)
     unlock = x25519.Identity.generate()
 
     async def scenario(crypto: Context) -> None:

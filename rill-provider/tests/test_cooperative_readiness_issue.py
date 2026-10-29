@@ -26,7 +26,9 @@ def test_probe_requires_admission_and_is_abandoned_after_owner_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with harness.acquire() as store:
         session, _, _ = _featured_paid_swap(harness, store)
@@ -122,7 +124,9 @@ def test_signed_readiness_echo_is_authenticated_and_never_prepares_a_claim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with harness.acquire() as store:
         session, _, _ = _featured_paid_swap(harness, store)

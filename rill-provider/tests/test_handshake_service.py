@@ -19,8 +19,9 @@ from pyrage import x25519  # type: ignore[import-untyped]
 from rill_core.wire.hashes import handshake_hash, unsigned_envelope_hash
 from rill_core.wire.messages import Envelope, HandshakeAccept, HandshakeInit
 from rill_core.wire.quotes import QuoteOffer
-from test_live_session_store import Harness, _bytes
+from test_live_session_store import EPOCH_SECRET, Harness, _bytes
 
+from rill_provider import live_session_store as live
 from rill_provider.handshake_service import (
     HandshakeService,
     ServiceHealth,
@@ -115,7 +116,9 @@ def test_native_handshake_through_relay_and_service(  # noqa: PLR0915 - one end-
     from rill_provider.provider_identity import ProviderIdentity  # noqa: PLC0415
 
     harness = Harness(tmp_path, monkeypatch)
-    harness.provision()
+    # The service's first rotation creates the epoch the fixture init commits to.
+    harness.provision(fixture_epoch=False)
+    monkeypatch.setattr(live, "_new_epoch_scalar", lambda: EPOCH_SECRET)
     unlock = x25519.Identity.generate()
 
     async def scenario(crypto: Context) -> None:
@@ -159,6 +162,7 @@ def test_native_handshake_through_relay_and_service(  # noqa: PLR0915 - one end-
                     )
                     advertisement = json.loads(announcement["content"])["advertisement"]
                     (epoch,) = advertisement["epoch_inbox_xonly_keys"]
+                    assert epoch == harness.epoch
                     assert advertisement["transport_endpoints"] == [url]
                     assert service.health().relays_connected == 1  # the relays down alert
                     await relay.inject(
@@ -296,12 +300,12 @@ def test_announcements_are_durably_ordered_cached_and_sessions_expire(
     clock = [10_000.0]
     identity = _Identity()
     with harness.acquire() as store:
-        store.reserve(harness.init, now=9_000)
+        store.reserve(harness.initiation, now=9_000)
         service = HandshakeService(store, identity, object(), policy, clock=lambda: clock[0])  # type: ignore[arg-type]
         down = _Relay(accept=False)
         asyncio.run(service.tick([down]))
         with pytest.raises(SessionExpiredError):  # recorded answer, never a new accept
-            store.reserve(harness.init)
+            store.reserve(harness.initiation)
         clock[0] += 1
         asyncio.run(service.tick([down]))
         assert identity.built == 1
@@ -344,7 +348,7 @@ def test_a_tick_reads_the_outbox_a_bounded_number_of_times_however_many_attempts
         handshake_timeout=100,
     )
     with harness.acquire() as store:
-        store.reserve(harness.init, now=9_000)
+        store.reserve(harness.initiation, now=9_000)
         service = HandshakeService(store, _Identity(), object(), policy, clock=lambda: 10_000.0)  # type: ignore[arg-type]
         down = _Relay(accept=False)
         asyncio.run(service.tick([down]))
@@ -676,7 +680,7 @@ def test_native_sequence_reuse_conflicts_whatever_the_label(
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
         harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store,
     ):
-        store.reserve(harness.init)
+        store.reserve(harness.initiation)
         store.commit_accept(harness.accept)
         store.admit_confirm(harness.confirm)
         mailbox = harness.envelopes[1]["sender_session_key"]
@@ -783,7 +787,7 @@ def test_native_firm_request_gets_signed_terms_and_reserves_the_hash(  # noqa: P
             expected_xonly_public_key=harness.identity,
             crypto=crypto,
         )
-        store.reserve(harness.init)
+        store.reserve(harness.initiation)
         store.commit_accept(harness.accept)
         store.admit_confirm(harness.confirm)
         mailbox = harness.envelopes[1]["sender_session_key"]

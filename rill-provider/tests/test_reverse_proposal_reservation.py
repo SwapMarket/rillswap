@@ -586,7 +586,9 @@ def test_version_discriminator_alone_blocks_otherwise_allocatable_forward_attemp
     from rill_provider import live_session_store as module  # noqa: PLC0415
 
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with (
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,

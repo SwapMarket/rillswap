@@ -30,7 +30,7 @@ def _insert_funded_swap(store: live.LiveSessionStore, harness: Harness, state: s
     policy = store._policy  # noqa: SLF001
     store._policy = replace(policy, features=policy.features - {COOPERATIVE_CLAIM_FEATURE})  # noqa: SLF001
     try:
-        reservation = store.reserve(harness.init, now=1000)
+        reservation = store.reserve(harness.initiation, now=1000)
     finally:
         store._policy = policy  # noqa: SLF001
     source = harness.source
@@ -105,7 +105,7 @@ def test_conflict_and_dispatch_share_the_store_transaction_boundary(harness: Har
         conflict = copy.deepcopy(harness.envelopes[0])
         conflict["message_id"] = "99" * 32
         with pytest.raises(live.SessionBlockedError):
-            store.reserve(canonicalize(conflict), now=1002)
+            store.reserve(harness.received(canonicalize(conflict)), now=1002)
         assert not store.commit_payment_dispatch(session, _hash(harness), b"request")
         assert store._connection.execute(  # noqa: SLF001
             "SELECT state, request FROM payment_dispatch"

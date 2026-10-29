@@ -16,6 +16,7 @@ import test_live_session_store as fixtures
 from rill_core.wire.canonical import canonicalize
 from rill_core.wire.hashes import (
     COOPERATIVE_CLAIM_FEATURE,
+    EPOCH_SESSION_FEATURE,
     client_acceptance_hash,
     contract_hash,
     handshake_hash,
@@ -70,11 +71,12 @@ class OriginHarness(fixtures.Harness):
         )
         super().__init__(tmp_path, monkeypatch)
         features = [COOPERATIVE_CLAIM_FEATURE] if featured else []
-        self.policy = replace(self.policy, profile="ln-to-btc/v1", features=frozenset(features))
+        bound = sorted({*features, EPOCH_SESSION_FEATURE})  # every session is epoch-bound
+        self.policy = replace(self.policy, profile="ln-to-btc/v1", features=frozenset(bound))
         self.scalar = (9).to_bytes(32, "big")
         context = self.source["verification_context"]
-        context["handshake_init"]["required_features"] = features
-        context["handshake_accept"]["required_features"] = features
+        context["handshake_init"]["required_features"] = bound
+        context["handshake_accept"]["required_features"] = bound
         initiation = HandshakeInit.model_validate_json(
             canonicalize(context["handshake_init"]), strict=True
         )
@@ -212,7 +214,7 @@ def origin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> OriginHarness:
 
 
 def _handshake(store: LiveSessionStore, origin: OriginHarness) -> None:
-    store.reserve(origin.init)
+    store.reserve(origin.initiation)
     store.commit_accept(origin.accept)
     store.admit_confirm(origin.confirm)
 
@@ -271,7 +273,7 @@ def test_restart_never_reconstructs_origin_from_accept_confirm_or_accepted_swap(
     origin: OriginHarness, stage: str
 ) -> None:
     with origin.acquire() as store:
-        store.reserve(origin.init)
+        store.reserve(origin.initiation)
         store.commit_accept(origin.accept)
         if stage != "accept":
             store.admit_confirm(origin.confirm)
@@ -297,7 +299,7 @@ def test_successful_commit_reported_failed_never_creates_or_retains_origin(
     origin: OriginHarness, stage: str
 ) -> None:
     with origin.acquire() as store:
-        store.reserve(origin.init)
+        store.reserve(origin.initiation)
         if stage == "terms":
             store.commit_accept(origin.accept)
             store.admit_confirm(origin.confirm)
@@ -394,7 +396,7 @@ def test_fresh_accept_without_confirmation_cannot_create_final_origin(
     origin: OriginHarness,
 ) -> None:
     with origin.acquire() as store:
-        store.reserve(origin.init)
+        store.reserve(origin.initiation)
         store.commit_accept(origin.accept)
         with pytest.raises(LiveSessionStoreError, match="confirmed session"):
             origin.acceptance(store)
@@ -439,5 +441,5 @@ def test_idle_expiry_removes_preliminary_origin_after_commit_without_reconstruct
         assert origin.session_id not in store._reverse_negotiations
         assert not store._has_original_reverse_negotiation(origin.session_id, "ff" * 32)
         with pytest.raises(SessionExpiredError):
-            store.reserve(origin.init)
+            store.reserve(origin.initiation)
         assert not store._reverse_negotiations

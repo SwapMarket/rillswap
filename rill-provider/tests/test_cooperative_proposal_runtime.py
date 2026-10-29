@@ -50,7 +50,9 @@ def runtime(
     from rill_crypto import Context  # noqa: PLC0415 - explicit native test opt-in
 
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with (
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,

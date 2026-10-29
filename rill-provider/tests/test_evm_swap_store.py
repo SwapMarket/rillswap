@@ -55,7 +55,7 @@ def _accept_evm_swap(
     policy = store._policy  # noqa: SLF001
     store._policy = replace(policy, features=policy.features - {COOPERATIVE_CLAIM_FEATURE})  # noqa: SLF001
     try:
-        reservation = store.reserve(harness.init, now=1000)
+        reservation = store.reserve(harness.initiation, now=1000)
     finally:
         store._policy = policy  # noqa: SLF001
     digest = contract_hash(terms).hex()

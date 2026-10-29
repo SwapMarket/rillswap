@@ -108,7 +108,9 @@ def test_checked_completion_selects_before_exposing_partial(  # noqa: PLR0911, P
     from rill_crypto import Context  # noqa: PLC0415 - opt-in native dependency
 
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with (
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,

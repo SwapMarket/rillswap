@@ -514,7 +514,7 @@ through the proxy.
 
 ## Persistent state and backups
 
-The store uses schema v19 and opens only a store of exactly that version (see
+The store uses schema v20 and opens only a store of exactly that version (see
 [Upgrades](#upgrades)).
 
 The store keeps an append-only swap ledger: each firm offer, acceptance and
@@ -558,9 +558,9 @@ and cancellation after a completed worker may still require operator inspection.
 ### Upgrades
 
 Stop the service before installing a new version. Stores are never upgraded in
-place. A store of any other schema version (including v18 and earlier) is
+place. A store of any other schema version (including v19 and earlier) is
 refused with its contents unchanged, with
-`live session store version unsupported (found N, requires 19); recreate it with
+`live session store version unsupported (found N, requires 20); recreate it with
 provision-store`. (If the old process crashed, SQLite may still fold its
 committed write-ahead log into the database file; nothing is lost.) An older
 release also refuses a newer store.

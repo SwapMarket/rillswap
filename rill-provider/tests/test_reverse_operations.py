@@ -183,7 +183,9 @@ def test_token_is_task_bound_stopped_after_caught_cancel_and_not_reusable(  # no
                 async with store.reverse_operations.operation() as operation:
                     assert operation.submission_allowed() is True
                     assert tokens[0].submission_allowed() is False
-                    assert store.reserve(harness.init).revision == 0  # Renewed authoritative check.
+                    assert (
+                        store.reserve(harness.initiation).revision == 0
+                    )  # Renewed authoritative check.
                     await operation.worker(lambda: calls.append("fresh operation"))
                 assert calls == ["fresh operation"]
                 with pytest.raises(LiveSessionStoreError, match="stopped"):
@@ -259,7 +261,7 @@ def test_checkpoint_fences_cancellation_caught_outside_a_worker(harness: Harness
             # A fresh operation captures its own cancellation baseline and
             # requires renewed state, rather than permanently fencing recovery.
             async with store.reverse_operations.operation() as operation:
-                assert store.reserve(harness.init).revision == 0
+                assert store.reserve(harness.initiation).revision == 0
                 assert await operation.worker(lambda: "fresh") == "fresh"
 
         asyncio.run(exercise())
@@ -291,7 +293,7 @@ def test_nonworker_timeout_must_escape_or_explicitly_abandon_its_token(
             with pytest.raises(LiveSessionStoreError, match="stopped"):
                 operation.check()
             async with store.reverse_operations.operation() as fresh:
-                assert store.reserve(harness.init).revision == 0
+                assert store.reserve(harness.initiation).revision == 0
                 assert (
                     await fresh.worker(lambda: "recovery remains available")
                     == "recovery remains available"
@@ -394,7 +396,7 @@ def test_timeout_placement_does_not_disable_fresh_recovery_after_actual_drain(
                     await running
                 assert finished.is_set()
                 async with store.reverse_operations.operation() as operation:
-                    assert store.reserve(harness.init).revision == 0
+                    assert store.reserve(harness.initiation).revision == 0
                     assert (
                         await operation.worker(lambda: "fresh debt/refund recovery")
                         == "fresh debt/refund recovery"

@@ -176,7 +176,7 @@ def test_store_reports_each_mailbox_with_its_declared_work(
     harness = Harness(tmp_path, monkeypatch)
     harness.provision()
     with harness.acquire() as store:
-        store.reserve(harness.init)
+        store.reserve(harness.initiation)
         assert store.mailbox_work() == ()  # no committed accept: nothing to receive yet
         store.commit_accept(harness.accept)
         key = harness.envelopes[1]["sender_session_key"]

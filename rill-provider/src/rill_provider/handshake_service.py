@@ -810,7 +810,6 @@ class HandshakeService:
                 slot=policy.slot,
                 created_at=now,
                 expires_at=now + policy.announcement_lifetime,
-                epoch_bound_sessions=self._store.requires_epoch_bound_sessions,
                 evm_assets=policy.evm_assets,
                 transport_pow_bits=policy.transport_pow_bits,
                 funding_confirmations=policy.funding_confirmations,

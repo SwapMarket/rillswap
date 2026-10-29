@@ -63,7 +63,9 @@ def test_signed_echo_enters_waiting_only_via_original_live_service(  # noqa: PLR
     from rill_crypto import Context  # noqa: PLC0415 - opt-in native dependency
 
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with (
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
@@ -380,7 +382,9 @@ def test_echo_prepares_exact_fallback_with_original_deadlines_or_refuses(  # noq
     from rill_crypto import Context  # noqa: PLC0415 - native signing opt-in
 
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with (
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,

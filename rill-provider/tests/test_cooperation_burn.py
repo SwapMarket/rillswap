@@ -224,7 +224,9 @@ def test_burn_is_durable_and_never_reissued_after_abandonment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with harness.acquire() as store:
         session, plan, _ = _featured_paid_swap(harness, store)
@@ -274,7 +276,9 @@ def test_burn_refuses_wrong_transaction_funding_or_deadline_without_an_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with harness.acquire() as store:
         session, plan, funding = _featured_paid_swap(harness, store)
@@ -315,7 +319,9 @@ def test_burn_refuses_missing_malformed_and_wrong_hash_preimage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preimage: str | bytes | None
 ) -> None:
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with harness.acquire() as store:
         session, plan, _ = _featured_paid_swap(harness, store)
@@ -373,7 +379,9 @@ def test_supported_cooperation_cannot_upgrade_an_accepted_legacy_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with harness.acquire() as store:
         session, plan, _ = _featured_paid_swap(harness, store, with_feature=False)
@@ -395,7 +403,9 @@ def test_public_nonce_and_signed_proposal_commit_before_outbox_replay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     nonce = b"\x02" * 66  # structural test only; native integration validates the curve
     with harness.acquire() as store:
@@ -478,7 +488,9 @@ def test_failed_proposal_signing_rolls_back_nonce_and_outbox_together(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with harness.acquire() as store:
         session, plan, _ = _featured_paid_swap(harness, store)
@@ -552,7 +564,9 @@ def test_committed_burn_cannot_publish_against_changed_facts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed: str
 ) -> None:
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with harness.acquire() as store:
         session, plan, _ = _featured_paid_swap(harness, store)
@@ -601,7 +615,9 @@ def test_pinned_native_provider_nonce_and_signed_proposal_bytes(
     from rill_crypto import Context  # noqa: PLC0415 - opt-in native dependency
 
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with (
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
@@ -659,7 +675,9 @@ def test_store_owned_native_nonce_never_exports_scalar_or_reallocates(  # noqa: 
     from rill_crypto import Context  # noqa: PLC0415 - opt-in native dependency
 
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with (
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
@@ -759,7 +777,9 @@ def test_uncertain_nonce_proposal_commit_releases_native_custody(
     from rill_crypto import Context  # noqa: PLC0415 - opt-in native dependency
 
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with (
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
@@ -852,7 +872,9 @@ def test_authenticated_cooperative_reply_is_durable_without_granting_signature( 
     from rill_crypto import Context  # noqa: PLC0415 - opt-in native dependency
 
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with (
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
@@ -1081,7 +1103,9 @@ def test_native_provider_partial_requires_fresh_facts_and_durable_completion(  #
     from rill_crypto import Context  # noqa: PLC0415 - opt-in native dependency
 
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with (
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
@@ -1482,7 +1506,9 @@ def test_verified_completion_receipt_is_admitted_without_authority(  # noqa: PLR
     from rill_crypto import Context  # noqa: PLC0415 - opt-in native dependency
 
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with (
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from rill_core.wire.hashes import handshake_accept_hash
+from rill_core.wire.hashes import EPOCH_SESSION_FEATURE, handshake_accept_hash
 from rill_core.wire.messages import HandshakeAccept
 from rill_core.wire.types import NetworkIdentity
 
@@ -88,7 +88,7 @@ def _binding(init: bytes, network: NetworkIdentity, **overrides: object) -> Sess
         "expected_network": network,
         "expected_profile": "btc-to-ln/v1",
         "expected_provider_identity": IDENTITY_KEY,
-        "supported_features": frozenset(),
+        "supported_features": frozenset({EPOCH_SESSION_FEATURE}),
     }
     configured.update(overrides)
     return session_reservation_for_init(init, **configured)
@@ -106,7 +106,7 @@ def _sign(
         "expected_network": network,
         "expected_profile": "btc-to-ln/v1",
         "expected_provider_identity": IDENTITY_KEY,
-        "supported_features": frozenset(),
+        "supported_features": frozenset({EPOCH_SESSION_FEATURE}),
         "supported_encryption_suites": frozenset({"noise-xk-secp256k1-chachapoly-sha256/v1"}),
         "supported_capabilities": frozenset({"core/v1", "recovery/v1"}),
         "session_ref": ref,

@@ -37,38 +37,42 @@ if TYPE_CHECKING:
 
 
 def reverse_init(harness: Harness, features: tuple[str, ...] = ()) -> None:
+    """Rewrite the fixture init as an epoch-bound reverse init with ``features``."""
     harness.policy = replace(
-        POLICY, profile="ln-to-btc/v1", features=frozenset({COOPERATIVE_CLAIM_FEATURE})
+        POLICY, profile="ln-to-btc/v1", features=POLICY.features | {COOPERATIVE_CLAIM_FEATURE}
     )
     for envelope in harness.envelopes:
         envelope["profile_id"] = "ln-to-btc/v1"
         envelope["required_features"] = list(features)
     harness.envelopes[0]["payload"]["profile_id"] = "ln-to-btc/v1"
-    harness.envelopes[0]["payload"]["required_features"] = list(features)
+    harness.envelopes[0]["payload"]["required_features"] = _bound(features)
     harness.init = _bytes(harness.envelopes[0])
+
+
+def _bound(features: tuple[str, ...]) -> list[str]:
+    return sorted({*features, EPOCH_SESSION_FEATURE})
 
 
 def test_reverse_unfeatured_reservation_keeps_advertised_policy_unchanged(harness: Harness) -> None:
     reverse_init(harness)
     harness.provision()
     with harness.acquire() as store:
-        reserved = store.reserve(harness.init)
-        assert store.reserve(harness.init) == reserved
+        reserved = store.reserve(harness.initiation)
+        assert store.reserve(harness.initiation) == reserved
         assert json.loads(store._connection.execute("SELECT policy_jcs FROM meta").fetchone()[0])[
             "features"
-        ] == [COOPERATIVE_CLAIM_FEATURE]
+        ] == [COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE]
         assert store._reverse_negotiations == {}
 
 
 def test_unilateral_reverse_does_not_waive_epoch_admission(harness: Harness) -> None:
     reverse_init(harness)
-    harness.policy = replace(
-        harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE})
-    )
+    harness.envelopes[0]["payload"]["required_features"] = []  # an unbound reverse init
+    harness.init = _bytes(harness.envelopes[0])
     harness.provision()
     with harness.acquire() as store:
         with pytest.raises(LiveSessionStoreError, match="epoch-bound"):
-            store.reserve(harness.init)
+            store.reserve(harness.initiation)
         assert store._connection.execute("SELECT count(*) FROM sessions").fetchone() == (0,)
 
 
@@ -104,7 +108,7 @@ def test_fresh_reverse_negotiation_accepts_matching_terms_without_node_or_funds(
             crypto=crypto,
         )
         with harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store:
-            reservation = store.reserve(harness.init)
+            reservation = store.reserve(harness.initiation)
             accepted = store.create_accept(
                 reservation.session_id,
                 identity=identity,
@@ -112,7 +116,7 @@ def test_fresh_reverse_negotiation_accepts_matching_terms_without_node_or_funds(
             )
             assert json.loads(accepted.canonical_bytes)["payload"]["accept"][
                 "required_features"
-            ] == list(features)
+            ] == _bound(features)
             confirm = copy.deepcopy(harness.envelopes[2])
             confirm["in_reply_to"] = accepted.message_id
             confirm["payload"]["handshake_hash"] = accepted.transcript_digest

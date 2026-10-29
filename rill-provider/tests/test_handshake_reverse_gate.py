@@ -66,7 +66,7 @@ def reverse_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Re
     fixture.scalar = (9).to_bytes(32, "big")
     fixture.provision()
     with fixture.acquire() as store:
-        store.reserve(fixture.init)
+        store.reserve(fixture.initiation)
         store.commit_accept(fixture.accept)
         store.admit_confirm(fixture.confirm)
         request = copy.deepcopy(fixture.envelopes[2])

@@ -32,17 +32,17 @@ from rill_provider.quote_policy import answer_quote
 if TYPE_CHECKING:
     from pathlib import Path
 
-COOPERATIVE = replace(POLICY, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+COOPERATIVE = replace(POLICY, features=POLICY.features | {COOPERATIVE_CLAIM_FEATURE})
 CLIENT_SECRET = (2).to_bytes(32, "big")  # Fixture-only public scalar of the client key.
 
 # ruff: noqa: SLF001 - store metadata and fixture policy seams
 
 
-def _featured_init(harness: Harness) -> bytes:
+def _featured_init(harness: Harness) -> live.EpochInitiation:
     envelope = copy.deepcopy(harness.envelopes[0])
     envelope["required_features"] = [COOPERATIVE_CLAIM_FEATURE]
-    envelope["payload"]["required_features"] = [COOPERATIVE_CLAIM_FEATURE]
-    return _bytes(envelope)
+    envelope["payload"]["required_features"] = [COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE]
+    return harness.received(_bytes(envelope))
 
 
 def _stored_policy(store: live.LiveSessionStore) -> dict[str, Any]:
@@ -85,7 +85,7 @@ def test_new_unfeatured_initiation_is_refused_before_any_reservation(harness: Ha
     harness.provision()
     with harness.acquire() as store:
         with pytest.raises(LiveSessionStoreError, match="requires cooperative claims"):
-            store.reserve(harness.init)
+            store.reserve(harness.initiation)
         assert store._connection.execute("SELECT count(*) FROM sessions").fetchone() == (0,)
         reserved = store.reserve(_featured_init(harness))
         assert store.reserve(_featured_init(harness)) == reserved
@@ -93,18 +93,16 @@ def test_new_unfeatured_initiation_is_refused_before_any_reservation(harness: Ha
 
 def test_store_policy_never_changes_in_place(harness: Harness) -> None:
     harness.provision()  # without cooperation
-    for changed in (
-        COOPERATIVE,
-        replace(POLICY, features=frozenset({COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE})),
-    ):
-        harness.policy = changed
-        with pytest.raises(LiveSessionStoreError, match="policy mismatch"):
-            harness.acquire()  # no upgrade
-    harness.path = harness.path.with_name("cooperative.sqlite")
     harness.policy = COOPERATIVE
+    with pytest.raises(LiveSessionStoreError, match="policy mismatch"):
+        harness.acquire()  # no upgrade
+    harness.path = harness.path.with_name("cooperative.sqlite")
     harness.provision()
     with harness.acquire() as store:
-        assert _stored_policy(store)["features"] == [COOPERATIVE_CLAIM_FEATURE]
+        assert _stored_policy(store)["features"] == [
+            COOPERATIVE_CLAIM_FEATURE,
+            EPOCH_SESSION_FEATURE,
+        ]
     for changed in (POLICY, replace(COOPERATIVE, capabilities=frozenset({"core/v1"}))):
         harness.policy = changed
         with pytest.raises(LiveSessionStoreError, match="policy mismatch"):
@@ -165,7 +163,10 @@ def test_native_accept_commits_cooperation(
                 reserved.session_id, identity=signer, transport_endpoints=("wss://r/",)
             )
             accept = Envelope.model_validate_json(committed.canonical_bytes, strict=True)
-            assert accept.payload["accept"]["required_features"] == [COOPERATIVE_CLAIM_FEATURE]
+            assert accept.payload["accept"]["required_features"] == [
+                COOPERATIVE_CLAIM_FEATURE,
+                EPOCH_SESSION_FEATURE,
+            ]
             confirm = copy.deepcopy(harness.envelopes[2])
             confirm["in_reply_to"] = committed.message_id
             confirm["payload"]["handshake_hash"] = committed.transcript_digest

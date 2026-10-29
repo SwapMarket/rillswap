@@ -13,6 +13,11 @@ from pathlib import Path
 
 import pytest
 from rill_core.wire.canonical import canonicalize
+from rill_core.wire.hashes import (
+    EPOCH_SESSION_EXTENSION,
+    EPOCH_SESSION_FEATURE,
+    epoch_bound_session_id,
+)
 from rill_core.wire.types import NetworkIdentity
 
 from rill_provider import issuance_reservation
@@ -36,7 +41,7 @@ def _context() -> tuple[NetworkIdentity, HandshakePolicy, dict[str, object]]:
     network = NetworkIdentity.model_validate(package["network_identity"])
     policy = HandshakePolicy(
         profile="btc-to-ln/v1",
-        features=frozenset(),
+        features=frozenset({EPOCH_SESSION_FEATURE}),
         encryption_suites=frozenset({"noise-xk-secp256k1-chachapoly-sha256/v1"}),
         capabilities=frozenset({"core/v1", "recovery/v1"}),
     )
@@ -119,16 +124,25 @@ def test_conflicting_canonical_init_marks_session_blocked_across_restart(tmp_pat
         ).fetchone() == ("CONFLICT", 1)
 
 
-def test_unsigned_foreign_sender_collision_can_poison_reservation(tmp_path: Path) -> None:
-    """Conservative availability cost, not evidence of client equivocation."""
+def test_unsigned_foreign_init_collision_can_poison_reservation(tmp_path: Path) -> None:
+    """Conservative availability cost, not evidence of client equivocation.
+
+    The epoch-bound session ID commits to the client key, so a stranger cannot
+    claim it under another key, but can resend it with other unsigned fields.
+    """
     store, raw = _open(tmp_path)
     reserved = store.reserve_init(raw)
     _, _, envelope = _context()
     fixture = json.loads(FIXTURE.read_bytes())
     foreign = fixture["verification_context"]["handshake_accept"]["provider_session_xonly_key"]
-    envelope["sender_session_key"] = foreign
+    stolen = deepcopy(envelope)
+    stolen["sender_session_key"] = foreign
+    stolen["payload"] = {**deepcopy(envelope["payload"]), "client_session_xonly_key": foreign}
+    with pytest.raises(IssuanceReservationError, match="refused"):
+        store.reserve_init(canonicalize(stolen))
+    assert store.lookup(reserved.session_id) == reserved
     payload = deepcopy(envelope["payload"])
-    payload["client_session_xonly_key"] = foreign
+    payload["client_challenge"] = "31" * 32
     envelope["payload"] = payload
     with pytest.raises(IssuanceConflictError, match="durable"):
         store.reserve_init(canonicalize(envelope))
@@ -171,11 +185,14 @@ def test_challenge_reuse_is_refused_and_regenerated_within_one_store(
 ) -> None:
     store, raw = _open(tmp_path)
     first = store.reserve_init(raw)
-    _, _, envelope = _context()
-    envelope["session_id"] = "ab" * 32
-    envelope["message_id"] = "13" * 32
+    network, _, envelope = _context()
+    fixture = json.loads(FIXTURE.read_bytes())
+    client = fixture["verification_context"]["handshake_accept"]["provider_session_xonly_key"]
     payload = deepcopy(envelope["payload"])
-    payload["session_id"] = envelope["session_id"]
+    epoch = payload["extensions"][EPOCH_SESSION_EXTENSION]["epoch_inbox_xonly_key"]
+    session = epoch_bound_session_id(network, PROVIDER, epoch, client).hex()
+    envelope.update(session_id=session, message_id="13" * 32, sender_session_key=client)
+    payload.update(session_id=session, client_session_xonly_key=client)
     envelope["payload"] = payload
     challenges = iter([first.provider_challenge, payload["client_challenge"], "30" * 32])
     monkeypatch.setattr(issuance_reservation.secrets, "token_hex", lambda _size: next(challenges))

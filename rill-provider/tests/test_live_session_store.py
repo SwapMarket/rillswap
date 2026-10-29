@@ -15,7 +15,13 @@ import pyrage  # type: ignore[import-untyped]
 import pytest
 from pyrage import x25519
 from rill_core.wire.canonical import canonicalize
-from rill_core.wire.hashes import handshake_accept_hash, unsigned_envelope_hash
+from rill_core.wire.hashes import (
+    EPOCH_SESSION_EXTENSION,
+    EPOCH_SESSION_FEATURE,
+    epoch_bound_session_id,
+    handshake_accept_hash,
+    unsigned_envelope_hash,
+)
 from rill_core.wire.messages import Envelope, HandshakeAccept
 from rill_core.wire.types import NetworkIdentity
 
@@ -36,17 +42,20 @@ if TYPE_CHECKING:
 
 FIXTURE = Path(__file__).parent / "fixtures" / "initial-btc-to-ln-v1.json"
 CONFIRM_SIGNATURE = (
-    "d8a7339977e4673e215e61339386e8208b0c6d1ecbe01621e985fe3d6c1399"
-    "384f7b321a32c9ddf5363cb484e78561b3fb6aa65e686a076fcf95c7263a13c3bb"
+    "35359913a9d74ebdfac2c32bbc877a8816d4d080a17a7e0534c6eb3e4f6b01"
+    "a54a3b0e647681c065e3dfd12a2727d7a3ed6bc96984f60a660885c1fe43931bed"
 )
 POLICY = HandshakePolicy(
     profile="btc-to-ln/v1",
-    features=frozenset(),
+    features=frozenset({EPOCH_SESSION_FEATURE}),
     encryption_suites=frozenset({"noise-xk-secp256k1-chachapoly-sha256/v1"}),
     capabilities=frozenset({"core/v1", "recovery/v1"}),
 )
 AUTHORITY = AuthorityDeclaration("test-volume", outside_restore_domain=True, single_host=True)
 SESSION_SECRET = (3).to_bytes(32, "big")  # Fixture-only public scalar of the fixture session key.
+EPOCH_SECRET = (15).to_bytes(32, "big")  # Fixture-only public scalar of the fixture epoch key.
+# The fixture epoch is created at the earliest valid instant and outlives every test clock.
+FIXTURE_EPOCH_LIFETIME = 2**40
 P = 2**256 - 2**32 - 977
 N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 G = (
@@ -193,8 +202,18 @@ class Harness:
         self.custody = x25519.Identity.generate()
         self.policy = POLICY
         self.init, self.accept, self.confirm = (_bytes(e) for e in self.envelopes)
+        self.epoch = init["extensions"][EPOCH_SESSION_EXTENSION]["epoch_inbox_xonly_key"]
 
-    def provision(self) -> None:
+    @property
+    def initiation(self) -> live.EpochInitiation:
+        """The fixture init as received under the fixture epoch."""
+        return live.EpochInitiation(self.init, self.epoch)
+
+    def received(self, document: bytes) -> live.EpochInitiation:
+        """Any init document as received on the fixture epoch inbox."""
+        return live.EpochInitiation(document, self.epoch)
+
+    def provision(self, *, fixture_epoch: bool = True) -> None:
         LiveSessionStore.provision(
             self.path,
             self.network,
@@ -203,6 +222,18 @@ class Harness:
             AUTHORITY,
             custody_recipient=str(self.custody.to_public()),
         )
+        if fixture_epoch:
+            self.register_fixture_epoch()
+
+    def register_fixture_epoch(self) -> None:
+        """Create the fixture's epoch inbox key (scalar 15) so its init is admissible."""
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(live, "_new_epoch_scalar", lambda: EPOCH_SECRET)
+            with self.acquire() as store:
+                advertised = store.rotate_epochs(
+                    now=1, period=1, retention=FIXTURE_EPOCH_LIFETIME, advertise_for=0
+                )
+        assert advertised == (self.epoch,)
 
     def acquire(self) -> LiveSessionStore:
         return self.acquire_at(self.path)
@@ -268,10 +299,10 @@ def test_full_handshake_commits_accept_before_exposure_and_admits_confirm(
 ) -> None:
     harness.provision()
     with harness.acquire() as store:
-        reserved = store.reserve(harness.init)
+        reserved = store.reserve(harness.initiation)
         expected = harness.source["verification_context"]["handshake_accept"]
         assert reserved.provider_challenge == expected["provider_challenge"]
-        assert store.reserve(harness.init) == reserved
+        assert store.reserve(harness.initiation) == reserved
         assert store.pending_outbox() == ()
         with pytest.raises(LiveSessionStoreError, match="no committed accept"):
             store.admit_confirm(harness.confirm)
@@ -298,7 +329,7 @@ def test_accept_must_match_reserved_challenge_and_is_atomic(harness: Harness) ->
     with harness.acquire() as store:
         with pytest.raises(LiveSessionStoreError, match="no reservation"):
             store.commit_accept(harness.accept)
-        store.reserve(harness.init)
+        store.reserve(harness.initiation)
         tampered = copy.deepcopy(harness.envelopes[1])
         tampered["payload"]["provider_identity_signature"] = "00" * 64
         with pytest.raises(LiveSessionStoreError, match="refused"):
@@ -317,7 +348,7 @@ def test_accept_must_match_reserved_challenge_and_is_atomic(harness: Harness) ->
 def test_unverifiable_confirm_leaves_no_record(harness: Harness) -> None:
     harness.provision()
     with harness.acquire() as store:
-        store.reserve(harness.init)
+        store.reserve(harness.initiation)
         store.commit_accept(harness.accept)
         forged = copy.deepcopy(harness.envelopes[2])
         forged["signature"] = "11" * 64
@@ -330,7 +361,7 @@ def test_unverifiable_confirm_leaves_no_record(harness: Harness) -> None:
 def test_signed_confirm_equivocation_blocks_session_durably(harness: Harness) -> None:
     harness.provision()
     with harness.acquire() as store:
-        store.reserve(harness.init)
+        store.reserve(harness.initiation)
         store.commit_accept(harness.accept)
         store.admit_confirm(harness.confirm)
         second = copy.deepcopy(harness.envelopes[2])
@@ -348,13 +379,13 @@ def test_signed_confirm_equivocation_blocks_session_durably(harness: Harness) ->
 def test_conflicting_unsigned_init_blocks_before_any_accept(harness: Harness) -> None:
     harness.provision()
     with harness.acquire() as store:
-        store.reserve(harness.init)
+        store.reserve(harness.initiation)
         other = copy.deepcopy(harness.envelopes[0])
         other["message_id"] = "17" * 32
         with pytest.raises(SessionBlockedError):
-            store.reserve(_bytes(other))
+            store.reserve(harness.received(_bytes(other)))
         with pytest.raises(SessionBlockedError):
-            store.reserve(harness.init)
+            store.reserve(harness.initiation)
         with pytest.raises(SessionBlockedError):
             store.commit_accept(harness.accept)
         assert store.pending_outbox() == ()
@@ -366,8 +397,8 @@ def test_untrusted_init_is_refused_without_state(harness: Harness) -> None:
         wrong = copy.deepcopy(harness.envelopes[0])
         wrong["sequence"] = 1
         with pytest.raises(LiveSessionStoreError, match="unsupported handshake initiation"):
-            store.reserve(_bytes(wrong))
-        store.reserve(harness.init)
+            store.reserve(harness.received(_bytes(wrong)))
+        store.reserve(harness.initiation)
 
 
 def _child_acquire(
@@ -423,13 +454,13 @@ def test_generation_advances_and_stale_or_closed_handle_cannot_write(harness: Ha
     first = store.generation
     store.close()
     with pytest.raises(StaleOwnerError):
-        store.reserve(harness.init)
+        store.reserve(harness.initiation)
     store = harness.acquire()
     assert store.generation == first + 1
     with sqlite3.connect(harness.path) as connection:  # simulates a broken lock
         connection.execute("UPDATE meta SET generation=generation+1")
     with pytest.raises(StaleOwnerError):
-        store.reserve(harness.init)
+        store.reserve(harness.initiation)
     with pytest.raises(StaleOwnerError):
         store.pending_outbox()
     store.close()
@@ -441,7 +472,7 @@ def test_generation_advances_and_stale_or_closed_handle_cannot_write(harness: Ha
 def test_copied_or_file_restored_store_is_not_authoritative(harness: Harness) -> None:
     harness.provision()
     with harness.acquire() as store:
-        store.reserve(harness.init)
+        store.reserve(harness.initiation)
     copy_dir = harness.path.parent / "copy"
     copy_dir.mkdir()
     shutil.copy2(harness.path, copy_dir / harness.path.name)
@@ -462,7 +493,7 @@ def test_namespace_or_policy_mismatch_refuses(harness: Harness) -> None:
     harness.provision()
     other_policy = HandshakePolicy(
         profile="btc-to-ln/v1",
-        features=frozenset(),
+        features=POLICY.features,
         encryption_suites=POLICY.encryption_suites,
         capabilities=frozenset({"core/v1"}),
     )
@@ -488,10 +519,44 @@ def test_namespace_or_policy_mismatch_refuses(harness: Harness) -> None:
         )
 
 
+def test_policy_without_epoch_binding_is_refused_before_any_state(harness: Harness) -> None:
+    unbound = HandshakePolicy(
+        profile=POLICY.profile,
+        features=frozenset(),
+        encryption_suites=POLICY.encryption_suites,
+        capabilities=POLICY.capabilities,
+    )
+    with pytest.raises(LiveSessionStoreError, match="must require epoch-bound"):
+        LiveSessionStore.provision(
+            harness.path,
+            harness.network,
+            harness.identity,
+            unbound,
+            AUTHORITY,
+            custody_recipient=str(harness.custody.to_public()),
+        )
+    assert list(harness.path.parent.iterdir()) == []
+    harness.provision()
+    files = sorted(harness.path.parent.iterdir())
+    before = [file.read_bytes() for file in files]
+    with pytest.raises(LiveSessionStoreError, match="must require epoch-bound"):
+        LiveSessionStore.acquire(
+            harness.path,
+            harness.network,
+            harness.identity,
+            unbound,
+            crypto=harness.crypto,
+            custody_identity=str(harness.custody),
+            public_keys=PurePublicKeys(),
+        )
+    assert sorted(harness.path.parent.iterdir()) == files
+    assert [file.read_bytes() for file in files] == before
+
+
 def test_resigned_identical_confirm_is_replay_not_equivocation(harness: Harness) -> None:
     harness.provision()
     with harness.acquire() as store:
-        store.reserve(harness.init)
+        store.reserve(harness.initiation)
         store.commit_accept(harness.accept)
         first = store.admit_confirm(harness.confirm)
         resigned = copy.deepcopy(harness.envelopes[2])
@@ -508,7 +573,7 @@ def test_resigned_identical_confirm_is_replay_not_equivocation(harness: Harness)
         ]
 
 
-def _forked_child(store: LiveSessionStore, init: bytes, queue: Any) -> None:  # noqa: ANN401
+def _forked_child(store: LiveSessionStore, init: live.EpochInitiation, queue: Any) -> None:  # noqa: ANN401
     try:
         store.reserve(init)
     except StaleOwnerError as error:
@@ -523,13 +588,13 @@ def test_handle_inherited_across_fork_cannot_act_or_release_parent(harness: Harn
     context = multiprocessing.get_context("fork")
     queue = context.Queue()
     with harness.acquire() as store:
-        child = context.Process(target=_forked_child, args=(store, harness.init, queue))
+        child = context.Process(target=_forked_child, args=(store, harness.initiation, queue))
         child.start()
         child.join(30)
         assert queue.get(timeout=5) == "store handle inherited across fork; reacquire"
         with pytest.raises(LiveSessionStoreError, match="owned by another"):
             harness.acquire()  # the child's close did not release our lock
-        assert store.reserve(harness.init).revision == 0
+        assert store.reserve(harness.initiation).revision == 0
 
 
 class _FailingCommit:
@@ -550,11 +615,11 @@ def test_uncertain_commit_releases_ownership(harness: Harness) -> None:
     store = harness.acquire()
     store._connection = _FailingCommit(store._connection)  # type: ignore[assignment]  # noqa: SLF001
     with pytest.raises(StaleOwnerError, match="uncertain"):
-        store.reserve(harness.init)
+        store.reserve(harness.initiation)
     with pytest.raises(StaleOwnerError):
-        store.reserve(harness.init)
+        store.reserve(harness.initiation)
     with harness.acquire() as fresh:  # released; the truth is re-read by a new owner
-        assert fresh.reserve(harness.init).revision == 0
+        assert fresh.reserve(harness.initiation).revision == 0
 
 
 def test_nested_owner_pins_fence_immediately_but_release_only_after_final_exit(
@@ -568,7 +633,7 @@ def test_nested_owner_pins_fence_immediately_but_release_only_after_final_exit(
             store.close()
             store.close()
             with pytest.raises(StaleOwnerError, match="closed"):
-                store.reserve(harness.init)
+                store.reserve(harness.initiation)
             with pytest.raises(StaleOwnerError, match="closed"):
                 store.pending_outbox()
             with pytest.raises(StaleOwnerError, match="closed"), store.retain_owner():
@@ -579,7 +644,7 @@ def test_nested_owner_pins_fence_immediately_but_release_only_after_final_exit(
             harness.acquire()
     with harness.acquire() as fresh:
         assert fresh.generation == generation + 1
-        assert fresh.reserve(harness.init).revision == 0
+        assert fresh.reserve(harness.initiation).revision == 0
 
 
 def test_pin_exit_does_not_close_a_live_owner_or_suppress_exceptions(harness: Harness) -> None:
@@ -589,7 +654,7 @@ def test_pin_exit_does_not_close_a_live_owner_or_suppress_exceptions(harness: Ha
             raise RuntimeError("body failure")
         with pytest.raises(LiveSessionStoreError, match="owned by another"):
             harness.acquire()
-        assert store.reserve(harness.init).revision == 0
+        assert store.reserve(harness.initiation).revision == 0
     with harness.acquire() as fresh:
         assert fresh.generation == store.generation + 1
 
@@ -613,7 +678,7 @@ def test_pin_survives_native_cleanup_reentrancy_and_failure(harness: Harness) ->
             store.close()
         store.close()
         with pytest.raises(StaleOwnerError, match="closed"):
-            store.reserve(harness.init)
+            store.reserve(harness.initiation)
         with pytest.raises(LiveSessionStoreError, match="owned by another"):
             harness.acquire()
     assert calls == ["destroyed"]
@@ -640,7 +705,7 @@ def test_transaction_failure_fences_immediately_without_releasing_a_pinned_owner
     with store.retain_owner():
         if failure == "commit":
             with pytest.raises(StaleOwnerError, match="uncertain"):
-                store.reserve(harness.init)
+                store.reserve(harness.initiation)
         else:
             with pytest.raises(RuntimeError, match="original transaction failure"), store._write():  # noqa: SLF001
                 raise RuntimeError("original transaction failure")
@@ -651,7 +716,7 @@ def test_transaction_failure_fences_immediately_without_releasing_a_pinned_owner
         with pytest.raises(LiveSessionStoreError, match="owned by another"):
             harness.acquire()
     with harness.acquire() as fresh:
-        assert fresh.reserve(harness.init).revision == 0
+        assert fresh.reserve(harness.initiation).revision == 0
 
 
 def _forked_pinned_child(store: LiveSessionStore, pin: Any, queue: Any) -> None:  # noqa: ANN401
@@ -693,7 +758,7 @@ def test_forked_pin_exit_cannot_release_parent_or_suppress_child_exception(
         with pytest.raises(LiveSessionStoreError, match="owned by another"):
             harness.acquire()
         if not closed:
-            assert store.reserve(harness.init).revision == 0
+            assert store.reserve(harness.initiation).revision == 0
     finally:
         store.close()
         pin.__exit__(None, None, None)
@@ -743,9 +808,9 @@ def test_reservation_binds_encrypted_session_key_and_accept_must_use_it(
         "provider_session_xonly_key"
     ]
     with harness.acquire() as store:
-        reserved = store.reserve(harness.init)
+        reserved = store.reserve(harness.initiation)
         assert reserved.provider_session_key == fixture_key
-        assert store.reserve(harness.init) == reserved
+        assert store.reserve(harness.initiation) == reserved
     stored = (
         harness.path.read_bytes() + harness.path.with_name(harness.path.name + "-wal").read_bytes()
         if harness.path.with_name(harness.path.name + "-wal").exists()
@@ -764,7 +829,7 @@ def test_accept_for_a_different_session_key_is_refused(harness: Harness) -> None
     harness.provision()
     harness.scalar = (5).to_bytes(32, "big")
     with harness.acquire() as store:
-        reserved = store.reserve(harness.init)
+        reserved = store.reserve(harness.initiation)
         assert (
             reserved.provider_session_key
             != (
@@ -791,7 +856,7 @@ def test_wrong_custody_credential_refuses_ownership(harness: Harness) -> None:
 def test_substituted_or_corrupt_custody_is_never_replaced(harness: Harness) -> None:
     harness.provision()
     with harness.acquire() as store:
-        store.reserve(harness.init)
+        store.reserve(harness.initiation)
     with sqlite3.connect(harness.path) as connection:
         sealed = connection.execute("SELECT session_secret_age FROM sessions").fetchone()[0]
         record = json.loads(pyrage.decrypt(sealed, [harness.custody]))
@@ -800,7 +865,7 @@ def test_substituted_or_corrupt_custody_is_never_replaced(harness: Harness) -> N
         connection.execute("UPDATE sessions SET session_secret_age=?", (forged,))
     with harness.acquire() as store:
         with pytest.raises(LiveSessionStoreError, match="custody unavailable"):
-            store.reserve(harness.init)
+            store.reserve(harness.initiation)
         with pytest.raises(LiveSessionStoreError, match="custody unavailable"):
             store.commit_accept(harness.accept)
         assert store.pending_outbox() == ()
@@ -838,7 +903,7 @@ def test_native_crypto_full_handshake_with_real_custody_derivation(harness: Harn
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
         harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store,
     ):
-        reserved = store.reserve(harness.init)
+        reserved = store.reserve(harness.initiation)
         assert (
             reserved.provider_session_key == PurePublicKeys().public_key(SESSION_SECRET)[1:].hex()
         )
@@ -869,7 +934,7 @@ def test_native_handshake_over_nip59_session_mailboxes(harness: Harness) -> None
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
         harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store,
     ):
-        reserved = store.reserve(harness.init)
+        reserved = store.reserve(harness.initiation)
         committed = store.commit_accept(harness.accept)
         client_key = crypto.public_key(client_secret)[1:].hex()
         wraps = [store.wrap_pending(committed.message_id, transport=crypto) for _ in range(2)]
@@ -945,7 +1010,7 @@ def test_forged_mailbox_frame_is_refused_before_custody_decryption(
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
         harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store,
     ):
-        reserved = store.reserve(harness.init)
+        reserved = store.reserve(harness.initiation)
         store.commit_accept(harness.accept)
         frame = _wrap_envelope(
             harness.confirm,
@@ -973,7 +1038,7 @@ def test_create_accept_refuses_without_reservation_or_foreign_identity(harness: 
     with harness.acquire() as store:
         with pytest.raises(LiveSessionStoreError, match="no reservation"):
             store.create_accept("ab" * 32, identity=foreign, transport_endpoints=("wss://r/",))
-        reserved = store.reserve(harness.init)
+        reserved = store.reserve(harness.initiation)
         with pytest.raises(LiveSessionStoreError, match="not this store's provider"):
             store.create_accept(
                 reserved.session_id, identity=foreign, transport_endpoints=("wss://r/",)
@@ -1015,7 +1080,7 @@ def test_native_owner_built_accept_and_fresh_client_confirm(
             expected_xonly_public_key=xonly,
             crypto=crypto,
         )
-        reserved = store.reserve(harness.init)
+        reserved = store.reserve(harness.initiation)
         committed = store.create_accept(
             reserved.session_id, identity=signer, transport_endpoints=("wss://relay.test/",)
         )
@@ -1040,7 +1105,7 @@ def test_native_owner_built_accept_and_fresh_client_confirm(
 
 
 def test_epoch_rotation_schedule_retention_and_cap(harness: Harness) -> None:
-    harness.provision()
+    harness.provision(fixture_epoch=False)
     with harness.acquire() as store:
         with pytest.raises(LiveSessionStoreError, match="schedule"):
             store.rotate_epochs(now=100, period=0, retention=0, advertise_for=0)
@@ -1090,7 +1155,7 @@ def test_older_store_is_refused_unchanged_with_no_upgrade_path(
 ) -> None:
     harness.provision()
     with harness.acquire() as store:
-        store.reserve(harness.init)
+        store.reserve(harness.initiation)
     with sqlite3.connect(harness.path) as connection:
         connection.execute("UPDATE meta SET schema_version=?", (version,))
         connection.execute(f"PRAGMA user_version={version}")
@@ -1113,18 +1178,22 @@ def test_older_store_is_refused_unchanged_with_no_upgrade_path(
     os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
     reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
 )
-def test_native_init_received_on_epoch_inbox(harness: Harness) -> None:
+def test_native_init_received_on_epoch_inbox(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from rill_crypto import Context  # noqa: PLC0415
 
     from rill_provider._nip59_send import _wrap_envelope  # noqa: PLC0415
 
     client_secret = (2).to_bytes(32, "big")  # Fixture-only public scalar of the client key.
-    harness.provision()
+    harness.provision(fixture_epoch=False)
+    monkeypatch.setattr(live, "_new_epoch_scalar", lambda: EPOCH_SECRET)
     with (
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
         harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store,
     ):
         (epoch,) = store.rotate_epochs(now=1000, period=100, retention=100, advertise_for=0)
+        assert epoch == harness.epoch  # the fixture init commits to this epoch
         frame = _wrap_envelope(
             harness.init,
             sender_session_secret=client_secret,
@@ -1134,7 +1203,7 @@ def test_native_init_received_on_epoch_inbox(harness: Harness) -> None:
         opened = store.open_epoch_frame(frame, now=1150, transport=crypto)
         assert opened.document == harness.init
         assert opened.epoch_key == epoch
-        assert store.reserve(opened).session_id == harness.envelopes[0]["session_id"]
+        assert store.reserve(opened, now=1150).session_id == harness.envelopes[0]["session_id"]
         with pytest.raises(LiveSessionStoreError, match="retired epoch"):
             store.open_epoch_frame(frame, now=1200, transport=crypto)
         not_init = _wrap_envelope(
@@ -1149,12 +1218,14 @@ def test_native_init_received_on_epoch_inbox(harness: Harness) -> None:
             store.open_epoch_frame(frame[:-5] + b"0000}", now=1150, transport=crypto)
 
 
-def _other_init(harness: Harness, index: int) -> bytes:
+def _other_init(harness: Harness, index: int) -> live.EpochInitiation:
+    """A distinct session on the fixture epoch: client key scalar ``index + 16``."""
     envelope = copy.deepcopy(harness.envelopes[0])
-    session = f"{index:064x}"
-    envelope["session_id"] = envelope["payload"]["session_id"] = session
-    envelope["message_id"] = f"{index + 0x100:064x}"
-    return _bytes(envelope)
+    key = PurePublicKeys().public_key((index + 16).to_bytes(32, "big"))[1:].hex()
+    session = epoch_bound_session_id(harness.network, harness.identity, harness.epoch, key).hex()
+    envelope.update(session_id=session, sender_session_key=key, message_id=f"{index + 0x100:064x}")
+    envelope["payload"].update(session_id=session, client_session_xonly_key=key)
+    return harness.received(_bytes(envelope))
 
 
 def test_live_tombstone_and_rate_limits_bind_only_new_sessions(
@@ -1194,7 +1265,7 @@ def test_live_tombstone_and_rate_limits_bind_only_new_sessions(
 def test_expired_sessions_are_permanent_tombstones(harness: Harness) -> None:
     harness.provision()
     with harness.acquire() as store:
-        store.reserve(harness.init, now=1000)
+        store.reserve(harness.initiation, now=1000)
         store.commit_accept(harness.accept)
         assert store.expire_idle(now=1100, idle_timeout=100) == 1
         assert store.pending_outbox() == ()
@@ -1202,13 +1273,13 @@ def test_expired_sessions_are_permanent_tombstones(harness: Harness) -> None:
         with pytest.raises(live.SessionExpiredError):
             store.admit_confirm(harness.confirm)
         with pytest.raises(live.SessionExpiredError):
-            store.reserve(harness.init, now=10**9)
+            store.reserve(harness.initiation, now=10**9)
         different = json.loads(harness.init)
         different["message_id"] = "77" * 32
         with pytest.raises(live.SessionExpiredError):
-            store.reserve(_bytes(different), now=1)  # any init for that ID, any clock
+            store.reserve(harness.received(_bytes(different)), now=1)  # any init, any clock
     with harness.acquire() as store, pytest.raises(live.SessionExpiredError):
-        store.reserve(harness.init)
+        store.reserve(harness.initiation)
     for file in harness.path.parent.iterdir():
         assert harness.accept not in file.read_bytes()
 
@@ -1216,7 +1287,7 @@ def test_expired_sessions_are_permanent_tombstones(harness: Harness) -> None:
 def test_idle_confirmed_sessions_expire_but_keep_their_record(harness: Harness) -> None:
     harness.provision()
     with harness.acquire() as store:
-        store.reserve(harness.init, now=10)
+        store.reserve(harness.initiation, now=10)
         store.commit_accept(harness.accept)
         store.admit_confirm(harness.confirm, now=20)
         assert store.expire_idle(now=119, idle_timeout=100) == 0
@@ -1224,7 +1295,7 @@ def test_idle_confirmed_sessions_expire_but_keep_their_record(harness: Harness) 
         with pytest.raises(live.SessionExpiredError):
             store.admit_confirm(harness.confirm)
         with pytest.raises(live.SessionExpiredError):
-            store.reserve(harness.init)
+            store.reserve(harness.initiation)
     for file in harness.path.parent.iterdir():
         assert b"secret_scalar" not in file.read_bytes()
 
@@ -1293,7 +1364,7 @@ def test_native_signed_requests_get_one_durable_signed_answer(harness: Harness) 
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
         harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store,
     ):
-        store.reserve(harness.init)
+        store.reserve(harness.initiation)
         first = _signed_request(harness, crypto, 2, "21" * 32)
         with pytest.raises(LiveSessionStoreError):
             store.answer_request(first, responder=responder, signer=crypto)  # not confirmed

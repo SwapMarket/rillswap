@@ -68,7 +68,9 @@ def test_approved_new_session_gate_does_not_reinterpret_historical_admission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with harness.acquire() as store:
         session, _, _ = _featured_paid_swap(harness, store)
@@ -136,7 +138,9 @@ def test_probe_is_not_inferred_from_an_older_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with harness.acquire() as store:
         session, _, _ = _featured_paid_swap(harness, store)
@@ -168,7 +172,9 @@ def test_due_probe_records_real_unilateral_before_any_core_rpc(  # noqa: PLR0915
     from rill_crypto import Context  # noqa: PLC0415 - opt-in native signing
 
     harness = Harness(tmp_path, monkeypatch)
-    harness.policy = replace(harness.policy, features=frozenset({COOPERATIVE_CLAIM_FEATURE}))
+    harness.policy = replace(
+        harness.policy, features=harness.policy.features | {COOPERATIVE_CLAIM_FEATURE}
+    )
     harness.provision()
     with (
         Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,

@@ -60,7 +60,7 @@ def insert_reverse_swap(
     store: live.LiveSessionStore, harness: Harness, state: str, *, reservation: str = "UNSENT"
 ) -> str:
     """Insert an accepted LN to BTC swap with its hash and reservation rows."""
-    session = store.reserve(harness.init, now=1000).session_id
+    session = store.reserve(harness.initiation, now=1000).session_id
     offer = copy.deepcopy(harness.envelopes[1])
     offer.update(
         message_type="terms_offer",
