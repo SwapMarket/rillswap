@@ -221,6 +221,9 @@ services:
       - monero-merchant:/monero-wallets/merchant:ro
       - monero-buyer:/monero-wallets/buyer:ro
     depends_on:
+      # Keep the shared image builder reachable during targeted startups.
+      chain:
+        condition: service_started
       lnd-maker:
         condition: service_healthy
       lnd-user:
@@ -368,6 +371,8 @@ services:
     ports:
       - 127.0.0.1:${RILL_DEV_BROADCAST_PORT:-8092}:8092
     depends_on:
+      chain:
+        condition: service_started
       bitcoind:
         condition: service_healthy
 

@@ -16,7 +16,7 @@ stack
   up                  build if needed, start everything, wait for bootstrap
   down                stop containers (keeps chain, wallets and maker state)
   reset               stop and delete ALL dev state (asks for confirmation)
-  build               rebuild the dev image (after dependency changes)
+  build [svc...]      rebuild selected images and their buildable dependencies
   status              container status
   logs [svc...]       follow logs (e.g. logs maker-btc-to-ln)
   restart <svc...>    restart services (e.g. after editing provider code)
@@ -78,7 +78,7 @@ case "$cmd" in
         [ "$answer" = "y" ] || exit 1
         compose down -v --remove-orphans
         ;;
-    build) compose build "$@" ;;
+    build) compose build --with-dependencies "$@" ;;
     status) compose ps -a "$@" ;;
     logs) compose logs -f --tail=100 "$@" ;;
     restart) compose restart "$@" ;;

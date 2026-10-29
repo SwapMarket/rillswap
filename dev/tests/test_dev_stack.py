@@ -131,6 +131,35 @@ def compose_service(name: str) -> str:
     return match.group(1)
 
 
+def test_shared_image_has_one_builder_reachable_from_every_consumer():
+    service_config = COMPOSE.split("\nservices:\n", 1)[1].split("\nvolumes:\n", 1)[0]
+    services = {
+        name: compose_service(name)
+        for name in re.findall(r"^  ([a-z][a-z0-9-]*):$", service_config, re.M)
+    }
+    consumers = {
+        name
+        for name, body in services.items()
+        if "<<: *rill" in body or "image: rillswap-dev:local" in body
+    }
+    builders = {name for name in consumers if re.search(r"^    build:", services[name], re.M)}
+    assert builders == {"chain"}
+    assert COMPOSE.count("dockerfile: dev/Dockerfile") == 1
+
+    for consumer in consumers:
+        pending = [consumer]
+        reached = set()
+        while pending:
+            name = pending.pop()
+            if name in reached:
+                continue
+            reached.add(name)
+            dependencies = re.search(r"^    depends_on:\n((?: {6,}.+\n)*)", services[name], re.M)
+            if dependencies:
+                pending.extend(re.findall(r"^      ([a-z][a-z0-9-]*):$", dependencies[1], re.M))
+        assert "chain" in reached, f"{consumer} cannot build the shared image on a cold start"
+
+
 def test_monero_chain_persists_and_wallet_rpc_stays_private():
     monerod = compose_service("monerod")
     # Without --keep-fakechain monerod deletes the regtest chain at every start.

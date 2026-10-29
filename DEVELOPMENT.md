@@ -391,6 +391,12 @@ installed editable from it. After editing:
 - dependencies, native crypto, `dev/entrypoint.sh`, `dev/Dockerfile`, or
   `rill-payments` code the web page imports: `dev/devctl build && dev/devctl up`
 
+The shared dev image is built once, by `chain`. Targeted starts also include
+that stateless reader through service dependencies. `dev/devctl build tools`
+rebuilds the shared image and buildable dependencies, including the Monero
+image. With direct `docker compose build` commands, pass `--with-dependencies`
+to include the selected service's image builder.
+
 ## Stopping and resetting
 
 ```sh
