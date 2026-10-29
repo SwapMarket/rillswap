@@ -853,6 +853,12 @@ print('Pinned LND unfunded invoice OPEN and CANCELED observations passed')
 )
 def test_pinned_lnd_unfunded_invoice_observation(tmp_path: Path) -> None:
     """Real OPEN/CANCELED serialization with no funding, channel, or HTLC."""
+    result = _run_single_lnd(tmp_path, OPEN_INVOICE, prefix="invoice", timeout=105)
+    assert result == "Pinned LND unfunded invoice OPEN and CANCELED observations passed"
+
+
+def _run_single_lnd(tmp_path: Path, script: str, *, prefix: str, timeout: int) -> str:
+    """Run one sidecar script beside a fresh LND on a one-block regtest chain."""
     assert DOCKER is not None
     public = tmp_path / "public"
     public.mkdir(mode=0o700)
@@ -861,9 +867,9 @@ def test_pinned_lnd_unfunded_invoice_observation(tmp_path: Path) -> None:
     _state_messages(generated)
     run_id = secrets.token_hex(16)
     label = f"org.rillswap.test-run={run_id}"
-    core = f"rillswap-invoice-core-{secrets.token_hex(6)}"
-    lnd = f"rillswap-invoice-lnd-{secrets.token_hex(6)}"
-    sidecar = f"rillswap-invoice-client-{secrets.token_hex(6)}"
+    core = f"rillswap-{prefix}-core-{secrets.token_hex(6)}"
+    lnd = f"rillswap-{prefix}-lnd-{secrets.token_hex(6)}"
+    sidecar = f"rillswap-{prefix}-client-{secrets.token_hex(6)}"
     cert = public / "tls.cert"
     try:
         _docker(
@@ -964,16 +970,155 @@ def test_pinned_lnd_unfunded_invoice_observation(tmp_path: Path) -> None:
             f"type=bind,src={generated},dst=/work/generated,readonly",
             "--env",
             "PYTHONPATH=/work/provider/.venv/lib/python3.14/site-packages:"
-            "/work/provider/src:/work/core/packages/core/src:/work/generated",
+            "/work/provider/src:/work/core/packages/core/src:/work/generated:"
+            "/work/provider/tests",
             PYTHON_IMAGE,
             "python",
             "-c",
-            OPEN_INVOICE,
-            timeout=105,
+            script,
+            timeout=timeout,
         )
-        assert result == "Pinned LND unfunded invoice OPEN and CANCELED observations passed"
     finally:
         _cleanup_containers((sidecar, lnd, core), run_id, cert)
+    return result
+
+
+# Signed fixture invoices (key 1) read by the pinned LND and by RillSwap's
+# decoder, which adds rill-core's reader rules on the same bytes.
+DECODE_DIFFERENTIAL = """
+import json, os, secrets, sys, time
+from pathlib import Path
+import grpc
+import bolt11_fixtures as b11
+from rill_core.wire.types import NetworkIdentity
+from rill_provider._lnd_proto import lightning_pb2
+from rill_provider.lnd_invoice_decode import InvoiceRejectedError, LndInvoiceDecoder
+import walletunlocker_pb2 as unlock
+import stateservice_pb2 as state
+
+cert = Path('/work/public/tls.cert').read_bytes()
+def unary(channel, method, request, response):
+    return channel.unary_unary(method, request_serializer=request.SerializeToString,
+                               response_deserializer=response.FromString)
+def metadata(mac):
+    return (('macaroon', mac.hex()),)
+def dial():
+    return grpc.secure_channel('127.0.0.1:10009',
+        grpc.ssl_channel_credentials(root_certificates=cert))
+channel = dial()
+seed = unary(channel, '/lnrpc.WalletUnlocker/GenSeed',
+    unlock.GenSeedRequest, unlock.GenSeedResponse)(unlock.GenSeedRequest(), timeout=10)
+admin = unary(channel, '/lnrpc.WalletUnlocker/InitWallet',
+    unlock.InitWalletRequest, unlock.InitWalletResponse)(unlock.InitWalletRequest(
+    wallet_password=secrets.token_bytes(24), cipher_seed_mnemonic=seed.cipher_seed_mnemonic,
+    recovery_window=0, stateless_init=True), timeout=20).admin_macaroon
+channel.close()
+channel = dial()
+readiness = unary(channel, '/lnrpc.State/GetState',
+    state.GetStateRequest, state.GetStateResponse)
+for _ in range(100):
+    try:
+        if readiness(state.GetStateRequest(), metadata=metadata(admin),
+                     timeout=1).state == state.SERVER_ACTIVE:
+            break
+    except grpc.RpcError:
+        pass
+    time.sleep(0.2)
+else:
+    raise AssertionError('LND readiness not established')
+read = bytes.fromhex(unary(channel, '/lnrpc.Lightning/BakeMacaroon',
+    lightning_pb2.BakeMacaroonRequest, lightning_pb2.BakeMacaroonResponse)(
+    lightning_pb2.BakeMacaroonRequest(
+        permissions=[lightning_pb2.MacaroonPermission(entity='offchain', action='read')],
+        root_key_id=0, allow_external_permissions=False),
+    metadata=metadata(admin), timeout=3).macaroon)
+private = Path('/tmp/rill-differential-decoder.macaroon')
+fd = os.open(private, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+with os.fdopen(fd, 'wb') as output:
+    output.write(read)
+raw = unary(channel, '/lnrpc.Lightning/DecodePayReq',
+    lightning_pb2.PayReqString, lightning_pb2.PayReq)
+def lnd(invoice):
+    return raw(lightning_pb2.PayReqString(pay_req=invoice), metadata=metadata(read), timeout=5)
+network = NetworkIdentity.model_validate(json.loads(
+    Path('/work/provider/tests/fixtures/initial-btc-to-ln-v1.json').read_text()
+)['contract_terms']['network_identity'])
+decoder = LndInvoiceDecoder(host='127.0.0.1', port=10009,
+    tls_certificate_path='/work/public/tls.cert', macaroon_path=private, network=network)
+now = int(time.time())
+base = [b11.payment_hash('ab' * 32), b11.payment_secret(b's' * 32),
+        b11.description('RillSwap differential'), b11.expiry(3600), b11.final_cltv(40),
+        b11.features(8, 14, 17, 25)]
+def signed(fields):
+    return b11.invoice(fields, timestamp=now)
+def refused(invoice, reason):
+    try:
+        decoder.decode(invoice)
+    except InvoiceRejectedError as error:
+        assert reason in str(error), (reason, str(error))
+    else:
+        raise AssertionError('admitted: ' + reason)
+
+print('PHASE: genuine', file=sys.stderr)
+ordinary = signed(base)
+reported = lnd(ordinary)
+assert reported.destination == b11.PAYEE and reported.payment_hash == 'ab' * 32
+assert set(reported.features) == {8, 14, 17, 25}  # LND adds or drops no bits
+assert decoder.decode(ordinary).min_final_cltv_delta == 40
+# Without x and c: BOLT 11 says 3600 s and at least 18 blocks; LND assumes 24
+# blocks (zpay32 DefaultAssumedFinalCLTVDelta), which stays the bound delta.
+defaults = signed(base[:3] + base[5:])
+assert (lnd(defaults).expiry, lnd(defaults).cltv_expiry) == (3600, 24)
+binding = decoder.decode(defaults)
+assert (binding.expires_at - binding.created_at, binding.min_final_cltv_delta) == (3600, 24)
+assert decoder.decode(signed([*base, b11.payee()])).payee_compressed_pubkey == b11.PAYEE
+
+print('PHASE: two hashes', file=sys.stderr)
+two_hashes = signed([*base, b11.payment_hash('cd' * 32)])
+try:
+    lnd(two_hashes)
+except grpc.RpcError:
+    pass  # lnd#11190, fixed in 0.20.5 and 0.21.4
+else:
+    raise AssertionError('pinned LND accepted two payment hashes')
+refused(two_hashes, '')
+
+print('PHASE: first wins', file=sys.stderr)
+other = '02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5'  # key 2
+first_wins = {
+    'secret': (b11.payment_secret(b't' * 32), 'payment_addr', b's' * 32),
+    'expiry': (b11.expiry(7200), 'expiry', 3600),
+    'cltv': (b11.final_cltv(144), 'cltv_expiry', 40),
+    'payee': ([*b11.payee(), *b11.payee(other)], 'destination', b11.PAYEE),
+    'short secret': (b11.tag(16, [0] * 51), 'payment_addr', b's' * 32),
+}
+for name, (extra, field, first) in first_wins.items():
+    invoice = signed([*base, extra])
+    reported = lnd(invoice)
+    assert getattr(reported, field) == first, name
+    assert reported.payment_hash == 'ab' * 32, name
+    refused(invoice, 'ambiguous')
+# LND keeps the first 9 field, the browser and rill-core the last (AMP here).
+features = signed([*base, b11.features(8, 14, 17, 25, 30)])
+assert set(lnd(features).features) == {8, 14, 17, 25}
+refused(features, 'ambiguous')
+for batched in (ordinary + ordinary, ordinary + ' ' + ordinary, ordinary + 'q'):
+    refused(batched, '')
+private.unlink()
+channel.close()
+print('Pinned LND invoice reader differential passed')
+"""
+
+
+@pytest.mark.lnd
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_LND") != "1",
+    reason="set RILLSWAP_RUN_LND=1 for pinned disposable LND",
+)
+def test_pinned_lnd_and_wire_reader_disagreements_are_refused(tmp_path: Path) -> None:
+    """Fields the pinned LND reads first-wins never reach a binding."""
+    result = _run_single_lnd(tmp_path, DECODE_DIFFERENTIAL, prefix="decode", timeout=105)
+    assert result == "Pinned LND invoice reader differential passed"
 
 
 # Shared test-only channel fixture. Each scenario gets fresh isolated wallets;
@@ -1935,7 +2080,7 @@ def _supervisor_identity(container: str) -> tuple[object, ...]:
     return (value["Id"], value["State"]["Pid"], value["State"]["StartedAt"], start_ticks)
 
 
-def _run_two_node_sidecar(  # noqa: PLR0913, PLR0915 - isolated test infrastructure
+def _run_two_node_sidecar(  # noqa: PLR0912, PLR0913, PLR0915 - isolated test infrastructure
     tmp_path: Path,
     program: str,
     *,
@@ -1948,11 +2093,17 @@ def _run_two_node_sidecar(  # noqa: PLR0913, PLR0915 - isolated test infrastruct
         "merchant_proof",
         "merchant_conversion",
         "merchant_restart",
+        "receiver_restart",
     ] = "baseline",
     merchant_bun_bundle: Path | None = None,
     merchant_proof_tls_directory: Path | None = None,
+    funding_spent: bool = False,
 ) -> dict[str, object]:
-    """Use fresh owned Core/LND containers for one bounded sidecar scenario."""
+    """Use fresh owned Core/LND containers for one bounded sidecar scenario.
+
+    ``receiver_restart`` supervises receiver ``b`` for one restart without any
+    merchant fixture. ``funding_spent`` expects a confirmed channel close.
+    """
     native_preflight = profile in ("native_reverse", "merchant_conversion", "merchant_restart")
     merchant_proof = profile in ("merchant_proof", "merchant_conversion", "merchant_restart")
     cookie_required = native_preflight or merchant_proof
@@ -1962,7 +2113,7 @@ def _run_two_node_sidecar(  # noqa: PLR0913, PLR0915 - isolated test infrastruct
         "merchant_conversion",
         "merchant_restart",
     )
-    source_restart = profile == "merchant_restart"
+    source_restart = profile in ("merchant_restart", "receiver_restart")
     merchant_mounts = _merchant_fixture_mounts(profile, merchant_bun_bundle)
     proof_mounts = _merchant_proof_mounts(
         profile, merchant_bun_bundle, merchant_proof_tls_directory
@@ -2209,16 +2360,13 @@ def _run_two_node_sidecar(  # noqa: PLR0913, PLR0915 - isolated test infrastruct
         assert evidence["capacity_sat"] == 1_000_000
         assert len(evidence["funding_txid"]) == 64
         assert type(evidence["vout"]) is int
-        output = json.loads(
-            _core_cli(
-                core,
-                "gettxout",
-                evidence["funding_txid"],
-                str(evidence["vout"]),
-                "false",
-            ),
-            parse_float=Decimal,
+        unspent = _core_cli(
+            core, "gettxout", evidence["funding_txid"], str(evidence["vout"]), "false"
         )
+        if funding_spent:
+            assert unspent == ""  # bitcoin-cli prints nothing for a spent output
+            return evidence
+        output = json.loads(unspent, parse_float=Decimal)
         assert output["confirmations"] >= 1
         assert output["value"] == Decimal("0.01000000")
         return evidence
