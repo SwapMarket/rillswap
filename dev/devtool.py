@@ -520,6 +520,13 @@ def provision_maker(
             # RS-006: cheap (about 256 hashes), but every client message is mined and checked.
             "transport_pow_bits": 8,
         }
+        # Explicit test opt-in, only when creating a fresh config. Existing
+        # stores/configs are never repriced or reprovisioned by this flag.
+        if evm is None and os.environ.get("RILL_DEV_NETWORK_FEES") == "1":
+            config["terms"]["network_fees"] = {
+                "max_feerate_sat_kvb": 10000,
+                "max_routing_fee_ppm": 1000,
+            }
         if direction == "ln-to-btc":
             config["bitcoin_core"]["wallet"] = "maker"
             config["lnd"]["invoices_macaroon"] = "admin.macaroon"

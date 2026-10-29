@@ -211,6 +211,7 @@ services:
     command: [python, /src/dev/devtool.py, bootstrap]
     environment:
       RILL_DEV_RELAY_HOST: ws://127.0.0.1:${RILL_DEV_RELAY_PORT:-7777}
+      RILL_DEV_NETWORK_FEES: ${RILL_DEV_NETWORK_FEES:-0}
     volumes:
       - ..:/src:ro
       - state:/state
