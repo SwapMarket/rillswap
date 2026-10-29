@@ -143,6 +143,48 @@ def test_results_and_failures_are_cached_for_thirty_seconds() -> None:
     assert prices.prices() == first
 
 
+def test_a_cached_price_cannot_outlive_its_source_freshness() -> None:
+    sources, clock = Sources(), Clock()
+    sources.btc = kraken("XXBTZUSD", "80400.10", NOW - 119)
+    prices = feed(sources, clock)
+    prices.prices()
+    clock.now += 2  # still within the cache TTL, but the source is stale
+    with pytest.raises(PriceUnavailableError, match="stale"):
+        prices.prices()
+
+
+def test_a_cold_read_cannot_return_prices_that_expired_while_other_sources_loaded() -> None:
+    sources, clock = Sources(), Clock()
+
+    def slow(url: str, params: dict[str, str]) -> object:
+        result = sources(url, params)
+        if params.get("pair") == "ETHUSD":
+            clock.now += 121
+        return result
+
+    prices = PriceFeed(MEMPOOL, with_eth=True, fetch_json=slow, clock=clock)
+    with pytest.raises(PriceUnavailableError, match="expired"):
+        prices.prices()
+
+
+def test_a_wall_clock_rollback_cannot_extend_the_price_cache() -> None:
+    sources, clock = Sources(), Clock()
+    prices = feed(sources, clock)
+    prices.prices()
+    clock.now -= 1
+    prices.prices()
+    assert len(sources.calls) == 6
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://", "https://user:password@mempool.example", "https://mempool.example/#fragment"],
+)
+def test_price_source_urls_must_not_hide_credentials_or_fragments(url: str) -> None:
+    with pytest.raises(ValueError, match="https base URL"):
+        PriceFeed(url, fetch_json=Sources())
+
+
 def test_conversions_round_for_the_provider() -> None:
     prices = UsdPrices(Fraction(80_000), Fraction("80400.10"), Fraction("2322.57"))
     # LN to token: the provider pays tokens, at the low BTC price, rounded down.

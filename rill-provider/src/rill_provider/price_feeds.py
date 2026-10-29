@@ -103,6 +103,24 @@ def usd_as_sats(prices: UsdPrices, usd: int, side: Side) -> int:
     return value.numerator // value.denominator
 
 
+def check_mempool_url(value: str) -> str:
+    """Require an HTTPS base URL without credentials, query or fragment."""
+    try:
+        url = httpx.URL(value)
+    except httpx.InvalidURL:
+        raise ValueError("mempool price source must be an https base URL") from None
+    if (
+        url.scheme != "https"
+        or not url.host
+        or url.username
+        or url.password
+        or url.query
+        or url.fragment
+    ):
+        raise ValueError("mempool price source must be an https base URL")
+    return value
+
+
 def _decimal(value: object) -> Fraction:
     if isinstance(value, str) and _DECIMAL.fullmatch(value):
         parsed = Fraction(value)
@@ -111,7 +129,7 @@ def _decimal(value: object) -> Fraction:
     raise PriceUnavailableError("price malformed")
 
 
-def _kraken_trade(document: object, pair: str, now: float) -> Fraction:
+def _kraken_trade(document: object, pair: str, now: float) -> tuple[Fraction, float]:
     if not (
         isinstance(document, dict)
         and document.get("error") == []
@@ -126,10 +144,10 @@ def _kraken_trade(document: object, pair: str, now: float) -> Fraction:
     traded_at = float(trade[2])
     if not (now - MAX_TRADE_AGE_SECONDS <= traded_at <= now + MAX_FUTURE_SKEW_SECONDS):
         raise PriceUnavailableError("Kraken trade stale")
-    return _decimal(trade[0])
+    return _decimal(trade[0]), traded_at + MAX_TRADE_AGE_SECONDS
 
 
-def _mempool_usd(document: object, now: float) -> Fraction:
+def _mempool_usd(document: object, now: float) -> tuple[Fraction, float]:
     if not (
         isinstance(document, dict)
         and type(observed := document.get("time")) is int
@@ -139,7 +157,7 @@ def _mempool_usd(document: object, now: float) -> Fraction:
         raise PriceUnavailableError("mempool prices malformed")
     if not (now - MAX_MEMPOOL_AGE_SECONDS <= observed <= now + MAX_FUTURE_SKEW_SECONDS):
         raise PriceUnavailableError("mempool price stale")
-    return Fraction(usd)
+    return Fraction(usd), float(observed + MAX_MEMPOOL_AGE_SECONDS)
 
 
 class PriceFeed:
@@ -155,38 +173,46 @@ class PriceFeed:
         clock: Callable[[], float] = time.time,
     ) -> None:
         """Read from ``mempool_url`` (an ``https://`` base) and Kraken."""
-        if not (mempool_url.startswith("https://") and "?" not in mempool_url):
-            raise ValueError("mempool price source must be an https base URL")
+        check_mempool_url(mempool_url)
         self._prices_url = mempool_url.rstrip("/") + MEMPOOL_PRICES_PATH
         self._with_eth = with_eth
         self._fetch: FetchJson = fetch_json or _http_fetcher(proxy)
         self._clock = clock
         self._lock = threading.Lock()
-        self._cached: tuple[float, UsdPrices | None] | None = None
+        self._cached: tuple[float, float, UsdPrices | None] | None = None
 
     def prices(self) -> UsdPrices:
         """Return fresh prices or raise ``PriceUnavailableError`` (blocking)."""
         with self._lock:
             now = self._clock()
-            if self._cached is not None and now - self._cached[0] < CACHE_SECONDS:
-                cached = self._cached[1]
+            if (
+                self._cached is not None
+                and 0 <= now - self._cached[0] < CACHE_SECONDS
+                and now <= self._cached[1]
+            ):
+                cached = self._cached[2]
                 if cached is None:
                     raise PriceUnavailableError("price sources recently failed")
                 return cached
             try:
-                prices = self._observe(now)
+                prices, fresh_until = self._observe(now)
+                # A cold read can consume several RPC deadlines. Never hand
+                # a quote prices that expired while the other source loaded.
+                if not now <= self._clock() <= fresh_until:
+                    raise PriceUnavailableError("price expired during observation")  # noqa: TRY301
             except PriceUnavailableError as error:
                 LOG.warning("prices unavailable (%s)", error)
-                self._cached = (now, None)
+                failed_at = self._clock()
+                self._cached = (failed_at, failed_at + CACHE_SECONDS, None)
                 raise
-            self._cached = (now, prices)
+            self._cached = (now, fresh_until, prices)
             return prices
 
-    def _observe(self, now: float) -> UsdPrices:
+    def _observe(self, now: float) -> tuple[UsdPrices, float]:
         try:
-            mempool = _mempool_usd(self._fetch(self._prices_url, {}), now)
-            kraken = self._kraken("btc", now)
-            eth = self._kraken("eth", now) if self._with_eth else None
+            mempool, mempool_until = _mempool_usd(self._fetch(self._prices_url, {}), now)
+            kraken, btc_until = self._kraken("btc", now)
+            eth, eth_until = self._kraken("eth", now) if self._with_eth else (None, btc_until)
         except PriceUnavailableError:
             raise
         except Exception as error:  # noqa: BLE001 - any transport or JSON failure
@@ -194,9 +220,12 @@ class PriceFeed:
         low, high = min(mempool, kraken), max(mempool, kraken)
         if high - low > MAX_BTC_DIVERGENCE * low:
             raise PriceUnavailableError("BTC price sources disagree")
-        return UsdPrices(btc_usd_low=low, btc_usd_high=high, eth_usd=eth)
+        return (
+            UsdPrices(btc_usd_low=low, btc_usd_high=high, eth_usd=eth),
+            min(mempool_until, btc_until, eth_until),
+        )
 
-    def _kraken(self, asset: str, now: float) -> Fraction:
+    def _kraken(self, asset: str, now: float) -> tuple[Fraction, float]:
         query, pair = KRAKEN_PAIRS[asset]
         document = self._fetch(KRAKEN_TRADES_URL, {"pair": query, "count": "1"})
         return _kraken_trade(document, pair, now)
