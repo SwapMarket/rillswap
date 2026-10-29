@@ -1,7 +1,8 @@
 """Decode a client's BOLT11 invoice with the provider's own LND (RS-008).
 
 LND verifies the invoice signature and refuses invoices for another network;
-this adapter maps the result onto the RS-001 ``InvoiceBinding``. Decoding is
+this adapter maps the result onto the RS-001 ``InvoiceBinding`` and refuses
+invoices that rill-core's reader would read differently. Decoding is
 read-only (``DecodePayReq`` needs only ``offchain:read``) and grants nothing:
 unsupported routing features are rejected before returning a fundable binding,
 and the caller still applies amount, expiry, and CLTV policy.
@@ -17,6 +18,7 @@ from typing import TYPE_CHECKING
 import grpc
 from rill_core.errors import ValidationError
 from rill_core.networks import backend_names, invoice_matches_network
+from rill_core.wire.bolt11 import require_wire_agreement
 from rill_core.wire.messages import InvoiceBinding
 
 from rill_provider._lnd_proto import lightning_pb2
@@ -58,8 +60,41 @@ class InvoiceRejectedError(LndObservationError):
     """LND refused to decode the invoice (malformed, bad signature, other network)."""
 
 
-def binding_from_payreq(bolt11: str, payreq: lightning_pb2.PayReq) -> InvoiceBinding:
-    """Map a decoded ``PayReq`` onto an ``InvoiceBinding`` or refuse it."""
+def binding_from_payreq(
+    bolt11: str, payreq: lightning_pb2.PayReq, *, expected: InvoiceBinding | None = None
+) -> InvoiceBinding:
+    """Map a decoded ``PayReq`` onto an ``InvoiceBinding`` or refuse it.
+
+    LND verified the signature, but readers disagree on repeated or malformed
+    fields (LND keeps the first; older LND even a second payment hash), so the
+    exact bytes must also read the same under rill-core's rules, which the
+    browser and offline CLI use. A differing ``expected`` binding is LND's
+    fault, not the invoice's, and is checked first.
+    """
+    binding = _mapped_binding(bolt11, payreq)
+    if expected is not None and binding != expected:
+        raise LndProtocolError("decoded invoice differs from signed binding")
+    try:
+        require_wire_agreement(
+            bolt11,
+            payment_hash=payreq.payment_hash,
+            payment_secret=payreq.payment_addr.hex(),
+            amount_msat=payreq.num_msat,
+            payee=payreq.destination,
+            timestamp=payreq.timestamp,
+            expiry_seconds=payreq.expiry,
+            min_final_cltv_delta=payreq.cltv_expiry,
+            features=frozenset(payreq.features),
+            blinded_paths=bool(payreq.blinded_paths),
+        )
+    except ValidationError:
+        # Callers act on this module's rejection class (FAILED, "rejected"),
+        # never on rill-core's, which would read as an outage and be retried.
+        raise InvoiceRejectedError("invoice fields are ambiguous to BOLT11 readers") from None
+    return binding
+
+
+def _mapped_binding(bolt11: str, payreq: lightning_pb2.PayReq) -> InvoiceBinding:
     if not isinstance(payreq, lightning_pb2.PayReq):
         raise LndProtocolError("LND decode returned an unexpected message")
     features = set(payreq.features)

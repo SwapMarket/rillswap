@@ -124,3 +124,14 @@ test("multiple or malformed payment hashes are refused by every reader", () => {
   expect(decodeBolt11(invoice([tag(24, [9])])).minFinalCltvDelta).toBe(9);
   expect(invoiceBinding(invoice([]), "regtest").payee_compressed_pubkey).toBe(receiver);
 });
+
+// A batch of invoices in one string must never pass as one of them (or all).
+test("batched, wrapped or padded invoice strings are one refusal", () => {
+  const first = invoice([]), second = testInvoice("modern-lnurl");
+  expect(invoiceBinding(first, "regtest").payee_compressed_pubkey).toBe(receiver);
+  for (const batched of [first + second, `${first} ${second}`, `${first},${second}`, `${first}\n${second}`,
+    `lightning:${first}`, `${first} `, ` ${first}`, `${first}q`]) {
+    expect(() => decodeBolt11(batched)).toThrow("Invoice refused");
+    expect(() => invoiceBinding(batched, "regtest")).toThrow("Invoice refused");
+  }
+});

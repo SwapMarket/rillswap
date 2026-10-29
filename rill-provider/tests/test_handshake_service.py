@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
 
+import bolt11_fixtures as b11
 import pytest
 from fake_relay import FakeRelay
 from pyrage import x25519  # type: ignore[import-untyped]
@@ -22,6 +23,7 @@ from rill_core.wire.quotes import QuoteOffer
 from test_live_session_store import EPOCH_SECRET, Harness, _bytes
 
 from rill_provider import live_session_store as live
+from rill_provider._lnd_proto import lightning_pb2
 from rill_provider.handshake_service import (
     HandshakeService,
     ServiceHealth,
@@ -34,6 +36,7 @@ from rill_provider.live_session_store import (
     SessionExpiredError,
     StaleOwnerError,
 )
+from rill_provider.lnd_invoice_decode import binding_from_payreq
 from rill_provider.quote_policy import ClaimFeeRate
 from rill_provider.relay_client import RelayConnection
 
@@ -62,6 +65,47 @@ def test_policy_refuses_schedules_that_strand_epochs() -> None:
             announcement_lifetime=10,
             announcement_refresh=10,
         )
+
+
+def test_an_ambiguous_invoice_is_rejected_not_an_outage(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The decoder's real refusal for a field LND reads first-wins: a second
+    # payment hash. Callers must see "rejected" (invoice_unacceptable), never
+    # "unavailable", which would log a warning per attacker request.
+    fields = (
+        b11.payment_hash("ab" * 32),
+        b11.payment_secret(b"s" * 32),
+        b11.expiry(3600),
+        b11.final_cltv(40),
+        b11.features(8, 14, 17, 25),
+    )
+    ambiguous = b11.invoice([*fields, b11.payment_hash("cd" * 32)])
+    lnd_view = lightning_pb2.PayReq(
+        destination=b11.PAYEE,
+        payment_hash="ab" * 32,
+        num_msat=50_000_000,
+        timestamp=1_700_000_000,
+        expiry=3600,
+        cltv_expiry=40,
+        payment_addr=b"s" * 32,
+        features={8: {}, 14: {}, 17: {}, 25: {}},
+    )
+    service = SimpleNamespace(
+        _invoice_decoder=lambda invoice: binding_from_payreq(invoice, lnd_view),
+        _store=SimpleNamespace(classify_request=lambda _document: "new"),
+    )
+    document = json.dumps(
+        {
+            "message_type": "quote_request",
+            "sequence": live.FIRST_REQUEST_SEQUENCE,
+            "payload": {"mode": "firm", "invoice": ambiguous},
+        }
+    ).encode()
+    with caplog.at_level(logging.WARNING):
+        outcome = asyncio.run(HandshakeService._decode_invoice(service, document))  # type: ignore[arg-type]  # noqa: SLF001
+    assert outcome == "rejected"
+    assert caplog.records == []
 
 
 def _signed_confirm(harness: Harness, accept: Envelope, crypto: Context) -> dict[str, Any]:

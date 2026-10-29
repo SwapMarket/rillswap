@@ -226,8 +226,7 @@ class LndPaymentSender:
                 lightning_pb2.PayReq,
                 deadline,
             )
-            if binding_from_payreq(bolt11, payreq) != invoice_binding:
-                raise LndProtocolError("decoded invoice differs from signed binding")
+            binding_from_payreq(bolt11, payreq, expected=invoice_binding)
             tip, payer = self._attest(calls, deadline, expected=None)
             limit = max_expiry_height - tip
             if (

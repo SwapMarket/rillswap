@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Protocol
 
 from rill_core.errors import ValidationError
@@ -250,8 +250,13 @@ def _authenticate(
         raise InvoiceRejectedError("signature invalid") from None
 
 
-def decode_bolt11(invoice: str, *, crypto: EcdsaAuthenticator) -> DecodedInvoice:
-    """Decode and authenticate one BOLT 11 string (reader rules only, no policy)."""
+def _read(invoice: str) -> tuple[DecodedInvoice, bytes, bytes, _Fields]:
+    """Apply every reader rule except signature math.
+
+    Returns the facts (payee empty), the signed digest, the signature, and the
+    fields as written (``None`` where absent). Never return these facts to a
+    caller unchecked.
+    """
     if type(invoice) is not str or not 0 < len(invoice) <= MAX_INVOICE_CHARS:
         raise InvoiceRejectedError("length unsupported")
     human, words = _bech32_decode(invoice)
@@ -265,14 +270,13 @@ def decode_bolt11(invoice: str, *, crypto: EcdsaAuthenticator) -> DecodedInvoice
     signature = _words_to_bytes(words[-_SIGNATURE_WORDS:], exact=True)
     fields = _parse_fields(data[_TIMESTAMP_WORDS:])
     digest = hashlib.sha256(human.encode() + _words_to_bytes(data, exact=False)).digest()
-    payee = _authenticate(signature, digest, fields.payee, crypto)
-    return DecodedInvoice(
+    facts = DecodedInvoice(
         currency=match[1],
         amount_msat=amount,
         timestamp=_words_to_int(data[:_TIMESTAMP_WORDS]),
         payment_hash=fields.payment_hash,
         payment_secret=fields.payment_secret,
-        payee=payee,
+        payee="",
         expiry_seconds=_DEFAULT_EXPIRY_SECONDS if fields.expiry is None else fields.expiry,
         min_final_cltv_delta=(
             _DEFAULT_MIN_FINAL_CLTV if fields.min_final_cltv is None else fields.min_final_cltv
@@ -280,6 +284,72 @@ def decode_bolt11(invoice: str, *, crypto: EcdsaAuthenticator) -> DecodedInvoice
         features=fields.features,
         blinded_paths=fields.blinded_paths,
     )
+    return facts, digest, signature, fields
+
+
+def decode_bolt11(invoice: str, *, crypto: EcdsaAuthenticator) -> DecodedInvoice:
+    """Decode and authenticate one BOLT 11 string (reader rules only, no policy)."""
+    facts, digest, signature, fields = _read(invoice)
+    return replace(facts, payee=_authenticate(signature, digest, fields.payee, crypto))
+
+
+def require_wire_agreement(  # noqa: PLR0913 - every fact a node reports is compared
+    invoice: str,
+    *,
+    payment_hash: str,
+    payment_secret: str,
+    amount_msat: int,
+    payee: str,
+    timestamp: int,
+    expiry_seconds: int,
+    min_final_cltv_delta: int,
+    features: frozenset[int],
+    blinded_paths: bool,
+) -> None:
+    """Refuse unless this reader sees exactly what an authenticating node reported.
+
+    For a node (LND) that already verified the signature over these same
+    bytes, so no signature math runs here, and nothing is returned: this can
+    only refuse, never admit unauthenticated facts. Repeated or wrong-length
+    binding fields are refused by the reader rules. A repeated field that a
+    first-wins node reads differently from this reader (``9`` is last-wins
+    here) changes a fact and is refused too. An explicit ``n`` must name
+    ``payee``; without one the recovered payee is the node's.
+
+    Without a ``c`` field BOLT 11 lets a payer assume any final delta of at
+    least 18 (LND assumes 24); a larger one only gives the payee more time.
+    Every other default, the expiry included, must match exactly.
+    """
+    facts, _digest, _signature, fields = _read(invoice)
+    reported = (
+        payment_hash,
+        payment_secret,
+        amount_msat,
+        timestamp,
+        expiry_seconds,
+        features,
+        blinded_paths,
+    )
+    read = (
+        facts.payment_hash,
+        facts.payment_secret,
+        facts.amount_msat,
+        facts.timestamp,
+        facts.expiry_seconds,
+        facts.features,
+        facts.blinded_paths,
+    )
+    final_delta_agrees = (
+        min_final_cltv_delta >= _DEFAULT_MIN_FINAL_CLTV
+        if fields.min_final_cltv is None
+        else min_final_cltv_delta == fields.min_final_cltv
+    )
+    if (
+        read != reported
+        or not final_delta_agrees
+        or (fields.payee is not None and fields.payee.hex() != payee)
+    ):
+        raise InvoiceRejectedError("decoders disagree on the invoice fields")
 
 
 def invoice_binding(

@@ -14,7 +14,12 @@ from typing import Any
 import pytest
 
 from rill_core.errors import ValidationError
-from rill_core.wire.bolt11 import InvoiceRejectedError, decode_bolt11, invoice_binding
+from rill_core.wire.bolt11 import (
+    InvoiceRejectedError,
+    decode_bolt11,
+    invoice_binding,
+    require_wire_agreement,
+)
 from rill_core.wire.types import NetworkIdentity
 
 DOCS = Path(__file__).parents[3] / "rill-docs"
@@ -143,3 +148,128 @@ def test_rejections_are_validation_errors_and_inputs_must_be_strings() -> None:
         decode_bolt11("", crypto=PinnedAuthenticator(None))
     with pytest.raises(InvoiceRejectedError, match="length unsupported"):
         decode_bolt11(1234, crypto=PinnedAuthenticator(None))  # type: ignore[arg-type]
+
+
+def _reported(name: str, **changes: Any) -> dict[str, Any]:  # noqa: ANN401
+    """What an authenticating node (LND) reports for a vector, plus changes."""
+    decoded = _case(name)["decoded"]
+    facts = {
+        "payment_hash": decoded["payment_hash"],
+        "payment_secret": decoded["payment_secret"],
+        "amount_msat": int(decoded["amount_msat"]),
+        "payee": decoded["payee"],
+        "timestamp": decoded["timestamp"],
+        "expiry_seconds": decoded["expiry_seconds"],
+        "min_final_cltv_delta": decoded["min_final_cltv_delta"],
+        "features": frozenset(decoded["features"]),
+        "blinded_paths": decoded["blinded_paths"],
+    }
+    return facts | changes
+
+
+def test_wire_agreement_accepts_only_the_facts_the_bytes_carry() -> None:
+    invoice = _case("regtest hold invoice")["invoice"]
+    require_wire_agreement(invoice, **_reported("regtest hold invoice"))
+    # Without an explicit n field the payee is the node's recovered key.
+    require_wire_agreement(invoice, **_reported("regtest hold invoice", payee="02" + "11" * 32))
+    for change in (
+        {"payment_hash": "00" * 32},
+        {"payment_secret": "00" * 32},
+        {"amount_msat": 50_001_000},
+        {"timestamp": 1_700_000_001},
+        {"expiry_seconds": 3600},
+        {"min_final_cltv_delta": 18},
+        {"features": frozenset({8, 14})},
+        {"blinded_paths": True},
+    ):
+        with pytest.raises(InvoiceRejectedError, match="decoders disagree"):
+            require_wire_agreement(invoice, **_reported("regtest hold invoice", **change))
+
+
+def test_wire_agreement_binds_an_explicit_payee() -> None:
+    name = "explicit payee with a low-S signature"
+    require_wire_agreement(_case(name)["invoice"], **_reported(name))
+    with pytest.raises(InvoiceRejectedError, match="decoders disagree"):
+        require_wire_agreement(_case(name)["invoice"], **_reported(name, payee="02" + "11" * 32))
+
+
+def test_without_a_final_cltv_field_a_node_may_assume_only_a_larger_delta() -> None:
+    name = "default expiry and final CLTV"
+    invoice = _case(name)["invoice"]
+    assert _case(name)["decoded"]["min_final_cltv_delta"] == 18  # BOLT 11 default
+    for assumed in (18, 24, 144):  # LND v0.21 assumes 24
+        require_wire_agreement(invoice, **_reported(name, min_final_cltv_delta=assumed))
+    with pytest.raises(InvoiceRejectedError, match="decoders disagree"):
+        require_wire_agreement(invoice, **_reported(name, min_final_cltv_delta=17))
+    # The expiry default is not direction-safe: a longer one is refused.
+    with pytest.raises(InvoiceRejectedError, match="decoders disagree"):
+        require_wire_agreement(invoice, **_reported(name, expiry_seconds=3601))
+    # An explicit c field is exact in both directions.
+    explicit = "regtest hold invoice"
+    delta = _case(explicit)["decoded"]["min_final_cltv_delta"]
+    for wrong in (delta - 1, delta + 1):
+        with pytest.raises(InvoiceRejectedError, match="decoders disagree"):
+            require_wire_agreement(
+                _case(explicit)["invoice"], **_reported(explicit, min_final_cltv_delta=wrong)
+            )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "two payment hashes",
+        "duplicate payment secret",
+        "duplicate expiry",
+        "duplicate final CLTV",
+        "duplicate explicit payee",
+        "payment hash of 51 words",
+        "payment secret of 53 words",
+    ],
+)
+def test_wire_agreement_refuses_fields_a_first_wins_node_would_pick(name: str) -> None:
+    # LND keeps the first occurrence (older LND also a second payment hash),
+    # so it reports the ordinary invoice's facts; the reader refuses anyway.
+    with pytest.raises(InvoiceRejectedError):
+        require_wire_agreement(_case(name)["invoice"], **_reported("regtest hold invoice"))
+
+
+def test_a_repeated_feature_field_stays_last_wins_but_cannot_disagree_with_a_node() -> None:
+    name = "repeated feature field, last wins"
+    invoice = _case(name)["invoice"]
+    assert _case(name)["decoded"]["features"] == [8, 14, 17]  # the published v1 vector
+    with pytest.raises(InvoiceRejectedError, match="decoders disagree"):
+        # LND keeps the first 9 field: 8, 14 and the unknown even bit 100.
+        require_wire_agreement(invoice, **_reported(name, features=frozenset({8, 14, 100})))
+    require_wire_agreement(invoice, **_reported(name))
+
+
+def _joined(separator: str) -> str:
+    first = _case("regtest hold invoice")["invoice"]
+    second = _case("explicit payee with a low-S signature")["invoice"]
+    return first + separator + second
+
+
+@pytest.mark.parametrize(
+    "invoice",
+    [
+        _joined(""),
+        _joined(" "),
+        _joined(","),
+        _joined("\n"),
+        "lightning:" + _case("regtest hold invoice")["invoice"],
+        _case("regtest hold invoice")["invoice"] + " ",
+        " " + _case("regtest hold invoice")["invoice"],
+        _case("regtest hold invoice")["invoice"] + "q",
+    ],
+    ids=["concatenated", "space", "comma", "newline", "uri", "trailing", "leading", "extra"],
+)
+def test_batched_or_wrapped_invoices_are_one_rejection_before_any_signature(invoice: str) -> None:
+    crypto = PinnedAuthenticator(_case("regtest hold invoice")["decoded"]["payee"])
+    with pytest.raises(InvoiceRejectedError):
+        decode_bolt11(invoice, crypto=crypto)
+    with pytest.raises(InvoiceRejectedError):
+        require_wire_agreement(invoice, **_reported("regtest hold invoice"))
+    for name in NETWORK_FILES:
+        with pytest.raises(InvoiceRejectedError):
+            invoice_binding(invoice, network(name), crypto=crypto)
+    assert crypto.calls == []

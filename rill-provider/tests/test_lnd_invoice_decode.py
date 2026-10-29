@@ -7,8 +7,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+import bolt11_fixtures as b11
 import grpc
 import pytest
+from rill_core.errors import ValidationError
 from rill_core.wire.types import NetworkIdentity
 
 from rill_provider import lnd_invoice_decode as decode
@@ -25,7 +27,18 @@ NETWORK = NetworkIdentity.model_validate(
     ]["network_identity"]
 )
 PAYEE = "02" + "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-INVOICE = "lnbcrt500u1pexample"
+assert PAYEE == b11.PAYEE
+KEY_2_PAYEE = "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+# Signed bytes carrying exactly the facts _payreq() reports for them.
+FIELDS = (
+    b11.payment_hash("ab" * 32),
+    b11.payment_secret(b"s" * 32),
+    b11.description("RillSwap test"),
+    b11.expiry(3600),
+    b11.final_cltv(40),
+    b11.features(8, 14, 17, 25),
+)
+INVOICE = b11.invoice(FIELDS)
 
 
 def _payreq(**changes: Any) -> lightning_pb2.PayReq:  # noqa: ANN401
@@ -136,6 +149,106 @@ def test_unbindable_invoices_are_rejected(
     channel = _decoder(tmp_path, monkeypatch, payreq)
     with pytest.raises(decode.InvoiceRejectedError):
         channel.decoder.decode(INVOICE)  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        b11.payment_hash("cd" * 32),  # older LND pays the first hash
+        b11.payment_hash("ab" * 32),  # even an identical repeat is refused
+        b11.payment_secret(b"t" * 32),
+        b11.expiry(7200),
+        b11.final_cltv(144),
+        [*b11.payee(), *b11.payee(KEY_2_PAYEE)],  # two n fields, LND keeps the first
+        b11.features(8, 14, 17, 25, 30),  # LND keeps the first 9, the browser the last
+        b11.tag(16, [0] * 51),  # wrong-length secret LND would skip
+        b11.tag(1, [0] * 51),  # wrong-length hash LND would skip
+    ],
+    ids=[
+        "second-hash",
+        "same-hash",
+        "secret",
+        "expiry",
+        "cltv",
+        "payee",
+        "features",
+        "short-secret",
+        "short-hash",
+    ],
+)
+def test_fields_a_first_wins_lnd_reads_differently_are_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra: list[int]
+) -> None:
+    ambiguous = b11.invoice([*FIELDS, extra])
+    # _payreq() is what LND reports: the first occurrence of each field.
+    channel = _decoder(tmp_path, monkeypatch, _payreq())
+    with pytest.raises(decode.InvoiceRejectedError, match="ambiguous") as refused:
+        channel.decoder.decode(ambiguous)  # type: ignore[attr-defined]
+    # The provider's class, which callers treat as a final refusal, never
+    # rill-core's ValidationError, which they would treat as an outage.
+    assert not isinstance(refused.value, ValidationError)
+    assert channel.closed
+
+
+def test_lnd_reporting_other_facts_than_the_bytes_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for changes in (
+        {"payment_hash": "cd" * 32},
+        {"payment_addr": b"t" * 32},
+        {"num_msat": 50_001_000},
+        {"timestamp": 1_700_000_001},
+        {"expiry": 7200},
+        {"cltv_expiry": 144},
+        {"features": {8: {}, 14: {}, 25: {}}},
+    ):
+        channel = _decoder(tmp_path, monkeypatch, _payreq(**changes))
+        with pytest.raises(decode.InvoiceRejectedError, match="ambiguous"):
+            channel.decoder.decode(INVOICE)  # type: ignore[attr-defined]
+
+
+def test_an_explicit_payee_must_be_the_one_lnd_verified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    explicit = b11.invoice([*FIELDS, b11.payee()])
+    channel = _decoder(tmp_path, monkeypatch, _payreq())
+    assert channel.decoder.decode(explicit).payee_compressed_pubkey == PAYEE  # type: ignore[attr-defined]
+    channel = _decoder(tmp_path, monkeypatch, _payreq(destination=KEY_2_PAYEE))
+    with pytest.raises(decode.InvoiceRejectedError, match="ambiguous"):
+        channel.decoder.decode(explicit)  # type: ignore[attr-defined]
+
+
+def test_without_a_final_cltv_field_lnds_larger_default_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # LND assumes 24 where BOLT 11 says at least 18; the previous release
+    # bound 24 and still does. Only a smaller delta would be a disagreement.
+    no_c = b11.invoice([field for field in FIELDS if field[0] != 24])
+    channel = _decoder(tmp_path, monkeypatch, _payreq(cltv_expiry=24))
+    assert channel.decoder.decode(no_c).min_final_cltv_delta == 24  # type: ignore[attr-defined]
+    channel = _decoder(tmp_path, monkeypatch, _payreq(cltv_expiry=17))
+    with pytest.raises(decode.InvoiceRejectedError, match="ambiguous"):
+        channel.decoder.decode(no_c)  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "invoice",
+    [
+        INVOICE + INVOICE,
+        INVOICE + "," + INVOICE,
+        INVOICE + " " + INVOICE,
+        INVOICE + "\n" + INVOICE,
+        INVOICE + "q",
+    ],
+    ids=["concatenated", "comma", "space", "newline", "trailing"],
+)
+def test_batched_invoice_strings_are_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invoice: str
+) -> None:
+    # Even if a node returned the first invoice's facts, nothing is admitted.
+    channel = _decoder(tmp_path, monkeypatch, _payreq())
+    with pytest.raises(decode.InvoiceRejectedError):
+        channel.decoder.decode(invoice)  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize(

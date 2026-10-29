@@ -8,13 +8,14 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import bolt11_fixtures as b11
 import grpc
 import pytest
 from rill_core.wire.types import NetworkIdentity
 
 from rill_provider import lnd_payment_send as sender
 from rill_provider._lnd_proto import lightning_pb2
-from rill_provider.lnd_invoice_decode import binding_from_payreq
+from rill_provider.lnd_invoice_decode import InvoiceRejectedError, binding_from_payreq
 from rill_provider.lnd_payment_observation import LndProtocolError, LndUnavailableError
 
 NETWORK = NetworkIdentity.model_validate(
@@ -24,9 +25,20 @@ NETWORK = NetworkIdentity.model_validate(
 )
 PREIMAGE = "42" * 32
 HASH = hashlib.sha256(bytes.fromhex(PREIMAGE)).hexdigest()
-INVOICE = "lnbcrt500u1pexample"
 PAYEE = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 NOW = 1_700_000_010
+# Signed bytes carrying exactly the facts _payreq() reports for them.
+INVOICE = b11.invoice(
+    [
+        b11.payment_hash(HASH),
+        b11.payment_secret(b"s" * 32),
+        b11.description("RillSwap test"),
+        b11.expiry(3600),
+        b11.final_cltv(40),
+        b11.features(8, 14, 17, 25),
+    ],
+    timestamp=NOW - 10,
+)
 PAYER = "03" + "ab" * 32
 AMOUNT_MSAT = 50_000_000
 
@@ -427,6 +439,32 @@ def test_query_must_match_signed_invoice_before_preparing_route(
     assert all(
         method not in (sender.QUERY_METHOD, sender.SEND_METHOD) for method, _ in channel.calls
     )
+
+
+def test_an_in_flight_ambiguous_invoice_is_a_final_refusal_before_routing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Admitted by an older release through a first-wins LND: a second payment
+    # hash rides along, and LND still reports the first invoice's facts.
+    ambiguous = b11.invoice(
+        [
+            b11.payment_hash(HASH),
+            b11.payment_secret(b"s" * 32),
+            b11.expiry(3600),
+            b11.final_cltv(40),
+            b11.features(8, 14, 17, 25),
+            b11.payment_hash("cd" * 32),
+        ],
+        timestamp=NOW - 10,
+    )
+    stored = binding_from_payreq(INVOICE, _payreq()).model_copy(
+        update={"bolt11_sha256": hashlib.sha256(ambiguous.encode()).hexdigest()}
+    )
+    client, channel = _sender(tmp_path, monkeypatch, [])
+    with pytest.raises(InvoiceRejectedError, match="ambiguous"):
+        client.prepare(ambiguous, invoice_binding=stored, fee_limit_sat=10, max_expiry_height=1070)
+    assert [method for method, _ in channel.calls] == [sender.DECODE_METHOD]
 
 
 def test_prepared_bytes_cannot_bypass_expiry_cap(
