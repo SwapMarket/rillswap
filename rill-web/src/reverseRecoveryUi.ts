@@ -50,6 +50,7 @@ export function reverseRecoveryControls(root: HTMLElement, options: {
     consent.className = "swap-consent";
     controls.append(feeLabel, fee, consent);
     const prepare = button(controls, "Approve and prepare recovery claim", "swap-reverse-recovery-prepare");
+    prepare.className = "primary";
     const claimStatus = node("p", "First prepare a claim or inspect local execution state to obtain its exact encrypted backup.", "swap-reverse-recovery-claim-status");
     claimStatus.className = "swap-consent";
     controls.append(claimStatus); let savedClaimTxid = "";
@@ -73,6 +74,7 @@ export function reverseRecoveryControls(root: HTMLElement, options: {
         ? "Exact claim bytes are saved; prior exposure is unknown. Only identical manual export is available."
         : "Exact claim bytes are saved, not yet exposed. Keep the claim backup; export or broadcast it when ready."; });
     const exportClaim = button(controls, "Approve and download exact saved claim", "swap-reverse-recovery-export"), broadcast = button(controls, "Approve and broadcast saved claim once", "swap-reverse-recovery-broadcast");
+    broadcast.className = "primary";
     const expose = async (action: "download" | "broadcast"): Promise<void> => { const approval = capturedApproval(), claimTxid = savedClaimTxid;
       const exposureApproved = (): void => { approval.check(); if (!claimTxid || savedClaimTxid !== claimTxid) throw new Error("No exact claim backup is prepared"); };
       exposureApproved(); broadcast.dataset.locked = "true"; broadcast.disabled = true;

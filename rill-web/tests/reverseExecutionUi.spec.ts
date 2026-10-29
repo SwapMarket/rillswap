@@ -1,4 +1,4 @@
-import { expect, test } from "./fixtures/swapPage";
+import { expect, openSettings, test } from "./fixtures/swapPage";
 import type { Page } from "@playwright/test";
 import regtest from "../src/networks/regtest-rillswap-e2e-v1.json" with { type: "json" };
 import { scriptAddress } from "../src/swap/address";
@@ -28,7 +28,7 @@ async function mountedExecution(page: Page, claimConfirmations?: string): Promis
 }
 
 async function chooseClaimConfirmations(page: Page, value: string): Promise<void> {
-  await page.locator("#swap-settings-toggle").click();
+  await openSettings(page, "advanced");
   await page.locator("#swap-reverse-claim-confirmations").fill(value);
   await page.locator("#swap-settings-close").click();
 }

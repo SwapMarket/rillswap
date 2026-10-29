@@ -1,4 +1,4 @@
-import { expect, test } from "./fixtures/swapPage";
+import { expect, openTool, test } from "./fixtures/swapPage";
 import type { Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -77,7 +77,7 @@ async function chain(page: Page, uncertain = false, mempool = false) {
 
 async function resume(page: Page): Promise<void> {
   await page.goto(PAGE); // deliberately no file and no recovery fragment
-  await page.locator("#swap-saved-recoveries summary").click();
+  await openTool(page, "history");
   await expect(page.locator("#swap-saved-recoveries-list")).toContainText("Lightning to Bitcoin");
   await page.getByRole("button", { name: "Resume", exact: true }).click();
 }
@@ -85,7 +85,7 @@ async function resume(page: Page): Promise<void> {
 test("a funded reverse swap resumes and automatically claims using only browser storage", async ({ page }) => {
   await seedFunded(page); const transport = await chain(page);
   await page.reload();
-  await expect(page.locator("#swap-saved-recoveries-list")).toContainText("funded");
+  await expect(page.locator("#swap-saved-recoveries-list")).toContainText("Funding recorded");
   expect(transport.posts).toBe(0); expect(transport.reads).toBe(0);
   await resume(page);
   await expect(page.locator("#swap-reverse-steps h2")).toHaveText("Bitcoin received");
@@ -153,7 +153,7 @@ test("a pending payment resumes original-session archived funding without publis
   });
   await seedFunded(page, true); const transport = await chain(page);
   await page.reload();
-  await expect(page.locator("#swap-saved-recoveries-list")).toContainText("payment-unknown");
+  await expect(page.locator("#swap-saved-recoveries-list")).toContainText("Payment needs checking");
   expect(archiveReads).toBe(0); expect(transport.posts).toBe(0);
   await resume(page);
   await expect(page.locator("#swap-reverse-steps h2")).toHaveText("Bitcoin received");

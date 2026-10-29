@@ -137,52 +137,54 @@ function mount(root: HTMLElement): void {
   cardHead.className = "card-heading";
   const settingsButton = node("button", "Settings", "swap-settings-toggle");
   settingsButton.type = "button";
-  settingsButton.setAttribute("aria-haspopup", "dialog");
   const providersButton = node("button", "Providers", "swap-providers-toggle");
   providersButton.type = "button";
-  providersButton.setAttribute("aria-haspopup", "dialog");
-  cardHead.append(node("h2", "Swap Bitcoin"), providersButton, settingsButton);
-  const settings = node("dialog", "", "swap-settings");
+  cardHead.append(node("h2", "Swap"));
+  const settings = node("section", "", "swap-settings");
   const settingsHead = node("div");
   settingsHead.className = "card-heading";
   const closeSettings = node("button", "Close", "swap-settings-close");
   closeSettings.type = "button";
   settingsHead.append(node("h2", "Swap settings"), closeSettings);
   settings.append(settingsHead);
-  settingsButton.onclick = () => settings.showModal();
-  closeSettings.onclick = () => settings.close();
+  const connections = node("details", "", "swap-connection-settings");
+  connections.append(node("summary", "Network & connections"));
+  const evmSettings = node("details", "", "swap-evm-settings");
+  evmSettings.append(node("summary", "Stablecoin connections"));
+  const advancedSettings = node("details", "", "swap-advanced-settings");
+  advancedSettings.append(node("summary", "Advanced overrides"));
   const form = node("form", "", "swap-form");
   const networkLabel = node("label", "Network");
   const network = node("select", "", "swap-network");
   networkLabel.htmlFor = network.id;
   for (const name of Object.keys(NETWORKS)) network.append(Object.assign(node("option", name), { value: name }));
   network.value = __SWAP_DEFAULTS__.network;
-  settings.append(networkLabel, network);
+  connections.append(networkLabel, network);
   const relayLabel = node("label", "Nostr relays (one per line)");
   const relay = node("textarea", "", "swap-relay");
   relayLabel.htmlFor = relay.id;
   relay.value = __SWAP_DEFAULTS__.relays.join("\n");
   relay.spellcheck = false;
-  settings.append(relayLabel, relay, node("small", "Up to eight relays, used to find providers and talk to them. Each relay sees your IP unless you use Tor; onion relays only connect in Tor Browser."));
-  const chainApi = field(settings, "swap-chain-api", "Mempool API", __SWAP_DEFAULTS__.mempoolApi,
+  connections.append(relayLabel, relay, node("small", "Up to eight relays. Each sees your IP unless you use Tor. Onion relays only connect in Tor Browser."));
+  const chainApi = field(connections, "swap-chain-api", "Mempool API", __SWAP_DEFAULTS__.mempoolApi,
     "Any mempool or Esplora instance over https, for example https://mempool.example/api. Used for confirmations and transaction links.");
-  const broadcastApi = field(settings, "swap-broadcast-api", "Transaction broadcast API", __SWAP_DEFAULTS__.broadcastApi,
+  const broadcastApi = field(connections, "swap-broadcast-api", "Transaction broadcast API", __SWAP_DEFAULTS__.broadcastApi,
     "Where claim and refund transactions are sent. Usually the same as the mempool API.");
-  const evmRpc = field(settings, "swap-evm-rpc", "EVM RPC (stablecoin swaps)", __SWAP_DEFAULTS__.evmRpc ?? "",
+  const evmRpc = field(evmSettings, "swap-evm-rpc", "EVM RPC (stablecoin swaps)", __SWAP_DEFAULTS__.evmRpc ?? "",
     "Read-only chain access for stablecoin swaps; your wallet extension signs. This operator sees your IP and the swap's addresses. Custom origins need a deployment CSP allowance.");
-  const evmSponsor = field(settings, "swap-evm-sponsor", "Gas sponsor (receive stablecoins without a wallet)", __SWAP_DEFAULTS__.evmSponsor?.url ?? "",
+  const evmSponsor = field(evmSettings, "swap-evm-sponsor", "Gas sponsor (receive stablecoins without a wallet)", __SWAP_DEFAULTS__.evmSponsor?.url ?? "",
     "Alchemy-compatible wallet API that pays claim gas. Leave empty to claim from your own wallet extension. The sponsor learns the claim preimage and your destination address.");
-  const evmEntryPoint = field(settings, "swap-evm-entry-point", "ERC-4337 EntryPoint v0.7", __SWAP_DEFAULTS__.evmSponsor?.entryPoint ?? "",
+  const evmEntryPoint = field(evmSettings, "swap-evm-entry-point", "ERC-4337 EntryPoint v0.7", __SWAP_DEFAULTS__.evmSponsor?.entryPoint ?? "",
     "Sponsored claims are bound to this EntryPoint; the browser recomputes every hash it signs.");
-  const evmDelegate = field(settings, "swap-evm-delegate", "EIP-7702 account delegate", __SWAP_DEFAULTS__.evmSponsor?.delegate ?? "",
+  const evmDelegate = field(evmSettings, "swap-evm-delegate", "EIP-7702 account delegate", __SWAP_DEFAULTS__.evmSponsor?.delegate ?? "",
     "The only contract the browser-held claim key will delegate to. Changing it moves trust to that contract's code.");
-  const evmSponsorPolicy = field(settings, "swap-evm-sponsor-policy", "Gas sponsor policy ID (optional)", __SWAP_DEFAULTS__.evmSponsor?.policyId ?? "",
+  const evmSponsorPolicy = field(evmSettings, "swap-evm-sponsor-policy", "Gas sponsor policy ID (optional)", __SWAP_DEFAULTS__.evmSponsor?.policyId ?? "",
     "Alchemy gas policy UUID sent with each sponsored claim. Leave empty for a sponsor proxy that applies its own policy.");
   const sponsorConfigured = (): boolean => [evmSponsor, evmEntryPoint, evmDelegate].some((input) => input.value.trim() !== "");
   const selectedSponsor = (): EvmSponsorDefaults | null => sponsorConfigured()
     ? validateEvmSponsor(evmSponsor.value.trim(), evmEntryPoint.value.trim().toLowerCase(), evmDelegate.value.trim().toLowerCase(), network.value as NetworkName,
       evmSponsorPolicy.value.trim()) : null;
-  const identity = field(settings, "swap-provider", "Provider identity", "",
+  const identity = field(advancedSettings, "swap-provider", "Provider identity", "",
     "Automatic by default. Optionally pin a provider's 64-character public identity key, or choose one under Providers.");
   const rankingLabel = node("label", "Provider ranking");
   const ranking = node("select", "", "swap-ranking");
@@ -190,9 +192,8 @@ function mount(root: HTMLElement): void {
   ranking.append(Object.assign(node("option", "Fastest payment, then lowest price"), { value: "time" }),
     Object.assign(node("option", "Lowest price, then fastest payment"), { value: "price" }));
   ranking.value = "time";
-  settings.append(rankingLabel, ranking, node("small", "Fastest means the fewest funding confirmations the provider waits for. " +
-    "Providers that do not announce it rank after those that do. Applies to automatic choice and the order of offers."));
-  const claimConfirmations = field(settings, "swap-reverse-claim-confirmations", "Lightning to Bitcoin: claim after confirmations", "",
+  settings.append(rankingLabel, ranking, node("small", "Fastest means the fewest funding confirmations. Providers with unknown confirmation requirements rank last."));
+  const claimConfirmations = field(advancedSettings, "swap-reverse-claim-confirmations", "Lightning to Bitcoin: claim after confirmations", "",
     "Empty waits for the funding confirmations the provider signed. A lower number (0: unconfirmed) claims sooner, but the claim reveals " +
     "your payment secret: the provider can then settle your Lightning payment and still double-spend its unconfirmed or shallow " +
     "funding, keeping both. Only lower it for providers and amounts you are willing to lose.");
@@ -209,7 +210,7 @@ function mount(root: HTMLElement): void {
   const automaticText = (): string => sortMode() === "time" ? "fastest payment, then lowest price" : "lowest price, then fastest payment";
   identity.placeholder = "Automatic (by provider ranking)";
   // The provider directory: every announced provider with its limits and fees, browsable before any amount.
-  const providers = node("dialog", "", "swap-providers");
+  const providers = node("section", "", "swap-providers");
   const providersHead = node("div");
   providersHead.className = "card-heading";
   const closeProviders = node("button", "Close", "swap-providers-close");
@@ -222,8 +223,6 @@ function mount(root: HTMLElement): void {
   providersStatus.setAttribute("role", "status");
   const providersList = node("div", "", "swap-providers-list");
   providers.append(providersHead, providersIntro, providersStatus, reloadProviders, providersList);
-  providersButton.onclick = () => providers.showModal();
-  closeProviders.onclick = () => providers.close();
   const providerChoice = node("p", "", "swap-provider-choice");
   const PROFILE_TITLE: Record<string, string> = { "btc-to-ln/v1": "Bitcoin → Lightning", "ln-to-btc/v1": "Lightning → Bitcoin",
     "erc20-to-ln/v1": "Stablecoin → Lightning", "ln-to-erc20/v1": "Lightning → Stablecoin" };
@@ -271,6 +270,7 @@ function mount(root: HTMLElement): void {
           node("td", entry.fundingConfirmations === null ? "unknown" : String(entry.fundingConfirmations)),
           node("td", new Date(entry.expiresAt * 1000).toLocaleString())];
         const action = node("td"); action.append(choose(entry.identity, "Choose"));
+        cells.forEach((cell, index) => { cell.dataset.label = head.children[index]!.textContent ?? ""; });
         row.append(...cells, action);
         body.append(row);
       }
@@ -346,14 +346,14 @@ function mount(root: HTMLElement): void {
   const invoiceBox = node("div");
   const invoice = field(invoiceBox, "swap-invoice", "Lightning invoice to pay (BOLT11)");
   invoice.placeholder = "Paste your Lightning invoice";
-  const receiveBox = node("div");
+  const receiveBox = node("div", "", "swap-receive-fields");
   const receiveAddress = field(receiveBox, "swap-receive-address", "Bitcoin address to receive");
   receiveAddress.placeholder = "bc1... (your wallet)";
   const receiveAmount = field(receiveBox, "swap-receive-amount", "Amount to receive (sat)");
   receiveAmount.inputMode = "numeric";
   receiveAmount.placeholder = "50000";
   // Live estimate from announced fees, so Swap can proceed without a separate review when the signed quote is no worse.
-  const estimate = node("p", "", "swap-estimate");
+  const estimate = node("div", "", "swap-estimate");
   estimate.setAttribute("role", "status");
   // The directory entry the shown estimate names: a signed offer no worse on both price and depth may skip review.
   // BTC to LN: a shallower depth only means the provider pays sooner. LN to BTC: the depth is when the client
@@ -391,23 +391,28 @@ function mount(root: HTMLElement): void {
     const found = estimateFromDirectory(directoryEntries, route.profile, amount, identity.value.trim(), undefined, sortMode());
     if ("reason" in found) { estimate.textContent = found.reason; return; }
     estimatedTotal = amount + found.feeSat; estimatedDepth = found.fundingConfirmations;
-    estimate.textContent = (route.profile === "btc-to-ln/v1"
-      ? `You send about ${estimatedTotal.toLocaleString()} sat (${amount.toLocaleString()} sat invoice + ${found.feeSat.toLocaleString()} sat provider fee via ${found.identity.slice(0, 12)}…). Your wallet's network fee is extra. `
-      : `You pay about ${estimatedTotal.toLocaleString()} sat over Lightning (${found.feeSat.toLocaleString()} sat provider fee via ${found.identity.slice(0, 12)}…) to receive ${amount.toLocaleString()} sat. `) +
-      fundingWaitText(route.profile, found.fundingConfirmations);
+    estimate.replaceChildren(node("span", route.profile === "btc-to-ln/v1" ? "Estimated Bitcoin deposit" : "Estimated Lightning payment"),
+      node("strong", `${estimatedTotal.toLocaleString()} sat`),
+      node("small", `${amount.toLocaleString()} sat ${route.profile === "btc-to-ln/v1" ? "invoice" : "received"} + ${found.feeSat.toLocaleString()} sat provider fee. ` +
+        (route.profile === "btc-to-ln/v1" ? "Your wallet's network fee is extra. " : "Your wallet's routing fee is extra. ") +
+        fundingWaitText(route.profile, found.fundingConfirmations)));
   };
   invoice.oninput = receiveAmount.oninput = updateEstimate;
   form.append(invoiceBox, receiveBox, estimate);
-  const keyRecommendation = node("p", "Save your 12-word recovery key; it is stored in this browser, but Tor Browser and private windows may erase it on restart.", "swap-key-recommendation");
+  const keyRecommendation = node("p", "", "swap-key-recommendation");
+  const backupKey = node("button", "Back up your recovery key", "swap-key-backup");
+  backupKey.type = "button";
+  backupKey.className = "text-button";
+  keyRecommendation.append(backupKey, node("small", "Tor Browser and private windows may forget it on restart."));
   const setup = node("details", "", "swap-wallet-setup");
   const prerequisites = node("p", "", "swap-prerequisites");
-  setup.append(node("summary", "Recovery key & advanced overrides"), prerequisites);
+  setup.append(node("summary", "Your recovery key"), prerequisites);
   const walletStatus = node("p", "Preparing your browser recovery key...", "swap-wallet-status");
   const walletActions = node("div", "", "swap-wallet-actions");
   setup.append(walletStatus, walletActions);
   // Overrides apply to Bitcoin to Lightning only; the recovery key serves both directions.
   const overrides = node("div", "", "swap-forward-overrides");
-  setup.append(overrides);
+  advancedSettings.append(overrides);
   const refund = field(overrides, "swap-refund", "Refund address override (optional)", "",
     "Leave empty for a fresh address derived from your browser recovery key. Otherwise use your own wallet's P2WPKH or P2TR address.");
   const tip = field(overrides, "swap-tip", "Block height override (optional)", "", "Leave empty to fetch the height from the configured mempool API.");
@@ -425,7 +430,7 @@ function mount(root: HTMLElement): void {
     node("li", "The recovery key is stored unencrypted in this browser. Save its 12 words; private windows and Tor Browser forget it on restart."),
     node("li", "Open source (MIT), provided as is, without warranty."));
   privacy.append(node("summary", "Privacy & terms"), privacyList);
-  const limits = node("details");
+  const limits = node("details", "", "swap-limit-settings");
   limits.append(node("summary", "Fee & timeout limits"));
   limits.append(node("p", "These are caps, not charges: the swap stops before funding if the " +
     "provider's signed terms exceed any of them.", "swap-limits-hint"));
@@ -448,29 +453,33 @@ function mount(root: HTMLElement): void {
     "If the provider never pays, your refund unlocks within this many EVM blocks of the quote.");
   const evmClaimWindow = field(limits, "swap-evm-claim-window", "Minimum receive claim window (EVM blocks)", "600",
     "Lightning to stablecoin only. Claims also require at least ten minutes before the provider's refund block.");
-  settings.append(limits);
+  settings.append(connections, evmSettings, limits, advancedSettings);
   const notice = node("p", "", "swap-release-notice");
   notice.setAttribute("role", "note");
-  const start = node("button", "Swap", "swap-start");
+  const start = node("button", "Continue", "swap-start");
   start.type = "submit";
   start.className = "primary";
-  form.append(keyRecommendation, setup, notice, start);
+  form.append(notice, start, keyRecommendation);
   // Once a swap starts, the form gives way to this tracking view; its link addresses the swap record.
   const tracking = node("div", "", "swap-tracking");
   tracking.hidden = true;
   const trackingTitle = node("h2", "Your swap");
-  const another = node("a", "Start another swap", "swap-another");
+  const another = node("a", "New swap", "swap-another");
   another.href = "./swap.html";
   const linkBox = node("div", "", "swap-link");
   linkBox.hidden = true;
-  const linkAnchor = node("a", "Swap link", "swap-link-anchor");
-  const copyLink = node("button", "Copy swap link", "swap-link-copy");
+  const linkAnchor = node("a", "Open saved link", "swap-link-anchor");
+  const copyLink = node("button", "Copy link", "swap-link-copy");
   copyLink.type = "button";
-  linkBox.append(node("p", "This link holds your encrypted swap record; keep it with your recovery key."), linkAnchor, copyLink);
+  copyLink.setAttribute("aria-label", "Copy encrypted swap link");
+  const linkFeedback = node("span", "", "swap-link-feedback");
+  linkFeedback.setAttribute("role", "status");
+  linkBox.append(copyLink, linkAnchor, linkFeedback, node("small", "Encrypted backup link. Keep your recovery key too."));
   tracking.append(trackingTitle, another, linkBox);
   const panel = node("div", "", "swap-panel");
   panel.setAttribute("aria-live", "polite");
   const progress = node("section", "", "swap-progress");
+  progress.hidden = true;
   const status = node("p", "Ready when you are", "swap-status");
   status.setAttribute("role", "status");
   const steps = node("ol", "", "swap-steps");
@@ -480,8 +489,24 @@ function mount(root: HTMLElement): void {
   diagnostics.append(node("summary", "Technical activity"));
   const log = node("pre", "", "swap-log");
   diagnostics.append(log);
-  card.append(cardHead, form, tracking, progress, panel, privacy, diagnostics);
+  card.append(cardHead, form, tracking, progress, panel);
+  const utilityNav = node("nav", "", "swap-utilities");
+  utilityNav.setAttribute("aria-label", "Swap tools");
+  const historyButton = node("button", "History", "swap-history-toggle");
+  const recoveryButton = node("button", "Recovery", "swap-recovery-toggle");
+  utilityNav.append(historyButton, recoveryButton, providersButton, settingsButton);
+  const utilityPanels = node("div", "", "swap-utility-panels");
+  const recoveryTools = node("section", "", "swap-recovery-tools");
+  const recoveryHead = node("div"); recoveryHead.className = "card-heading";
+  const closeRecovery = node("button", "Close"); closeRecovery.type = "button";
+  recoveryHead.append(node("h2", "Recovery"), closeRecovery);
+  recoveryTools.append(recoveryHead, setup);
+  const privacyButton = node("button", "Privacy & terms", "swap-privacy-toggle");
+  const activityButton = node("button", "Activity", "swap-activity-toggle");
+  const footerNav = node("nav"); footerNav.setAttribute("aria-label", "About RillSwap");
+  footerNav.append(privacyButton, activityButton);
   const footer = node("footer", "Permissionless · Non-custodial · Locally verified");
+  footer.prepend(footerNav);
   const commit = document.querySelector<HTMLMetaElement>('meta[name="rillswap-build-commit"]')?.content;
   if (commit && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(commit)) {
     const revision = node("a", commit.slice(0, 7), "swap-build-commit");
@@ -489,9 +514,45 @@ function mount(root: HTMLElement): void {
     revision.setAttribute("aria-label", `View build commit ${commit.slice(0, 7)} on GitHub`);
     footer.append(" · Build ", revision);
   }
-  root.replaceChildren(header, intro, card, footer, settings, providers);
+  const main = node("main"); main.append(intro, card, utilityNav, utilityPanels);
+  root.replaceChildren(header, main, footer);
+  const utilities = new Map<HTMLButtonElement, HTMLElement>();
+  let selectedUtility: HTMLButtonElement | undefined;
+  const showUtility = (button?: HTMLButtonElement, focus = true): void => {
+    selectedUtility = button;
+    for (const [control, content] of utilities) {
+      content.hidden = control !== button;
+      control.setAttribute("aria-expanded", String(control === button));
+      if (control === button && content instanceof HTMLDetailsElement) content.open = true;
+    }
+    if (focus && button) {
+      const content = utilities.get(button)!;
+      const title = content.querySelector<HTMLElement>("h2, summary")!;
+      title.tabIndex = -1;
+      title.focus({ preventScroll: true });
+      content.scrollIntoView({ block: "nearest" });
+    }
+  };
+  const addUtility = (button: HTMLButtonElement, content: HTMLElement): void => {
+    button.type = "button";
+    button.setAttribute("aria-controls", content.id);
+    button.setAttribute("aria-expanded", "false");
+    content.hidden = true; content.classList.add("utility-panel");
+    utilities.set(button, content); utilityPanels.append(content);
+    button.onclick = () => showUtility(selectedUtility === button ? undefined : button);
+  };
+  const closeUtility = (): void => { const previous = selectedUtility; showUtility(undefined); previous?.focus(); };
+  closeSettings.onclick = closeProviders.onclick = closeRecovery.onclick = closeUtility;
+  utilityPanels.addEventListener("keydown", (event) => { if (event.key === "Escape") { event.preventDefault(); closeUtility(); } });
+  addUtility(recoveryButton, recoveryTools);
+  addUtility(providersButton, providers);
+  addUtility(settingsButton, settings);
+  addUtility(privacyButton, privacy);
+  addUtility(activityButton, diagnostics);
+  backupKey.onclick = () => { setup.open = true; showUtility(recoveryButton); };
   const setStatus = (text: string, step: number, state = "working"): void => {
     status.textContent = text;
+    progress.hidden = state === "ready" && panel.childElementCount === 0 && tracking.hidden;
     progress.dataset.state = state;
     for (const [index, item] of [...steps.children].entries()) {
       item.className = index < step ? "done" : index === step ? "current" : "";
@@ -508,8 +569,19 @@ function mount(root: HTMLElement): void {
     else if (line.startsWith("refused:") || line.startsWith("stopped:")) setStatus(line.replace(/^[^:]+: /, ""), -1, "error");
   };
   let busy = false;
+  const setBusy = (value: boolean): void => {
+    busy = value;
+    settingsButton.disabled = providersButton.disabled = badge.disabled = value;
+    if (value) showUtility(undefined, false);
+  };
+  const showReview = (keepAddress = false): void => {
+    intro.hidden = cardHead.hidden = true;
+    card.dataset.review = keepAddress ? "address" : "quote";
+    form.hidden = !keepAddress;
+  };
   const showTracking = (title: string): void => {
-    intro.hidden = form.hidden = true;
+    intro.hidden = form.hidden = cardHead.hidden = true;
+    delete card.dataset.review;
     tracking.hidden = false;
     trackingTitle.textContent = title;
   };
@@ -522,7 +594,7 @@ function mount(root: HTMLElement): void {
     linkBox.hidden = false;
   };
   copyLink.onclick = () => {
-    void navigator.clipboard.writeText(location.href).then(() => { copyLink.textContent = "Copied"; }, () => { copyLink.textContent = "Copy failed; use the link"; });
+    void navigator.clipboard.writeText(linkAnchor.href).then(() => { linkFeedback.textContent = "Copied"; }, () => { linkFeedback.textContent = "Copy failed. Open the saved link to copy it."; });
   };
   const walletPromise = BrowserRecoveryWallet.open();
   const recovery = recoveryPanel({
@@ -538,7 +610,8 @@ function mount(root: HTMLElement): void {
     selectedEvmRpc: () => validateMempoolApi(evmRpc.value.trim(), network.value as NetworkName),
     selectedEvmSponsor: selectedSponsor,
   });
-  card.insertBefore(recovery.element, privacy);
+  recoveryTools.append(recovery.element);
+  (recovery.element as HTMLDetailsElement).open = true;
   // Register failure handling immediately so blocked storage never becomes an unhandled rejection.
   void walletPromise.then(async (wallet) => {
     await walletBackupControls(walletActions, wallet, walletStatus);
@@ -559,16 +632,21 @@ function mount(root: HTMLElement): void {
   updateDisclosure();
   const updateNetwork = (): void => {
     const route = routeFor(fromAsset.value, toAsset.value);
+    if (!busy && tracking.hidden) {
+      intro.hidden = form.hidden = cardHead.hidden = false;
+      delete card.dataset.review;
+      progress.hidden = panel.childElementCount === 0;
+    }
     badge.value = network.value;
     notice.hidden = true;
     heroTitle.textContent = route.title;
-    heroTagline.textContent = route.tagline;
+    heroTagline.textContent = "An open, permissionless market. No account.";
     pairNote.textContent = route.unavailable ?? "";
     pairNote.hidden = !route.unavailable;
     invoiceBox.hidden = route.profile !== "btc-to-ln/v1" && route.profile !== "erc20-to-ln/v1";
     overrides.hidden = route.profile !== "btc-to-ln/v1";
     prerequisites.textContent = route.profile === "btc-to-ln/v1"
-      ? "This experimental flow needs a wallet that can sign a PSBT without broadcasting it, but creates your recovery key and refund address automatically."
+      ? "Send Bitcoin from any native segwit wallet. A finalized PSBT is optional. Your recovery key and refund address are created automatically."
       : route.profile === "erc20-to-ln/v1"
         ? `This flow needs an EVM wallet extension (MetaMask or similar) holding ${route.from.symbol} plus gas on the provider's chain. ` +
           "The wallet keeps the refund key; your browser recovery key encrypts the swap record."
@@ -584,7 +662,7 @@ function mount(root: HTMLElement): void {
     receiveBox.querySelector<HTMLLabelElement>('label[for="swap-receive-amount"]')!.textContent = `Amount to receive (${route.profile === "ln-to-erc20/v1" ? route.to.symbol : "sat"})`;
     receiveAmount.inputMode = route.profile === "ln-to-erc20/v1" ? "decimal" : "numeric";
     start.disabled = route.unavailable !== null;
-    start.textContent = route.unavailable ? "Pair unavailable" : "Swap";
+    start.textContent = route.unavailable ? "Pair unavailable" : "Continue";
     updateEstimate();
   };
   const changePair = (changed: HTMLSelectElement, other: HTMLSelectElement, previous: string): void => {
@@ -643,15 +721,18 @@ function mount(root: HTMLElement): void {
   const savedRecoveries = node("details", "", "swap-saved-recoveries");
   savedRecoveries.append(node("summary", "Your swaps"));
   const savedList = node("div", "Loading local recovery checkpoints...", "swap-saved-recoveries-list");
-  savedRecoveries.append(savedList); card.insertBefore(savedRecoveries, recovery.element);
+  savedRecoveries.append(node("p", "Saved on this device. Resume continues an existing swap without paying again."), savedList);
+  addUtility(historyButton, savedRecoveries);
   const refreshSavedRecoveries = async (): Promise<void> => {
     try {
       const wallet = await walletPromise, entries = await wallet.listFundedRecoveries();
       savedList.replaceChildren();
       for (const entry of entries) {
-        const row = node("div"); savedList.append(row);
+        const row = node("article"); row.className = "saved-swap"; savedList.append(row);
         if ("error" in entry) { row.append(node("p", entry.error)); continue; }
-        row.append(node("p", `${entry.network}: ${entry.id.slice(-16)}`));
+        const description = node("div"), actions = node("div"); actions.className = "swap-actions";
+        description.append(node("h3", "Saved checkpoint"), node("small", `${entry.network} · ${entry.id.slice(-16)}`));
+        row.append(description, actions);
         for (const label of ["Open saved swap", "Prepare download"]) {
           const button = node("button", label); button.type = "button";
           button.onclick = () => {
@@ -660,7 +741,9 @@ function mount(root: HTMLElement): void {
             void wallet.readFundedRecovery(entry.id).then((snapshot) => {
               if (busy) return;
               if (label === "Prepare download") {
-                offerDownload(row, snapshot.ciphertext, `rillswap-funded-${entry.id.slice(-16)}.age`);
+                for (const old of actions.querySelectorAll<HTMLAnchorElement>("a[download]")) { URL.revokeObjectURL(old.href); old.remove(); }
+                offerDownload(actions, snapshot.ciphertext, `rillswap-funded-${entry.id.slice(-16)}.age`);
+                actions.querySelector("a")!.textContent = "Download backup";
               } else {
                 if (network.value !== snapshot.network) { network.value = snapshot.network; applyNetwork(); }
                 history.replaceState(null, "", location.pathname + location.search);
@@ -668,11 +751,12 @@ function mount(root: HTMLElement): void {
                 showTracking("Saved funded swap");
                 setStatus("Saved funded recovery opened locally", -1, "ready");
                 recovery.load(snapshot.ciphertext, "saved-funded-swap.age");
+                showUtility(recoveryButton);
               }
             }).catch((error: Error) => { row.append(node("p", error.message)); })
               .finally(() => { button.disabled = false; });
           };
-          row.append(button);
+          actions.append(button);
         }
       }
       const journal = await BrowserReverseJournal.open();
@@ -681,13 +765,18 @@ function mount(root: HTMLElement): void {
         if (!entries.length && !reverse.length) savedList.append(node("p", "No swaps saved in this browser."));
         for (const record of reverse) {
           const name = (record.context.networkIdentity as { name: NetworkName }).name;
-          const row = node("div"); row.dataset.reverseSession = record.context.sessionId;
-          row.append(node("p", `${name}: Lightning to Bitcoin · ${record.context.request.nominal_payout_sat} sat · ${record.stage}`));
+          const row = node("article"); row.className = "saved-swap"; row.dataset.reverseSession = record.context.sessionId;
+          const stages = { "secrets-ready": "Setup saved", "terms-ready": "Terms saved", "payment-unknown": "Payment needs checking", funded: "Funding recorded",
+            "claim-ready": "Claim prepared", "claim-unknown": "Claim needs checking", accepted: "Claim submitted" } as const;
+          const description = node("div");
+          description.append(node("h3", `${BigInt(record.context.request.nominal_payout_sat).toLocaleString()} sat`),
+            node("p", "Lightning to Bitcoin"), node("small", `${name} · ${stages[record.stage]}`));
+          row.append(description);
           const open = node("button", "Resume"); open.type = "button";
           row.append(open); savedList.append(row);
           open.onclick = () => {
             if (busy) return;
-            busy = true; open.disabled = settingsButton.disabled = providersButton.disabled = badge.disabled = true;
+            setBusy(true); open.disabled = true;
             void (async () => {
               if (network.value !== name) { network.value = name; applyNetwork(); }
               const api = validateMempoolApi(chainApi.value.trim(), name), broadcast = validateMempoolApi(broadcastApi.value.trim(), name);
@@ -707,7 +796,7 @@ function mount(root: HTMLElement): void {
                 download: offerDownload, saved: (file) => { publishLink(file, name); void refreshSavedRecoveries(); } });
             })().catch(() => {
               row.append(node("p", "Could not resume this saved swap. Keep any backups; no payment was retried."));
-              busy = false; open.disabled = settingsButton.disabled = providersButton.disabled = badge.disabled = false;
+              setBusy(false); open.disabled = false;
             });
           };
         }
@@ -724,6 +813,7 @@ function mount(root: HTMLElement): void {
     showTracking("Swap record");
     setStatus("Swap record opened from its link", -1, "ready");
     recovery.load(link.file, "swap-link.age");
+    showUtility(recoveryButton, false);
   }
   // Following another swap link while this page is open is a fragment-only navigation; reload so
   // the new record is opened, unless a swap is in progress in this tab.
@@ -781,10 +871,9 @@ function mount(root: HTMLElement): void {
       return;
     }
     void requestSwapNotifications();
-    const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button")];
-    busy = true;
+    const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button"), ...setup.querySelectorAll("input, button")];
+    setBusy(true);
     for (const control of controls) (control as HTMLInputElement).disabled = true;
-    settingsButton.disabled = providersButton.disabled = badge.disabled = true;
     const guard = (unload: BeforeUnloadEvent): void => unload.preventDefault();
     window.addEventListener("beforeunload", guard);
     const cancellation = new AbortController();
@@ -793,9 +882,8 @@ function mount(root: HTMLElement): void {
     const done = node("button", "Edit swap", "swap-edit");
     done.type = "button";
     const restore = (): void => {
-      busy = false;
+      setBusy(false);
       for (const control of controls) (control as HTMLInputElement).disabled = false;
-      settingsButton.disabled = providersButton.disabled = badge.disabled = false;
       window.removeEventListener("beforeunload", guard);
       updateNetwork();
     };
@@ -876,9 +964,11 @@ function mount(root: HTMLElement): void {
         }
         const accept = node("button", "Swap with this quote", "swap-quote-accept");
         accept.type = "button";
+        accept.className = "primary";
         review.append(offers, node("p", "By continuing you accept the provider's signed terms. " +
           "Your wallet will ask you to approve and lock the tokens; it keeps the refund key.", "swap-quote-consent"), accept, done);
         panel.replaceChildren(review);
+        showReview();
         setStatus("Quote ready. Review before continuing", 1);
         const accepted = await new Promise<LocatedQuote<PreparedErc20Swap> | null>((resolve) => {
           accept.onclick = () => { for (const option of offers.querySelectorAll("input")) option.disabled = true; accept.disabled = true; resolve(selected); };
@@ -923,16 +1013,15 @@ function mount(root: HTMLElement): void {
       if (parseTokenAmount(amount, 18, "Amount to receive") <= 0n) throw new Error("Amount to receive must be positive");
     } catch (error) { report(`refused: ${(error as Error).message}`); return; }
     void requestSwapNotifications();
-    const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button")];
-    busy = true; for (const control of controls) (control as HTMLInputElement).disabled = true;
-    settingsButton.disabled = providersButton.disabled = badge.disabled = true;
+    const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button"), ...setup.querySelectorAll("input, button")];
+    setBusy(true); for (const control of controls) (control as HTMLInputElement).disabled = true;
     const cancellation = new AbortController(), guard = (event: BeforeUnloadEvent): void => event.preventDefault();
     window.addEventListener("beforeunload", guard);
     let executing = false, arrivals: readonly LocatedQuote<PreparedLnErc20Quote>[] = [];
     const current = (): void => cancellation.signal.throwIfAborted();
     const restore = (): void => {
-      busy = false; for (const control of controls) (control as HTMLInputElement).disabled = false;
-      settingsButton.disabled = providersButton.disabled = badge.disabled = false; window.removeEventListener("beforeunload", guard); updateNetwork();
+      setBusy(false); for (const control of controls) (control as HTMLInputElement).disabled = false;
+      window.removeEventListener("beforeunload", guard); updateNetwork();
     };
     const edit = node("button", "Edit swap", "swap-edit"); edit.type = "button";
     edit.onclick = () => {
@@ -978,11 +1067,12 @@ function mount(root: HTMLElement): void {
             ...tags(quote), node("small", `Identity: ${quote.prepared.quote.providerIdentity}; transport: ${quote.relayUrl}`)); choices.append(label);
         }
         const accept = node("button", "Swap with this quote", "swap-quote-accept"); accept.type = "button";
+        accept.className = "primary";
         review.append(choices, node("p", "By continuing you accept the provider's signed terms. " +
           (sponsor ? `The tokens are sent to ${destination}; the gas sponsor pays the claim. ` : "Connect an EVM wallet to receive the tokens; ") +
           "Pay the invoice from any Lightning wallet. The firm price cannot exceed this estimate."), accept, edit);
         if (result.failures || directory.warnings.length || selection.providers.length > MAX_QUOTE_PROVIDERS) review.append(node("small", "Incomplete provider results; this is not a market-wide best-price guarantee."));
-        panel.replaceChildren(review); setStatus("Quote ready. Review before continuing", 1);
+        panel.replaceChildren(review); showReview(); setStatus("Quote ready. Review before continuing", 1);
         const chosen = await new Promise<LocatedQuote<PreparedLnErc20Quote> | null>((resolve) => {
           accept.onclick = () => { accept.disabled = true; for (const input of choices.querySelectorAll("input")) input.disabled = true; resolve(selected); };
           cancellation.signal.addEventListener("abort", () => resolve(null), { once: true });
@@ -1050,10 +1140,9 @@ function mount(root: HTMLElement): void {
     }
     void requestSwapNotifications();
     // The payout address stays editable until continuation; everything else is frozen with the estimate.
-    const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button")].filter((control) => control !== receiveAddress);
-    busy = true;
+    const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button"), ...setup.querySelectorAll("input, button")].filter((control) => control !== receiveAddress);
+    setBusy(true);
     for (const control of controls) (control as HTMLInputElement).disabled = true;
-    settingsButton.disabled = providersButton.disabled = badge.disabled = true;
     const cancellation = new AbortController();
     const selection = (): string => JSON.stringify([network.value, fromAsset.value, toAsset.value, receiveAmount.value, relay.value, identity.value,
       chainApi.value, broadcastApi.value, successFee.value, minReserve.value, claimFee.value, minRefundDelay.value, maxHold.value]);
@@ -1068,9 +1157,8 @@ function mount(root: HTMLElement): void {
     const done = node("button", "Edit swap", "swap-edit");
     done.type = "button";
     const restore = (): void => {
-      busy = false;
+      setBusy(false);
       for (const control of controls) (control as HTMLInputElement).disabled = false;
-      settingsButton.disabled = providersButton.disabled = badge.disabled = false;
       receiveAddress.disabled = false;
       updateNetwork();
     };
@@ -1128,6 +1216,7 @@ function mount(root: HTMLElement): void {
         }
         const wallet = await walletPromise; assertCurrent(); const info = await wallet.info(); assertCurrent();
         const continueSwap = node("button", "Continue with selected provider", "swap-reverse-continue"); continueSwap.type = "button";
+        continueSwap.className = "primary";
         const refusal = node("p", "", "swap-reverse-refusal");
         /** True once continuation started; false when the address or estimate blocks it (the review explains). */
         const continueWith = (): boolean => {
@@ -1160,7 +1249,8 @@ function mount(root: HTMLElement): void {
           return true;
         };
         continueSwap.onclick = () => { continueWith(); };
-        review.append(providers, chosen, node("p", "By continuing you accept the provider's signed terms.", "swap-reverse-consent"),
+        providers.append(chosen);
+        review.append(providers, node("p", "By continuing you accept the provider's signed terms.", "swap-reverse-consent"),
           refusal, continueSwap, done);
         // One-step swap: a signed price no worse than the shown estimate, with the address already entered, continues directly.
         if (withinEstimate("ln-to-btc/v1", quote.holdInvoiceSat, quote.fundingConfirmations) && receiveAddress.value.trim()) {
@@ -1168,6 +1258,7 @@ function mount(root: HTMLElement): void {
           if (continueWith()) return;
         }
         panel.replaceChildren(review);
+        showReview(true);
         setStatus("Estimate ready. Enter your payout address, then continue", 1);
       } catch (error) {
         if (!cancellation.signal.aborted) {
@@ -1232,17 +1323,15 @@ function mount(root: HTMLElement): void {
         throw new Error("Block height override is invalid");
       }
     } catch (error) {
-      setup.open = true;
       report(`refused: ${(error as Error).message}`);
       return;
     }
     void requestSwapNotifications();
-    const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button")];
-    busy = true;
+    const controls = [...form.elements, ...settings.querySelectorAll("input, textarea, select, button"), ...setup.querySelectorAll("input, button")];
+    setBusy(true);
     for (const input of controls) {
       (input as HTMLInputElement).disabled = true;
     }
-    settingsButton.disabled = providersButton.disabled = badge.disabled = true;
     const guard = (unload: BeforeUnloadEvent): void => unload.preventDefault();
     window.addEventListener("beforeunload", guard);
     let cancelled = false;
@@ -1253,9 +1342,8 @@ function mount(root: HTMLElement): void {
     const cancel = node("button", "Edit swap", "swap-edit");
     cancel.type = "button";
     const restore = (): void => {
-      busy = false;
+      setBusy(false);
       for (const control of controls) (control as HTMLInputElement).disabled = false;
-      settingsButton.disabled = providersButton.disabled = badge.disabled = false;
       updateNetwork();
       window.removeEventListener("beforeunload", guard);
     };
@@ -1344,11 +1432,12 @@ function mount(root: HTMLElement): void {
         }
         const accept = node("button", "Use this quote", "swap-quote-accept");
         accept.type = "button";
+        accept.className = "primary";
         review.append(offers, node("p", "By continuing you accept the provider's signed terms.", "swap-quote-consent"), accept, cancel);
         // One-step swap: a signed price no worse than the shown estimate is accepted without a separate review.
         const direct = withinEstimate("btc-to-ln/v1", selected.prepared.quote.contractAmountSat, selected.prepared.quote.fundingConfirmations);
         if (direct) report(`signed price ${selected.prepared.quote.contractAmountSat} sat is within the shown estimate ${estimatedTotal} sat; continuing`);
-        else { panel.replaceChildren(review); setStatus("Quote ready. Review before continuing", 1); }
+        else { panel.replaceChildren(review); showReview(); setStatus("Quote ready. Review before continuing", 1); }
         const accepted = direct ? selected : await new Promise<LocatedQuote | null>((resolve) => {
           accept.onclick = () => {
             for (const option of offers.querySelectorAll("input")) option.disabled = true;
@@ -1555,16 +1644,14 @@ async function run(
       },
       cosigner: browserCosigner,
     });
-    panel.replaceChildren(
-      node("h2", "Invoice paid"),
-      node("p", "The provider paid the invoice; this preimage proves it:"),
-      node("pre", outcome.preimage, "swap-preimage"),
+    const proof = node("details", "", "swap-payment-proof");
+    proof.append(node("summary", "Payment proof"), node("p", "This preimage proves your invoice was paid:"), node("pre", outcome.preimage, "swap-preimage"),
       node("p", outcome.cooperation === "verified"
         ? "You cosigned the provider's private key-path claim, so the swap leaves no script trace on chain."
         : "The provider claims with the preimage (cooperation was skipped). Nothing else is needed from you.",
-        "swap-cooperation"),
-      node("p", "Optional: download the paid swap backup below as a record of the completed swap."),
-    );
+        "swap-cooperation"));
+    panel.classList.add("swap-complete");
+    panel.replaceChildren(node("h2", "Invoice paid"), node("p", "Your Lightning invoice has been paid. Nothing else is needed from you."), proof);
     updateBackup(outcome.paidRecovery, "paid");
     publish(outcome.paidRecovery);
     return true;

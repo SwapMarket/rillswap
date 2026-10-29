@@ -139,7 +139,7 @@ Unknown exposure remains blocked from automatic retry.
 
 Funded Bitcoin recovery checkpoints are saved encrypted in browser storage with
 strict commit and exact readback before funding publication. On a URL-less reload,
-open **Your swaps** beside the recovery panel. Reverse swaps appear at every saved
+open **History** below the swap card. Reverse swaps appear at every saved
 stage; **Resume** continues funding checks and claims, never a Lightning payment.
 Funded forward swaps open their refund controls locally. Merely listing swaps does
 not connect, pay, sign, or broadcast. Keep a backup independently: browser eviction and
@@ -166,6 +166,20 @@ Local builds and tests never publish anything.
 
 ## Using the app
 
+The swap card shows only the current task. **History**, **Recovery**, **Providers**,
+and **Settings** below it open separate panels without interrupting an active swap.
+Settings and provider selection stay locked while a swap is running. Recovery
+retains its separate inspection and approval controls. History can still be browsed,
+but cannot open or resume a different swap until the current workflow releases its
+lock. Privacy disclosures and technical activity are available in the footer.
+
+Use **Back up your recovery key** to reveal or save the browser's 12 words.
+This is recommended, not a prerequisite for swapping. Settings groups connection
+endpoints, stablecoin configuration, limits, and advanced overrides into optional
+disclosures. Saved history shows only what local records prove, not inferred
+completion or dates. This layout does not migrate or replace existing keys,
+checkpoints, journals, or encrypted swap links.
+
 Pick a pair under **You send / You receive** (or use the switch button).
 Available providers and their advertised assets decide which pairs can be
 quoted.
@@ -174,7 +188,7 @@ Automatic provider choice ranks offers by the funding confirmations each
 provider announces (fewest first), then by price. **Provider ranking** in
 Settings switches to lowest price first. Providers that do not announce their
 confirmations rank after those that do. The manual selection list labels the
-fastest and the cheapest offer, and the Providers dialog shows each
+fastest and the cheapest offer, and the Providers panel shows each
 provider's confirmations. An offer that waits longer than its provider
 announced is refused.
 

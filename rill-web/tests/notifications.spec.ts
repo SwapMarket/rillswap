@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 import { testInvoice } from "../../rill-payments/tests/helpers";
 import regtest from "../src/networks/regtest-rillswap-e2e-v1.json" with { type: "json" };
-import { expect, test } from "./fixtures/swapPage";
+import { expect, openSettings, test } from "./fixtures/swapPage";
 
 const PAGE = "http://127.0.0.1:18765/test-only/swap.html";
 const API = "http://127.0.0.1:8091/api";
@@ -42,7 +42,7 @@ async function fillSwap(page: Page, from: string, to: string): Promise<void> {
   await page.locator("#swap-from").selectOption(from);
   await page.locator("#swap-to").selectOption(to);
   if (from === "usdc" || from === "usdt" || to === "usdc" || to === "usdt") {
-    await page.locator("#swap-settings-toggle").click();
+    await openSettings(page, "evm");
     await page.locator("#swap-evm-rpc").fill("http://127.0.0.1:8545");
     await page.locator("#swap-settings-close").click();
   }

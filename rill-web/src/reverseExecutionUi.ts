@@ -272,6 +272,7 @@ export async function mountReverseExecution(root: HTMLElement, options: ReverseE
     const warning = earlyClaimWarning(e.claimDepth, terms.funding_confirmations);
     if (warning !== null) { v.screen.append(node("p", warning, "swap-reverse-early-claim")); options.report?.(`warning: ${warning}`); }
     const accept = button(v.screen, "Accept and show the invoice", "swap-reverse-accept");
+    accept.className = "primary";
     const nodeControls = node("section"); v.advanced.append(nodeControls);
     const afterPayment = (settlement?: () => Promise<string | null>): void => {
       nodeControls.remove(); v.message.textContent = "Waiting for the provider to lock the Bitcoin.";
@@ -317,6 +318,7 @@ export async function mountReverseExecution(root: HTMLElement, options: ReverseE
         const plan = await e.planPayment(payer, nodeApi, BigInt(feeValue), approval); approval();
         v.screen.replaceChildren(node("h2", "Approve your Lightning payment"), node("p", `${terms.economics.hold_invoice_sat} sat plus ${plan.feeMsat} msat routing fee.`));
         const pay = button(v.screen, "Pay this exact Lightning route once", "swap-reverse-pay");
+        pay.className = "primary";
         pay.onclick = () => { pay.disabled = true; void (async () => {
           await e.pay(payer, plan, nodeApi, approval); current(); v.screen.replaceChildren(node("h2", "Locking Bitcoin"));
           afterPayment(() => payer.status(plan.paymentHash, plan.invoiceBinding.amount_msat));

@@ -4,6 +4,32 @@ import { PUBLIC_RELAYS } from "../../src/swap/publicRelays";
 
 export { expect };
 
+/** Use the same persistent tool navigation as a person, without touching the swap URL. */
+export async function openTool(page: Page, tool: "settings" | "recovery" | "history"): Promise<void> {
+  const button = page.locator(`#swap-${tool}-toggle`);
+  if (await button.getAttribute("aria-expanded") !== "true") await button.click();
+}
+
+export async function openSettings(page: Page, ...groups: ("connection" | "advanced" | "evm" | "limit")[]): Promise<void> {
+  await openTool(page, "settings");
+  for (const group of groups) {
+    const details = page.locator(`#swap-${group}-settings`);
+    if (await details.getAttribute("open") === null) await details.locator(":scope > summary").click();
+  }
+}
+
+export async function openRecovery(page: Page): Promise<void> {
+  await openTool(page, "recovery");
+  const details = page.locator("#swap-recovery");
+  if (await details.getAttribute("open") === null) await details.locator(":scope > summary").click();
+}
+
+export async function openRecoveryKey(page: Page): Promise<void> {
+  await openTool(page, "recovery");
+  const details = page.locator("#swap-wallet-setup");
+  if (await details.getAttribute("open") === null) await details.locator(":scope > summary").click();
+}
+
 /**
  * The swap page loads provider listings from its relays when it opens. Answer every relay
  * locally with an empty listing so no test reaches a public relay. A test's own

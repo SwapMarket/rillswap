@@ -83,6 +83,7 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
   };
   const inspect = element("button", "Inspect recovery file", "swap-recovery-inspect");
   inspect.type = "button";
+  inspect.className = "primary";
   const result = element("section", "", "swap-recovery-result");
   result.setAttribute("aria-live", "polite");
   const fundingControls = element("section", "", "swap-recovery-funding-controls");
@@ -106,8 +107,10 @@ export function recoveryPanel(options: RecoveryUiOptions): RecoveryPanel {
   const consent = element("p", "By preparing the refund you confirm you recognize this recovery file and control the refund address above, and approve the displayed destination and fee.", "swap-refund-consent");
   consent.className = "swap-consent";
   const prepare = element("button", "Approve and prepare refund", "swap-refund-prepare"); prepare.type = "button";
+  prepare.className = "primary";
   const download = element("button", "Download signed transaction", "swap-refund-download"); download.type = "button"; download.hidden = true;
   const broadcast = element("button", "Broadcast refund", "swap-refund-broadcast"); broadcast.type = "button"; broadcast.hidden = true;
+  broadcast.className = "primary";
   const refundResult = element("section", "", "swap-refund-result"); refundResult.setAttribute("aria-live", "polite");
   refundControls.append(element("h3", "Refund to the signed destination"), destination, feeLabel, fee, amount,
     element("p", "An imported file cannot prove ownership of this address. Verify it in your wallet before approving. The signed destination cannot be changed."),

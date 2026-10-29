@@ -1,4 +1,4 @@
-import { directorySettled, expect, MAINNET_RELAYS, test } from "./fixtures/swapPage";
+import { directorySettled, expect, MAINNET_RELAYS, openSettings, test } from "./fixtures/swapPage";
 import { buildCommit } from "../scripts/build-commit";
 
 for (const prefix of ["", "repository/"]) {
@@ -48,7 +48,7 @@ for (const prefix of ["", "repository/"]) {
     // The header picker is the only network switch; the footer repeats no deployment links.
     await expect(page.getByRole("navigation", { name: "Deployment network" })).toHaveCount(0);
     const picker = page.getByRole("combobox", { name: "Switch network" });
-    await page.locator("#swap-settings-toggle").click();
+    await openSettings(page, "connection");
     await expect(page.locator("#swap-network")).toHaveValue("mainnet");
     await expect(page.locator("#swap-chain-api")).toHaveValue("https://mempool.space/api");
     await page.locator("#swap-settings-close").click();
@@ -56,7 +56,7 @@ for (const prefix of ["", "repository/"]) {
     await expect(page).toHaveURL(`${base}signet/`);
     await directorySettled(page);
     await expect(page.locator("#swap-start")).toBeEnabled();
-    await page.locator("#swap-settings-toggle").click();
+    await openSettings(page, "connection");
     await expect(page.locator("#swap-network")).toHaveValue("signet");
     await expect(page.locator("#swap-chain-api")).toHaveValue("https://mempool.space/signet/api");
     await expect(page.locator("#swap-broadcast-api")).toHaveValue("https://mempool.space/signet/api");
@@ -119,12 +119,12 @@ for (const prefix of ["", "repository/"]) {
     // A network without a published build still reconfigures in place.
     await picker.selectOption("testnet4");
     await expect(page).toHaveURL(`${base}signet/`);
-    await page.locator("#swap-settings-toggle").click();
+    await openSettings(page, "connection");
     await expect(page.locator("#swap-network")).toHaveValue("testnet4");
     await page.locator("#swap-settings-close").click();
     await picker.selectOption("signet"); // the build's own network: in place, no reload
     await expect(page).toHaveURL(`${base}signet/`);
-    await page.locator("#swap-settings-toggle").click();
+    await openSettings(page, "connection");
     await expect(page.locator("#swap-network")).toHaveValue("signet");
     expect(errors).toEqual([]);
   });

@@ -62,7 +62,7 @@ for (const { rail, label, parts } of methods) {
       const opened = page.waitForEvent("popup"); await link.click(); const swap = await opened;
       swap.on("pageerror", (error) => errors.push(error.message));
       await expect(swap.locator("#swap-invoice")).toHaveValue(before.invoice);
-      await expect(swap.locator("#swap-estimate")).toContainText("You send about", { timeout: 60000 });
+      await expect(swap.locator("#swap-estimate strong")).toHaveText(/^[0-9,]+ sat$/, { timeout: 60000 });
       await swap.locator("#swap-start").click();
       await expect(swap.locator("#swap-funding-uri")).toBeVisible({ timeout: 60000 });
       await expect(swap.locator("#swap-quote-accept")).toHaveCount(0);

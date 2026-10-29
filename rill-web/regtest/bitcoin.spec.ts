@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { assertDisposableStack, command, composeEnabled, providerState, webURL } from "./stack";
 import { fundBitcoinQuote } from "./bitcoinFlow";
+import { openTool } from "../tests/fixtures/swapPage";
 
 for (const funding of ["psbt", "send-btc"] as const) {
 test(`browser validates ${funding === "psbt" ? "a finalized Bitcoin PSBT" : "an external wallet BTC send"} and receives Lightning, with confirmed provider claim`, async ({ page }, testInfo) => {
@@ -10,7 +11,7 @@ test(`browser validates ${funding === "psbt" ? "a finalized Bitcoin PSBT" : "an 
   const invoice = command("invoice", "20000", "--node", "user");
   const paymentHash = JSON.parse(command("lncli", "user", "decodepayreq", invoice)).payment_hash;
   await page.goto(webURL()); await page.locator("#swap-invoice").fill(invoice);
-  await expect(page.locator("#swap-estimate")).toContainText("You send about", { timeout: 60000 });
+  await expect(page.locator("#swap-estimate strong")).toHaveText(/^[0-9,]+ sat$/, { timeout: 60000 });
   await page.locator("#swap-start").click();
   await expect(page.locator("#swap-funding-uri")).toBeVisible({ timeout: 60000 });
   await expect(page.locator("#swap-quote-accept")).toHaveCount(0);
@@ -27,8 +28,7 @@ test(`browser validates ${funding === "psbt" ? "a finalized Bitcoin PSBT" : "an 
   const downloading = page.waitForEvent("download"); await backup.click();
   await (await downloading).saveAs(testInfo.outputPath("paid-recovery.age"));
   await page.goto("about:blank"); await page.goto(webURL());
-  await page.locator("#swap-wallet-setup summary").first().click();
-  await page.locator("#swap-saved-recoveries summary").click();
+  await openTool(page, "history");
   await page.getByRole("button", { name: "Open saved swap", exact: true }).last().click();
   await expect(page.locator("#swap-recovery-result h3")).toHaveText("Recovery record verified");
   expect(new URL(page.url()).hash).toBe("");

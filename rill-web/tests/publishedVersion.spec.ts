@@ -1,4 +1,4 @@
-import { expect, test } from "./fixtures/swapPage";
+import { expect, openSettings, test } from "./fixtures/swapPage";
 import type { Page } from "@playwright/test";
 import regtest from "../src/networks/regtest-rillswap-e2e-v1.json" with { type: "json" };
 import { testInvoice } from "../../rill-payments/tests/helpers";
@@ -19,7 +19,7 @@ async function setup(page: Page, reverse = false, token = false): Promise<string
   if (token) {
     await page.locator("#swap-from").selectOption(reverse ? "ln" : "usdc");
     await page.locator("#swap-to").selectOption(reverse ? "usdc" : "ln");
-    await page.locator("#swap-settings-toggle").click();
+    await openSettings(page, "evm");
     await page.locator("#swap-evm-rpc").fill("http://127.0.0.1:8545");
     await page.locator("#swap-settings-close").click();
   }

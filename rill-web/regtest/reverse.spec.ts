@@ -5,6 +5,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { assertDisposableStack, composeEnabled } from "./stack";
 import { stopPaymentProcess } from "./paymentProcess";
+import { openRecoveryKey } from "../tests/fixtures/swapPage";
 
 const root = resolve(import.meta.dirname, "../.."), artifacts = resolve(root, "tmp/reverse-live");
 const enabled = process.env.RILLSWAP_RUN_BROWSER_REVERSE_REGTEST === "1";
@@ -43,7 +44,7 @@ test(`real browser reverse swap (${nodePayment ? "configured node" : "external w
   await page.locator("#swap-receive-amount").fill("50000");
   await page.locator("#swap-start").click();
   await expect(page.locator("#swap-reverse-continue")).toBeEnabled(); // no backup check gate; the address is entered before continuing
-  await page.locator("#swap-wallet-setup summary").click();
+   await openRecoveryKey(page);
   const wallet = await download(page, '#swap-wallet-actions a[download="rillswap-recovery-key.json"]', "wallet.json");
   await page.locator("#swap-receive-address").fill(address);
   await page.locator("#swap-reverse-continue").click();

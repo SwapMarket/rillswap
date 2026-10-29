@@ -7,6 +7,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { assertDisposableStack, composeEnabled, run } from "./stack";
 import { EvmRpc } from "../src/swap/evmHtlc";
+import { openSettings } from "../tests/fixtures/swapPage";
 
 const root = resolve(import.meta.dirname, "../..");
 const enabled = process.env.RILLSWAP_RUN_BROWSER_ERC20_REGTEST === "1" || composeEnabled;
@@ -47,7 +48,7 @@ async function injectWallet(page: Page): Promise<string[]> {
 
 /** The dev build configures the gas sponsor; wallet-claim tests opt out of it explicitly. */
 async function disableSponsor(page: Page): Promise<void> {
-  await page.locator("#swap-settings-toggle").click();
+  await openSettings(page, "evm");
   for (const id of ["swap-evm-sponsor", "swap-evm-entry-point", "swap-evm-delegate"]) await page.locator(`#${id}`).fill("");
   await page.locator("#swap-settings-close").click();
 }

@@ -25,7 +25,7 @@ declare global {
 window.uiFixture = { requests: [], executed: 0, executedProviders: [], disposed: 0, wallet: BrowserRecoveryWallet, infoPending: false };
 export const MAX_QUOTE_PROVIDERS = 8;
 export const DIRECTORY_PROFILES = ["btc-to-ln/v1", "ln-to-btc/v1", "erc20-to-ln/v1", "ln-to-erc20/v1"];
-export const discoverMarketplace = async () => ({ providers: [{}], warnings: [] });
+export const discoverMarketplace = async () => ({ providers: [{ announcement: {} }], warnings: [] });
 export const eligibleProviders = (providers: unknown[]) => providers;
 export const ineligibilityReason = () => "fixture ineligible";
 export const discoverDirectory = async () => ({ warnings: [], entries: [{ identity: "4".repeat(64), slot: "fixture", profiles: ["btc-to-ln/v1", "ln-to-btc/v1"],

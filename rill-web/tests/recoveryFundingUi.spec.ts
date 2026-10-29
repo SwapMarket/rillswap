@@ -1,4 +1,4 @@
-import { expect, test } from "./fixtures/swapPage";
+import { expect, openRecovery, openSettings, openTool, test } from "./fixtures/swapPage";
 import type { Page } from "@playwright/test";
 import canonicalize from "canonicalize";
 import { readFileSync } from "node:fs";
@@ -21,7 +21,7 @@ async function importRecord(page: Page, item: RecoveryRefundCase): Promise<void>
     try { return (await wallet.recoveryKey()).recipient; } finally { wallet.close(); }
   });
   const encrypted = await encryptCanonicalRecoveryForRecipient(new TextEncoder().encode(canonicalize(item.record)!), recipient);
-  await page.locator("#swap-recovery summary").first().click();
+  await openRecovery(page);
   await page.locator("#swap-recovery-file").setInputFiles(payload(encrypted, "public-test-swap.age"));
   await page.locator("#swap-recovery-inspect").click();
   await expect(page.locator("#swap-recovery-result h3")).toHaveText("Recovery record verified");
@@ -113,8 +113,7 @@ for (const failStorage of [false, true]) test(`funded callback ${failStorage ? "
   if (failStorage) return;
   const before = calls.length;
   await page.goto("about:blank"); await page.goto(url); // No URL fragment or download is used.
-  await page.locator("#swap-wallet-setup summary").first().click();
-  await page.locator("#swap-saved-recoveries summary").click();
+  await openTool(page, "history");
   await page.getByRole("button", { name: "Open saved swap", exact: true }).click();
   await expect(page.locator("#swap-recovery-result h3")).toHaveText("Recovery record verified");
   await expect(page.locator("#swap-status")).toHaveText("Saved funded recovery opened locally");
@@ -139,7 +138,7 @@ test("opening a saved checkpoint clears a different linked record's URL authorit
   await page.goto(url + swapLinkFragment({ file: linked, network: "regtest" }));
   await expect(page.locator("#swap-recovery-result h3")).toHaveText("Recovery record verified");
   await expect(page.locator("#swap-link")).toBeVisible();
-  await page.locator("#swap-saved-recoveries summary").click();
+  await openTool(page, "history");
   await page.getByRole("button", { name: "Open saved swap", exact: true }).click();
   await expect(page.locator("#swap-status")).toHaveText("Saved funded recovery opened locally");
   await expect(page.locator("#swap-link")).toBeHidden();
@@ -160,7 +159,7 @@ test("a delayed local Open cannot replace an active quote's network or recovery 
     try { await wallet.saveFundedRecovery("signet", Uint8Array.of(1)); } finally { wallet.close(); }
   });
   await page.reload();
-  await page.locator("#swap-saved-recoveries summary").click();
+  await openTool(page, "history");
   await page.evaluate(() => {
     const prototype = window.uiFixture.wallet.prototype, original = prototype.readFundedRecovery;
     prototype.readFundedRecovery = async function(id) {
@@ -176,6 +175,7 @@ test("a delayed local Open cannot replace an active quote's network or recovery 
   await page.locator("#swap-start").click();
   await expect(page.locator("#swap-quote-accept")).toBeEnabled();
   await page.evaluate(() => window.uiFixture.releaseInfo!());
+  await openTool(page, "history");
   await expect(page.getByRole("button", { name: "Open saved swap", exact: true })).toBeEnabled();
   await expect(page.locator("#swap-network")).toHaveValue("regtest");
   await expect(page.locator("#swap-recovery-result h3")).toHaveCount(0);
@@ -266,8 +266,9 @@ test("changing settings after approval invalidates prepared exposure controls wi
   await page.goto("http://127.0.0.1:18765/test-only/swap.html"); await importRecord(page, item);
   await page.locator("#swap-refund-prepare").click();
   await expect(page.locator("#swap-refund-result h3")).toHaveText("Refund prepared and saved");
-  await page.locator("#swap-settings-toggle").click(); await page.locator("#swap-broadcast-api").fill("https://mempool.space/api");
+  await openSettings(page, "connection"); await page.locator("#swap-broadcast-api").fill("https://mempool.space/api");
   await page.locator("#swap-settings-close").click();
+  await openRecovery(page);
   await expect(page.locator("#swap-refund-broadcast")).not.toBeVisible();
   await expect(page.locator("#swap-refund-download")).not.toBeVisible();
 });
@@ -286,8 +287,8 @@ test("approval invalidated after export commitment but before its return prevent
     };
   });
   await page.locator("#swap-refund-download").click(); await page.waitForFunction(() => window.refundExposurePending);
-  await page.locator("#swap-settings-toggle").click(); await page.locator("#swap-broadcast-api").fill("https://mempool.space/api");
-  await page.locator("#swap-settings-close").click(); await page.evaluate(() => window.releaseRefundExposure());
+  await openSettings(page, "connection"); await page.locator("#swap-broadcast-api").fill("https://mempool.space/api");
+  await page.locator("#swap-settings-close").click(); await openRecovery(page); await page.evaluate(() => window.releaseRefundExposure());
   await expect(page.locator("#swap-refund-result")).toContainText("Refund action could not be completed");
   expect(downloads).toBe(0);
   const stored = await page.evaluate(async () => {
@@ -309,7 +310,7 @@ for (const changed of ["network", "API"]) {
     await expect(page.locator("#swap-recovery-funding-result h3")).toHaveText("Funding observed by your API");
     const before = calls.length;
     const outsideBefore = outside.length;
-    await page.locator("#swap-settings-toggle").click();
+    await openSettings(page, "connection");
     if (changed === "network") await page.locator("#swap-network").selectOption("signet");
     else await page.locator("#swap-chain-api").fill("https://mempool.space/api");
     await page.locator("#swap-settings-close").click();
@@ -362,9 +363,9 @@ test("production CSP lets mainnet recovery checks use the user's own https mempo
   let reached = false;
   await page.route("https://mempool.example.invalid/**", async (route) => { reached = true; await route.abort(); });
   await page.goto("http://127.0.0.1:18765/swap.html");
-  await page.locator("#swap-settings-toggle").click(); await page.locator("#swap-chain-api").fill("https://mempool.example.invalid/api");
+  await openSettings(page, "connection"); await page.locator("#swap-chain-api").fill("https://mempool.example.invalid/api");
   await page.locator("#swap-settings-close").click();
-  await page.locator("#swap-recovery summary").first().click();
+  await openRecovery(page);
   await page.locator("#swap-recovery-file").setInputFiles(payload(encrypted, "mainnet-test.age"));
   await page.locator("#swap-recovery-key-file").setInputFiles(payload(key.file, "original.key"));
   await page.locator("#swap-recovery-inspect").click();
@@ -397,10 +398,11 @@ for (const changed of ["network", "API", "file", "key", "revision"]) {
     await page.goto("http://127.0.0.1:18765/test-only/swap.html"); await importRecord(page, item);
     await page.locator("#swap-recovery-check-funding").click(); await pending;
     if (changed === "network" || changed === "API") {
-      await page.locator("#swap-settings-toggle").click();
+      await openSettings(page, "connection");
       if (changed === "network") await page.locator("#swap-network").selectOption("signet");
       else await page.locator("#swap-chain-api").fill("https://mempool.space/api");
       await page.locator("#swap-settings-close").click();
+      await openRecovery(page);
     } else if (changed === "file") await page.locator("#swap-recovery-file").setInputFiles([]);
     else if (changed === "key") {
       const key = await createRecoveryKey(); await page.locator("#swap-recovery-key-file").setInputFiles(payload(key.file, "different.key"));

@@ -56,10 +56,10 @@ test("defaults fetch a tip on quote action and the stored browser key approves a
   expect(requests).toEqual([]);
   await expect(page.locator("#swap-chain-consent")).toHaveCount(0);
   await expect(page.locator("#swap-chain-disclosure")).not.toBeVisible();
-  await page.locator("#swap-privacy summary").click();
+  await page.locator("#swap-privacy-toggle").click();
   await expect(page.locator("#swap-chain-disclosure")).toContainText(API);
   expect(requests).toEqual([]);
-  await page.locator("#swap-privacy summary").click();
+  await page.locator("#swap-privacy-toggle").click();
   await invoice(page);
   await page.locator("#swap-start").click();
   await expect(page.locator("#swap-quote-accept")).toBeEnabled();
@@ -242,7 +242,8 @@ test("with announced fees loaded on open, Swap accepts a signed price within the
   await page.goto(PAGE);
   await expect(page.locator("#swap-estimate")).toHaveText("Paste a Lightning invoice that includes an amount to see the fee.");
   await invoice(page);
-  await expect(page.locator("#swap-estimate")).toContainText("You send about 3,000 sat (1,000 sat invoice + 2,000 sat provider fee via 444444444444…)");
+  await expect(page.locator("#swap-estimate strong")).toHaveText("3,000 sat");
+  await expect(page.locator("#swap-estimate small")).toContainText("1,000 sat invoice + 2,000 sat provider fee");
   expect(requests).toEqual([]); // the directory uses relays only, never the chain API
   await page.locator("#swap-start").click();
   await expect(page.locator("#swap-error")).toContainText("Fixture stopped before funding");
@@ -301,7 +302,8 @@ test("with announced fees loaded and the address entered, a Lightning to Bitcoin
   await page.getByRole("button", { name: "Switch direction" }).click();
   await expect(page.locator("#swap-estimate")).toHaveText("Enter the amount to receive to see the fee.");
   await page.locator("#swap-receive-amount").fill("50000");
-  await expect(page.locator("#swap-estimate")).toContainText("You pay about 52,000 sat over Lightning (2,000 sat provider fee via 444444444444…) to receive 50,000 sat.");
+  await expect(page.locator("#swap-estimate strong")).toHaveText("52,000 sat");
+  await expect(page.locator("#swap-estimate small")).toContainText("50,000 sat received + 2,000 sat provider fee");
   await page.locator("#swap-receive-amount").fill("500");
   await expect(page.locator("#swap-estimate")).toHaveText("fixture ineligible"); // the directory's refusal reason replaces the estimate
   await page.locator("#swap-receive-amount").fill("50000");

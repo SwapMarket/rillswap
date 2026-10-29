@@ -1,4 +1,4 @@
-import { expect, test } from "./fixtures/swapPage";
+import { expect, openRecovery, openSettings, test } from "./fixtures/swapPage";
 import type { Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import type * as Recovery from "../src/browserReverseRecovery";
@@ -50,7 +50,7 @@ test("CLI-style disclosure recovery preserves the exact fallback without another
   const encrypted = await encryptCanonicalRecoveryForRecipient(new TextEncoder().encode(data.plaintext), recipient);
   await page.goto("http://127.0.0.1:18765/test-only/swap.html");
   const transport = await api(page, data);
-  await page.locator("#swap-recovery summary").first().click();
+  await openRecovery(page);
   await page.locator("#swap-recovery-file").setInputFiles({ name: "cli-reverse-disclosed.age", mimeType: "application/octet-stream", buffer: Buffer.from(encrypted) });
   await page.locator("#swap-recovery-key-file").setInputFiles({ name: "cli.key", mimeType: "text/plain", buffer: Buffer.from(data.identity) });
   await page.locator("#swap-recovery-inspect").click();
@@ -210,7 +210,7 @@ for (const change of ["file", "key", "words", "network"]) {
     const encrypted = await encryptCanonicalRecoveryForRecipient(new TextEncoder().encode(data.plaintext), key.recipient);
     const payload = (bytes: Uint8Array, name: string) => ({ name, mimeType: "application/octet-stream", buffer: Buffer.from(bytes) });
     await page.goto("http://127.0.0.1:18765/test-only/swap.html"); const transport = await api(page);
-    await page.locator("#swap-recovery summary").first().click(); await page.locator("#swap-recovery-file").setInputFiles(payload(encrypted, "original.age"));
+    await openRecovery(page); await page.locator("#swap-recovery-file").setInputFiles(payload(encrypted, "original.age"));
     await page.locator("#swap-recovery-key-file").setInputFiles(payload(key.file, "original.key")); await page.locator("#swap-recovery-inspect").click();
     await expect(page.locator("#swap-recovery-result h3")).toHaveText("Lightning to Bitcoin recovery verified");
     await page.locator("#swap-reverse-recovery-fee").fill("100");
@@ -226,7 +226,7 @@ for (const change of ["file", "key", "words", "network"]) {
       await page.getByText("Use a saved recovery key (optional)", { exact: true }).click();
       await page.locator("#swap-recovery-words").fill("changed");
     }
-    else { await page.locator("#swap-settings-toggle").click(); await page.locator("#swap-network").selectOption("signet"); await page.locator("#swap-settings-close").click(); }
+    else { await openSettings(page, "connection"); await page.locator("#swap-network").selectOption("signet"); await page.locator("#swap-settings-close").click(); await openRecovery(page); }
     release(); await completed;
     // Wait for the immutable encrypted state read after the completed observer,
     // rather than sleeping or confusing the harness callback with real controls.

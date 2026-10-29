@@ -1,4 +1,4 @@
-import { directorySettled, expect, MAINNET_RELAYS, test } from "./fixtures/swapPage";
+import { directorySettled, expect, MAINNET_RELAYS, openRecoveryKey, openSettings, test } from "./fixtures/swapPage";
 import { buildCommit } from "../scripts/build-commit";
 
 test("merchant invoice fragments prefill locally without connecting and are removed from the address bar", async ({ page, relaySockets: sockets }) => {
@@ -40,7 +40,7 @@ test("direction flips between Bitcoin and Lightning, and stablecoins pair with L
   const requests: string[] = [];
   page.on("request", (request) => requests.push(request.url()));
   await page.goto(SWAP);
-  await page.locator("#swap-settings-toggle").click();
+  await openSettings(page, "connection");
   await page.locator("#swap-network").selectOption("regtest");
   await page.locator("#swap-settings-close").click();
   await directorySettled(page);
@@ -57,7 +57,7 @@ test("direction flips between Bitcoin and Lightning, and stablecoins pair with L
   await expect(page.locator("#swap-to")).toHaveValue("btc");
   await expect(page.getByRole("heading", { name: "Lightning in. Bitcoin out." })).toBeVisible();
   await expect(page.locator("#swap-invoice")).not.toBeVisible();
-  await expect(page.locator("#swap-wallet-setup")).toBeVisible(); // the recovery key serves both directions
+  await expect(page.locator("#swap-recovery-toggle")).toBeVisible(); // the recovery key serves both directions
   await expect(page.locator("#swap-forward-overrides")).not.toBeVisible();
   await expect(page.locator("#swap-receive-address")).toBeVisible();
   await expect(page.locator("#swap-receive-amount")).toBeVisible();
@@ -94,7 +94,7 @@ test("direction flips between Bitcoin and Lightning, and stablecoins pair with L
   await expect(page.locator("#swap-receive-address")).not.toBeVisible();
   await expect(page.locator('label[for="swap-receive-amount"]')).toHaveText("Amount to receive (USDC)");
   // A configured gas sponsor turns receiving into "amount plus address": no wallet extension, no gas.
-  await page.locator("#swap-settings-toggle").click();
+  await openSettings(page, "evm");
   await page.locator("#swap-evm-sponsor").fill("http://127.0.0.1:8094");
   await page.locator("#swap-evm-entry-point").fill("0x0000000071727de22e5e9d8baf0edac6f37da032");
   await page.locator("#swap-evm-delegate").fill("0x77021100bd87b7008e5e1989d0eb38555d0d0000");
@@ -130,10 +130,10 @@ test("the swap page enables mainnet and only loads provider listings when it ope
   await expect(page.locator("#swap-log")).not.toBeVisible();
   await expect(page.locator("#swap-chain-disclosure")).not.toBeVisible();
   await expect(page.locator("#swap-chain-consent")).toHaveCount(0);
-  await page.locator("#swap-privacy summary").click();
+  await page.locator("#swap-privacy-toggle").click();
   await expect(page.locator("#swap-chain-disclosure")).toContainText("https://mempool.space/api");
-  await page.locator("#swap-privacy summary").click();
-  await page.locator("#swap-wallet-setup summary").click();
+  await page.locator("#swap-privacy-toggle").click();
+  await openRecoveryKey(page);
   await expect(page.locator("#swap-prerequisites")).toContainText("PSBT");
   await expect(page.locator("#swap-wallet-status")).toContainText("New browser recovery key created");
   await expect(page.getByRole("link", { name: "Download rillswap-recovery-key.json" })).toBeVisible();
@@ -174,13 +174,13 @@ test("the CSP admits the same-origin MuSig2 WASM and the cooperation journal API
 test("invalid input is refused before any relay connection", async ({ page, relaySockets: sockets }) => {
  
   await page.goto(SWAP);
-  await page.locator("#swap-settings-toggle").click();
+  await openSettings(page, "connection");
   await page.locator("#swap-network").selectOption("signet");
   await page.locator("#swap-relay").fill("wss://relay.invalid");
   await page.locator("#swap-settings-close").click();
   await directorySettled(page);
   const directorySockets = sockets.length;
-  await page.locator("#swap-wallet-setup summary").click();
+  await openSettings(page, "advanced");
   await page.locator("#swap-refund").fill("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4");
   await page.locator("#swap-tip").fill("1000");
   await page.locator("#swap-start").click();
@@ -212,7 +212,8 @@ test("mainnet admission still pins invoice currency and opens no chain connectio
   await page.locator("#swap-start").click();
   await expect(page.locator("#swap-status")).toContainText("refused:");
   expect(sockets).toHaveLength(directorySockets); expect(external).toEqual([]);
-  await expect(page.locator("#swap-refund")).toBeVisible(); // Validation opens the advanced overrides.
+  await openSettings(page, "advanced");
+  await expect(page.locator("#swap-refund")).toBeVisible();
   await page.locator("#swap-refund").fill("bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu");
   await page.locator("#swap-tip").fill("900000");
   await page.locator("#swap-invoice").fill(testInvoice("mainnet-admission", "1000000", now, now + 7200, "bc"));
@@ -227,7 +228,10 @@ test("settings are keyboard accessible and switching networks resets local relay
   await page.goto(SWAP);
   await page.locator("#swap-settings-toggle").focus();
   await page.keyboard.press("Enter");
-  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.locator("#swap-settings")).toBeVisible();
+  await expect(page.locator("#swap-settings h2")).toBeFocused();
+  await expect(page.locator("#swap-settings-toggle")).toHaveAttribute("aria-expanded", "true");
+  await openSettings(page, "connection");
   await page.locator("#swap-network").selectOption("regtest");
   await expect(page.locator("#swap-relay")).toHaveValue("ws://127.0.0.1:7777/");
   await expect(page.locator("#swap-chain-api")).toHaveValue("http://127.0.0.1:8091/api");
@@ -235,9 +239,10 @@ test("settings are keyboard accessible and switching networks resets local relay
   await expect(page.locator("#swap-relay")).toHaveValue(MAINNET_RELAYS.join("\n"));
   await expect(page.locator("#swap-chain-api")).toHaveValue("https://mempool.space/signet/api");
   await page.keyboard.press("Escape");
-  await expect(page.getByRole("dialog")).not.toBeVisible();
+  await expect(page.locator("#swap-settings")).not.toBeVisible();
+  await expect(page.locator("#swap-settings-toggle")).toBeFocused();
   await expect(page.locator("#swap-start")).toBeEnabled();
-  await page.locator("#swap-privacy summary").click();
+  await page.locator("#swap-privacy-toggle").click();
   await expect(page.locator("#swap-chain-disclosure")).toContainText("https://mempool.space/signet/api");
   await directorySettled(page);
   for (const url of sockets) expect([...MAINNET_RELAYS, "ws://127.0.0.1:7777/"]).toContain(url);
@@ -251,7 +256,7 @@ test("the header network indicator switches an unpublished network in place and 
   expect(await picker.locator("option").allTextContents()).toEqual(["Mainnet", "signet · test funds", "testnet4 · test funds", "regtest · test funds"]);
   await picker.selectOption("signet");
   await expect(page).toHaveURL(SWAP); // no deployment map in this build: nothing navigates
-  await page.locator("#swap-settings-toggle").click();
+  await openSettings(page, "connection");
   await expect(page.locator("#swap-network")).toHaveValue("signet");
   await expect(page.locator("#swap-chain-api")).toHaveValue("https://mempool.space/signet/api");
   await page.locator("#swap-network").selectOption("regtest");
@@ -299,7 +304,8 @@ test("the minimal swap card fits a mobile viewport", async ({ page }) => {
   await page.goto(SWAP);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
   await expect(page.locator("#swap-invoice")).toBeVisible();
-  await expect(page.locator("#swap-status")).toBeVisible();
+  await expect(page.locator("#swap-progress")).toBeHidden();
+  await expect(page.locator("#swap-start")).toBeInViewport();
 });
 
 test("automatic discovery uses every configured relay and restores inputs when no provider is found", async ({ page }) => {
@@ -312,7 +318,7 @@ test("automatic discovery uses every configured relay and restores inputs when n
     });
   });
   await page.goto(SWAP);
-  await page.locator("#swap-settings-toggle").click();
+  await openSettings(page, "connection");
   await page.locator("#swap-network").selectOption("regtest");
   await page.locator("#swap-relay").fill("ws://127.0.0.1:7777\nws://127.0.0.1:7778");
   await page.locator("#swap-settings-close").click();
@@ -320,7 +326,7 @@ test("automatic discovery uses every configured relay and restores inputs when n
   sockets.length = 0; // the regtest provider directory loaded on network change
   const now = Math.floor(Date.now() / 1000);
   await page.locator("#swap-invoice").fill(testInvoice("browser_discovery", "1000000", now, now + 7200));
-  await page.locator("#swap-wallet-setup summary").click();
+  await openSettings(page, "advanced");
   await page.locator("#swap-refund").fill(scriptAddress("0014" + "11".repeat(20), "regtest"));
   await page.locator("#swap-tip").fill("1000");
   await page.locator("#swap-start").click();
@@ -343,14 +349,14 @@ test("canceling discovery closes its relay and a new search cannot show stale re
     });
   });
   await page.goto(SWAP);
-  await page.locator("#swap-settings-toggle").click();
+  await openSettings(page, "connection");
   await page.locator("#swap-network").selectOption("regtest");
   await page.locator("#swap-settings-close").click();
   await directorySettled(page);
   armed = true;
   const now = Math.floor(Date.now() / 1000);
   await page.locator("#swap-invoice").fill(testInvoice("browser_cancel", "1000000", now, now + 7200));
-  await page.locator("#swap-wallet-setup summary").click();
+  await openSettings(page, "advanced");
   await page.locator("#swap-refund").fill(scriptAddress("0014" + "11".repeat(20), "regtest"));
   await page.locator("#swap-tip").fill("1000");
   await page.locator("#swap-start").click();
@@ -412,7 +418,7 @@ test("the provider directory loads by itself, groups providers by swap type and 
     });
   });
   await page.goto(SWAP);
-  await page.locator("#swap-settings-toggle").click();
+  await openSettings(page, "connection");
   await page.locator("#swap-network").selectOption("regtest");
   await page.locator("#swap-settings-close").click();
   await expect(page.locator("#swap-provider-choice")).toHaveText("Provider: automatic, fastest payment, then lowest price");
@@ -443,7 +449,7 @@ test("the provider directory loads by itself, groups providers by swap type and 
   await expect.poll(() => requests).toBe(2);
   await page.locator("#swap-providers-close").click();
   await expect(page.locator("#swap-provider-choice")).toHaveText(`Provider: ${identity.slice(0, 12)}… (chosen by you)`);
-  await page.locator("#swap-settings-toggle").click();
+  await openSettings(page, "advanced");
   await expect(page.locator("#swap-provider")).toHaveValue(identity);
   await page.locator("#swap-provider").fill("");
   await expect(page.locator("#swap-ranking")).toHaveValue("time"); // fastest first by default
@@ -466,7 +472,7 @@ test("the provider directory reloads itself while idle and drops offers once the
     });
   });
   await page.goto(SWAP);
-  await page.locator("#swap-settings-toggle").click();
+  await openSettings(page, "connection");
   await page.locator("#swap-network").selectOption("regtest");
   await page.locator("#swap-settings-close").click();
   const status = page.locator("#swap-providers-status");
@@ -513,7 +519,7 @@ test("discovery uses only portable relay filters, so relays that refuse multi-le
     });
   });
   await page.goto(SWAP);
-  await page.locator("#swap-settings-toggle").click();
+  await openSettings(page, "connection");
   await page.locator("#swap-network").selectOption("regtest");
   await page.locator("#swap-settings-close").click();
   await expect(page.locator("#swap-providers-status")).toHaveText("1 provider on regtest.");

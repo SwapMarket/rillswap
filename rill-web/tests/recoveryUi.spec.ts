@@ -1,4 +1,4 @@
-import { expect, test } from "./fixtures/swapPage";
+import { expect, openRecovery, openRecoveryKey, openSettings, test } from "./fixtures/swapPage";
 import canonicalize from "canonicalize";
 import { readFileSync } from "node:fs";
 import { encryptCanonicalRecoveryForRecipient } from "../src/recoveryAgeContainer";
@@ -19,7 +19,7 @@ test("the 12-word key is recommended without blocking swaps and is revealed only
   await expect(page.locator("#swap-key-recommendation")).toContainText("Tor Browser and private windows");
   await expect(page.locator("#swap-start")).toBeEnabled();
   await expect(page.locator("#swap-wallet-words")).toBeEmpty();
-  await page.locator("#swap-wallet-setup summary").click();
+  await openRecoveryKey(page);
   await page.locator("#swap-wallet-show-words").click();
   const words = page.locator("#swap-wallet-words");
   await expect(words).toBeVisible();
@@ -51,7 +51,7 @@ for (const source of ["words", "JSON backup"]) {
       const wallet = await window.uiFixture.wallet.open();
       try { return (await wallet.info()).fingerprint; } finally { wallet.close(); }
     });
-    await page.locator("#swap-recovery summary").first().click();
+    await openRecovery(page);
     await page.locator("#swap-recovery-file").setInputFiles(payload(encrypted, "swap.age"));
     if (source === "words") {
       await page.getByText("Use a saved recovery key (optional)", { exact: true }).click();
@@ -81,7 +81,7 @@ test("the recovery panel uses the saved browser key and makes no external connec
     try { return (await wallet.recoveryKey()).recipient; } finally { wallet.close(); }
   });
   const file = await encryptCanonicalRecoveryForRecipient(plaintext("signed funding revision zero"), recipient);
-  await page.locator("#swap-recovery summary").first().click();
+  await openRecovery(page);
   await page.locator("#swap-recovery-file").setInputFiles(payload(file, "my-funded-swap.age"));
   await page.locator("#swap-recovery-inspect").click();
   await expect(page.locator("#swap-recovery-result h3")).toHaveText("Recovery record verified");
@@ -99,7 +99,7 @@ test("existing mainnet files can be inspected with their original age key while 
   const file = await encryptCanonicalRecoveryForRecipient(plaintext("expired mainnet session"), key.recipient);
   await page.goto("http://127.0.0.1:18765/swap.html");
   await expect(page.locator("#swap-start")).toBeEnabled();
-  await page.locator("#swap-recovery summary").first().click();
+  await openRecovery(page);
   await page.locator("#swap-recovery-file").setInputFiles(payload(file, "older-mainnet-swap.age"));
   await page.locator("#swap-recovery-key-file").setInputFiles(payload(key.file, "older-key.age-key"));
   await page.locator("#swap-recovery-inspect").click();
@@ -116,20 +116,22 @@ test("wrong key, wrong network, and damaged signed data are refused without expo
     const wallet = await window.uiFixture.wallet.open();
     try { return (await wallet.info()).fingerprint; } finally { wallet.close(); }
   });
-  await page.locator("#swap-recovery summary").first().click();
+  await openRecovery(page);
   await page.locator("#swap-recovery-file").setInputFiles(payload(file, "private-error-canary.age"));
   await page.locator("#swap-recovery-inspect").click();
   await expect(page.locator("#swap-recovery-result")).toContainText("Could not verify this recovery file");
   await expect(page.locator("#swap-recovery-result")).not.toContainText("private-error-canary");
   await page.locator("#swap-recovery-key-file").setInputFiles(payload(key.file, "original.key"));
-  await page.locator("#swap-settings-toggle").click();
+  await openSettings(page, "connection");
   await page.locator("#swap-network").selectOption("signet");
   await page.locator("#swap-settings-close").click();
+  await openRecovery(page);
   await page.locator("#swap-recovery-inspect").click();
   await expect(page.locator("#swap-recovery-result")).toContainText("Could not verify this recovery file");
-  await page.locator("#swap-settings-toggle").click();
+  await openSettings(page, "connection");
   await page.locator("#swap-network").selectOption("regtest");
   await page.locator("#swap-settings-close").click();
+  await openRecovery(page);
   const damaged = await encryptCanonicalRecoveryForRecipient(plaintext("invalid provider_terms_signature"), key.recipient);
   await page.locator("#swap-recovery-file").setInputFiles(payload(damaged, "damaged.age"));
   await page.locator("#swap-recovery-inspect").click();
@@ -143,7 +145,7 @@ test("wrong key, wrong network, and damaged signed data are refused without expo
 
 test("oversized local recovery and key files are refused before decryption", async ({ page }) => {
   await page.goto("http://127.0.0.1:18765/test-only/swap.html");
-  await page.locator("#swap-recovery summary").first().click();
+  await openRecovery(page);
   await page.locator("#swap-recovery-file").setInputFiles(payload(new Uint8Array(256 * 1024 + 1), "large.age"));
   await page.locator("#swap-recovery-inspect").click();
   await expect(page.locator("#swap-recovery-result")).toContainText("at most 256 KiB");
@@ -161,7 +163,7 @@ test("changing the independently selected network while opening a file discards 
     try { return (await wallet.recoveryKey()).recipient; } finally { wallet.close(); }
   });
   const file = await encryptCanonicalRecoveryForRecipient(plaintext("signed funding revision zero"), recipient);
-  await page.locator("#swap-recovery summary").first().click();
+  await openRecovery(page);
   await page.locator("#swap-recovery-file").setInputFiles(payload(file, "swap.age"));
   await page.evaluate(() => {
     const prototype = window.uiFixture.wallet.prototype, original = prototype.recoveryKey;
@@ -175,7 +177,7 @@ test("changing the independently selected network while opening a file discards 
   });
   await page.locator("#swap-recovery-inspect").click();
   await page.waitForFunction(() => window.recoveryImportPending);
-  await page.locator("#swap-settings-toggle").click();
+  await openSettings(page, "connection");
   await page.locator("#swap-network").selectOption("signet");
   await page.locator("#swap-settings-close").click();
   await page.evaluate(() => window.releaseRecoveryImport());

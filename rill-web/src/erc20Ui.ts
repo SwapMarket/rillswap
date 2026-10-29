@@ -182,6 +182,7 @@ export function evmRecoveryControls(root: HTMLElement, options: EvmRecoveryOptio
   const message = node("p", "", "swap-evm-recovery-message");
   const check = node("button", "Check lock status", "swap-evm-recovery-check"); check.type = "button";
   const refund = node("button", `Refund ${tokenLabel(lock.amount, asset)} with your wallet`, "swap-evm-recovery-refund"); refund.type = "button";
+  refund.className = "primary";
   refund.disabled = true;
   root.replaceChildren(
     node("h3", `${asset.token_symbol} to Lightning recovery verified`),
@@ -249,6 +250,7 @@ function reverseEvmRecoveryControls(root: HTMLElement, record: EvmRecoveryRecord
   const check = node("button", "Check lock status", "swap-evm-recovery-check"); check.type = "button";
   const sponsorConfig = record.claimKey !== null ? options.sponsor?.() ?? null : null;
   const claim = node("button", sponsorConfig ? "Claim through the gas sponsor" : "Claim with your EVM wallet", "swap-evm-recovery-claim"); claim.type = "button"; claim.disabled = true;
+  claim.className = "primary";
   root.replaceChildren(node("h3", `Lightning to ${terms.evm_asset.token_symbol} recovery verified`),
     node("p", `${tokenLabel(record.lock.amount, terms.evm_asset)} to ${record.lock.claimAddress}` +
       (record.claimDestination ? `, forwarded to ${record.claimDestination}` : "") + `. Provider refund block ${record.lock.timelock}. ` +
