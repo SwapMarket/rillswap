@@ -8,6 +8,7 @@
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "isolatedModules": true,
     "useDefineForClassFields": true,
     "skipLibCheck": true,

@@ -1,7 +1,7 @@
 /** Deployment defaults are public configuration, never wallet credentials. */
 import { validateEvmAssetIdentity } from "../generated/manualAdvertisementValidators.js";
-import type { EvmAssetIdentity } from "../manualProviderAdvertisement";
-import { isOnionRelay, PUBLIC_RELAYS } from "./publicRelays";
+import type { EvmAssetIdentity } from "../manualProviderAdvertisement.ts";
+import { isOnionRelay, PUBLIC_RELAYS } from "./publicRelays.ts";
 
 export const NETWORK_NAMES = ["mainnet", "signet", "testnet4", "regtest"] as const;
 export type NetworkName = typeof NETWORK_NAMES[number];
