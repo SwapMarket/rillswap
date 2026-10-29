@@ -36,6 +36,30 @@ async function fits(page: Page, info: TestInfo, stage: string): Promise<void> {
   await page.screenshot({ path: info.outputPath(`${stage}.png`), fullPage: true, animations: "disabled" });
 }
 
+test("the network picker aligns its chevron and header pills without losing native keyboard behavior", async ({ page }, info) => {
+  await page.goto(PAGE);
+  const picker = page.getByRole("combobox", { name: "Switch network" });
+  for (const width of [320, 390, 1440]) {
+    await page.setViewportSize({ width, height: 844 });
+    for (const network of ["mainnet", "signet", "testnet4", "regtest"]) {
+      await picker.selectOption(network);
+      await expect(picker).toHaveValue(network);
+      const badge = (await picker.boundingBox())!, source = (await page.locator("#swap-source").boundingBox())!;
+      expect(Math.abs(badge.height - source.height)).toBeLessThan(1);
+      expect(Math.abs(badge.y + badge.height / 2 - source.y - source.height / 2)).toBeLessThan(1);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    }
+    await fits(page, info, `network-${width}`);
+  }
+  await expect(picker).toHaveCSS("appearance", "none");
+  await expect(picker).toHaveCSS("background-position-y", "50%");
+  await picker.focus();
+  await page.keyboard.press("Home");
+  await expect(picker).toHaveValue("mainnet");
+  await page.keyboard.press("End");
+  await expect(picker).toHaveValue("regtest");
+});
+
 test("tools are persistent sibling panels with keyboard focus and unchanged inputs", async ({ page }) => {
   await page.goto(PAGE);
   await page.locator("#swap-invoice").fill("an unfinished invoice");
