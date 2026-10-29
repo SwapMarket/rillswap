@@ -1,6 +1,20 @@
 import { directorySettled, expect, MAINNET_RELAYS, test } from "./fixtures/swapPage";
+import { buildCommit } from "../scripts/build-commit";
 
 for (const prefix of ["", "repository/"]) {
+  test(`both network footers link to the build commit under /${prefix}`, async ({ page }) => {
+    const commit = buildCommit();
+    for (const network of ["", "signet/"]) {
+      await page.goto(`http://127.0.0.1:18866/${prefix}${network}`);
+      const revision = page.locator("footer #swap-build-commit");
+      if (!commit) { await expect(revision).toHaveCount(0); continue; }
+      await expect(revision).toHaveText(commit.slice(0, 7));
+      await expect(revision).toHaveAttribute("href", `https://github.com/rillswap/rillswap/commit/${commit}`);
+      await expect(revision).toHaveAttribute("target", "_blank");
+      await expect(revision).toHaveAttribute("rel", "noopener noreferrer");
+    }
+  });
+
   test(`swap execution code is loaded with each page under /${prefix}`, async ({ page, request }) => {
     for (const network of ["", "signet/"]) {
       await page.goto(`http://127.0.0.1:18866/${prefix}${network}`);

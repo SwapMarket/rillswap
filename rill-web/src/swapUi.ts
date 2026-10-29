@@ -482,6 +482,13 @@ function mount(root: HTMLElement): void {
   diagnostics.append(log);
   card.append(cardHead, form, tracking, progress, panel, privacy, diagnostics);
   const footer = node("footer", "Permissionless · Non-custodial · Locally verified");
+  const commit = document.querySelector<HTMLMetaElement>('meta[name="rillswap-build-commit"]')?.content;
+  if (commit && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(commit)) {
+    const revision = node("a", commit.slice(0, 7), "swap-build-commit");
+    Object.assign(revision, { href: `${SOURCE_CODE_URL}/commit/${commit}`, target: "_blank", rel: "noopener noreferrer" });
+    revision.setAttribute("aria-label", `View build commit ${commit.slice(0, 7)} on GitHub`);
+    footer.append(" · Build ", revision);
+  }
   root.replaceChildren(header, intro, card, footer, settings, providers);
   const setStatus = (text: string, step: number, state = "working"): void => {
     status.textContent = text;

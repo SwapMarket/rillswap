@@ -81,6 +81,13 @@ Tabs opened before this safeguard was deployed need a manual reload to gain it.
 
 Deployment defaults are set and validated at build time.
 
+The swap footer shows the first seven characters of the build's Git commit,
+linked to that commit on GitHub. Builds read the local checkout's `HEAD`;
+source archives or containers without Git can set `RILLSWAP_BUILD_COMMIT` to
+the full commit hash. If no valid revision is available, the link is omitted.
+This identifies the base commit, not uncommitted changes. Revision-only changes
+do not trigger the application bundle update warning.
+
 | Variable | Meaning |
 | --- | --- |
 | `VITE_RILLSWAP_NETWORK` | `mainnet`, `signet`, `testnet4` or `regtest` |

@@ -1,8 +1,10 @@
 import { defineConfig, loadEnv } from "vite";
+import { buildCommit } from "./scripts/build-commit";
 import { resolveSwapDefaults } from "./src/swap/config";
 
 export default defineConfig(({ mode }) => {
   const defaults = resolveSwapDefaults({ ...loadEnv(mode, process.cwd(), "VITE_"), ...process.env });
+  const commit = buildCommit();
   return {
     base: "./",
     define: { __SWAP_DEFAULTS__: JSON.stringify(defaults) },
@@ -15,7 +17,13 @@ export default defineConfig(({ mode }) => {
         if (url && new URL(url).protocol === "http:") origins.add(new URL(url).origin);
       }
       return html.replace("__CHAIN_API_ORIGINS__", [...origins].join(" "));
-    } }],
+    } }, {
+      name: "build-commit",
+      // Keep revision-only changes out of bundle URLs used by the update safeguard.
+      transformIndexHtml: () => commit ? [{
+        tag: "meta", attrs: { name: "rillswap-build-commit", content: commit }, injectTo: "head",
+      }] : [],
+    }],
     build: {
       outDir: "dist",
       emptyOutDir: true,

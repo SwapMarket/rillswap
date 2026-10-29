@@ -1,4 +1,5 @@
 import { directorySettled, expect, MAINNET_RELAYS, test } from "./fixtures/swapPage";
+import { buildCommit } from "../scripts/build-commit";
 
 test("merchant invoice fragments prefill locally without connecting and are removed from the address bar", async ({ page, relaySockets: sockets }) => {
   const requests: string[] = [];
@@ -266,6 +267,31 @@ test("the header links to the source code in a new tab, beside the network picke
   await expect(source).toHaveAttribute("rel", "noopener noreferrer");
   await expect(page.locator("header #swap-toolbar")).toContainText("GitHub");
   await expect(page.locator(".swap-intro")).toContainText("open, permissionless market");
+});
+
+test("the footer links the short build revision to its full GitHub commit in a new tab", async ({ page }) => {
+  await page.goto(SWAP);
+  const commit = buildCommit(), revision = page.locator("footer #swap-build-commit");
+  if (!commit) { await expect(revision).toHaveCount(0); return; }
+  await expect(revision).toHaveText(commit.slice(0, 7));
+  await expect(revision).toHaveAttribute("href", `https://github.com/rillswap/rillswap/commit/${commit}`);
+  await expect(revision).toHaveAttribute("target", "_blank");
+  await expect(revision).toHaveAttribute("rel", "noopener noreferrer");
+});
+
+test("missing or malformed build metadata leaves the swap usable without a commit link", async ({ page }) => {
+  for (const metadata of ["", '<meta name="rillswap-build-commit" content="not-a-commit">']) {
+    await page.route(SWAP, async (route) => {
+      const response = await route.fetch();
+      const html = (await response.text()).replace(/<meta name="rillswap-build-commit"[^>]*>/g, "");
+      await route.fulfill({ response, body: html.replace("</head>", `${metadata}</head>`) });
+    });
+    await page.goto(SWAP);
+    await directorySettled(page);
+    await expect(page.locator("#swap-build-commit")).toHaveCount(0);
+    await expect(page.locator("#swap-start")).toBeEnabled();
+    await page.unroute(SWAP);
+  }
 });
 
 test("the minimal swap card fits a mobile viewport", async ({ page }) => {
