@@ -1219,3 +1219,48 @@ def test_trusted_balance_reads_the_funding_wallet_exactly(tmp_path: Path) -> Non
         result[0] = "403"  # a whitelist generated before getbalances was needed
         with pytest.raises(CoreAuthError):
             reader.trusted_balance_sat()
+
+
+def test_wallet_utxo_count_includes_locked_and_unconfirmed_without_double_counting(
+    tmp_path: Path,
+) -> None:
+    _, _, network = _context()
+    requests: list[dict[str, Any]] = []
+    shared = {"txid": "ab" * 32, "vout": 0}
+    outputs = {
+        "listunspent": [shared, {"txid": "cd" * 32, "vout": 1, "confirmations": 0}],
+        "listlockunspent": [shared, {"txid": "ef" * 32, "vout": 2}],
+    }
+
+    def respond(payload: dict[str, Any]) -> tuple[int, bytes]:
+        return _rpc_reply(outputs[payload["method"]])(payload)
+
+    with _server(respond, requests) as port:
+        reader = CoreTransactionReader(
+            port=port, cookie_path=_cookie(tmp_path), network=network, wallet="maker"
+        )
+        assert reader.wallet_utxo_count() == 3
+    assert [(item["method"], item["params"], item["path"]) for item in requests] == [
+        ("listunspent", [0], "/wallet/maker"),
+        ("listlockunspent", [], "/wallet/maker"),
+    ]
+
+
+@pytest.mark.parametrize("outputs", [None, {}, [None], [{}], [{"txid": "ab" * 32, "vout": True}]])
+def test_wallet_utxo_count_rejects_malformed_lists(tmp_path: Path, outputs: object) -> None:
+    _, _, network = _context()
+    with _server(_rpc_reply(outputs), []) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        with pytest.raises(CoreProtocolError, match="UTXO"):
+            reader.wallet_utxo_count()
+
+
+def test_wallet_utxo_count_reports_empty_wallet_and_refused_credentials(tmp_path: Path) -> None:
+    _, _, network = _context()
+    with _server(_rpc_reply([]), []) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        assert reader.wallet_utxo_count() == 0
+    with _server(lambda _: (403, b""), []) as port:
+        reader = CoreTransactionReader(port=port, cookie_path=_cookie(tmp_path), network=network)
+        with pytest.raises(CoreAuthError):
+            reader.wallet_utxo_count()

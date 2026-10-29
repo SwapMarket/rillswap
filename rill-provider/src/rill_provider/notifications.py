@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -53,6 +54,8 @@ CLOSE_TIMEOUT_SECONDS = 30.0  # the last events at shutdown, within Compose's 1m
 POLL_SECONDS = 15.0
 MAX_EVENTS_PER_POLL = 256
 DAY_SECONDS = 24 * 60 * 60
+BALANCE_WAIT_SECONDS = 15.0
+BALANCE_WORKERS = 4
 OUTCOME_ORDER = (COMPLETED, FAILED, REFUNDED, ABORTED, LOST)
 
 
@@ -163,6 +166,7 @@ class Notifier:
         profile: str,
         network: str,
         health: Callable[[], ServiceHealth],
+        balances: dict[str, Callable[[], str]] | None = None,
         clock: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
         poll_seconds: float = POLL_SECONDS,
@@ -174,6 +178,9 @@ class Notifier:
         self._profile = profile
         self._prefix = f"RillSwap {profile} ({network})"
         self._health = health
+        self._balances = dict(balances or {})
+        self._balance_executor: ThreadPoolExecutor | None = None
+        self._balance_pending: dict[str, Future[str]] = {}
         self._clock, self._monotonic = clock, monotonic
         self._poll_seconds = poll_seconds
         self._cursor = store.ledger_head()  # history is summarized, never replayed
@@ -195,6 +202,10 @@ class Notifier:
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
             self._task = None
+        if self._balance_executor is not None:
+            self._balance_executor.shutdown(wait=False, cancel_futures=True)
+            self._balance_executor = None
+            self._balance_pending.clear()
         messages = self._collect(self._swap_messages)
         if self._settings.service_start_stop:
             if failed:
@@ -210,13 +221,42 @@ class Notifier:
 
     async def poll(self) -> None:
         """Deliver what is due as one notification; never raises but cancellation."""
-        await self._deliver(
-            [
-                *self._collect(self._swap_messages),
-                *self._collect(self._health_messages),
-                *self._collect(self._summary_messages),
+        messages = [*self._collect(self._swap_messages), *self._collect(self._health_messages)]
+        summaries = self._collect(self._summary_messages)
+        if summaries and self._settings.summary_balances and self._balances:
+            balances = await asyncio.gather(
+                *(self._read_balance(label, read) for label, read in self._balances.items())
+            )
+            message = summaries[0]
+            summaries = [
+                Message(
+                    message.title, message.body + "\nBalances (current):\n" + "\n".join(balances)
+                )
             ]
-        )
+        await self._deliver([*messages, *summaries])
+
+    async def _read_balance(self, label: str, read: Callable[[], str]) -> str:
+        previous = self._balance_pending.get(label)
+        if previous is not None and not previous.done():
+            return f"{label}: unavailable."
+        future: Future[str] | None = None
+        try:
+            if self._balance_executor is None:
+                self._balance_executor = ThreadPoolExecutor(
+                    max_workers=BALANCE_WORKERS, thread_name_prefix="rill-notifications"
+                )
+            future = self._balance_executor.submit(read)
+            self._balance_pending[label] = future
+            # Cancellation drops queued work and discards late results/errors;
+            # the concurrent future still tracks an already-running backend call.
+            value = await asyncio.wait_for(asyncio.wrap_future(future), BALANCE_WAIT_SECONDS)
+        except Exception as error:  # noqa: BLE001 - one backend must not suppress the summary
+            LOG.warning("notification balance unavailable: %s", type(error).__name__)
+            value = "unavailable"
+        finally:
+            if future is not None and future.done():
+                self._balance_pending.pop(label, None)
+        return f"{label}: {value}."
 
     async def _run(self) -> None:
         if self._settings.service_start_stop:

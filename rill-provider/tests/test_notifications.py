@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -231,6 +232,8 @@ class Clocks:
 def _notifier(
     ledger: Ledger,
     clocks: Clocks,
+    *,
+    balances: dict[str, Any] | None = None,
     **settings: Any,  # noqa: ANN401 - settings fields
 ) -> tuple[Notifier, Sender]:
     sender = Sender()
@@ -243,6 +246,7 @@ def _notifier(
         health=lambda: clocks.health,
         clock=lambda: clocks.wall,
         monotonic=lambda: clocks.mono,
+        balances=balances,
     )
     return notifier, sender
 
@@ -401,6 +405,157 @@ def test_disabled_summary_is_never_computed(monkeypatch: pytest.MonkeyPatch) -> 
     clocks.wall += 2 * DAY
     asyncio.run(notifier.poll())
     assert sender.sent == []
+
+
+@pytest.mark.parametrize("settings", [{}, {"summary_balances": False}, {"daily_summary": False}])
+def test_summary_balances_are_default_on_and_only_read_when_due(settings: dict[str, bool]) -> None:
+    calls: list[int] = []
+    main_thread = threading.get_ident()
+
+    def read() -> str:
+        calls.append(threading.get_ident())
+        return "123,456 sat, 7 UTXOs"
+
+    clocks = Clocks()
+    notifier, sender = _notifier(Ledger(), clocks, balances={"Bitcoin": read}, **settings)
+    asyncio.run(notifier.poll())
+    assert calls == []
+    clocks.wall += DAY
+    asyncio.run(notifier.poll())
+    asyncio.run(notifier.poll())
+    if settings:
+        assert calls == []
+        assert not sender.sent or "Balances" not in sender.sent[-1][1]
+    else:
+        assert len(calls) == 1
+        assert calls[0] != main_thread
+        assert "Balances (current):\nBitcoin: 123,456 sat, 7 UTXOs." in sender.sent[-1][1]
+
+
+def test_balance_failures_and_timeouts_preserve_other_balances_and_ledger_summary(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    release = threading.Event()
+
+    def fail() -> str:
+        raise OSError("SECRET credential URL")
+
+    def slow() -> str:
+        release.wait(timeout=2)
+        return "late"
+
+    monkeypatch.setattr(notifications, "BALANCE_WAIT_SECONDS", 0.02)
+    clocks = Clocks()
+    notifier, sender = _notifier(
+        Ledger(), clocks, balances={"Core": fail, "EVM": slow, "Lightning": lambda: "0 sat"}
+    )
+
+    async def scenario() -> None:
+        clocks.wall += DAY
+        try:
+            await notifier.poll()
+            assert "Closed: none." in sender.sent[-1][1]
+            assert "Core: unavailable." in sender.sent[-1][1]
+            assert "EVM: unavailable." in sender.sent[-1][1]
+            assert "Lightning: 0 sat." in sender.sent[-1][1]
+            await notifier.poll()
+            assert len(sender.sent) == 1
+        finally:
+            release.set()
+
+    asyncio.run(scenario())
+    assert "SECRET" not in caplog.text
+
+
+def test_blocked_balance_reads_are_isolated_and_do_not_accumulate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = threading.Event()
+    calls: list[int] = []
+    monkeypatch.setattr(notifications, "BALANCE_WAIT_SECONDS", 0.05)
+
+    async def scenario() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        started = asyncio.Event()
+
+        def read() -> str:
+            calls.append(threading.get_ident())
+            loop.call_soon_threadsafe(started.set)
+            release.wait(timeout=3)
+            return "late"
+
+        clocks = Clocks()
+        notifier, sender = _notifier(
+            Ledger(), clocks, balances={f"asset {index}": read for index in range(6)}
+        )
+        clocks.wall += DAY
+        task = asyncio.create_task(notifier.poll())
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            assert await asyncio.wait_for(asyncio.to_thread(lambda: "serving"), 0.2) == "serving"
+            await task
+            running = len(calls)
+            assert 1 <= running <= 4
+            clocks.wall += DAY
+            await notifier.poll()
+            assert len(calls) == running  # no new reads behind the still-running sources
+            assert len(sender.sent) == 2
+            await asyncio.wait_for(notifier.close(failed=False), 0.2)
+        finally:
+            release.set()
+            await task
+
+    asyncio.run(scenario())
+
+
+def test_close_during_balance_reads_cancels_queued_work_and_discards_late_errors(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    release = threading.Event()
+    calls: list[int] = []
+
+    async def scenario() -> None:
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        loop_errors: list[dict[str, Any]] = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+
+        def read() -> str:
+            calls.append(threading.get_ident())
+            loop.call_soon_threadsafe(entered.set)
+            release.wait(timeout=3)
+            raise OSError("SECRET late backend failure")
+
+        clocks = Clocks()
+        notifier, sender = _notifier(
+            Ledger(), clocks, balances={f"asset {index}": read for index in range(6)}
+        )
+        monkeypatch.setattr(notifier, "_poll_seconds", 0.001)
+        clocks.wall += DAY
+        notifier.start()
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            pending = tuple(notifier._balance_pending.values())  # noqa: SLF001
+            await asyncio.wait_for(notifier.close(failed=False), 0.2)
+            running = len(calls)
+            assert 1 <= running <= 4
+            assert any(future.cancelled() for future in pending)
+            release.set()
+            await asyncio.gather(
+                *(asyncio.wrap_future(future) for future in pending), return_exceptions=True
+            )
+            await asyncio.sleep(0)  # flush late wrapper callbacks
+            assert len(calls) == running
+            assert loop_errors == []
+            assert sender.sent == []
+        finally:
+            release.set()
+            loop.set_exception_handler(previous_handler)
+
+    asyncio.run(scenario())
+    assert "SECRET" not in caplog.text
 
 
 def test_failures_are_logged_without_detail_and_never_raised(
@@ -565,6 +720,7 @@ def test_settings_defaults_and_config_resolution(tmp_path: Path) -> None:
         "swap_failed": False,
         "swap_lost": True,
         "daily_summary": True,
+        "summary_balances": True,
         "summary_time": "00:00",
         "low_liquidity": True,
         "relays_down": True,
@@ -577,6 +733,12 @@ def test_settings_defaults_and_config_resolution(tmp_path: Path) -> None:
     config = load_config(_config(tmp_path, notifications={"urls_file": "notify.urls"}))
     assert config.notifications is not None
     assert config.notifications.urls_file == tmp_path / "notify.urls"
+    assert config.notifications.summary_balances is True
+    config = load_config(
+        _config(tmp_path, notifications={"urls_file": "notify.urls", "summary_balances": False})
+    )
+    assert config.notifications is not None
+    assert config.notifications.summary_balances is False
     for bad in (
         {"summary_time": "24:00"},
         {"summary_time": "8:00"},
@@ -635,3 +797,37 @@ def test_real_store_events_and_summary_reach_an_apprise_endpoint(
     assert "Closed: 1, 100% success (1 completed)." in summary
     assert "Net profit: 698.766 sat." in summary
     assert "Costs of 1 swaps were not all recorded" in summary
+
+
+def test_default_summary_balances_reach_an_apprise_endpoint(
+    tmp_path: Path, hook: tuple[str, list[tuple[str, dict[str, Any]]]]
+) -> None:
+    url, received = hook
+    settings = NotificationSettings(urls_file=_urls(tmp_path, url))
+    clocks = Clocks()
+
+    async def scenario() -> None:
+        async with notification_sender(settings, None) as sender:
+            assert sender is not None
+            notifier = Notifier(
+                settings,
+                sender,
+                Ledger(),  # type: ignore[arg-type]
+                profile="btc-to-ln/v1",
+                network="regtest",
+                health=lambda: HEALTHY,
+                balances={
+                    "Bitcoin Core trusted": lambda: "42 sat",
+                    "Bitcoin Core UTXOs": lambda: "2",
+                },
+                clock=lambda: clocks.wall,
+            )
+            clocks.wall += DAY
+            await notifier.poll()
+
+    asyncio.run(scenario())
+    assert len(received) == 1
+    body = received[0][1]["message"]
+    assert "Closed: none." in body
+    assert "Bitcoin Core trusted: 42 sat." in body
+    assert "Bitcoin Core UTXOs: 2." in body

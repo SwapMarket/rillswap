@@ -95,9 +95,11 @@ CORE_RPC_METHODS = (
     "getbalances",
     # Privacy-first funding: the provider picks the inputs itself.
     "listunspent",
+    # Read-only operator reporting includes temporarily locked wallet outputs.
+    "listlockunspent",
 )
 # Besides the wallet* methods.
-_WALLET_RPC_METHODS = ("lockunspent", "getbalances", "listunspent")
+_WALLET_RPC_METHODS = ("lockunspent", "getbalances", "listunspent", "listlockunspent")
 MAX_VOUT = 0xFFFFFFFF
 
 
@@ -525,6 +527,44 @@ class CoreTransactionReader:
             raise CoreProtocolError("Core wallet balance invalid")
         with localcontext(DecimalContext(prec=28)):
             return int(trusted * SATS_PER_BTC)
+
+    def wallet_utxo_count(self) -> int:
+        """Count Core's listed wallet outputs, including locked and unconfirmed.
+
+        Informational, not an atomic snapshot or a count of spendable funding
+        inputs. Watch-only and unsafe outputs returned by Core are included;
+        ``listunspent`` does not return immature coinbase outputs.
+        """
+        username, password = _cookie(self._cookie_path)
+        try:
+            with httpx.Client(
+                base_url=self._url,
+                auth=httpx.BasicAuth(username, password),
+                trust_env=False,
+                follow_redirects=False,
+                timeout=httpx.Timeout(READ_SECONDS, connect=CONNECT_SECONDS),
+            ) as client:
+                unlocked = self._rpc(client, "listunspent", [0], 1)
+                locked = self._rpc(client, "listlockunspent", [], 2)
+        except httpx.HTTPError:
+            raise CoreUnavailableError("Core RPC transport unavailable") from None
+        outpoints: set[tuple[str, int]] = set()
+        for outputs in (unlocked, locked):
+            if not isinstance(outputs, list):
+                raise CoreProtocolError("Core wallet UTXO list invalid")
+            for output in outputs:
+                if not isinstance(output, dict):
+                    raise CoreProtocolError("Core wallet UTXO invalid")
+                txid, vout = output.get("txid"), output.get("vout")
+                if not (
+                    isinstance(txid, str)
+                    and re.fullmatch(r"[0-9a-f]{64}", txid)
+                    and type(vout) is int
+                    and 0 <= vout <= MAX_VOUT
+                ):
+                    raise CoreProtocolError("Core wallet UTXO outpoint invalid")
+                outpoints.add((txid, vout))
+        return len(outpoints)
 
     def observe_source(
         self, source_height: int, *, deadline_seconds: float = 10
@@ -1635,6 +1675,7 @@ class CoreTransactionReader:
         max_bytes = {
             "getblock": MAX_BLOCK_RESPONSE_BYTES,
             "listunspent": MAX_UNSPENT_RESPONSE_BYTES,
+            "listlockunspent": MAX_UNSPENT_RESPONSE_BYTES,
         }.get(method, MAX_RESPONSE_BYTES)
         try:
             with client.stream(

@@ -218,6 +218,7 @@ class NotificationSettings(_Strict):
     swap_failed: bool = False  # failed, refunded or aborted
     swap_lost: bool = True  # paid out without getting the funds back
     daily_summary: bool = True
+    summary_balances: bool = True  # current balances and Bitcoin wallet UTXO count
     summary_time: str = Field(default="00:00", pattern=r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
     low_liquidity: bool = True  # liquidity below every amount band, not announcing
     relays_down: bool = True  # no relay connected

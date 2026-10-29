@@ -221,6 +221,10 @@ class EvmHtlcClient:
         contract = self._web3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)
         return int(contract.functions.decimals().call())
 
+    def native_balance(self, owner: str) -> int:
+        """Return the account's native gas balance in wei."""
+        return int(self._web3.eth.get_balance(Web3.to_checksum_address(owner)))
+
     def token_balance(self, token: str, owner: str) -> int:
         """Return ``balanceOf(owner)`` of an ERC20 token."""
         contract = self._web3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)

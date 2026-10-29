@@ -31,6 +31,7 @@ from rill_provider.lnd_hold_invoice import LndHoldInvoices
 from rill_provider.lnd_invoice_decode import LndInvoiceDecoder
 from rill_provider.lnd_payment_observation import LndObservationError
 from rill_provider.lnd_payment_send import LndPaymentSender
+from rill_provider.notification_balances import balance_readers
 from rill_provider.notifications import Notifier, notification_sender
 from rill_provider.operator_config import (
     OperatorConfig,
@@ -450,6 +451,7 @@ async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
                 profile=config.handshake.profile,
                 network=config.network.name,
                 health=service.health,
+                balances=balance_readers(config) if notifications.summary_balances else None,
             )
             notifier.start()
             failed = True

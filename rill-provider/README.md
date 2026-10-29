@@ -468,6 +468,7 @@ a refused one is reported by line number only.
 | `swap_failed` | `false` | A swap failed, was refunded or aborted |
 | `swap_lost` | `true` | A swap paid out without getting the funds back |
 | `daily_summary` | `true` | Requests, success rate, revenue, costs and net profit |
+| `summary_balances` | `true` | Include current balances of configured assets and the Bitcoin Core wallet UTXO count in the daily summary |
 | `summary_time` | `"00:00"` | When the daily summary is sent (`HH:MM`, UTC) |
 | `low_liquidity` | `true` | Liquidity is below every amount band (not announcing) |
 | `relays_down` | `true` | No relay is connected |
@@ -488,6 +489,36 @@ revenue, mining and routing costs, losses, net profit (in sat, with msat
 precision) and EVM gas (in gwei, kept apart). If a closed swap has costs that
 were not recorded (not reported by a backend), the summary says so and the
 net profit is an upper bound.
+
+By default, the summary also includes current balances (not balances at the
+summary window's end): the Bitcoin Core wallet's trusted balance, Lightning
+local/remote channel balances, the LND default on-chain account, and every
+configured EVM token plus the signer's native gas balance in wei. Remote channel
+funds belong to peers; channel balances are not available routing liquidity.
+Token amounts use the configured decimals. These are separate snapshots, not
+an atomic view or a combined portfolio total.
+
+The Bitcoin Core UTXO count combines `listunspent` (minimum confirmations 0)
+with `listlockunspent`, deduplicating outputs. It includes unconfirmed,
+unsafe, watch-only and temporarily locked outputs; Core's `listunspent` does
+not return immature coinbase outputs. It is not a count of usable funding
+inputs. Core reporting needs `getbalances`,
+`listunspent` and `listlockunspent` in any `rpcwhitelist`. LND reporting uses
+only `lnd.macaroon`: channel balances need `offchain:read`, and the on-chain
+balance needs `onchain:read`. Existing credentials are never replaced with a
+more privileged macaroon. Missing permissions, timeouts and unavailable
+backends show as `unavailable`, not zero; other balances and ledger accounting
+are still sent. Reads use a separate, four-thread notification pool with a
+bounded wait, never the swap-processing pool. A timeout does not terminate a
+running backend call; its source is not read again until that call ends.
+Notifier shutdown cancels queued reads without waiting for active ones, but
+Python process exit can still wait for active backend calls to finish.
+
+Upgrading an existing config with notifications enabled also enables this
+balance reporting to its existing destinations, without changing the config
+file or store. Set `"summary_balances": false` to omit both balances and the
+UTXO count and skip their RPC reads. With no `notifications` section, nothing
+is sent; with `"daily_summary": false`, no balance reads occur.
 
 Notifications are best effort and never affect serving. Nothing about them is
 persisted: events that happen while the service is stopped are not sent one
