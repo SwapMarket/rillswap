@@ -24,6 +24,8 @@ from typing import cast
 
 import pytest
 
+from rill_provider.handshake_store import HandshakePolicy
+
 CRASH_CHILD = """
 import json, os, signal, sys
 from contextlib import contextmanager
@@ -366,7 +368,7 @@ EXTRA = """
         signer = ProviderIdentity.load(directory/'provider.age', custody_identity=str(unlock),
             expected_xonly_public_key=identity, crypto=crypto)
         policy = HandshakePolicy(profile='ln-to-btc/v1',
-            features=frozenset({'cooperative-claim/v1'}),
+            features=frozenset({'cooperative-claim/v1','epoch-bound-session/v1'}),
             encryption_suites=frozenset({'noise-xk-secp256k1-chachapoly-sha256/v1'}),
             capabilities=frozenset({'core/v1','recovery/v1'}))
         LiveSessionStore.provision(directory/'provider.sqlite', network, identity, policy,
@@ -991,6 +993,27 @@ def test_actual_fixture_readiness_requires_settlement_and_strict_original_depth(
     ready = namespace["claim_receipt_ready"]
     assert callable(ready)
     assert ready(states, transaction, 3) is expected
+
+
+def test_actual_fixture_policy_supports_required_reverse_handshake_features() -> None:
+    policies: list[ast.stmt] = [
+        node
+        for node in ast.walk(ast.parse(_program()))
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "HandshakePolicy"
+    ]
+    assert len(policies) == 1
+    # Execute only the actual effect-free policy constructor, never wallet setup.
+    namespace: dict[str, object] = {"HandshakePolicy": HandshakePolicy}
+    exec(  # noqa: S102 - fixed test-owned policy AST
+        compile(ast.Module(body=policies, type_ignores=[]), "<provider-policy>", "exec"),
+        namespace,
+    )
+    policy = namespace["policy"]
+    assert isinstance(policy, HandshakePolicy)
+    assert {"cooperative-claim/v1", "epoch-bound-session/v1"} <= policy.features
 
 
 def test_combined_profile_preserves_proof_mounts_and_refuses_missing_inputs() -> None:
