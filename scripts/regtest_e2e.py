@@ -228,6 +228,10 @@ class Stack:
                 f"--bitcoind.rpcuser={RPC_USER}",
                 f"--bitcoind.rpcpass={RPC_PASSWORD}",
                 "--bitcoind.rpcpolling",
+                # As in dev/compose.yaml: the default interval leaves LND
+                # unsynced for seconds after each block, past the provider's
+                # Core/LND tip agreement, so cooperative claims were refused.
+                "--bitcoind.blockpollinginterval=1s",
                 "--rpclisten=0.0.0.0:10009",
                 "--listen=0.0.0.0:9735",
                 "--tlsextraip=127.0.0.1",
