@@ -76,10 +76,15 @@ For the base profile's principal `A` (Lightning principal for BTC to LN,
 nominal Bitcoin payout for LN to BTC):
 
 ```text
-service_fee_sat = base_sat + ceil(A * proportional_millionths / 1000000)
-network_fee_sat = ceil(154 * feerate_sat_kvb / 1000)
-success_fee_sat = service_fee_sat + network_fee_sat
+service_fee_sat <= base_sat + ceil(A * proportional_millionths / 1000000)
+network_fee_sat  = ceil(154 * feerate_sat_kvb / 1000)
+success_fee_sat  = service_fee_sat + network_fee_sat
 ```
+
+The advertised service formula is a ceiling, not an exact price: a provider
+MAY discount the service fee, even below zero (a signed rebate), for example to
+attract swaps that rebalance its liquidity. It MUST NOT charge more. The
+network fee is never discounted or surcharged.
 
 Clients MUST recompute these integers, verify the original announcement ID and
 policy commitment, and enforce BOTH the advertised and requested feerate
@@ -105,9 +110,11 @@ fixed across fee changes, delays and restarts; normal funding, invoice and
 settlement deadlines continue to apply.
 
 For provider-originated Lightning payments, the actual routing budget MUST be
-bounded by the signed service fee, the provider's absolute operator limit, and
-the advertised principal-based `max_routing_fee_ppm`. The network component is
-not available for routing. The implementation enforces the resulting absolute
+bounded by the provider's absolute operator limit and the advertised
+principal-based `max_routing_fee_ppm`. It MUST NOT be derived from the signed
+service or success fee, which may be a discount or a rebate; a provider that
+discounts bears its routing cost. The network component is not available for
+routing. The implementation enforces the resulting absolute
 limit through LND. No additional routing allowance is charged. The client's
 own wallet routing fees for paying a reverse hold invoice are separate.
 

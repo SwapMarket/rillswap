@@ -245,7 +245,7 @@ def _economic_semantics_are_valid(terms: dict[str, Any]) -> bool:
         and contract > 0
         and payout > 0
         and payout + reserve == contract
-        and 0 <= prepayment <= fee
+        and 0 <= prepayment <= max(fee, 0)
         and contract + fee - prepayment == hold
         and invoice_msat == hold * 1_000
         and feature_committed
@@ -410,6 +410,7 @@ def test_economic_invalid_mutations_are_rejected() -> None:
             "invoice-must-equal-principal",
             "hold-invoice-equation-mismatch",
             "mining-prepayment-feature-not-committed",
+            "mining-prepayment-exceeds-positive-success-fee",
             "profile-role-mismatch",
             "strict-refund-margin-required",
         }:

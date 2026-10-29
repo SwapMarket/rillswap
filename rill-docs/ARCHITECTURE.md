@@ -172,7 +172,7 @@ Use regtest for deterministic development and public test networks for interoper
 
 ## 7. Wire format and authentication
 
-Use RFC8785 canonical JSON for signing, with RillSwap restrictions: no floating-point protocol values, no duplicate keys, bounded nesting, bounded arrays and strings, and canonical lower-case hex. Represent all satoshi/millisatoshi amounts as canonical nonnegative decimal strings. Native applications convert to Python integers; browser applications use `bigint`. Heights and timestamps are bounded integer fields within JavaScript's exact range. Contract and invoice values are strictly positive; fees are nonnegative; enforce a maximum of 2,100,000,000,000,000 sats (and its exact millisatoshi equivalent) plus per-provider/client limits.
+Use RFC8785 canonical JSON for signing, with RillSwap restrictions: no floating-point protocol values, no duplicate keys, bounded nesting, bounded arrays and strings, and canonical lower-case hex. Represent all satoshi/millisatoshi amounts as canonical nonnegative decimal strings, except success and service fees, which are signed (negative for a provider rebate, never `-0`). Native applications convert to Python integers; browser applications use `bigint`. Heights and timestamps are bounded integer fields within JavaScript's exact range. Contract and invoice values are strictly positive; fees may be negative only down to the provider's configured rebate floor; enforce a maximum of 2,100,000,000,000,000 sats (and its exact millisatoshi equivalent) plus per-provider/client limits.
 
 Every application message carries:
 

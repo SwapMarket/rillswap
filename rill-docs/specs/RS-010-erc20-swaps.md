@@ -94,8 +94,9 @@ payout_sat_equivalent = ceil(payout_token_base * 1e8 / rate)
 hold_invoice_sat = payout_sat_equivalent + success_fee_sat
 ```
 
-Rounding always favors the provider by at most one base unit or one
-satoshi. Both objects carry every term of their equation so that any party
+Success fees are signed (RS-001): a negative fee is a provider rebate, and
+the lock amount and hold invoice MUST still be positive. Rounding always
+favors the provider by at most one base unit or one satoshi. Both objects carry every term of their equation so that any party
 can recompute it. Gas is paid by the party sending each transaction: the
 client pays lock gas (erc20-to-ln) or claim gas (ln-to-erc20); the provider
 pays its own claim, lock, and refund gas and prices it into the success fee.

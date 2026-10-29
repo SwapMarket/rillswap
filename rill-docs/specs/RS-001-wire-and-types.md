@@ -14,7 +14,9 @@ Protocol values MUST NOT contain JSON floating-point numbers. Satoshi and
 millisatoshi values are canonical decimal strings matching `0|[1-9][0-9]*`.
 Values MUST be no greater than 2,100,000,000,000,000 satoshis or exactly 1,000
 times that bound in millisatoshis. Contract and invoice amounts MUST be
-positive; fees MAY be zero. Heights, timestamps, revisions, and sequence
+positive. Success and service fees are signed: they match `0|-?[1-9][0-9]*`
+(never `-0`), have the same magnitude bound, and are negative when the provider
+pays a rebate. Every other amount is unsigned. Heights, timestamps, revisions, and sequence
 numbers are JSON integers in the range 0 through 9,007,199,254,740,991.
 
 Binary identifiers are lowercase hexadecimal without a prefix. Fixed-size
@@ -135,7 +137,8 @@ expired or does not leave the negotiated timing budget cannot be accepted.
 Economics is a closed discriminated object. For BTC to LN, let `L` be
 `lightning_principal_sat`, `S` be `success_fee_sat`, and `V` be
 `contract_amount_sat`. The object contains exactly those three fields and MUST
-satisfy `V = L + S`; the invoice amount MUST equal `L * 1000` millisatoshis.
+satisfy `V = L + S`, where a negative `S` is a provider rebate and `V` MUST
+still be positive; the invoice amount MUST equal `L * 1000` millisatoshis.
 Funding and possible refund mining fees are paid separately and MUST NOT reduce
 `V`. Mining prepayment is not valid for this direction.
 
@@ -143,12 +146,13 @@ For LN to BTC, let `V` be `contract_amount_sat`, `D` be
 `nominal_payout_sat`, `C` be `claim_fee_reserve_sat`, `S` be
 `success_fee_sat`, `M` be `mining_prepayment_sat`, and `H` be
 `hold_invoice_sat`. The object contains exactly those six fields and MUST
-satisfy `V = D + C`, `0 <= M <= S`, and `H = V + S - M`. The invoice amount
+satisfy `V = D + C`, `0 <= M <= max(S, 0)`, and `H = V + S - M`, so a rebate
+(`S < 0`) forbids a prepayment. The invoice amount
 MUST equal `H * 1000` millisatoshis. The total successful Lightning payment is
 `M + H = V + S`, excluding wallet routing fees. `M` MUST be zero unless the
 named mining-prepayment extension is explicitly offered and accepted.
 
-All equations are evaluated with arbitrary-precision nonnegative integers and
+All equations are evaluated with arbitrary-precision signed integers and
 then checked against the protocol monetary maximum. Overflow, underflow,
 fractional satoshis, zero principal, zero contract value, and a zero invoice are
 invalid.
