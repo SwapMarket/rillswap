@@ -55,9 +55,8 @@ Only this Nostr adapter restricts the application advertisement to exactly
 one `network_identities` entry, which must be a supported execution identity
 (default mainnet, default signet, testnet4, or namespaced default regtest; not
 testnet3 or custom signets) whose `name` equals `N`. Its known `extensions`
-keys are the exact epoch-admission requirement below, RS-010's
-`rillswap/evm-assets-v1`, RS-006's `rillswap/transport-pow`, and the funding
-depth below. A known key with a malformed value refuses the announcement.
+keys are RS-010's `rillswap/evm-assets-v1`, RS-006's `rillswap/transport-pow`,
+and the funding depth below. A known key with a malformed value refuses the announcement.
 Consumers ignore keys they do not know and use the rest of the announcement:
 per RS-001 an unknown optional extension cannot change safety behavior, so a
 provider that needs clients to act on a new key also requires a handshake
@@ -70,21 +69,12 @@ timestamp is not application revision ordering. Consumers compare revision
 only within `(kind, identity pubkey, d)` after all signatures and complete
 network checks; a matching coarse `network` tag alone proves nothing.
 
-An explicitly migrated epoch-bound provider advertises exactly:
-
-```json
-{"rillswap/handshake-required-features": ["epoch-bound-session/v1"]}
-```
-
-in `extensions`. Both signatures cover this requirement. New clients select
-the advertised epoch before deriving their session ID and MUST negotiate the
-RS-001 epoch-bound feature in both initiation and acceptance. Unknown or
-malformed requirements in this key are refused rather than downgraded.
-Without the epoch requirement, the legacy
-handshake contract applies. Replaying an older signed legacy announcement after provider opt-in
-cannot enable legacy admission: the provider's durable policy independently
-refuses new unbound sessions. An advertisement is still discovery evidence,
-not permission to fund or a proof that its epoch is currently usable.
+Every session is epoch-bound (RS-001 section 7.1), so the requirement is
+unconditional and no extension advertises it. Clients select one of the
+advertised epoch inbox keys before deriving their session ID and MUST
+negotiate the RS-001 epoch-bound feature in both initiation and acceptance.
+An advertisement is still discovery evidence, not permission to fund or a
+proof that its epoch is currently usable.
 
 A provider announces its funding depth as
 

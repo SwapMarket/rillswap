@@ -239,9 +239,10 @@ deposit, never a replacement or automatic additional claim.
 `network_identity`, `session_id`, `client_challenge`,
 `client_session_xonly_key`, `expected_provider_identity_xonly_key`,
 `requested_encryption_suites`, `requested_capabilities`, `required_features`,
-and `extensions`. Unless the epoch-bound feature below is negotiated, session
-ID and challenge are independent random 32-byte values. `handshake_init_hash`
-is the handshake-init tagged hash of this object.
+and `extensions`. Every session is epoch-bound (section 7.1): its session ID
+is derived from the provider epoch, and the client challenge is an independent
+random 32-byte value. `handshake_init_hash` is the handshake-init tagged hash
+of this object.
 
 `HandshakeAcceptV1` contains exactly `handshake_init_hash`, `protocol`,
 `wire_version`, `profile_id`, `network_identity`, `session_id`,
@@ -268,13 +269,13 @@ Negotiation fails on network mismatch, reused challenge, unsupported suite or
 profile, downgrade, unknown required feature, bad signature, or expired
 advertisement. Session and contract keys MUST be distinct.
 
-### 7.1. Optional epoch-bound admission
+### 7.1. Epoch-bound admission
 
-`epoch-bound-session/v1` is a required handshake feature for a separate,
-finite-lifetime admission lane. It does not change the closed handshake wire
-shape or reinterpret legacy records. Both initiation and acceptance MUST list
-the feature in `required_features`; neither party may introduce or drop it
-unilaterally. An initiation selecting this feature MUST
+`epoch-bound-session/v1` is a mandatory handshake feature: every session is
+admitted through a finite-lifetime provider epoch. It does not change the
+closed handshake wire shape. Both initiation and acceptance MUST list the
+feature in `required_features`; a handshake half without it is refused, and
+there is no unbound admission. The initiation MUST
 carry `extensions["rillswap/epoch-bound-session"]` with exactly
 `{"epoch_inbox_xonly_key": <recipient epoch x-only key>}`. The client MUST use
 a fresh session key and an independent random client challenge.
@@ -295,7 +296,7 @@ selected session key MUST also differ from the retiring epoch key. This static
 binding is not evidence that the epoch is active or belongs to the provider.
 Before reserving any new challenge, a live provider MUST authenticate the actual
 recipient epoch, require it to equal the declared epoch, and establish that it
-has not durably retired. Missing provenance never authorizes this lane.
+has not durably retired. Missing provenance never authorizes admission.
 
 Within an admissible epoch, exact initiation replays MUST reuse the recorded
 result. A provider MUST NOT discard that replay protection merely because the
@@ -305,18 +306,14 @@ session-ID tombstones. Retired epochs MUST NOT reopen after a clock rollback;
 rewrapping the old initiation for another epoch MUST be refused. Expired
 pre-economic transcripts are refused, never issued another accept.
 
-This exception does not permit retiring accepted contracts, payment-hash
-reservations, or legacy replay history. An optional extension without the
-required feature remains legacy admission. Existing installations gain no
-epoch-retirement authority from missing migration or ingress metadata.
+This exception does not permit retiring accepted contracts or payment-hash
+reservations. An epoch extension without the feature is refused, never
+treated as an unbound session.
 
-Before pruning any epoch-bound replay record, a provider MUST durably require
-this feature for all new handshakes. It MUST NOT later return to unrestricted
-legacy admission in the same namespace: an arbitrary legacy session ID could
-otherwise recreate a pruned epoch-bound ID. Existing legacy records continue
-to replay under their original semantics. Per-epoch tombstone limits MAY refuse
-new sessions until retirement frees capacity; they MUST NOT delete replay
-protection early to make room.
+Every session ID commits to its epoch and a retired epoch never reopens, so a
+pruned session ID cannot be admitted again. Per-epoch tombstone limits MAY
+refuse new sessions until retirement frees capacity; they MUST NOT delete
+replay protection early to make room.
 
 Retirement MUST NOT make a formerly used epoch key eligible for reuse. Providers
 retain a public epoch-key history across rotations and upgrades. Unlike
@@ -324,11 +321,9 @@ temporary session tombstones, this history grows with provider-controlled key
 rotations and is not bounded total storage. Retired epoch secret keys need not
 remain available.
 
-Provider v7 stores support explicit epoch custody/retirement and policy migration.
-An opted-in provider advertises its requirement as defined in RS-005, and clients
-negotiate it from that signed advertisement. Offline recovery validates the
-binding as historical evidence; it does not require an epoch to remain active.
-Existing configurations do not acquire this feature implicitly.
+Clients select the epoch from the provider's signed advertisement (RS-005).
+Offline recovery requires the binding and validates it as historical evidence;
+it does not require the epoch to remain active.
 
 ## 8. Message authentication, ordering, and effects
 
