@@ -52,8 +52,8 @@ LN_SPAN = LN_TARGET - LN_HALF_BAND  # band edge to an empty side
 # Operators may not configure a floor below -1 % (an error, not a policy).
 MIN_SERVICE_FEE_PPM_LIMIT = -10_000
 DEFAULT_MIN_SERVICE_FEE_PPM = -1_000
-# Discounts move in steps of this share of the principal, so a quote reveals
-# only a coarse position on the curve, never an exact balance.
+# Discounts move in steps of this share of the principal to reduce quote
+# precision. Adaptive queries can still infer more; this is not balance secrecy.
 DISCOUNT_STEP_PPM = 250
 
 
