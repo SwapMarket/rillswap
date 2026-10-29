@@ -383,7 +383,10 @@ def _native_ln_to_btc_swap(  # noqa: PLR0915
     sys.path.insert(0, str(PROVIDER_TESTS))
     from fake_relay import FakeRelay  # type: ignore[import-not-found]  # noqa: PLC0415
     from pyrage import x25519  # noqa: PLC0415
-    from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE  # noqa: PLC0415
+    from rill_core.wire.hashes import (  # noqa: PLC0415
+        COOPERATIVE_CLAIM_FEATURE,
+        EPOCH_SESSION_FEATURE,
+    )
     from rill_crypto import Context  # noqa: PLC0415
     from rill_provider.handshake_service import HandshakeService, ServicePolicy  # noqa: PLC0415
     from rill_provider.handshake_store import HandshakePolicy  # noqa: PLC0415
@@ -406,7 +409,7 @@ def _native_ln_to_btc_swap(  # noqa: PLR0915
     reports: list[str] = []
     policy_store = HandshakePolicy(
         profile="ln-to-btc/v1",
-        features=frozenset({COOPERATIVE_CLAIM_FEATURE}),
+        features=frozenset({COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE}),
         encryption_suites=frozenset({"noise-xk-secp256k1-chachapoly-sha256/v1"}),
         capabilities=frozenset({"core/v1", "recovery/v1"}),
     )

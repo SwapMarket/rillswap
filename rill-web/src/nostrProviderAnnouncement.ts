@@ -12,29 +12,21 @@ import type { ProfileId } from "./swapPairs";
 const HEX32 = /^[0-9a-f]{64}$/;
 const HEX64 = /^[0-9a-f]{128}$/;
 const encoder = new TextEncoder();
-const HANDSHAKE_REQUIREMENTS = "rillswap/handshake-required-features";
-
 /**
  * RS-005: unknown extension keys are ignored and the rest of the announcement
- * is used. Known keys must be well formed: the handshake requirement may only
- * name the epoch-binding feature (an unknown requirement refuses), the RS-010
- * asset list and RS-005 funding depth are validated by the manual
- * advertisement verifier, the RS-006 work requirement by transportWorkRequirement.
+ * is used. Known keys must be well formed: the RS-010 asset list and RS-005
+ * funding depth are validated by the manual advertisement verifier, the RS-006
+ * work requirement by transportWorkRequirement. Every session is epoch-bound,
+ * so no extension changes the handshake.
  */
 function supportedExtensions(value: unknown): boolean {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  const extensions = value as Record<string, unknown>;
-  if (!Object.hasOwn(extensions, HANDSHAKE_REQUIREMENTS)) return true;
-  const required = extensions[HANDSHAKE_REQUIREMENTS];
-  return Array.isArray(required) && required.length === 1 && required[0] === "epoch-bound-session/v1";
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 export interface AnnouncementCandidate extends Omit<ManualProviderCandidate, "source"> {
   readonly source: "signed-nip01-announcement";
   readonly outerEventId: string;
   readonly addressD: string;
-  /** The signed advertisement requires an epoch-bound session handshake. */
-  readonly requiresEpochBinding: boolean;
   /** RS-006 transport proof of work every message to this provider needs (0: none). */
   readonly transportWorkBits: number;
 }
@@ -136,8 +128,6 @@ export function verifyNostrProviderAnnouncement(
       source: "signed-nip01-announcement" as const,
       outerEventId: event.id,
       addressD: addressTag[1],
-      // supportedExtensions admits only the exact epoch-binding requirement.
-      requiresEpochBinding: Object.hasOwn(advertisement.extensions as object, HANDSHAKE_REQUIREMENTS),
       // Malformed or excessive work refuses the announcement rather than downgrading.
       transportWorkBits: transportWorkRequirement(advertisement.extensions as Record<string, unknown>),
     });

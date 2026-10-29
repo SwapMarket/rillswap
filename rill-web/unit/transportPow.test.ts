@@ -104,14 +104,14 @@ class MemoryRelay implements RelayLink {
 }
 
 describe("handshake declares the provider's work and mines it", () => {
-  test.each([[0, false], [8, false], [8, true]])("work %d, epoch-bound %p", async (bits, epochBound) => {
+  test.each([[0], [8]])("work %d", async (bits) => {
     const epochSecret = generateSecretKey();
     const epoch = getPublicKey(epochSecret);
     const relay = new MemoryRelay();
     const session = new Session(relay, regtest, "btc-to-ln/v1", 50);
     session.replyTo = async () => { throw new Error("stop after the init"); };
     const provider = {
-      advertisedEpochInboxKeys: [epoch], requiresEpochBinding: epochBound, transportWorkBits: bits,
+      advertisedEpochInboxKeys: [epoch], transportWorkBits: bits,
     } as unknown as AnnouncementCandidate;
     await expect(handshake(session, provider, recipient)).rejects.toThrow("stop after the init");
     expect(session.workBits).toBe(bits);
@@ -120,6 +120,6 @@ describe("handshake declares the provider's work and mines it", () => {
     expect(proven(outer!)).toBe(bits);
     const init = open(outer!, epochSecret).payload as { extensions: Record<string, unknown> };
     expect(init.extensions[TRANSPORT_POW_EXTENSION]).toEqual(bits ? { bits } : undefined);
-    expect(Object.hasOwn(init.extensions, "rillswap/epoch-bound-session")).toBe(epochBound);
+    expect(init.extensions["rillswap/epoch-bound-session"]).toEqual({ epoch_inbox_xonly_key: epoch });
   });
 });

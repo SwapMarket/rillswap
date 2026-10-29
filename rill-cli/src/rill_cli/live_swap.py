@@ -55,7 +55,6 @@ from rill_core.wire.hashes import (
     COOPERATIVE_CLAIM_FEATURE,
     EPOCH_SESSION_EXTENSION,
     EPOCH_SESSION_FEATURE,
-    HANDSHAKE_FEATURES_EXTENSION,
     client_acceptance_hash,
     contract_hash,
     epoch_bound_session_id,
@@ -239,7 +238,6 @@ def verify_announcement(  # noqa: PLR0913 - explicit trust inputs
         or not advertisement["epoch_inbox_xonly_keys"]
     ):
         raise SwapError("announcement does not offer this swap now")
-    _requires_epoch_binding(advertisement)
     _transport_work(advertisement)
     announced_funding_confirmations(advertisement)
     return dict(advertisement)
@@ -285,16 +283,6 @@ def require_announced_depth(offered: int, advertisement: dict[str, Any]) -> None
         raise SwapError(
             f"terms wait {offered} funding confirmations, more than the announced {announced}"
         )
-
-
-def _requires_epoch_binding(advertisement: dict[str, Any]) -> bool:
-    """Interpret only an explicit, signed requirement; malformed is not legacy."""
-    extensions = _extensions(advertisement)
-    if HANDSHAKE_FEATURES_EXTENSION not in extensions:
-        return False
-    if extensions[HANDSHAKE_FEATURES_EXTENSION] != [EPOCH_SESSION_FEATURE]:
-        raise SwapError("announcement handshake requirements unsupported")
-    return True
 
 
 def _transport_work(advertisement: dict[str, Any]) -> int:
@@ -372,7 +360,7 @@ class _Session:
         self.profile = profile
         self.secret, public = _scalar(crypto)
         self.key = public[1:].hex()
-        self.session_id = secrets.token_hex(32)
+        self.session_id = secrets.token_hex(32)  # replaced by the epoch-bound ID in _handshake
         self.sequence = 0
         self.provider_key: str | None = None
         self.work_bits = 0  # RS-006 transport work declared at initiation, on every send
@@ -1374,15 +1362,10 @@ async def _handshake(
     session: _Session, advertisement: dict[str, Any], identity: str
 ) -> tuple[HandshakeInit, HandshakeAccept, str, str]:
     """Return init, accept, identity signature, and handshake hash."""
+    # Every session is bound to the provider epoch it is sent to.
     epoch = advertisement["epoch_inbox_xonly_keys"][0]
-    epoch_bound = _requires_epoch_binding(advertisement)
-    if epoch_bound:
-        session.session_id = epoch_bound_session_id(
-            session.network, identity, epoch, session.key
-        ).hex()
-    extensions: dict[str, Any] = (
-        {EPOCH_SESSION_EXTENSION: {"epoch_inbox_xonly_key": epoch}} if epoch_bound else {}
-    )
+    session.session_id = epoch_bound_session_id(session.network, identity, epoch, session.key).hex()
+    extensions: dict[str, Any] = {EPOCH_SESSION_EXTENSION: {"epoch_inbox_xonly_key": epoch}}
     # The declaration binds every message of this session to the advertised work.
     session.work_bits = _transport_work(advertisement)
     if session.work_bits:
@@ -1400,11 +1383,7 @@ async def _handshake(
         requested_capabilities=CAPABILITIES,
         # Cooperative MuSig2 claims are mandatory; a provider that does not
         # echo them fails ``validate_against`` below before any terms.
-        required_features=(
-            (COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE)
-            if epoch_bound
-            else (COOPERATIVE_CLAIM_FEATURE,)
-        ),
+        required_features=(COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE),
         extensions=extensions,
     )
     request = session.envelope("handshake_init", init.model_dump(mode="json"), signed=False)

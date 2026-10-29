@@ -85,48 +85,13 @@ def test_announcement_revision_must_be_an_exact_bounded_integer(
         )
 
 
-@pytest.mark.parametrize(
-    "requirement",
-    [
-        None,
-        True,
-        [],
-        "epoch-bound-session/v1",
-        ["unknown/v1"],
-        ["epoch-bound-session/v1", "unknown/v1"],
-    ],
-)
-def test_advertised_handshake_requirement_never_downgrades_on_malformed_or_unknown(
-    requirement: object,
-) -> None:
-    with pytest.raises(live_swap.SwapError, match="handshake requirements"):
-        live_swap._requires_epoch_binding(  # noqa: SLF001
-            {"extensions": {live_swap.HANDSHAKE_FEATURES_EXTENSION: requirement}}
-        )
-
-
-def test_handshake_mode_requires_an_explicit_advertised_requirement() -> None:
-    assert not live_swap._requires_epoch_binding({"extensions": {}})  # noqa: SLF001
-    assert live_swap._requires_epoch_binding(  # noqa: SLF001
-        {"extensions": {live_swap.HANDSHAKE_FEATURES_EXTENSION: [live_swap.EPOCH_SESSION_FEATURE]}}
-    )
-
-
 def test_unknown_extensions_are_ignored_and_enable_nothing() -> None:
     # RS-005: a key this client does not know neither hides the provider nor
-    # changes what it requires; only the known requirement decides.
-    assert not live_swap._requires_epoch_binding(  # noqa: SLF001
-        {"extensions": {"test/data": "signed"}}
-    )
-    assert live_swap._requires_epoch_binding(  # noqa: SLF001
-        {
-            "extensions": {
-                live_swap.HANDSHAKE_FEATURES_EXTENSION: [live_swap.EPOCH_SESSION_FEATURE],
-                "test/data": "signed",
-            }
-        }
-    )
-    assert live_swap.announced_funding_confirmations({"extensions": {"test/data": 1}}) is None
+    # changes what it requires. The retired handshake requirement is such a key:
+    # every session is epoch-bound, whatever it says.
+    for unknown in ({"test/data": 1}, {"rillswap/handshake-required-features": ["unknown/v1"]}):
+        assert live_swap.announced_funding_confirmations({"extensions": unknown}) is None
+        assert live_swap._transport_work({"extensions": unknown}) == 0  # noqa: SLF001
 
 
 DEPTH = live_swap.FUNDING_CONFIRMATIONS_EXTENSION

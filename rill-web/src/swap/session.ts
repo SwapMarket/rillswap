@@ -177,7 +177,7 @@ export function restoreReverseFundingReader(configuration: {
 export class Session {
   readonly secret = schnorr.utils.randomSecretKey();
   readonly key = getPublicKey(this.secret);
-  sessionId = bytesToHex(randomBytes(32));
+  sessionId = bytesToHex(randomBytes(32)); // replaced by the epoch-bound ID in handshake()
   providerKey: string | null = null;
   /** RS-006 transport work declared at initiation, mined into every send. */
   workBits = 0;

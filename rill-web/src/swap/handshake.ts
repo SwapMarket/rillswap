@@ -22,10 +22,9 @@ export interface Handshake {
 
 /** Shared by both directions; the profile comes from the session. */
 export async function handshake(session: Session, provider: AnnouncementCandidate, identity: string): Promise<Handshake> {
+  // Every session is bound to the provider epoch it is sent to.
   const epoch = provider.advertisedEpochInboxKeys[0]!;
-  if (provider.requiresEpochBinding) {
-    session.sessionId = bytesToHex(epochBoundSessionId(session.network, identity, epoch, session.key));
-  }
+  session.sessionId = bytesToHex(epochBoundSessionId(session.network, identity, epoch, session.key));
   const init: HandshakeInit = {
     protocol: "rillswap",
     wire_version: "1",
@@ -40,10 +39,10 @@ export async function handshake(session: Session, provider: AnnouncementCandidat
     // Both Bitcoin profiles negotiate cooperation, with unilateral recovery always available.
     required_features: [
       ...(["btc-to-ln/v1", "ln-to-btc/v1"].includes(session.profile) ? [COOPERATIVE_CLAIM_FEATURE] : []),
-      ...(provider.requiresEpochBinding ? [EPOCH_SESSION_FEATURE] : []),
+      EPOCH_SESSION_FEATURE,
     ],
     extensions: {
-      ...(provider.requiresEpochBinding ? { [EPOCH_SESSION_EXTENSION]: { epoch_inbox_xonly_key: epoch } } : {}),
+      [EPOCH_SESSION_EXTENSION]: { epoch_inbox_xonly_key: epoch },
       // RS-006: the declaration binds every message of this session to the advertised work.
       ...(provider.transportWorkBits > 0 ? { [TRANSPORT_POW_EXTENSION]: { bits: provider.transportWorkBits } } : {}),
     },

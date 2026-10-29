@@ -11,7 +11,7 @@ from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from rill_core.wire.hashes import EPOCH_SESSION_EXTENSION, EPOCH_SESSION_FEATURE
+from rill_core.wire.hashes import EPOCH_SESSION_EXTENSION
 from rill_core.wire.messages import HandshakeInit
 from rill_provider import _transport_pow as transport_pow
 from test_mandatory_cooperation import EPOCH, IDENTITY, PROVIDER_SESSION, _accept, _session
@@ -19,7 +19,6 @@ from test_mandatory_cooperation import EPOCH, IDENTITY, PROVIDER_SESSION, _accep
 from rill_cli import live_swap
 
 KEY = transport_pow.TRANSPORT_POW_EXTENSION
-EPOCH_REQUIREMENT = {live_swap.HANDSHAKE_FEATURES_EXTENSION: [EPOCH_SESSION_FEATURE]}
 FIXTURE = (
     Path(__file__).parents[2] / "rill-provider" / "tests" / "fixtures" / "initial-btc-to-ln-v1.json"
 )
@@ -27,12 +26,8 @@ FIXTURE = (
 
 def test_announced_work_is_read_only_from_a_well_formed_requirement() -> None:
     assert live_swap._transport_work({}) == 0  # noqa: SLF001
-    assert live_swap._transport_work({"extensions": EPOCH_REQUIREMENT}) == 0  # noqa: SLF001
     assert live_swap._transport_work({"extensions": {KEY: {"bits": 16}}}) == 16  # noqa: SLF001
-    both = {"extensions": {**EPOCH_REQUIREMENT, KEY: {"bits": 20}}}
-    assert live_swap._transport_work(both) == 20  # noqa: SLF001
-    assert live_swap._requires_epoch_binding(both)  # noqa: SLF001
-    assert not live_swap._requires_epoch_binding({"extensions": {KEY: {"bits": 16}}})  # noqa: SLF001
+    assert live_swap._transport_work({"extensions": {KEY: {"bits": 20}}}) == 20  # noqa: SLF001
 
 
 @pytest.mark.parametrize(
@@ -45,8 +40,8 @@ def test_malformed_or_excessive_work_is_refused_not_ignored(value: object) -> No
 
 @pytest.mark.parametrize(
     ("extensions", "bits"),
-    [({}, 0), ({KEY: {"bits": 12}}, 12), ({**EPOCH_REQUIREMENT, KEY: {"bits": 8}}, 8)],
-    ids=["none", "work", "epoch-and-work"],
+    [({}, 0), ({KEY: {"bits": 12}}, 12)],
+    ids=["none", "work"],
 )
 def test_handshake_declares_the_work_it_mines_on_every_send(
     extensions: dict[str, Any], bits: int
@@ -76,9 +71,7 @@ def test_handshake_declares_the_work_it_mines_on_every_send(
     asyncio.run(live_swap._handshake(session, advertisement, IDENTITY))  # noqa: SLF001
     (init,) = seen
     assert init.extensions.get(KEY) == ({"bits": bits} if bits else None)
-    assert (EPOCH_SESSION_EXTENSION in init.extensions) == (
-        EPOCH_REQUIREMENT.keys() <= extensions.keys()
-    )
+    assert init.extensions[EPOCH_SESSION_EXTENSION] == {"epoch_inbox_xonly_key": EPOCH}
     assert mined
     assert set(mined) == {bits}  # the init and everything after it
 

@@ -144,10 +144,9 @@ class FakeWallet:
 
 @pytest.mark.native_crypto
 @NATIVE
-@pytest.mark.parametrize("epoch_bound", [False, True])
 @pytest.mark.parametrize("paid_publication", ["success", "collision", "uncertain"])
 def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, epoch_bound: bool, paid_publication: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, paid_publication: str
 ) -> None:
     sys.path.insert(0, str(PROVIDER_TESTS))
     from fake_relay import FakeRelay  # type: ignore[import-not-found]  # noqa: PLC0415
@@ -191,9 +190,7 @@ def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
     sent: list[dict[str, Any]] = []
     policy_store = HandshakePolicy(
         profile="btc-to-ln/v1",
-        features=frozenset({EPOCH_SESSION_FEATURE, COOPERATIVE_CLAIM_FEATURE})
-        if epoch_bound
-        else frozenset({COOPERATIVE_CLAIM_FEATURE}),
+        features=frozenset({EPOCH_SESSION_FEATURE, COOPERATIVE_CLAIM_FEATURE}),
         encryption_suites=frozenset({"noise-xk-secp256k1-chachapoly-sha256/v1"}),
         capabilities=frozenset({"core/v1", "recovery/v1"}),
     )
@@ -404,11 +401,7 @@ def test_native_live_swap_settles_through_the_provider(  # noqa: PLR0915
                 )
         assert not (tmp_path / "invalid.age.paid").exists()
         context = json.loads(recoveries[0])["verification_context"]
-        expected_features = (
-            [COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE]
-            if epoch_bound
-            else [COOPERATIVE_CLAIM_FEATURE]
-        )
+        expected_features = [COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE]
         assert context["handshake_init"]["required_features"] == expected_features
         assert context["handshake_accept"]["required_features"] == expected_features
         funded = json.loads(recoveries[1])

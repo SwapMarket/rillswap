@@ -145,7 +145,6 @@ describe("provider discovery", () => {
     spyOn(Date, "now").mockReturnValue(1703021600 * 1000);
     const found = await discoverProvider(at(["{}", ANNOUNCEMENT, ANNOUNCEMENT]), IDENTITY, NETWORK, "btc-to-ln/v1");
     expect(found.identityXOnlyKey).toBe(IDENTITY);
-    expect(found.requiresEpochBinding).toBe(false);
   });
 
   test("floods, absence, and another identity are refused", async () => {

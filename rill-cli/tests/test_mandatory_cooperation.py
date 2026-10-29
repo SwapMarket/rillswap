@@ -11,6 +11,7 @@ import pytest
 from rill_core.wire.hashes import (
     COOPERATIVE_CLAIM_FEATURE,
     EPOCH_SESSION_FEATURE,
+    epoch_bound_session_id,
     handshake_init_hash,
 )
 from rill_core.wire.messages import HandshakeAccept, HandshakeInit
@@ -84,23 +85,24 @@ def _run_handshake(advertisement: dict[str, Any], echo: tuple[str, ...] | None) 
     return init
 
 
-def test_init_always_requests_cooperative_claims() -> None:
+def test_init_always_requests_cooperative_claims_and_epoch_binding() -> None:
     init = _run_handshake({"epoch_inbox_xonly_keys": [EPOCH]}, echo=None)
-    assert init.required_features == (COOPERATIVE_CLAIM_FEATURE,)
-
-
-def test_epoch_bound_init_requests_both_features_sorted() -> None:
-    advertisement = {
-        "epoch_inbox_xonly_keys": [EPOCH],
-        "extensions": {live_swap.HANDSHAKE_FEATURES_EXTENSION: [EPOCH_SESSION_FEATURE]},
-    }
-    init = _run_handshake(advertisement, echo=None)
     assert init.required_features == (COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE)
+    assert init.epoch_inbox_xonly_key == EPOCH
+    expected = epoch_bound_session_id(
+        init.network_identity, IDENTITY, EPOCH, init.client_session_xonly_key
+    )
+    assert init.session_id == expected.hex()
 
 
 def test_accept_without_cooperative_claims_is_refused_before_terms() -> None:
     with pytest.raises(ValueError, match="cooperative claim must be jointly negotiated"):
-        _run_handshake({"epoch_inbox_xonly_keys": [EPOCH]}, echo=())
+        _run_handshake({"epoch_inbox_xonly_keys": [EPOCH]}, echo=(EPOCH_SESSION_FEATURE,))
+
+
+def test_accept_without_epoch_binding_is_refused_before_terms() -> None:
+    with pytest.raises(ValueError, match="epoch-bound admission must be jointly negotiated"):
+        _run_handshake({"epoch_inbox_xonly_keys": [EPOCH]}, echo=(COOPERATIVE_CLAIM_FEATURE,))
 
 
 @pytest.mark.parametrize("module", [live_swap, live_reverse_swap], ids=["btc-to-ln", "ln-to-btc"])

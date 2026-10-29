@@ -80,9 +80,9 @@ test("vendored published test vector matches committed discovery fixture hash", 
 });
 
 describe("private-regtest NIP-01 signed announcement", () => {
-  test("accepts the signed epoch requirement without treating it as live admission", () => {
+  test("changed application content needs the application signature, not only the outer one", () => {
     const wrapper = structuredClone(application);
-    (wrapper.advertisement.extensions as Record<string, unknown>)["rillswap/handshake-required-features"] = ["epoch-bound-session/v1"];
+    (wrapper.advertisement.extensions as Record<string, unknown>)["test/data"] = "signed";
     const original = fixtureEvent();
     // Signing only the outer wrapper must not authenticate changed application content.
     expect(() => accept(JSON.stringify(reSign({ ...original, content: jcs(wrapper) }))))
@@ -91,17 +91,6 @@ describe("private-regtest NIP-01 signed announcement", () => {
     const event = reSign({ ...original, content: jcs(wrapper) });
     expect(accept(JSON.stringify(event)).identityXOnlyKey).toBe(PUBLIC);
   });
-
-  test.each([null, true, [], "epoch-bound-session/v1", ["unknown/v1"],
-    ["epoch-bound-session/v1", "unknown/v1"], ["epoch-bound-session/v1", "epoch-bound-session/v1"]].map(value => [value]))(
-    "refuses a signed malformed or unsupported handshake requirement %j", (value) => {
-      const wrapper = structuredClone(application);
-      (wrapper.advertisement.extensions as Record<string, unknown>)["rillswap/handshake-required-features"] = value;
-      reSignApplication(wrapper);
-      expect(() => accept(JSON.stringify(reSign({ ...fixtureEvent(), content: jcs(wrapper) }))))
-        .toThrow(AnnouncementRefusedError);
-    },
-  );
 
   const asset = {
     family: "evm" as const, chain_id: 31337, name: "anvil-dev", htlc_contract: `0x${"1a".repeat(20)}`, htlc_version: 6 as const,
@@ -141,14 +130,15 @@ describe("private-regtest NIP-01 signed announcement", () => {
   });
 
   test("unknown signed extensions are ignored while known ones still apply", () => {
-    // RS-005: a newer provider's extra keys must not hide its offers.
+    // RS-005: a newer provider's extra keys must not hide its offers. The retired
+    // handshake requirement is such a key: every session is epoch-bound anyway.
     const wrapper = structuredClone(application);
     Object.assign(wrapper.advertisement.extensions, {
-      "rillswap/handshake-required-features": ["epoch-bound-session/v1"], "test/data": "signed",
+      "rillswap/handshake-required-features": ["unknown/v1"], "test/data": "signed",
     });
     reSignApplication(wrapper);
     const candidate = accept(JSON.stringify(reSign({ ...fixtureEvent(), content: jcs(wrapper) })));
-    expect(candidate.requiresEpochBinding).toBe(true);
+    expect(Object.hasOwn(candidate, "requiresEpochBinding")).toBe(false);
     expect(candidate.fundingConfirmations).toBeNull();
   });
 
@@ -304,11 +294,10 @@ describe("public-network announcements", () => {
 });
 
 describe("RS-006 transport work requirement", () => {
-  function withWork(value: unknown, epochBound = false): string {
+  function withWork(value: unknown): string {
     const wrapper = structuredClone(application);
     const extensions = wrapper.advertisement.extensions as Record<string, unknown>;
     extensions["rillswap/transport-pow"] = value;
-    if (epochBound) extensions["rillswap/handshake-required-features"] = ["epoch-bound-session/v1"];
     reSignApplication(wrapper);
     return JSON.stringify(reSign({ ...fixtureEvent(), content: jcs(wrapper) }));
   }
@@ -316,8 +305,7 @@ describe("RS-006 transport work requirement", () => {
   test("is exposed when signed, and absent means none", () => {
     expect(accept(JSON.stringify(fixtureEvent())).transportWorkBits).toBe(0);
     expect(accept(withWork({ bits: 16 })).transportWorkBits).toBe(16);
-    const both = accept(withWork({ bits: 20 }, true));
-    expect([both.transportWorkBits, both.requiresEpochBinding]).toEqual([20, true]);
+    expect(accept(withWork({ bits: 20 })).transportWorkBits).toBe(20);
   });
 
   test.each([[{ bits: 0 }], [{ bits: 21 }], [{ bits: "16" }], [{ bits: 16, extra: 1 }], [16], [null]])(
