@@ -175,7 +175,6 @@ def maker_config(  # noqa: PLR0913 - one flat operator choice per argument
         },
         "handshake": {
             "profile": f"{profile}/v1",
-            "features": ["cooperative-claim/v1"] if bitcoin else [],
             "encryption_suites": ["noise-xk-secp256k1-chachapoly-sha256/v1"],
             "capabilities": ["core/v1", "recovery/v1"],
         },

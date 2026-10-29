@@ -9,6 +9,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from pydantic import ValidationError
 from pyrage import x25519
 from rill_core.wire.canonical import canonicalize, parse_model_json
 from rill_core.wire.hashes import (
@@ -23,8 +24,9 @@ from test_live_session_store import harness as harness  # noqa: PLC0414 - fixtur
 from test_quote_policy import CONTRACT, FIRM, FIRM_TERMS, HANDSHAKE, _envelope, _with
 
 from rill_provider import live_session_store as live
+from rill_provider.evm_quote_policy import EVM_PROFILES
 from rill_provider.live_session_store import LiveSessionStoreError, RequestContext
-from rill_provider.operator_config import HandshakeSelection
+from rill_provider.operator_config import HandshakeSelection, OperatorConfig
 from rill_provider.quote_policy import answer_quote
 
 if TYPE_CHECKING:
@@ -48,19 +50,34 @@ def _stored_policy(store: live.LiveSessionStore) -> dict[str, Any]:
     return json.loads(policy)
 
 
-def test_operator_policy_always_includes_cooperation() -> None:
+@pytest.mark.parametrize(
+    ("profile", "features"),
+    [
+        ("btc-to-ln/v1", {COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE}),
+        ("ln-to-btc/v1", {COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE}),
+        *((evm, {EPOCH_SESSION_FEATURE}) for evm in sorted(EVM_PROFILES)),
+    ],
+)
+def test_operator_policy_features_are_intrinsic(profile: str, features: set[str]) -> None:
     selection = HandshakeSelection(
-        profile="btc-to-ln/v1",
+        profile=profile,
         encryption_suites=("noise-xk-secp256k1-chachapoly-sha256/v1",),
         capabilities=("core/v1",),
     )
-    from rill_provider.operator_config import OperatorConfig  # noqa: PLC0415
-
     config = OperatorConfig.model_construct(handshake=selection)
-    assert COOPERATIVE_CLAIM_FEATURE in config.handshake_policy().features
-    epoch = selection.model_copy(update={"features": (EPOCH_SESSION_FEATURE,)})
-    features = OperatorConfig.model_construct(handshake=epoch).handshake_policy().features
-    assert features == {COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE}
+    assert config.handshake_policy().features == features
+
+
+def test_operator_cannot_configure_features() -> None:
+    with pytest.raises(ValidationError, match="features"):
+        HandshakeSelection.model_validate(
+            {
+                "profile": "btc-to-ln/v1",
+                "features": [COOPERATIVE_CLAIM_FEATURE],
+                "encryption_suites": ["noise-xk-secp256k1-chachapoly-sha256/v1"],
+                "capabilities": ["core/v1"],
+            }
+        )
 
 
 def test_new_unfeatured_initiation_is_refused_before_any_reservation(harness: Harness) -> None:

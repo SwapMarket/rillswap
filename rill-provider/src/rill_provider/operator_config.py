@@ -13,7 +13,7 @@ from pathlib import Path  # noqa: TC003 - pydantic resolves field types at runti
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from rill_core.domain.amounts import MAX_SATS
-from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE
+from rill_core.wire.hashes import COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE
 from rill_core.wire.types import (
     EvmAssetIdentity,
     NetworkIdentity,
@@ -52,7 +52,6 @@ class HandshakeSelection(_Strict):
     """What this provider negotiates; bound into the store at provisioning."""
 
     profile: str
-    features: tuple[str, ...] = ()
     encryption_suites: tuple[str, ...]
     capabilities: tuple[str, ...]
 
@@ -285,12 +284,13 @@ class OperatorConfig(_Strict):
     def handshake_policy(self) -> HandshakePolicy:
         """Return the store-bound negotiation policy."""
         h = self.handshake
-        # Cooperative MuSig2 claims are intrinsic to the Bitcoin profiles, never
-        # an operator toggle; EVM HTLC profiles have no key-path claim.
-        intrinsic = set() if h.profile in EVM_PROFILES else {COOPERATIVE_CLAIM_FEATURE}
+        # Features are protocol requirements, never operator toggles: every
+        # session is epoch-bound, and cooperative MuSig2 claims are mandatory
+        # for the Bitcoin profiles (EVM HTLC profiles have no key-path claim).
+        cooperative = set() if h.profile in EVM_PROFILES else {COOPERATIVE_CLAIM_FEATURE}
         return HandshakePolicy(
             profile=h.profile,  # type: ignore[arg-type]
-            features=frozenset(h.features) | intrinsic,
+            features=frozenset({EPOCH_SESSION_FEATURE, *cooperative}),
             encryption_suites=frozenset(h.encryption_suites),
             capabilities=frozenset(h.capabilities),
         )

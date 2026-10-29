@@ -186,7 +186,7 @@ The configuration is strict JSON; unknown fields are refused.
 | `bitcoin_core` | Loopback RPC `port`, `cookie_file`, optional `wallet` and `max_fee_estimate_sat_vb` |
 | `lnd` | Loopback gRPC `port`, `tls_certificate` and scoped macaroon paths |
 | `provider_destination_script` | Provider's P2WPKH or P2TR destination script; enables Bitcoin firm offers |
-| `handshake` | Selected profile, features, encryption suites and capabilities |
+| `handshake` | Selected profile, encryption suites and capabilities |
 | `terms` | Advertised profiles, amount bands, fees, slot label and the liquidity cap (`follow_liquidity`, `liquidity_margin_percent`) |
 | `quote` | Confirmation requirements, fee caps, deadlines and timing budgets |
 | `authority` | Store volume label and deployment attestations |
@@ -571,8 +571,13 @@ cannot open the old store), stop it, keep the old store for your records, and
 create a new store with `provision-store` at a new `store_path`. Lightning hold
 invoices of unfinished reverse swaps would otherwise stay in LND. The new store
 does not know the payment hashes the old one used; LND still refuses to pay an
-already paid payment hash or to create a second invoice for an existing one. The handshake policy is part of
-the store: changing it also needs a new store.
+already paid payment hash or to create a second invoice for an existing one.
+The handshake policy is part of the store: changing it also needs a new store.
+
+Handshake features are protocol requirements, not settings. Every session is
+epoch-bound (`epoch-bound-session/v1`), and the Bitcoin profiles also require
+cooperative claims (`cooperative-claim/v1`). A configuration that still sets
+`handshake.features` is refused; delete that key.
 
 ## Operations and recovery
 

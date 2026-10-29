@@ -960,9 +960,6 @@ def provider_config(
         },
         "handshake": {
             "profile": profile,
-            # Cooperative MuSig2 claims are mandatory; features are sorted.
-            "features": ["cooperative-claim/v1"]
-            + (["epoch-bound-session/v1"] if args.epoch_bound else []),
             "encryption_suites": ["noise-xk-secp256k1-chachapoly-sha256/v1"],
             "capabilities": ["core/v1", "recovery/v1"],
         },
@@ -1031,12 +1028,11 @@ def check_absolute_payment(stack: Stack, work: Path) -> None:
     assert json.loads(evidence)["reason"] == "claim-confirmed"
     record = json.loads(record_bytes)
     terms = json.loads(offer_bytes)["payload"]["terms"]["contract_terms"]
-    required_features = json.loads((work / "provider.json").read_text())["handshake"][
-        "features"
-    ]
+    # Cooperative claims and epoch binding are both mandatory; features are sorted.
+    required_features = ["cooperative-claim/v1", "epoch-bound-session/v1"]
     assert json.loads(init_bytes)["payload"]["required_features"] == required_features
     assert "cooperative-claim/v1" in terms["required_features"]
-    assert admissions == (1 if "epoch-bound-session/v1" in required_features else 0)
+    assert admissions == 1
     assert state == "SUBMITTED" and record["method"] == "SendToRouteV2"
     assert record["version"] == 1
     assert (
@@ -1601,11 +1597,6 @@ def cleanup_merchant_run(  # noqa: PLR0913 - owns the disposable diagnostic's en
 def main() -> int:  # noqa: PLR0915 - one ordered scenario
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--crypto-library", required=True)
-    parser.add_argument(
-        "--epoch-bound",
-        action="store_true",
-        help="exercise negotiated epoch-bound admission",
-    )
     parser.add_argument(
         "--keep", action="store_true", help="keep containers for inspection"
     )

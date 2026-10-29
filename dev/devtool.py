@@ -505,7 +505,6 @@ def provision_maker(
             },
             "handshake": {
                 "profile": profile,
-                "features": ["cooperative-claim/v1"],
                 "encryption_suites": ["noise-xk-secp256k1-chachapoly-sha256/v1"],
                 "capabilities": ["core/v1", "recovery/v1"],
             },
@@ -527,7 +526,6 @@ def provision_maker(
             # RS-010: no Taproot contract, so no destination script and no
             # cooperative claim feature; the HTLC signer is a dev Anvil key.
             del config["provider_destination_script"]
-            config["handshake"]["features"] = []
             config["lnd"]["invoices_macaroon"] = "admin.macaroon"
             config["evm"] = {
                 "rpc_url": ANVIL_RPC,
