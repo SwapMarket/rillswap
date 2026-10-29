@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import sqlite3
@@ -21,7 +22,15 @@ from test_payment_dispatch_store import _insert_funded_swap
 from test_reverse_swap_store import FUNDING, PREIMAGE, REFUND, _advance, insert_reverse_swap
 
 from rill_provider import live_session_store as live
-from rill_provider.swap_accounting import SwapEconomics, ledger_amount, swap_economics
+from rill_provider.swap_accounting import (
+    LEDGER_KINDS,
+    REBATE_WINDOW_SECONDS,
+    SwapEconomics,
+    ledger_amount,
+    signed_ledger_amount,
+    swap_economics,
+    swap_result,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 FORWARD = FIXTURES / "initial-btc-to-ln-v1.json"
@@ -333,3 +342,165 @@ def test_only_a_firm_terms_offer_records_an_offer(harness: Harness, firm: bool) 
         store.answer_request(request, responder=responder, signer=crypto, now=1000)
         expected = [(1000, "offered", 100000, "sat")] if firm else []
         assert _rows(store, session) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "stored"),
+    [
+        (-(2**63 - 1), -(2**63 - 1)),
+        (-1, -1),
+        (0, 0),
+        (2**63, None),
+        (-(2**63), None),
+        (False, None),
+    ],
+)
+def test_signed_ledger_amount_keeps_storable_signed_integers(
+    value: object, stored: int | None
+) -> None:
+    assert signed_ledger_amount(value) == stored
+
+
+def test_only_completed_revenue_may_be_negative(harness: Harness) -> None:
+    insert = (
+        "INSERT INTO swap_ledger (session_id, recorded_at, kind, amount, unit) "
+        "VALUES ('s', 1, ?, ?, 'sat')"
+    )
+    with harness.acquire() as store:
+        store._connection.execute(insert, ("completed", -1))  # noqa: SLF001
+        for kind in sorted(set(LEDGER_KINDS) - {"completed"}):
+            with pytest.raises(sqlite3.IntegrityError):
+                store._connection.execute(insert, (kind, -1))  # noqa: SLF001
+
+
+def test_a_rebate_swap_records_its_negative_revenue(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(live, "_offer_economics", lambda _offer: SwapEconomics(100000, -100, None))
+    with harness.acquire() as store:
+        session = _claimed_swap(store, harness)
+        assert (1500, "completed", -100, "sat") in _rows(store, session)
+        result = swap_result(store.ledger_session(session), "btc-to-ln/v1")
+        assert result is not None
+        assert (result.revenue_sat, result.net_msat) == (-100, -100_000 - 1234 - 300_000)
+
+
+def _rebate_row(store: live.LiveSessionStore, session: str, amount: int) -> None:
+    store._connection.execute(  # noqa: SLF001
+        "INSERT INTO swap_ledger (session_id, recorded_at, kind, amount, unit) "
+        "VALUES (?, 1000, 'rebate', ?, 'sat')",
+        (session, amount),
+    )
+
+
+def _offer_reservation(store: live.LiveSessionStore, session: str, *, released: bool) -> None:
+    store._connection.execute(  # noqa: SLF001
+        "INSERT INTO economic_reservations VALUES (?, ?, ?, ?)",
+        (
+            hashlib.sha256(session.encode()).hexdigest(),
+            session,
+            "RELEASED" if released else "UNSENT",
+            b"evidence" if released else None,
+        ),
+    )
+
+
+def _committed(store: live.LiveSessionStore, now: int) -> int:
+    return live._rebates_committed(store._connection, now)  # noqa: SLF001
+
+
+def test_rebate_budget_counts_open_offers_and_recently_completed_swaps(harness: Harness) -> None:
+    with harness.acquire() as store:
+        _offer_reservation(store, "open", released=False)
+        _rebate_row(store, "open", 100)
+        _offer_reservation(store, "expired", released=True)
+        _rebate_row(store, "expired", 1_000)
+        _rebate_row(store, "orphan", 10_000)  # neither open nor completed: never counted
+        assert _committed(store, 1200) == 100
+        closed = _claimed_swap(store, harness)  # completed at 1500, reservation still held
+        _rebate_row(store, closed, 20)
+        assert _committed(store, 1500 + REBATE_WINDOW_SECONDS - 1) == 120
+        assert _committed(store, 1500 + REBATE_WINDOW_SECONDS) == 100
+
+
+@pytest.mark.parametrize(
+    ("state", "counted"),
+    [("PAYING", True), ("CLAIMING", True), ("FAILED", False), ("LOST", False)],
+)
+def test_rebate_budget_holds_an_accepted_swap_until_it_finishes(
+    harness: Harness,
+    state: str,
+    counted: bool,  # noqa: FBT001
+) -> None:
+    with harness.acquire() as store:
+        session = _insert_funded_swap(store, harness, state)
+        _rebate_row(store, session, 70)
+        assert _committed(store, 2000) == 70 * counted
+
+
+@pytest.mark.native_crypto
+@pytest.mark.skipif(
+    os.environ.get("RILLSWAP_RUN_NATIVE_CRYPTO") != "1",
+    reason="set RILLSWAP_RUN_NATIVE_CRYPTO=1 with pinned native library",
+)
+@pytest.mark.parametrize(
+    ("message_type", "rebate", "admitted"),
+    [
+        ("terms_offer", 0, True),
+        ("terms_offer", 250, True),
+        ("terms_offer", -1, False),
+        ("terms_offer", True, False),
+        ("error", 0, True),
+        ("error", 5, False),  # only a firm offer can grant a rebate
+    ],
+)
+def test_a_firm_offer_records_the_rebate_it_grants(
+    harness: Harness,
+    message_type: str,
+    rebate: object,
+    admitted: bool,  # noqa: FBT001
+) -> None:
+    from rill_crypto import Context  # noqa: PLC0415
+    from test_live_session_store import _signed_request  # noqa: PLC0415
+
+    source = harness.source
+    seen: list[int | None] = []
+
+    def responder(_request: Any, _prior: Any, context: live.RequestContext) -> live.Answer:  # noqa: ANN401
+        seen.append(context.rebates_committed_sat)
+        payload = {
+            "terms": {
+                "contract_hash": source["contract_hash"],
+                "contract_terms": source["contract_terms"],
+                "handshake_hash": source["verification_context"]["handshake_hash"],
+            },
+            "provider_terms_signature": source["verification_context"]["provider_terms_signature"],
+        }
+        return live.Answer(
+            message_type,
+            payload,
+            payment_hash=source["contract_terms"]["invoice_binding"]["payment_hash"],
+            contract_hash=source["contract_hash"],
+            rebate_sat=rebate,  # type: ignore[arg-type]
+        )
+
+    with (
+        Context(library_path=os.environ["RILL_CRYPTO_LIBRARY"]) as crypto,
+        harness.acquire_at(harness.path, crypto=crypto, public_keys=crypto) as store,
+    ):
+        session = store.reserve(harness.initiation, now=1000).session_id
+        store.commit_accept(harness.accept)
+        store.admit_confirm(harness.confirm)
+        request = _signed_request(harness, crypto, 2, "21" * 32)
+        if not admitted:
+            with pytest.raises(live.LiveSessionStoreError, match="request refused"):
+                store.answer_request(request, responder=responder, signer=crypto, now=1000)
+            assert _rows(store, session) == []
+            assert _committed(store, 1000) == 0
+        else:
+            store.answer_request(request, responder=responder, signer=crypto, now=1000)
+            firm = [(1000, "offered", 100000, "sat")] if message_type == "terms_offer" else []
+            granted = [(1000, "rebate", rebate, "sat")] if rebate else []
+            assert _rows(store, session) == [*firm, *granted]
+            assert _committed(store, 1000) == rebate  # the open offer holds it
+        assert seen == [0]

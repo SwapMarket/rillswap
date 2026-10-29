@@ -126,6 +126,8 @@ from rill_provider.swap_accounting import (
     LEDGER_UNITS,
     LOST,
     OFFERED,
+    REBATE,
+    REBATE_WINDOW_SECONDS,
     REFUND_FEE,
     ROUTING_FEE,
     TERMINAL_KIND_BY_STATE,
@@ -133,6 +135,7 @@ from rill_provider.swap_accounting import (
     LedgerEntry,
     SwapEconomics,
     ledger_amount,
+    signed_ledger_amount,
     swap_economics,
 )
 
@@ -150,7 +153,7 @@ if TYPE_CHECKING:
     from rill_provider.reverse_operations import ReverseOperation, ReverseOperations
 
 APPLICATION_ID = 0x524C5331  # RLS1, distinct from all diagnostic stores.
-SCHEMA_VERSION = 20  # every other version is refused: recreate with provision-store
+SCHEMA_VERSION = 21  # every other version is refused: recreate with provision-store
 CONTRACT_KEY_RECORD_KIND = "rillswap-provider-contract-key"
 OPEN_PHASES = ("CONFIRMED", "ACCEPTED")  # sessions that may still send requests
 SWAP_TRANSITIONS = frozenset(
@@ -395,14 +398,15 @@ REVERSE_SPEND_SCAN_SCHEMA = (
     "CHECK (cursor_height!=floor_height OR cursor_block=floor_block))"
 )
 # Append-only per-swap accounting, written in each event's own transaction
-# (swap_accounting.py).
+# (swap_accounting.py). Only ``completed`` revenue may be negative (a rebate).
 SWAP_LEDGER_SCHEMA = (
     "CREATE TABLE swap_ledger (entry_id INTEGER PRIMARY KEY AUTOINCREMENT, "
     "session_id TEXT NOT NULL, "
     "recorded_at INTEGER NOT NULL CHECK (typeof(recorded_at)='integer'), "
     "kind TEXT NOT NULL CHECK (kind IN ("
     + ", ".join(f"'{kind}'" for kind in LEDGER_KINDS)
-    + ")), amount INTEGER CHECK (amount IS NULL OR (typeof(amount)='integer' AND amount>=0)), "
+    + ")), amount INTEGER CHECK (amount IS NULL OR (typeof(amount)='integer' "
+    f"AND (amount>=0 OR kind='{COMPLETED}'))), "
     "unit TEXT CHECK (unit IS NULL OR unit IN ("
     + ", ".join(f"'{unit}'" for unit in LEDGER_UNITS)
     + ")), CHECK ((amount IS NULL) = (unit IS NULL)))"
@@ -742,6 +746,9 @@ class RequestContext:
     # Whether both handshakes committed cooperative claims; new terms match it.
     cooperative: bool = False
     network_fees: bool = False
+    # Rebates granted by open firm offers plus those paid in the last 24 h,
+    # from this store alone. None (unknown) must grant no new rebate.
+    rebates_committed_sat: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -967,6 +974,8 @@ class Answer:
     payment_hash: str | None = None
     contract_hash: str | None = None  # envelope binding, e.g. for terms_offer
     effect: AcceptSwap | BindFunding | None = None
+    # The service-fee rebate a firm terms_offer grants (sat); zero otherwise.
+    rebate_sat: int = 0
 
 
 if TYPE_CHECKING:
@@ -3113,8 +3122,14 @@ class LiveSessionStore:
                         ),
                         cooperative=cooperative,
                         network_fees=FEE_POLICY_FEATURE in negotiated,
+                        rebates_committed_sat=_rebates_committed(connection, now),
                     )
                     reply = responder(outer, prior, context)
+                    if ledger_amount(reply.rebate_sat) is None or (
+                        reply.rebate_sat
+                        and (reply.message_type != "terms_offer" or reply.payment_hash is None)
+                    ):
+                        raise LiveSessionStoreError("request refused")  # noqa: TRY301
                     if reply.effect is not None:
                         _apply_effect(connection, outer, reply.effect, replied, now)
                         if isinstance(reply.effect, AcceptSwap):
@@ -3207,6 +3222,10 @@ class LiveSessionStore:
                             OFFERED,
                             None if economics is None else economics.volume_sat,
                         )
+                        if reply.rebate_sat:
+                            _record_ledger(
+                                connection, outer.session_id, now, REBATE, reply.rebate_sat
+                            )
         except LiveSessionStoreError:
             raise
         except Exception:  # noqa: BLE001 - never echo caller documents or crypto details
@@ -8871,12 +8890,32 @@ def _record_ledger(  # noqa: PLR0913 - one row's explicit parts
     The values are sanitized here, so the row can never refuse the swap event
     it describes: an unexpected amount is stored as unmeasured (NULL).
     """
-    measured = ledger_amount(amount)
+    measured = signed_ledger_amount(amount) if kind == COMPLETED else ledger_amount(amount)
     connection.execute(
         "INSERT INTO swap_ledger (session_id, recorded_at, kind, amount, unit) "
         "VALUES (?, ?, ?, ?, ?)",
         (session_id, int(now), kind, measured, None if measured is None else unit),
     )
+
+
+def _rebates_committed(connection: sqlite3.Connection, now: int) -> int:
+    """Return the rebates this store's open offers grant plus those paid recently.
+
+    An offer is open while its reservation is unreleased and its swap is absent
+    or not finished. A completed swap counts for ``REBATE_WINDOW_SECONDS``; a
+    finished swap that did not complete paid nothing. The responder runs in
+    the same write transaction, so concurrent quotes cannot both spend.
+    """
+    finished = ", ".join("?" for _ in FINISHED_SWAP_STATES)
+    (total,) = connection.execute(
+        "SELECT COALESCE(SUM(amount), 0) FROM swap_ledger WHERE kind=? AND session_id IN ("  # noqa: S608 - placeholders only
+        "SELECT r.session_id FROM economic_reservations r LEFT JOIN swaps w "
+        "ON w.session_id=r.session_id WHERE r.state<>'RELEASED' "
+        f"AND (w.state IS NULL OR w.state NOT IN ({finished})) "
+        "UNION SELECT session_id FROM swap_ledger WHERE kind=? AND recorded_at>?)",
+        (REBATE, *sorted(FINISHED_SWAP_STATES), COMPLETED, now - REBATE_WINDOW_SECONDS),
+    ).fetchone()
+    return int(total)
 
 
 def _offer_economics(offer: bytes) -> SwapEconomics | None:

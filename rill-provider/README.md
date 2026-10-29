@@ -621,14 +621,18 @@ through the proxy.
 
 ## Persistent state and backups
 
-The store uses schema v20 and opens only a store of exactly that version (see
+The store uses schema v21 and opens only a store of exactly that version (see
 [Upgrades](#upgrades)).
 
 The store keeps an append-only swap ledger: each firm offer, acceptance and
 outcome, and every realized cost (Lightning routing fee, claim, funding and
 refund mining fees, EVM gas), written in the same transaction as the swap
 event. A cost no backend reported is listed as unrecorded instead of being
-counted as zero.
+counted as zero. A firm offer that grants a rebate (a negative service fee)
+also records the rebate, and its completed swap records negative revenue.
+Rebates of open offers, and of swaps completed in the last 24 hours, count
+against the process's rebate budget; each process derives it from its own
+store only.
 
 Reverse spent-output scans retain a block-hash anchor and an immutable replay
 floor, checking parent continuity in batches of at most 12 blocks. Above-floor
@@ -670,10 +674,14 @@ supported stores resume normally; missing, malformed and unsupported stores reta
 their existing refusal behavior. This update requires no reprovisioning, migration
 or re-signing of pending transactions.
 
+Schema v21 lets the swap ledger record signed revenue and provider rebates. A
+v20 store never granted a rebate, so draining it and provisioning a new store
+(below) loses no rebate history.
+
 Stop the service before installing a new version. Stores are never upgraded in
-place. A store of any other schema version (including v19 and earlier) is
+place. A store of any other schema version (including v20 and earlier) is
 refused with its contents unchanged, with
-`live session store version unsupported (found N, requires 20); recreate it with
+`live session store version unsupported (found N, requires 21); recreate it with
 provision-store`. (If the old process crashed, SQLite may still fold its
 committed write-ahead log into the database file; nothing is lost.) An older
 release also refuses a newer store.

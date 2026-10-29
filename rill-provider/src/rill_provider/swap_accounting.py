@@ -26,7 +26,8 @@ if TYPE_CHECKING:
     from rill_core.wire.messages import AnyContractTerms
 
 SATS_PER_BTC = 100_000_000
-# Events. ``completed`` carries the revenue in sat, ``lost`` the principal lost.
+# Events. ``completed`` carries the signed revenue in sat (negative after a
+# rebate), ``lost`` the principal lost.
 OFFERED = "offered"
 ACCEPTED = "accepted"
 COMPLETED = "completed"
@@ -40,6 +41,12 @@ CLAIM_FEE = "claim_fee"  # sat
 FUNDING_FEE = "funding_fee"  # sat
 REFUND_FEE = "refund_fee"  # sat
 GAS = "gas"  # wei of the EVM chain's native coin, never converted to sat
+# The service-fee rebate (sat, positive) a firm offer grants, recorded with
+# ``offered``. ``completed`` then carries the negative revenue it realized.
+REBATE = "rebate"
+# Rebates count against the operator's budget while their offer is open and
+# for this long after their swap completed.
+REBATE_WINDOW_SECONDS = 24 * 3600
 LEDGER_KINDS = (
     OFFERED,
     ACCEPTED,
@@ -53,6 +60,7 @@ LEDGER_KINDS = (
     FUNDING_FEE,
     REFUND_FEE,
     GAS,
+    REBATE,
 )
 LEDGER_UNITS = ("sat", "msat", "wei")
 TERMINAL_KINDS = frozenset({COMPLETED, FAILED, LOST, REFUNDED, ABORTED})
@@ -97,8 +105,9 @@ class SwapEconomics:
 
     ``volume_sat`` is the swapped amount (LN principal, on-chain payout, or the
     payout's quoted sat value), ``revenue_sat`` what the provider keeps on
-    success before realized costs, and ``principal_sat`` the LN amount a
-    forward swap pays out (what a LOST swap loses).
+    success before realized costs (negative when it pays a rebate), and
+    ``principal_sat`` the LN amount a forward swap pays out (what a LOST swap
+    loses).
     """
 
     volume_sat: int
@@ -135,6 +144,13 @@ def ledger_amount(value: object) -> int | None:
     unexpected value must never fail it: it is recorded as unmeasured.
     """
     if type(value) is not int or not 0 <= value <= MAX_LEDGER_AMOUNT:
+        return None
+    return value
+
+
+def signed_ledger_amount(value: object) -> int | None:
+    """Return a storable signed amount (``completed`` revenue, negative for a rebate)."""
+    if type(value) is not int or not -MAX_LEDGER_AMOUNT <= value <= MAX_LEDGER_AMOUNT:
         return None
     return value
 
