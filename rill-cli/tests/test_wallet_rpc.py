@@ -34,6 +34,7 @@ def _answers() -> dict[str, Any]:
     return {
         "getblockchaininfo": {"chain": "regtest", "initialblockdownload": False, "blocks": 850},
         "getblockhash": NETWORK.genesis_hash,
+        "lockunspent": True,
         "listunspent": [
             {
                 "txid": "41" * 32,
@@ -123,6 +124,11 @@ def test_fund_returns_exact_declared_parts(
     assert create["path"] == "/wallet/w"
     assert create["params"][1] == [{"bcrt1pcontract": "0.00050000"}]
     assert create["params"][3]["change_type"] == "bech32m"
+    locks = [call["params"] for call in calls if call["method"] == "lockunspent"]
+    outpoint = [{"txid": "41" * 32, "vout": 1}]
+    assert locks == [[False, outpoint], [False, outpoint, True]]
+    methods = [call["method"] for call in calls]
+    assert methods.index("lockunspent") < methods.index("walletcreatefundedpsbt")
 
 
 def test_amounts_must_be_whole_satoshis() -> None:

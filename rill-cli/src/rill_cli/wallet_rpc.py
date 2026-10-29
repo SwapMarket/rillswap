@@ -11,6 +11,7 @@ import json
 import math
 import re
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -47,6 +48,8 @@ MAX_BLOCK_HEIGHT = 499_999_999
 TAPROOT_SCRIPT_BYTES = 34
 MAX_ADDRESS_BYTES = 128
 HTTP_OK = 200
+HTTP_RPC_ERROR = 500
+RPC_INVALID_PARAMETER = -8
 COOPERATIVE_SAMPLE_ATTEMPTS = 3  # a block may arrive during one; each retake is as strict
 METHODS = frozenset(
     {
@@ -62,6 +65,7 @@ METHODS = frozenset(
         "gettxout",
         "gettxspendingprevout",
         "listunspent",
+        "lockunspent",
         "sendrawtransaction",
         "walletcreatefundedpsbt",
         "walletprocesspsbt",
@@ -70,6 +74,7 @@ METHODS = frozenset(
 WALLET_EFFECTS = frozenset(
     {
         "getnewaddress",
+        "lockunspent",
         "walletcreatefundedpsbt",
         "walletprocesspsbt",
         "finalizepsbt",
@@ -80,6 +85,10 @@ WALLET_EFFECTS = frozenset(
 
 class WalletRpcError(RuntimeError):
     """Core refused or returned something unusable; no detail is echoed."""
+
+
+class _CoinUnavailableError(WalletRpcError):
+    """Core affirmatively refused an outpoint reservation (RPC error -8)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,7 +306,10 @@ class WalletRpc:
                 )
         except httpx.HTTPError:
             raise WalletRpcError("Core RPC unavailable") from None
-        if response.status_code != HTTP_OK or len(response.content) > MAX_RESPONSE_BYTES:
+        if (
+            response.status_code not in (HTTP_OK, HTTP_RPC_ERROR)
+            or len(response.content) > MAX_RESPONSE_BYTES
+        ):
             raise WalletRpcError(f"Core {method} failed")
         try:
             if strict_response:
@@ -311,7 +323,19 @@ class WalletRpc:
                 body = json.loads(response.content, parse_float=Decimal)
         except (ValueError, InvalidOperation):
             raise WalletRpcError("Core RPC response is not JSON") from None
-        if not isinstance(body, dict) or body.get("error") is not None:
+        error = body.get("error") if isinstance(body, dict) else None
+        if (
+            isinstance(error, dict)
+            and method == "lockunspent"
+            and type(error.get("code")) is int
+            and error["code"] == RPC_INVALID_PARAMETER
+        ):
+            raise _CoinUnavailableError("Core coin reservation refused")
+        if (
+            response.status_code != HTTP_OK
+            or not isinstance(body, dict)
+            or body.get("error") is not None
+        ):
             raise WalletRpcError(f"Core {method} failed")
         if strict_response and (
             body.get("jsonrpc") != "2.0"
@@ -384,33 +408,39 @@ class WalletRpc:
         """
         if type(fee_rate_sat_vb) is not int or fee_rate_sat_vb <= 0:
             raise WalletRpcError("funding fee rate must be a positive integer")
-        coin = self._select_coin(amount_sat + 165 * fee_rate_sat_vb)
-        decoded = self._call("decodescript", script_pubkey.hex(), wallet=False)
-        address = decoded.get("address") if isinstance(decoded, dict) else None
-        if not isinstance(address, str):
-            raise WalletRpcError("contract script has no address")
-        amount = format(Decimal(amount_sat) / SATS_PER_BTC, ".8f")
-        created = self._call(
-            "walletcreatefundedpsbt",
-            [{"txid": coin.txid.hex(), "vout": coin.output_index}],
-            [{address: amount}],
-            0,
-            {
-                "change_type": "bech32m",
-                "fee_rate": fee_rate_sat_vb,
-                "replaceable": False,
-                "add_inputs": False,
-            },
-        )
-        if not isinstance(created, dict) or not isinstance(created.get("psbt"), str):
-            raise WalletRpcError("Core funding PSBT unusable")
-        before_signing = self._call("decodepsbt", created["psbt"], wallet=False)
+        coin = self._reserve_coin(amount_sat + 165 * fee_rate_sat_vb)
         try:
-            actual = tuple((vin["txid"], vin["vout"]) for vin in before_signing["tx"]["vin"])
-        except (KeyError, TypeError):
-            raise WalletRpcError("wallet funding input description unusable") from None
-        if actual != ((coin.txid.hex(), coin.output_index),):
-            raise WalletRpcError("Core changed the approved funding input")
+            decoded = self._call("decodescript", script_pubkey.hex(), wallet=False)
+            address = decoded.get("address") if isinstance(decoded, dict) else None
+            if not isinstance(address, str):
+                raise WalletRpcError("contract script has no address")  # noqa: TRY301 - release unsigned reservation
+            amount = format(Decimal(amount_sat) / SATS_PER_BTC, ".8f")
+            created = self._call(
+                "walletcreatefundedpsbt",
+                [{"txid": coin.txid.hex(), "vout": coin.output_index}],
+                [{address: amount}],
+                0,
+                {
+                    "change_type": "bech32m",
+                    "fee_rate": fee_rate_sat_vb,
+                    "replaceable": False,
+                    "add_inputs": False,
+                },
+            )
+            if not isinstance(created, dict) or not isinstance(created.get("psbt"), str):
+                raise WalletRpcError("Core funding PSBT unusable")  # noqa: TRY301 - release unsigned reservation
+            before_signing = self._call("decodepsbt", created["psbt"], wallet=False)
+            try:
+                actual = tuple((vin["txid"], vin["vout"]) for vin in before_signing["tx"]["vin"])
+            except (KeyError, TypeError):
+                raise WalletRpcError("wallet funding input description unusable") from None
+            if actual != ((coin.txid.hex(), coin.output_index),):
+                raise WalletRpcError("Core changed the approved funding input")  # noqa: TRY301 - release unsigned reservation
+        except Exception:
+            self._unlock_unsigned_coin(coin)
+            raise
+        # From the first signing request onward its outcome may be ambiguous.
+        # Keep the durable lock, even on failure; Core removes it upon spending.
         processed = self._call(
             "walletprocesspsbt",
             created["psbt"],
@@ -449,7 +479,13 @@ class WalletRpc:
             raise WalletRpcError("Core changed the approved funding input details")
         return WalletFunding(raw, inputs, others, fee)
 
-    def _select_coin(self, required_sat: int) -> FundingPrevout:
+    def _unlock_unsigned_coin(self, coin: FundingPrevout) -> None:
+        """Release our own reservation only while signing definitely never started."""
+        with suppress(WalletRpcError):
+            self._call("lockunspent", True, [{"txid": coin.txid.hex(), "vout": coin.output_index}])  # noqa: FBT003 - Core unlock flag
+
+    def _reserve_coin(self, required_sat: int) -> FundingPrevout:
+        """Exclusively acquire one confirmed coin, then persist before any signing."""
         available = self._call("listunspent", 1)
         if not isinstance(available, list):
             raise WalletRpcError("Core coin list unusable")
@@ -475,7 +511,26 @@ class WalletRpc:
                 raise WalletRpcError("Core coin description unusable") from None
         if not candidates:
             raise WalletRpcError("no single confirmed coin covers funding and its fee reserve")
-        return min(candidates, key=lambda coin: (coin.value_sat, coin.txid, coin.output_index))
+        for coin in sorted(
+            candidates, key=lambda coin: (coin.value_sat, coin.txid, coin.output_index)
+        ):
+            outpoint = [{"txid": coin.txid.hex(), "vout": coin.output_index}]
+            try:
+                # Core's persistent form accepts already-locked coins. First
+                # acquire exclusively, then persist before any signing request.
+                acquired = self._call("lockunspent", False, outpoint)  # noqa: FBT003 - Core lock flag
+            except _CoinUnavailableError:
+                continue
+            if acquired is not True:
+                raise WalletRpcError("Core coin reservation unavailable")
+            try:
+                if self._call("lockunspent", False, outpoint, True) is not True:  # noqa: FBT003 - Core lock and persist flags
+                    raise WalletRpcError("Core durable coin reservation unavailable")  # noqa: TRY301 - release unsigned reservation
+            except Exception:
+                self._unlock_unsigned_coin(coin)
+                raise
+            return coin
+        raise WalletRpcError("no single confirmed coin could be reserved")
 
     def confirmed_output(self, txid: str, vout: int) -> ConfirmedOutput | None:
         """Return the unspent output as Core sees it (mempool included), or None.

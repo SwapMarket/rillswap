@@ -66,6 +66,9 @@ rill swap ln-to-btc "${common[@]}" --provider "$LN_TO_BTC_PROVIDER" \
 The forward macaroon must be able to decode invoices; the reverse macaroon
 must also send payments. Use a new recovery filename for every swap.
 
+Multiple invocations can swap simultaneously, including from the same Core
+wallet. Each BTC to Lightning swap needs a separate sufficient confirmed coin.
+
 ## Commands
 
 | Command | Purpose |
@@ -100,6 +103,18 @@ If payment is never observed, the contract may still be funded. A refund is
 possible after the recorded refund lock height while the output is unspent.
 Funding uses one confirmed P2WPKH or P2TR coin; the CLI does not combine
 coins when no single one covers the amount and fee reserve.
+
+Before signing, funding reserves its coin exclusively with a persistent Core
+wallet lock (tested with Core v30). Competing swaps choose different coins.
+Core removes the lock when the coin is spent. Known failures before signing release
+the reservation; once signing is requested, an uncertain result keeps it locked,
+including across wallet restarts. Inspect `listlockunspent` and preserve all
+recovery files before explicitly unlocking an abandoned funding input with
+`lockunspent true`. Never unlock an input whose signed funding could still be
+published.
+
+Upgrading changes no recovery files and needs no migration. Existing wallet
+locks remain untouched; new reservations are created only by explicit swaps.
 
 ### Lightning to Bitcoin
 
