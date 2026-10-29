@@ -26,7 +26,14 @@ from rill_core.wire.types import (
 )
 
 from rill_provider._transport_pow import MAX_WORK_BITS
+from rill_provider.balance_pricing import (
+    DEFAULT_MIN_SERVICE_FEE_PPM,
+    MIN_SERVICE_FEE_PPM_LIMIT,
+    BalancePricingError,
+    check_min_service_fee_ppm,
+)
 from rill_provider.core_tx_bytes import MAX_FEE_ESTIMATE_CEILING_SAT_VB
+from rill_provider.dynamic_pricing import FeeLimits
 from rill_provider.evm_quote_policy import EVM_PROFILES, EvmSchedule
 from rill_provider.handshake_service import ServicePolicy
 from rill_provider.handshake_store import HandshakePolicy
@@ -192,6 +199,26 @@ class BitcoinNetworkFees(_Strict):
     max_routing_fee_ppm: int = Field(ge=0, le=1_000_000)
 
 
+class DynamicFees(_Strict):
+    """Private balance-aware discounts below the advertised service fee, never above it.
+
+    Swaps that repair a liquidity shortage are discounted, down to
+    ``min_service_fee_ppm`` of the principal (a rebate below zero); every
+    other swap pays the normal fee. Nothing here is announced.
+    """
+
+    # Soft minimum of the bitcoin_core wallet (Bitcoin profiles).
+    btc_reserve_target_sat: int | None = Field(default=None, gt=0, le=MAX_SATS)
+    # Soft minimum of each configured token pool, valued at 1 USD per token
+    # (EVM profiles, which must serve only USD stablecoins).
+    stable_reserve_target_usd: int | None = Field(default=None, gt=0, le=10**12)
+    min_service_fee_ppm: int = Field(
+        default=DEFAULT_MIN_SERVICE_FEE_PPM, ge=MIN_SERVICE_FEE_PPM_LIMIT, le=0
+    )
+    # Rebates this process may grant per 24 hours, open offers included.
+    rebate_budget_sat_24h: int = Field(default=100_000, ge=0, le=MAX_SATS)
+
+
 class PublicTerms(_Strict):
     """RS-005 announcement terms."""
 
@@ -279,6 +306,7 @@ class OperatorConfig(_Strict):
     # announcement requiring it, so enable it only once they do.
     transport_pow_bits: int = Field(default=0, ge=0, le=MAX_WORK_BITS)
     notifications: NotificationSettings | None = None
+    dynamic_fees: DynamicFees | None = None
 
     @field_validator("provider_destination_script")
     @classmethod
@@ -297,7 +325,34 @@ class OperatorConfig(_Strict):
             self.handshake.profile in EVM_PROFILES or self.bitcoin_core is None
         ):
             raise ValueError("terms.network_fees requires a Bitcoin profile and bitcoin_core")
+        self._check_dynamic_fees()
         return self
+
+    def _check_dynamic_fees(self) -> None:
+        fees = self.dynamic_fees
+        if fees is None:
+            return
+        if self.terms.base_fee_sat <= 0:
+            raise ValueError("dynamic_fees requires a positive terms.base_fee_sat")
+        try:
+            check_min_service_fee_ppm(
+                fees.min_service_fee_ppm, normal_fee_ppms=(self.terms.proportional_millionths,)
+            )
+        except BalancePricingError as error:
+            raise ValueError(f"dynamic_fees: {error}") from None
+        if self.lnd is None:
+            raise ValueError("dynamic_fees requires lnd to observe channel balances")
+        if self.handshake.profile in EVM_PROFILES:
+            if self.evm is None or fees.stable_reserve_target_usd is None:
+                raise ValueError(
+                    "dynamic_fees on an EVM profile requires stable_reserve_target_usd"
+                )
+        elif self.terms.network_fees is None or fees.btc_reserve_target_sat is None:
+            # The breakdown is where clients verify the advertised ceiling.
+            raise ValueError(
+                "dynamic_fees on a Bitcoin profile requires terms.network_fees "
+                "and btc_reserve_target_sat"
+            )
 
     def bitcoin_fee_policy(self) -> BtcFeePolicy | None:
         """Build the announcement policy without binding coefficients to the store."""
@@ -362,6 +417,19 @@ class OperatorConfig(_Strict):
             follow_liquidity=t.follow_liquidity,
             liquidity_margin_percent=t.liquidity_margin_percent,
             fee_policy=self.bitcoin_fee_policy(),
+            dynamic_fees=self.fee_limits(),
+        )
+
+    def fee_limits(self) -> FeeLimits | None:
+        """Return the private balance-aware discount limits, if configured."""
+        fees = self.dynamic_fees
+        if fees is None:
+            return None
+        return FeeLimits(
+            min_service_fee_ppm=fees.min_service_fee_ppm,
+            rebate_budget_sat=fees.rebate_budget_sat_24h,
+            btc_reserve_target_sat=fees.btc_reserve_target_sat,
+            stable_reserve_target_usd=fees.stable_reserve_target_usd,
         )
 
 

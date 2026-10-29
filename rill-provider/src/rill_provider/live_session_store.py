@@ -752,6 +752,14 @@ class RequestContext:
 
 
 @dataclass(frozen=True, slots=True)
+class PricingCommitments:
+    """What this store's open offers already commit, for balance-aware pricing."""
+
+    open_volume_sat: int | None  # None: an open offer's volume was not measured
+    rebates_committed_sat: int
+
+
+@dataclass(frozen=True, slots=True)
 class SwapRecord:
     """Durable accepted-swap state; byte fields are exact canonical envelopes."""
 
@@ -8109,6 +8117,23 @@ class LiveSessionStore:
             raise LiveSessionStoreError("swap ledger bounds unsupported")
         return self._ledger_rows("entry_id > ? ORDER BY entry_id LIMIT ?", (entry_id, limit))
 
+    def pricing_commitments(self, now: int | None = None) -> PricingCommitments:
+        """Return this store's open firm-offer volume and committed rebates.
+
+        Advisory input for balance-aware pricing before a quote's transaction;
+        ``answer_request`` recomputes the rebates inside it.
+        """
+        now = int(time.time()) if now is None else now
+        try:
+            with self._write() as connection:
+                return PricingCommitments(
+                    _open_offer_volume(connection), _rebates_committed(connection, now)
+                )
+        except LiveSessionStoreError:
+            raise
+        except Exception:  # noqa: BLE001 - never echo storage details
+            raise LiveSessionStoreError("swap ledger unavailable") from None
+
     def ledger_session(self, session_id: str) -> tuple[LedgerEntry, ...]:
         """Return every ledger entry of one swap, oldest first."""
         return self._ledger_rows("session_id = ? ORDER BY entry_id", (session_id,))
@@ -8898,24 +8923,40 @@ def _record_ledger(  # noqa: PLR0913 - one row's explicit parts
     )
 
 
+# Sessions whose firm offer is still open: reservation unreleased and swap
+# absent or unfinished (a CLAIMED swap holds its reservation until expiry).
+_OPEN_OFFER_SESSIONS = (
+    "SELECT r.session_id FROM economic_reservations r LEFT JOIN swaps w "  # noqa: S608 - placeholders only
+    "ON w.session_id=r.session_id WHERE r.state<>'RELEASED' "
+    "AND (w.state IS NULL OR w.state NOT IN (" + ", ".join("?" for _ in FINISHED_SWAP_STATES) + "))"
+)
+_OPEN_OFFER_VALUES = tuple(sorted(FINISHED_SWAP_STATES))
+
+
 def _rebates_committed(connection: sqlite3.Connection, now: int) -> int:
     """Return the rebates this store's open offers grant plus those paid recently.
 
-    An offer is open while its reservation is unreleased and its swap is absent
-    or not finished. A completed swap counts for ``REBATE_WINDOW_SECONDS``; a
-    finished swap that did not complete paid nothing. The responder runs in
-    the same write transaction, so concurrent quotes cannot both spend.
+    A completed swap counts for ``REBATE_WINDOW_SECONDS``; a finished swap
+    that did not complete paid nothing. The responder runs in the same write
+    transaction, so concurrent quotes cannot both spend.
     """
-    finished = ", ".join("?" for _ in FINISHED_SWAP_STATES)
     (total,) = connection.execute(
         "SELECT COALESCE(SUM(amount), 0) FROM swap_ledger WHERE kind=? AND session_id IN ("  # noqa: S608 - placeholders only
-        "SELECT r.session_id FROM economic_reservations r LEFT JOIN swaps w "
-        "ON w.session_id=r.session_id WHERE r.state<>'RELEASED' "
-        f"AND (w.state IS NULL OR w.state NOT IN ({finished})) "
-        "UNION SELECT session_id FROM swap_ledger WHERE kind=? AND recorded_at>?)",
-        (REBATE, *sorted(FINISHED_SWAP_STATES), COMPLETED, now - REBATE_WINDOW_SECONDS),
+        + _OPEN_OFFER_SESSIONS
+        + " UNION SELECT session_id FROM swap_ledger WHERE kind=? AND recorded_at>?)",
+        (REBATE, *_OPEN_OFFER_VALUES, COMPLETED, now - REBATE_WINDOW_SECONDS),
     ).fetchone()
     return int(total)
+
+
+def _open_offer_volume(connection: sqlite3.Connection) -> int | None:
+    """Return the swapped volume of open offers; None if any is unmeasured."""
+    total, unmeasured = connection.execute(
+        "SELECT COALESCE(SUM(amount), 0), COUNT(*) - COUNT(amount) FROM swap_ledger "  # noqa: S608 - placeholders only
+        "WHERE kind=? AND session_id IN (" + _OPEN_OFFER_SESSIONS + ")",
+        (OFFERED, *_OPEN_OFFER_VALUES),
+    ).fetchone()
+    return None if unmeasured else int(total)
 
 
 def _offer_economics(offer: bytes) -> SwapEconomics | None:

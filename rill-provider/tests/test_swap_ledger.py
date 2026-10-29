@@ -423,6 +423,42 @@ def test_rebate_budget_counts_open_offers_and_recently_completed_swaps(harness: 
         assert _committed(store, 1500 + REBATE_WINDOW_SECONDS) == 100
 
 
+def _offered_row(store: live.LiveSessionStore, session: str, amount: int | None) -> None:
+    store._connection.execute(  # noqa: SLF001
+        "INSERT INTO swap_ledger (session_id, recorded_at, kind, amount, unit) "
+        "VALUES (?, 1000, 'offered', ?, ?)",
+        (session, amount, None if amount is None else "sat"),
+    )
+
+
+def test_pricing_commitments_sum_only_open_offers(harness: Harness) -> None:
+    with harness.acquire() as store:
+        _offer_reservation(store, "open", released=False)
+        _offered_row(store, "open", 40_000)
+        _rebate_row(store, "open", 30)
+        _offer_reservation(store, "expired", released=True)
+        _offered_row(store, "expired", 1_000_000)
+        _offered_row(store, "orphan", 2_000_000)  # no reservation: never offered here
+        assert store.pricing_commitments(1200) == live.PricingCommitments(40_000, 30)
+        _offer_reservation(store, "unmeasured", released=False)
+        _offered_row(store, "unmeasured", None)
+        assert store.pricing_commitments(1200) == live.PricingCommitments(None, 30)
+
+
+@pytest.mark.parametrize(("state", "volume"), [("PAYING", 60_000), ("CLAIMED", 0), ("FAILED", 0)])
+def test_pricing_commitments_hold_an_accepted_swap_until_it_finishes(
+    harness: Harness, state: str, volume: int
+) -> None:
+    with harness.acquire() as store:
+        session = (
+            _claimed_swap(store, harness)  # holds its reservation until expiry
+            if state == "CLAIMED"
+            else _insert_funded_swap(store, harness, state)
+        )
+        _offered_row(store, session, 60_000)
+        assert store.pricing_commitments(2000).open_volume_sat == volume
+
+
 @pytest.mark.parametrize(
     ("state", "counted"),
     [("PAYING", True), ("CLAIMING", True), ("FAILED", False), ("LOST", False)],

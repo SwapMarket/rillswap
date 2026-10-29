@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from rill_core.wire.messages import Envelope
     from rill_core.wire.types import NetworkIdentity, ProfileId
 
+    from rill_provider.dynamic_pricing import DynamicPricing, TokenPricing
     from rill_provider.evm_quote_policy import EvmQuoteContext
     from rill_provider.live_session_store import RequestContext
 
@@ -181,6 +182,7 @@ class QuoteTerms:
     claim_fee: ClaimFeeRate | None = None  # this tick's sample; LN to BTC only
     fee_policy: BtcFeePolicy | None = None
     fee_breakdown: FeeBreakdown | None = None
+    dynamic: DynamicPricing | None = None  # balance-aware discounts, if configured
 
 
 def _error(code: str, message: str) -> Answer:
@@ -192,11 +194,55 @@ def normal_service_fee(base_fee_sat: int, proportional_millionths: int, principa
     return base_fee_sat + -(-principal * proportional_millionths // MILLIONTHS)
 
 
-def success_fee(terms: QuoteTerms, principal: int) -> int:
+def _network_fee(terms: QuoteTerms) -> int:
+    return 0 if terms.fee_breakdown is None else int(terms.fee_breakdown.network_fee_sat)
+
+
+def service_fee(terms: QuoteTerms, principal: int, token: TokenPricing | None = None) -> int:
+    """Return the signed service fee: the frozen breakdown's, else balance-aware, else normal.
+
+    The breakdown is frozen before the store transaction (it may already
+    back a reverse hold invoice), so once present it is the price.
+    """
+    if terms.fee_breakdown is not None:
+        return int(terms.fee_breakdown.service_fee_sat)
+    normal = normal_service_fee(terms.base_fee_sat, terms.proportional_millionths, principal)
+    if terms.dynamic is None:
+        return normal
+    return terms.dynamic.service_fee(
+        profile=terms.profile, normal_fee_sat=normal, principal_sat=principal, token=token
+    )
+
+
+def success_fee(terms: QuoteTerms, principal: int, token: TokenPricing | None = None) -> int:
     """Return service pricing plus the frozen, separately disclosed network charge."""
-    service = normal_service_fee(terms.base_fee_sat, terms.proportional_millionths, principal)
-    network = 0 if terms.fee_breakdown is None else int(terms.fee_breakdown.network_fee_sat)
-    return service + network
+    return service_fee(terms, principal, token) + _network_fee(terms)
+
+
+def normal_success_fee(terms: QuoteTerms, principal: int) -> int:
+    """Return the undiscounted success fee, which bounds routing readiness checks."""
+    normal = normal_service_fee(terms.base_fee_sat, terms.proportional_millionths, principal)
+    return normal + _network_fee(terms)
+
+
+def granted_rebate(terms: QuoteTerms, context: RequestContext, service: int) -> int | None:
+    """Return the rebate a firm offer grants; None when the budget cannot cover it.
+
+    The store computes ``rebates_committed_sat`` inside this transaction, so
+    concurrent quotes can never both spend the same allowance.
+    """
+    rebate = max(0, -service)
+    if rebate == 0:
+        return 0
+    committed = context.rebates_committed_sat
+    if terms.dynamic is None or committed is None:
+        return None
+    return rebate if rebate <= terms.dynamic.limits.rebate_budget_sat - committed else None
+
+
+def rebate_exhausted() -> Answer:
+    """Refuse like any other capacity shortage: the budget state is private."""
+    return _error("capacity_unavailable", "firm quotes temporarily unavailable")
 
 
 def _fee_extensions(terms: QuoteTerms) -> dict[str, Any]:
@@ -340,6 +386,9 @@ def _firm(  # noqa: PLR0911 - one closed answer per rule
     if problem is not None:
         return _error("invoice_unacceptable", problem)
     fee = success_fee(terms, principal)
+    rebate = granted_rebate(terms, context, service_fee(terms, principal))
+    if rebate is None:
+        return rebate_exhausted()
     limits = request.limits
     lock = min(tip + schedule.max_refund_delay_blocks - 1, limits.max_refund_lock_height)
     htlc_expiry = tip + schedule.outgoing_cltv_budget_blocks
@@ -410,7 +459,11 @@ def _firm(  # noqa: PLR0911 - one closed answer per rule
         "provider_terms_signature": firm.sign(offer),
     }
     return Answer(
-        "terms_offer", payload, payment_hash=binding.payment_hash, contract_hash=offer.contract_hash
+        "terms_offer",
+        payload,
+        payment_hash=binding.payment_hash,
+        contract_hash=offer.contract_hash,
+        rebate_sat=rebate,
     )
 
 
@@ -534,6 +587,9 @@ def _reverse_firm(  # noqa: PLR0911 - one closed answer per rule
         return _error("capacity_unavailable", "firm quotes temporarily unavailable")
     bolt11, binding = hold
     economics = reverse_economics(terms, payout, reserve)
+    rebate = granted_rebate(terms, context, service_fee(terms, payout))
+    if rebate is None:
+        return rebate_exhausted()
     if (
         binding.payment_hash != request.payment_hash
         or binding.amount_msat != str(int(economics["hold_invoice_sat"]) * 1000)
@@ -605,5 +661,9 @@ def _reverse_firm(  # noqa: PLR0911 - one closed answer per rule
         "hold_invoice": bolt11,
     }
     return Answer(
-        "terms_offer", payload, payment_hash=binding.payment_hash, contract_hash=offer.contract_hash
+        "terms_offer",
+        payload,
+        payment_hash=binding.payment_hash,
+        contract_hash=offer.contract_hash,
+        rebate_sat=rebate,
     )

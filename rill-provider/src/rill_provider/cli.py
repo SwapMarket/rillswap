@@ -23,6 +23,7 @@ from rill_core.errors import ValidationError
 from rill_core.networks import require_supported_network
 
 from rill_provider.core_tx_bytes import CoreTransactionReader
+from rill_provider.dynamic_pricing import BTC_RESERVE, LiquiditySample, LiquiditySampler
 from rill_provider.evm_htlc import EvmBackendError, EvmHtlcClient
 from rill_provider.evm_quote_policy import EVM_PROFILES
 from rill_provider.evm_settlement import EvmSettlementEngine
@@ -32,7 +33,12 @@ from rill_provider.lnd_hold_invoice import LndHoldInvoices
 from rill_provider.lnd_invoice_decode import LndInvoiceDecoder
 from rill_provider.lnd_payment_observation import LndObservationError
 from rill_provider.lnd_payment_send import LndPaymentSender
-from rill_provider.notification_balances import balance_readers
+from rill_provider.notification_balances import (
+    balance_readers,
+    channel_amount_msat,
+    evm_token_balances,
+    lnd_channel_balance,
+)
 from rill_provider.notifications import Notifier, notification_sender
 from rill_provider.operator_config import (
     OperatorConfig,
@@ -223,22 +229,75 @@ def _liquidity(config: OperatorConfig) -> Callable[[], int] | None:
     (even with ``follow_liquidity`` off). LN to ERC20 has no token balance
     source yet, so its configured bands stay as they are.
     """
-    profile, core = config.handshake.profile, config.bitcoin_core
+    profile = config.handshake.profile
     if profile in ("btc-to-ln/v1", "erc20-to-ln/v1"):
         sender = _payment_sender(config)
         return None if sender is None else sender.largest_channel_send_sat
-    if profile == "ln-to-btc/v1" and core is not None:
-        try:
-            wallet = CoreTransactionReader(
-                port=core.port,
-                cookie_path=core.cookie_file,
-                network=config.network,
-                wallet=core.wallet,
+    wallet = _core_wallet(config) if profile == "ln-to-btc/v1" else None
+    return None if wallet is None else wallet.trusted_balance_sat
+
+
+def _core_wallet(config: OperatorConfig) -> CoreTransactionReader | None:
+    core = config.bitcoin_core
+    if core is None:
+        return None
+    try:
+        return CoreTransactionReader(
+            port=core.port, cookie_path=core.cookie_file, network=config.network, wallet=core.wallet
+        )
+    except ValueError:
+        raise OperatorConfigError("bitcoin_core requires a supported network") from None
+
+
+def _liquidity_sample(config: OperatorConfig) -> LiquiditySampler | None:
+    """Return the cached balance read that prices ``dynamic_fees`` discounts.
+
+    The LND channel position is an interval: in-flight HTLCs count as gone at
+    its low end and as returned at its high end. The reserve is the Core
+    wallet (trusted to trusted plus pending) or the EVM signer's token
+    balances. Config validation guarantees every backend named here.
+    """
+    lnd, evm = config.lnd, config.evm
+    if config.dynamic_fees is None or lnd is None:
+        return None
+    if config.handshake.profile in EVM_PROFILES:
+        if evm is None:
+            return None
+        settings = evm
+
+        def reserves() -> dict[str, tuple[int, int]]:
+            return {token: (base, base) for token, base in evm_token_balances(settings).items()}
+
+    else:
+        wallet = _core_wallet(config)
+        if wallet is None:
+            return None
+        core = wallet
+
+        def reserves() -> dict[str, tuple[int, int]]:
+            return {BTC_RESERVE: core.balance_interval_sat()}
+
+    channels = lnd
+
+    def read() -> LiquiditySample:
+        response = lnd_channel_balance(channels)
+        local, remote, outgoing, incoming = (
+            channel_amount_msat(response, field) // 1000
+            for field in (
+                "local_balance",
+                "remote_balance",
+                "unsettled_local_balance",
+                "unsettled_remote_balance",
             )
-        except ValueError:
-            raise OperatorConfigError("bitcoin_core requires a supported network") from None
-        return wallet.trusted_balance_sat
-    return None
+        )
+        return LiquiditySample(
+            outbound_low_sat=local,
+            outbound_high_sat=local + outgoing + incoming,
+            capacity_sat=local + remote + outgoing + incoming,
+            reserves=reserves(),
+        )
+
+    return LiquiditySampler(read)
 
 
 def _evm_settlement(
@@ -446,6 +505,7 @@ async def _serve(config: OperatorConfig, crypto: Context, custody: str) -> None:
                 evm_settlement=_evm_settlement(config, store, crypto),
                 liquidity=_liquidity(config),
                 claim_fee=_claim_fee(config),
+                liquidity_sample=_liquidity_sample(config),
             )
             if notifications is None or sender is None:
                 await service.run(stop)

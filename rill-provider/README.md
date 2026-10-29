@@ -192,6 +192,7 @@ The configuration is strict JSON; unknown fields are refused.
 | `authority` | Store volume label and deployment attestations |
 | `relay_urls`, `relay_proxy` | Relay WebSocket URLs and loopback Tor HTTP tunnel |
 | `evm` | ERC20 chain, verified HTLC deployment, signer, tokens and timing settings |
+| `dynamic_fees` | Optional private balance-aware discounts ([details](#balance-aware-discounts)) |
 
 `terms.amount_bands` are in satoshis. Fees use `base_fee_sat` and
 `proportional_millionths`. Review the `quote` settings against your network
@@ -321,6 +322,73 @@ For a fresh disposable dev stack, `RILL_DEV_NETWORK_FEES=1` opts only the two
 Bitcoin configs into this pricing model during bootstrap. It never edits an
 existing config or store. Compose CI runs separate legacy and fee-enabled
 variants, including real CLI/browser swaps in both Bitcoin directions.
+
+### Balance-aware discounts
+
+A provider that keeps liquidity on both sides can discount the swaps that
+rebalance it, even below zero, so that arbitrageurs do the rebalancing. Opt in
+with a top-level `dynamic_fees` object (never announced):
+
+```json
+"dynamic_fees": {
+  "btc_reserve_target_sat": 5000000,
+  "min_service_fee_ppm": -1000,
+  "rebate_budget_sat_24h": 100000
+}
+```
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `btc_reserve_target_sat` | required on Bitcoin profiles | soft minimum of the `bitcoin_core` wallet |
+| `stable_reserve_target_usd` | required on EVM profiles | soft minimum of each token pool, at 1 USD per token |
+| `min_service_fee_ppm` | `-1000` (-0.1 %) | lowest service fee, in millionths of the principal (-10000 to 0) |
+| `rebate_budget_sat_24h` | `100000` | rebates this process may grant per 24 hours |
+
+The curve keeps Lightning outbound liquidity inside 45 to 55 % of channel
+capacity (inbound is the rest) and each reserve above its target. A swap that
+repairs a shortage is discounted by how much it repairs; every other swap pays
+the advertised fee, never more. The discount applies to the service fee only:
+the network fee is charged on top and never discounted. A rebate shows as
+negative revenue in the swap ledger and notification summaries. For LN to BTC
+the rebate lowers the hold invoice, so the provider funds more on-chain than it
+receives over Lightning.
+
+Safeguards:
+
+- **Round trips:** the floor may not be deeper than this process's
+  `proportional_millionths`. If several processes share one LND node, keep
+  every floor no deeper than the smallest proportional fee among them, so a
+  round trip through two of them always pays a margin.
+- **Budget:** rebates of open firm offers and of swaps completed in the last 24
+  hours count against `rebate_budget_sat_24h`, checked inside each quote's own
+  store transaction. Each process has its own budget. When it is spent,
+  discounts stop at a zero service fee.
+- **Unknown state:** balances are read as intervals (in-flight HTLCs, unconfirmed
+  wallet coins and this process's open offers) and the end worse for the trader
+  is priced. Any failed or incomplete read prices the normal fee.
+- **Privacy:** discounts move in steps of 0.025 % of the principal, so a quote
+  reveals only a coarse position, never a balance. Balance reads are cached for
+  15 seconds, and a refused rebate looks like any other capacity refusal.
+- **Griefing:** an open offer holds its rebate until it expires, so a client
+  that never funds its offers can exhaust the budget only for the offer
+  lifetime and within `max_active_reservations`. Normal fees are never raised.
+
+Requirements: a positive `base_fee_sat` and `lnd` (for channel balances).
+Bitcoin profiles also need `terms.network_fees`, whose signed breakdown lets
+clients check that the discounted service fee stays below the advertised one.
+The BTC reserve is the `bitcoin_core` wallet: point a BTC to LN provider's
+`provider_destination_script` at an address of the wallet the LN to BTC
+provider funds from, and both share one reserve. EVM profiles must serve only
+USD stablecoins; their reserve is the process's own signer token balance,
+converted at the configured `rate_token_base_per_btc`. Two EVM processes share
+Lightning but not tokens: move tokens between their signers yourself. Reading the
+BTC reserve uses Core's `getbalances`, as LN to BTC funding does; while a
+backend read fails, the provider logs `liquidity sample unavailable` and
+prices the normal fee.
+
+**Upgrade:** absent `dynamic_fees` keeps existing behavior. Enabling or
+disabling it changes neither the handshake policy nor the store. An older
+release refuses a config that contains it.
 
 ### BTC to LN claim fee
 

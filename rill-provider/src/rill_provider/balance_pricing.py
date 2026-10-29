@@ -52,6 +52,9 @@ LN_SPAN = LN_TARGET - LN_HALF_BAND  # band edge to an empty side
 # Operators may not configure a floor below -1 % (an error, not a policy).
 MIN_SERVICE_FEE_PPM_LIMIT = -10_000
 DEFAULT_MIN_SERVICE_FEE_PPM = -1_000
+# Discounts move in steps of this share of the principal, so a quote reveals
+# only a coarse position on the curve, never an exact balance.
+DISCOUNT_STEP_PPM = 250
 
 
 class BalancePricingError(ValueError):
@@ -173,6 +176,19 @@ def balance_adjustment_sat(view: BalanceView, trade: Trade) -> int:
         lambda balance: reserve_potential(balance, reserve.target_sat),
     )
     return _ceil(change)
+
+
+def quantized_adjustment_sat(adjustment_sat: int, principal_sat: int) -> int:
+    """Round a discount toward zero to whole ``DISCOUNT_STEP_PPM`` steps of the principal.
+
+    Positive adjustments are never charged, so they pass unchanged.
+    """
+    if not (_is_int(adjustment_sat, principal_sat) and principal_sat > 0):
+        raise BalancePricingError("adjustment inputs unsupported")
+    if adjustment_sat >= 0:
+        return adjustment_sat
+    step = max(1, principal_sat * DISCOUNT_STEP_PPM // MILLIONTHS)
+    return -((-adjustment_sat) // step * step)
 
 
 def service_fee_floor_sat(principal_sat: int, min_service_fee_ppm: int) -> int:

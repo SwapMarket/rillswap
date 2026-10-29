@@ -31,6 +31,7 @@ from rill_core.wire.quotes import QuoteError, parse_quote_request
 from rill_core.wire.reverse_quotes import ReverseFirmQuoteRequest
 
 from rill_provider import _transport_pow as transport_pow
+from rill_provider.dynamic_pricing import DynamicPricing, FeeLimits, LiquiditySample
 from rill_provider.evm_quote_policy import EVM_PROFILES, ln_to_erc20_hold_msat
 from rill_provider.liquidity_cap import LiquidityCap
 from rill_provider.live_session_store import (
@@ -56,6 +57,7 @@ from rill_provider.quote_policy import (
     QuoteSchedule,
     QuoteTerms,
     hold_invoice_msat,
+    normal_success_fee,
     success_fee,
 )
 from rill_provider.relay_client import RelayConnection, RelayError
@@ -91,6 +93,7 @@ MAX_DEFERRED_EVENTS = 64
 TIP_LOOKUP_WAIT_SECONDS = 2.0  # waiting bound, not cancellation of Core's worker thread
 CLAIM_FEE_WAIT_SECONDS = 2.0  # likewise for the per-tick claim fee sample
 LIQUIDITY_WAIT_SECONDS = 30.0  # once per announcement; the RPCs carry their own timeouts
+PRICING_SAMPLE_WAIT_SECONDS = 2.0  # per quote (cached); a slow sample prices normally
 FUNDING_BALANCE_WAIT_SECONDS = 5.0  # per LN to BTC firm quote: refuse fast, never hang
 _RELAY_CONNECTED = b""  # in-band wake: tick now and re-announce
 # Relay dispositions that recur without telling an operator anything: history
@@ -147,6 +150,8 @@ class ServicePolicy:
     follow_liquidity: bool = True
     liquidity_margin_percent: tuple[int, int] = (10, 20)
     fee_policy: BtcFeePolicy | None = None
+    # Private balance-aware discounts (never announced); needs a liquidity sample.
+    dynamic_fees: FeeLimits | None = None
 
     def __post_init__(self) -> None:
         """Refuse schedules that would leave advertised epochs undecodable."""
@@ -224,6 +229,7 @@ class HandshakeService:
         evm_settlement: EvmSettlementEngine | None = None,
         liquidity: Callable[[], int] | None = None,
         claim_fee: Callable[[], ClaimFeeRate] | None = None,
+        liquidity_sample: Callable[[], LiquiditySample | None] | None = None,
     ) -> None:
         """Bind already-acquired, already-verified resources.
 
@@ -240,6 +246,9 @@ class HandshakeService:
         sample, quotes with an automatic reserve answer ``capacity_unavailable``.
         With network pricing enabled it is additionally sampled per request,
         outside store transactions, to freeze the provider's mining charge.
+        ``liquidity_sample`` (blocking, cached by the caller) prices
+        ``policy.dynamic_fees`` discounts per request; without a sample,
+        quotes pay the normal fee.
         """
         self._store = store
         self._identity = identity
@@ -266,6 +275,7 @@ class HandshakeService:
         self._tip_lookup: asyncio.Task[int] | None = None
         self._claim_fee = claim_fee
         self._claim_fee_lookup: asyncio.Task[ClaimFeeRate] | None = None
+        self._liquidity_sample = liquidity_sample
         self._tip_lookup_started: float | None = None
         # These maps are never reconstructed from signed outbox or inbox rows.
         self._readiness_probes: dict[str, ReadinessChallenge] = {}
@@ -1323,7 +1333,8 @@ class HandshakeService:
                 lambda: settlement.route_ready(
                     json.loads(document)["payload"]["invoice"],
                     invoice_binding=binding,
-                    success_fee_sat=success_fee(terms, principal),
+                    # Undiscounted: a rebate never shrinks what routing may cost.
+                    success_fee_sat=normal_success_fee(terms, principal),
                     max_expiry_height=tip + terms.schedule.outgoing_cltv_budget_blocks,
                     **routing_limits,
                 )
@@ -1342,6 +1353,25 @@ class HandshakeService:
             )
             return replace(terms, invoice="unavailable")
         return terms
+
+    async def _dynamic_pricing(self, now: int) -> DynamicPricing | None:
+        """Return this request's balance evidence, or None to price the normal fee."""
+        limits, sample = self._policy.dynamic_fees, self._liquidity_sample
+        if limits is None or sample is None:
+            return None
+        try:
+            liquidity = await asyncio.wait_for(
+                asyncio.to_thread(sample), timeout=PRICING_SAMPLE_WAIT_SECONDS
+            )
+            commitments = self._store.pricing_commitments(now)
+        except Exception as error:  # noqa: BLE001 - unknown balances grant no discount
+            LOG.warning("balance pricing unavailable (%s)", type(error).__name__)
+            return None
+        if liquidity is None or commitments.open_volume_sat is None:
+            return None
+        return DynamicPricing(
+            limits, liquidity, commitments.open_volume_sat, commitments.rebates_committed_sat
+        )
 
     async def _network_pricing(self, document: bytes, terms: QuoteTerms) -> QuoteTerms:
         """Freeze one independently bounded fee sample before any hold is opened."""
@@ -1370,13 +1400,18 @@ class HandshakeService:
             ):
                 return terms
             issued_at = max(sampled_at, self._deadline_now())
+            service = policy.service_fee(principal)
+            if terms.dynamic is not None:  # a discount, never above the committed policy
+                service = terms.dynamic.service_fee(
+                    profile=terms.profile, normal_fee_sat=service, principal_sat=principal
+                )
             breakdown = FeeBreakdown(
                 offer_event_id=binding.offer_event_id,
                 policy=policy,
                 feerate_sat_kvb=str(rate),
                 estimated_at=sampled_at,
                 issued_at=issued_at,
-                service_fee_sat=str(policy.service_fee(principal)),
+                service_fee_sat=str(service),
                 network_fee_sat=str(-(-NETWORK_FEE_VBYTES * rate // 1000)),
             )
             spend_cap = (
@@ -1426,6 +1461,7 @@ class HandshakeService:
             terms = replace(
                 terms, evm=await asyncio.to_thread(evm.quote_context) if evm is not None else None
             )
+        terms = replace(terms, dynamic=await self._dynamic_pricing(now))
         terms = await self._network_pricing(document, terms)
         pricing_ready = policy.fee_policy is None or terms.fee_breakdown is not None
         if pricing_ready:

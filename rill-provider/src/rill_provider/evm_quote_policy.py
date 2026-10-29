@@ -27,8 +27,17 @@ from rill_core.wire.hashes import contract_hash
 from rill_core.wire.messages import EvmContractTerms, ProviderTerms, ceil_div
 from rill_core.wire.quotes import MAX_INDICATIVE_REQUESTS_PER_SESSION, parse_quote_request
 
+from rill_provider.dynamic_pricing import TokenPricing
 from rill_provider.live_session_store import Answer
-from rill_provider.quote_policy import QuoteTerms, _error, _invoice_problem, success_fee
+from rill_provider.quote_policy import (
+    QuoteTerms,
+    _error,
+    _invoice_problem,
+    granted_rebate,
+    rebate_exhausted,
+    service_fee,
+    success_fee,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -111,9 +120,18 @@ def token_base_to_sats(token_base: int, rate: int) -> int:
     return ceil_div(token_base * SATS_PER_BTC, rate)
 
 
-def erc20_to_ln_economics(terms: QuoteTerms, principal: int, rate: int) -> dict[str, str]:
-    """RS-010 forward economics: ``lock = ceil(L * rate / 1e8) + S_token``."""
-    fee_token = sats_to_token_base(success_fee(terms, principal), rate)
+def _token(asset: EvmAssetIdentity, rate: int) -> TokenPricing:
+    return TokenPricing(asset.token_contract, asset.token_decimals, rate)
+
+
+def erc20_to_ln_economics(
+    terms: QuoteTerms, principal: int, rate: int, asset: EvmAssetIdentity
+) -> dict[str, str]:
+    """RS-010 forward economics: ``lock = ceil(L * rate / 1e8) + S_token``.
+
+    A rebate (negative fee) rounds toward the provider like any other fee.
+    """
+    fee_token = sats_to_token_base(success_fee(terms, principal, _token(asset, rate)), rate)
     return {
         "kind": "erc20-to-ln",
         "lightning_principal_sat": str(principal),
@@ -123,10 +141,12 @@ def erc20_to_ln_economics(terms: QuoteTerms, principal: int, rate: int) -> dict[
     }
 
 
-def ln_to_erc20_economics(terms: QuoteTerms, payout_token: int, rate: int) -> dict[str, str]:
+def ln_to_erc20_economics(
+    terms: QuoteTerms, payout_token: int, rate: int, asset: EvmAssetIdentity
+) -> dict[str, str]:
     """RS-010 reverse economics: ``E = ceil(D * 1e8 / rate)``, ``H = E + S_sat``."""
     equivalent = token_base_to_sats(payout_token, rate)
-    fee = success_fee(terms, equivalent)
+    fee = success_fee(terms, equivalent, _token(asset, rate))
     return {
         "kind": "ln-to-erc20",
         "payout_token_base": str(payout_token),
@@ -144,9 +164,9 @@ def ln_to_erc20_hold_msat(terms: QuoteTerms, request: LnToErc20FirmQuoteRequest)
         return None
     asset = evm.asset(request.evm_asset)
     rate = evm.rate(asset) if asset is not None else None
-    if rate is None:
+    if asset is None or rate is None:
         return None
-    economics = ln_to_erc20_economics(terms, int(request.payout_token_base), rate)
+    economics = ln_to_erc20_economics(terms, int(request.payout_token_base), rate, asset)
     equivalent = int(economics["payout_sat_equivalent"])
     if not any(low <= equivalent <= high for low, high in terms.amount_bands):
         return None
@@ -205,7 +225,7 @@ def _erc20_indicative(
     offer: dict[str, Any] = {
         "kind": "erc20-to-ln",
         "indicative": True,
-        "economics": erc20_to_ln_economics(terms, principal, rate),
+        "economics": erc20_to_ln_economics(terms, principal, rate, asset),
         "evm_asset": asset.model_dump(mode="json"),
         "funding_confirmations": evm.schedule.funding_confirmations,
         "settlement_confirmations": evm.schedule.settlement_confirmations,
@@ -229,7 +249,7 @@ def _ln_to_erc20_indicative(
     if isinstance(priced, Answer):
         return priced
     asset, rate = priced
-    economics = ln_to_erc20_economics(terms, int(request.payout_token_base), rate)
+    economics = ln_to_erc20_economics(terms, int(request.payout_token_base), rate, asset)
     equivalent = int(economics["payout_sat_equivalent"])
     if not any(low <= equivalent <= high for low, high in terms.amount_bands):
         return _error("amount_out_of_range", "amount outside announced bands")
@@ -285,7 +305,10 @@ def _erc20_firm(  # noqa: PLR0911 - one closed answer per rule
     evm_tip = int(evm.tip or 0)
     if request.client_evm_address == evm.provider_evm_address:
         return _error("request_unacceptable", "client address collides with the provider's")
-    economics = erc20_to_ln_economics(terms, principal, rate)
+    economics = erc20_to_ln_economics(terms, principal, rate, asset)
+    rebate = granted_rebate(terms, context, service_fee(terms, principal, _token(asset, rate)))
+    if rebate is None:
+        return rebate_exhausted()
     limits = request.limits
     htlc_expiry = tip + schedule.outgoing_cltv_budget_blocks
     timelock = min(
@@ -329,7 +352,9 @@ def _erc20_firm(  # noqa: PLR0911 - one closed answer per rule
         "required_features": [],
         "extensions": {},
     }
-    return _signed_offer(contract, context, firm.sign, payment_hash=binding.payment_hash)
+    return _signed_offer(
+        contract, context, firm.sign, payment_hash=binding.payment_hash, rebate_sat=rebate
+    )
 
 
 def _ln_to_erc20_firm(  # noqa: PLR0911 - one closed answer per rule
@@ -346,10 +371,13 @@ def _ln_to_erc20_firm(  # noqa: PLR0911 - one closed answer per rule
         return priced
     asset, rate = priced
     evm_tip = int(evm.tip or 0)
-    economics = ln_to_erc20_economics(terms, int(request.payout_token_base), rate)
+    economics = ln_to_erc20_economics(terms, int(request.payout_token_base), rate, asset)
     equivalent = int(economics["payout_sat_equivalent"])
     if not any(low <= equivalent <= high for low, high in terms.amount_bands):
         return _error("amount_out_of_range", "amount outside announced bands")
+    rebate = granted_rebate(terms, context, service_fee(terms, equivalent, _token(asset, rate)))
+    if rebate is None:
+        return rebate_exhausted()
     if context.is_payment_hash_reserved(request.payment_hash):  # no ownership oracle
         return _error("request_unacceptable", "request cannot be offered")
     hold = terms.hold
@@ -411,17 +439,23 @@ def _ln_to_erc20_firm(  # noqa: PLR0911 - one closed answer per rule
         "extensions": {},
     }
     return _signed_offer(
-        contract, context, firm.sign, payment_hash=binding.payment_hash, hold_invoice=bolt11
+        contract,
+        context,
+        firm.sign,
+        payment_hash=binding.payment_hash,
+        hold_invoice=bolt11,
+        rebate_sat=rebate,
     )
 
 
-def _signed_offer(
+def _signed_offer(  # noqa: PLR0913 - one offer's explicit parts
     contract: dict[str, Any],
     context: RequestContext,
     sign: Callable[[ProviderTerms], str],
     *,
     payment_hash: str,
     hold_invoice: str | None = None,
+    rebate_sat: int = 0,
 ) -> Answer:
     try:
         contract_terms = parse_model_json(EvmContractTerms, canonicalize(contract))
@@ -439,5 +473,9 @@ def _signed_offer(
     if hold_invoice is not None:
         payload["hold_invoice"] = hold_invoice
     return Answer(
-        "terms_offer", payload, payment_hash=payment_hash, contract_hash=offer.contract_hash
+        "terms_offer",
+        payload,
+        payment_hash=payment_hash,
+        contract_hash=offer.contract_hash,
+        rebate_sat=rebate_sat,
     )
