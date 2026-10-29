@@ -20,6 +20,7 @@ PYTHON_IMAGE = "python@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae
 ROOT = Path(__file__).parents[1]
 CORE = ROOT.parent / "rill-core"
 CRYPTO = ROOT.parent / "rill-crypto"
+PROVIDER = ROOT.parent / "rill-provider"
 DOCKER = shutil.which("docker")
 
 
@@ -65,10 +66,12 @@ def _python_check(container: str, work: Path, script: str, *environment: str) ->
         "--mount",
         f"type=bind,src={CRYPTO},dst=/work/crypto,readonly",
         "--mount",
+        f"type=bind,src={PROVIDER / 'src'},dst=/work/provider/src,readonly",
+        "--mount",
         f"type=bind,src={work},dst=/work/cookie",
         "--env",
         "PYTHONPATH=/work/cli/.venv/lib/python3.14/site-packages:/work/cli/src:"
-        "/work/core/packages/core/src:/work/crypto/python/src",
+        "/work/core/packages/core/src:/work/crypto/python/src:/work/provider/src",
         "--env",
         "RILL_CRYPTO_LIBRARY=/work/crypto/tmp/build/librill_crypto.so",
         *environment,
