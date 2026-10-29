@@ -225,6 +225,13 @@ class EvmHtlcClient:
         """Return the account's native gas balance in wei."""
         return int(self._web3.eth.get_balance(Web3.to_checksum_address(owner)))
 
+    def gas_price_wei(self) -> int:
+        """Return the node's current gas price in wei for quote-time cost budgeting."""
+        price = self._web3.eth.gas_price
+        if type(price) is not int or price <= 0:
+            raise EvmBackendError("EVM gas price invalid")
+        return price
+
     def token_balance(self, token: str, owner: str) -> int:
         """Return ``balanceOf(owner)`` of an ERC20 token."""
         contract = self._web3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)

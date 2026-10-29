@@ -46,6 +46,7 @@ from rill_provider.live_session_store import (
     DEFAULT_NEW_SESSIONS_PER_MINUTE,
     AuthorityDeclaration,
 )
+from rill_provider.price_feeds import check_mempool_url
 from rill_provider.quote_policy import MAX_WIRE_INTEGER, QuoteSchedule
 from rill_provider.relay_client import reachable_relays
 
@@ -137,8 +138,23 @@ class EvmToken(_Strict):
     token_contract: str = Field(pattern=r"^0x[0-9a-f]{40}$")
     token_symbol: str = Field(min_length=1, max_length=16)
     token_decimals: int = Field(ge=0, le=36)
-    # Fixed operator price until a rate source exists: token base units per BTC.
-    rate_token_base_per_btc: int = Field(ge=1)
+    # Legacy fixed price; omit when evm.pricing enables live USD stablecoin prices.
+    rate_token_base_per_btc: int | None = Field(default=None, ge=1)
+
+
+class EvmPricing(_Strict):
+    """Opt in to guarded USD stablecoin pricing and a non-discountable gas budget."""
+
+    mempool_url: str
+    # Cost budget denominated in gas units, chosen for this profile and chain.
+    gas_units: int = Field(gt=0, le=100_000_000)
+    # Quote-time refusal threshold only, never a cap that could strand a claim.
+    max_gas_price_wei: int = Field(default=200_000_000_000, gt=0, le=10**18)
+
+    @field_validator("mempool_url")
+    @classmethod
+    def _mempool_url(cls, value: str) -> str:
+        return check_mempool_url(value)
 
 
 class EvmSettings(_Strict):
@@ -154,6 +170,7 @@ class EvmSettings(_Strict):
     # Forward token recipient, typically the reverse maker's funding address.
     # The transaction signer remains independent and pays only gas.
     claim_address: EvmAddress | None = None
+    pricing: EvmPricing | None = None
     tokens: tuple[EvmToken, ...] = Field(min_length=1, max_length=16)
     funding_confirmations: int = Field(default=1, ge=1)
     settlement_confirmations: int = Field(default=1, ge=1)
@@ -168,6 +185,15 @@ class EvmSettings(_Strict):
         if value == "0x" + "0" * 40:
             raise ValueError("evm.claim_address must not be the zero address")
         return value
+
+    @model_validator(mode="after")
+    def _price_mode(self) -> EvmSettings:
+        fixed = [token.rate_token_base_per_btc is not None for token in self.tokens]
+        if self.pricing is None and not all(fixed):
+            raise ValueError("evm requires evm.pricing or a fixed rate for every token")
+        if self.pricing is not None and any(fixed):
+            raise ValueError("evm.pricing cannot be combined with fixed token rates")
+        return self
 
     def assets(self) -> tuple[EvmAssetIdentity, ...]:
         """Return the served asset identities exactly as terms will carry them."""
@@ -189,7 +215,11 @@ class EvmSettings(_Strict):
 
     def rates(self) -> dict[str, int]:
         """Return the fixed rate per token contract."""
-        return {token.token_contract: token.rate_token_base_per_btc for token in self.tokens}
+        return {
+            token.token_contract: token.rate_token_base_per_btc
+            for token in self.tokens
+            if token.rate_token_base_per_btc is not None
+        }
 
     def schedule(self) -> EvmSchedule:
         """Return the EVM-side quote schedule."""

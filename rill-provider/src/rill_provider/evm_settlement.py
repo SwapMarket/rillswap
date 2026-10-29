@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from rill_core.wire.messages import Erc20ToLnTiming, LnToErc20Timing
 
 from rill_provider.evm_htlc import EvmBackendError, LockParams
-from rill_provider.evm_quote_policy import BTC_BLOCK_SECONDS, EvmQuoteContext
+from rill_provider.evm_quote_policy import BTC_BLOCK_SECONDS, EvmQuoteContext, EvmQuotePrices
 from rill_provider.live_session_store import StaleOwnerError, StaleSwapError
 from rill_provider.lnd_invoice_decode import InvoiceRejectedError
 from rill_provider.lnd_payment_observation import LndNotSyncedError, LndUnavailableError
@@ -122,6 +122,7 @@ class EvmSettlementEngine:
         max_routing_fee_sat: int = 1_000,
         normal_fee_sat: Callable[[int], int] | None = None,
         claim_address: str | None = None,
+        quote_pricing: Callable[[], EvmQuotePrices] | None = None,
     ) -> None:
         """``lightning`` serves erc20-to-ln; ``hold_invoices`` serves ln-to-erc20.
 
@@ -144,6 +145,7 @@ class EvmSettlementEngine:
         self._max_routing_fee_sat = max_routing_fee_sat
         self._normal_fee_sat = normal_fee_sat
         self._claim_address = claim_address
+        self._quote_pricing = quote_pricing
         # Nonce gate: a tick signs nothing new once any recorded transaction was
         # refused by the node, so a fresh "pending" nonce never reuses its slot.
         self._may_sign = True
@@ -158,18 +160,28 @@ class EvmSettlementEngine:
     # -- quoting support -------------------------------------------------
 
     def quote_context(self) -> EvmQuoteContext:
-        """Fix the EVM facts one answer depends on (blocking: one RPC for the tip)."""
+        """Fix EVM facts, rates and any live gas charge before a hold is opened."""
         try:
             tip: int | None = self._htlc.block_number()
         except Exception:  # noqa: BLE001 - an unavailable node only defers firm offers
             LOG.warning("EVM tip unavailable; quotes answered capacity_unavailable")
             tip = None
+        try:
+            if self._quote_pricing is None:
+                rates, gas = self._rates(), None
+            else:
+                prices = self._quote_pricing()
+                rates, gas = prices.rates, prices.network_fees_token_base
+        except Exception as error:  # noqa: BLE001 - never fall back to a stale or zero price
+            LOG.warning("EVM prices unavailable (%s)", type(error).__name__)
+            rates, gas = {}, {}
         return EvmQuoteContext(
             assets=self._assets,
-            rates=self._rates(),
+            rates=rates,
             provider_evm_address=self._claim_address or self._htlc.signer_address,
             schedule=self._schedule,
             tip=tip,
+            network_fees_token_base=gas,
         )
 
     def route_ready(

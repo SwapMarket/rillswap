@@ -363,20 +363,29 @@ Safeguards:
 - **Round trips:** the floor may not be deeper than this process's
   `proportional_millionths`. If several processes share one LND node, keep
   every floor no deeper than the smallest proportional fee among them, so a
-  round trip through two of them always pays a margin.
+  rebate cannot exceed the opposite direction's normal proportional fee.
+  Align reserve targets across paired processes too. Stale observations or
+  inconsistent targets can still subsidize a round trip; the rebate budget
+  caps negative service fees, not a guarantee of zero arbitrage profit.
 - **Budget:** rebates of open firm offers and of swaps completed in the last 24
   hours count against `rebate_budget_sat_24h`, checked inside each quote's own
   store transaction. Each process has its own budget. When it is spent,
-  discounts stop at a zero service fee.
+  discounts stop at a zero service fee. This is not a total-loss limit:
+  Lightning routing still uses the normal service-fee budget and may cost
+  more than the discounted service charge; gas execution costs can drift too.
 - **Unknown state:** balances are read as intervals (in-flight HTLCs, unconfirmed
   wallet coins and this process's open offers) and the end worse for the trader
   is priced. Any failed or incomplete read prices the normal fee.
-- **Privacy:** discounts move in steps of 0.025 % of the principal, so a quote
-  reveals only a coarse position, never a balance. Balance reads are cached for
+- **Privacy:** discounts move in coarse steps (0.025 % of the principal,
+  rounded down to whole sats, at least 1 sat). Balance reads are cached for
   15 seconds, and a refused rebate looks like any other capacity refusal.
-- **Griefing:** an open offer holds its rebate until it expires, so a client
-  that never funds its offers can exhaust the budget only for the offer
-  lifetime and within `max_active_reservations`. Normal fees are never raised.
+  Prices necessarily reveal rebalancing incentives; adaptive quote probing
+  can infer more. This reduces leakage but does not guarantee balance secrecy.
+- **Griefing:** an open offer holds its rebate until its reservation is
+  released (an unfunded offer's idle session is retired after
+  `handshake_timeout`). A client that never funds its offers can temporarily
+  exhaust the budget, bounded by `max_active_reservations` and session
+  admission limits. Normal fees are never raised.
 
 Requirements: a positive `base_fee_sat` and `lnd` (for channel balances).
 Bitcoin profiles also need `terms.network_fees`, whose signed breakdown lets
@@ -385,8 +394,9 @@ The BTC reserve is the `bitcoin_core` wallet: point a BTC to LN provider's
 `provider_destination_script` at an address of the wallet the LN to BTC
 provider funds from, and both share one reserve. EVM profiles must serve only
 USD stablecoins; their reserve is the token balance of the funding signer, or
-the forward maker's configured claim recipient, converted at the configured
-`rate_token_base_per_btc`.
+the forward maker's configured claim recipient. For live conversion and
+separately charged gas, use [live stablecoin pricing](#live-stablecoin-pricing).
+Legacy fixed rates also remain supported.
 
 To share a token pool without sharing keys, set `evm.claim_address` in the
 ERC20 to LN process to the LN to ERC20 maker's funding address. Forward claims
@@ -406,6 +416,9 @@ prices the normal fee.
 **Upgrade:** absent `dynamic_fees` keeps existing behavior. Enabling or
 disabling it changes neither the handshake policy nor the store. An older
 release refuses a config that contains it.
+
+See the [balance-aware fee policy](../rill-docs/specs/extensions/balance-aware-fees.md)
+for the curve, cost treatment and privacy limitations.
 
 ### BTC to LN claim fee
 
@@ -493,8 +506,8 @@ funds swaps. Keep the payment macaroon.
 
 For ERC20 profiles, configure `evm` with `rpc_url`, `chain_id`, `name`,
 `htlc_contract`, `block_seconds`, `signer_key_file` and `tokens`. Each token
-needs its contract, symbol, decimals and `rate_token_base_per_btc`. Rates are
-fixed operator inputs, not a live price feed. Also set
+needs its contract, symbol and decimals, plus either a fixed
+`rate_token_base_per_btc` or live pricing below. Also set
 `forward_timelock_delay_blocks`, `reverse_timelock_delay_blocks`,
 `learn_and_claim_seconds` and `refund_and_ln_resolution_seconds`. Startup
 verifies the Boltz ERC20Swap v6 deployment before serving.
@@ -502,6 +515,60 @@ verifies the Boltz ERC20Swap v6 deployment before serving.
 The EVM signer file holds one hex secp256k1 private key, must be owned by the
 service user, and must have owner-only permissions. Bitcoin profiles include
 `cooperative-claim/v1` automatically; ERC20 profiles do not use it.
+
+### Live stablecoin pricing
+
+For USD stablecoins on chains whose gas currency is ETH, add this object under
+`evm` and remove `rate_token_base_per_btc` from every token:
+
+```json
+"pricing": {
+  "mempool_url": "https://mempool.example",
+  "gas_units": 70000,
+  "max_gas_price_wei": 200000000000
+}
+```
+
+Replace the placeholder URL with your own HTTPS mempool instance.
+`gas_units` is a required operator-chosen cost budget denominated in gas units,
+not measured consumption or a transaction gas limit. The 70,000 example is
+illustrative, not a guarantee: budget the claim for ERC20 to LN, and approval
+plus lock for LN to ERC20. Choose it for your tokens and chain. On rollups,
+L1 data charges are not included in `eth_gasPrice`; allow for them in the
+budget. The provider absorbs execution-price changes and any extra recovery
+or refund costs. Non-USD tokens and non-ETH gas currencies must use legacy
+fixed pricing, with their costs covered by the configured success fee.
+
+The provider values each token at exactly 1 USD (including a depegged token:
+disable it yourself). BTC/USD comes from your mempool instance, checked
+against Kraken within 2 %. Mempool observations must be at most one hour old;
+Kraken BTC/USD and ETH/USD trades at most two minutes old. The BTC bound
+worse for the trader determines the rate. Observations and failures are
+cached for 30 seconds, never beyond source freshness. Requests use
+`relay_proxy` when configured, including all price-feed traffic.
+
+Each quote freezes its rate and gas charge before opening a reverse hold:
+
+- ERC20 to LN: `ceil(service_sat * rate / 1e8) + gas_token_base`.
+- LN to ERC20: `service_sat + ceil(gas_token_base * 1e8 / rate)`.
+
+The gas charge is `gas_units * observed_gas_price_wei`, converted through
+ETH/USD at 1 USD per token and rounded up. It is never discounted; a negative
+service fee still reserves its full rebate budget even if gas makes the total
+success fee positive. The signed success fee includes both charges, and the
+client's total fee cap applies to their sum. EVM fees do not yet have a
+client-verified service/network breakdown like Bitcoin fees do.
+
+`max_gas_price_wei` defaults to 200 gwei and only refuses new quotes; it does
+not cap execution, which could strand a funded claim. Missing, stale,
+disagreeing or excessive price evidence refuses indicative and firm quotes,
+never substitutes zero or falls back to a fixed rate. A cold price read may
+take several seconds. Already accepted swaps do not depend on the feeds.
+
+**Upgrade:** with `evm.pricing` absent, every token still needs its old fixed
+rate and behaves as before. Live pricing with any fixed rate, or missing both
+modes, is refused at startup. Enabling it changes no store or handshake
+format and never reprices retained swaps. Older releases refuse this config.
 
 ### Funding confirmations
 

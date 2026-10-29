@@ -88,6 +88,14 @@ class EvmSchedule:
 
 
 @dataclass(frozen=True, slots=True)
+class EvmQuotePrices:
+    """One live rate and gas-charge snapshot, both required for each quoted token."""
+
+    rates: Mapping[str, int]
+    network_fees_token_base: Mapping[str, int]
+
+
+@dataclass(frozen=True, slots=True)
 class EvmQuoteContext:
     """The served assets, their current prices, and the EVM tip, fixed per answer."""
 
@@ -96,6 +104,9 @@ class EvmQuoteContext:
     provider_evm_address: str
     schedule: EvmSchedule
     tip: int | None  # EVM block number observed now; None defers firm offers
+    # None is legacy pricing (gas absorbed in the fixed service fee). A live
+    # snapshot must measure both rate and gas for a token before quoting it.
+    network_fees_token_base: Mapping[str, int] | None = None
 
     def asset(self, ref: EvmAssetRef) -> EvmAssetIdentity | None:
         """Return the served asset a request names, if any."""
@@ -107,7 +118,19 @@ class EvmQuoteContext:
     def rate(self, asset: EvmAssetIdentity) -> int | None:
         """Return the current integer token-base-per-BTC rate for an asset."""
         rate = self.rates.get(asset.token_contract)
-        return rate if isinstance(rate, int) and rate > 0 else None
+        if self.network_fees_token_base is not None:
+            gas = self.network_fees_token_base.get(asset.token_contract)
+            if type(gas) is not int or gas < 0:
+                return None
+        return rate if type(rate) is int and rate > 0 else None
+
+    def network_fee(self, asset: EvmAssetIdentity) -> int:
+        """Return a quoted asset's frozen gas charge, or zero for legacy pricing."""
+        return (
+            0
+            if self.network_fees_token_base is None
+            else self.network_fees_token_base[asset.token_contract]
+        )
 
 
 def sats_to_token_base(sats: int, rate: int) -> int:
@@ -124,6 +147,10 @@ def _token(asset: EvmAssetIdentity, rate: int) -> TokenPricing:
     return TokenPricing(asset.token_contract, asset.token_decimals, rate)
 
 
+def _gas_token_base(terms: QuoteTerms, asset: EvmAssetIdentity) -> int:
+    return 0 if terms.evm is None else terms.evm.network_fee(asset)
+
+
 def erc20_to_ln_economics(
     terms: QuoteTerms, principal: int, rate: int, asset: EvmAssetIdentity
 ) -> dict[str, str]:
@@ -132,6 +159,7 @@ def erc20_to_ln_economics(
     A rebate (negative fee) rounds toward the provider like any other fee.
     """
     fee_token = sats_to_token_base(success_fee(terms, principal, _token(asset, rate)), rate)
+    fee_token += _gas_token_base(terms, asset)
     return {
         "kind": "erc20-to-ln",
         "lightning_principal_sat": str(principal),
@@ -147,6 +175,7 @@ def ln_to_erc20_economics(
     """RS-010 reverse economics: ``E = ceil(D * 1e8 / rate)``, ``H = E + S_sat``."""
     equivalent = token_base_to_sats(payout_token, rate)
     fee = success_fee(terms, equivalent, _token(asset, rate))
+    fee += token_base_to_sats(_gas_token_base(terms, asset), rate)
     return {
         "kind": "ln-to-erc20",
         "payout_token_base": str(payout_token),

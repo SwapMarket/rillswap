@@ -246,6 +246,7 @@ def test_anvil_claim_submitter_cannot_redirect_the_committed_recipient(
         for key in ANVIL_KEYS[1:3]
     )
     receiver = Account.from_key(ANVIL_KEYS[0]).address.lower()
+    assert gas_signer.gas_price_wei() > 0
     token = web3.eth.contract(
         address=Web3.to_checksum_address(anvil["token"]), abi=anvil["token_abi"]
     )

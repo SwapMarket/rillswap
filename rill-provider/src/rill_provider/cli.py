@@ -25,7 +25,7 @@ from rill_core.networks import require_supported_network
 from rill_provider.core_tx_bytes import CoreTransactionReader
 from rill_provider.dynamic_pricing import BTC_RESERVE, LiquiditySample, LiquiditySampler
 from rill_provider.evm_htlc import EvmBackendError, EvmHtlcClient
-from rill_provider.evm_quote_policy import EVM_PROFILES
+from rill_provider.evm_quote_policy import EVM_PROFILES, EvmQuotePrices
 from rill_provider.evm_settlement import EvmSettlementEngine
 from rill_provider.handshake_service import HandshakeService
 from rill_provider.live_session_store import LiveSessionStore, LiveSessionStoreError
@@ -48,6 +48,13 @@ from rill_provider.operator_config import (
     read_evm_signer_key,
 )
 from rill_provider.payment_reconciliation import reconcile_payment
+from rill_provider.price_feeds import (
+    PriceFeed,
+    PriceUnavailableError,
+    Side,
+    gas_wei_as_token_base,
+    rate_token_base_per_btc,
+)
 from rill_provider.provider_identity import ProviderIdentity, ProviderIdentityError
 from rill_provider.quote_policy import ClaimFeeRate, normal_service_fee
 from rill_provider.relay_client import (
@@ -334,7 +341,44 @@ def _evm_settlement(
             normal_service_fee, config.terms.base_fee_sat, config.terms.proportional_millionths
         ),
         claim_address=evm.claim_address,
+        quote_pricing=_evm_pricing(config, htlc),
     )
+
+
+def _evm_pricing(
+    config: OperatorConfig, htlc: EvmHtlcClient
+) -> Callable[[], EvmQuotePrices] | None:
+    """Build an opt-in live USD/gas snapshot; never contact a feed at startup."""
+    evm = config.evm
+    if evm is None or evm.pricing is None:
+        return None
+    pricing = evm.pricing
+    tokens = evm.tokens
+    side: Side = (
+        "provider_sells_btc"
+        if config.handshake.profile == "erc20-to-ln/v1"
+        else "provider_buys_btc"
+    )
+    feed = PriceFeed(pricing.mempool_url, proxy=config.relay_proxy, with_eth=True)
+
+    def observe() -> EvmQuotePrices:
+        gas_price = htlc.gas_price_wei()
+        if type(gas_price) is not int or not 0 < gas_price <= pricing.max_gas_price_wei:
+            raise PriceUnavailableError("EVM gas price exceeds the quote limit")
+        # Price freshness is checked after the gas RPC, not before a slow read.
+        prices = feed.prices()
+        rates, gas = {}, {}
+        for token in tokens:
+            rate = rate_token_base_per_btc(prices, side, token.token_decimals)
+            if rate <= 0:
+                raise PriceUnavailableError("stablecoin rate is below one base unit")
+            gas[token.token_contract] = gas_wei_as_token_base(
+                prices, pricing.gas_units * gas_price, token.token_decimals
+            )
+            rates[token.token_contract] = rate
+        return EvmQuotePrices(rates, gas)
+
+    return observe
 
 
 def _settlement(
