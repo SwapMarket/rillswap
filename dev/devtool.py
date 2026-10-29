@@ -17,6 +17,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from decimal import Decimal
@@ -917,8 +918,11 @@ def cmd_broadcast(args: argparse.Namespace) -> None:
 def cmd_swap(args: argparse.Namespace) -> None:
     info = load_info()
     user = STATE / "user"
-    work = user / "swaps" / f"{time.strftime('%Y%m%dT%H%M%S')}-{args.direction}"
-    work.mkdir(mode=0o700, parents=True)
+    swaps = user / "swaps"
+    swaps.mkdir(mode=0o700, parents=True, exist_ok=True)
+    work = Path(
+        tempfile.mkdtemp(prefix=f"{time.strftime('%Y%m%dT%H%M%S')}-{args.direction}-", dir=swaps)
+    )
     command = [
         "rill",
         "swap",

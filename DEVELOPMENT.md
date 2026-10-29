@@ -48,6 +48,10 @@ provider terminal states, verified receipts and receipt persistence across
 application restarts. Component/schema/vector/artifact checks still run
 separately; these tests do not replace them.
 
+Concurrent acceptance tests overlap two swaps per profile, including shared
+Core-wallet CLI funding and shared EVM-account browser funding. They also
+check independent recovery records and coin reservations across wallet reloads.
+
 Storefront Lightning order creation briefly stops only the isolated auto-miner,
 drains mining RPCs and waits for LND to match Core's tip. Mining resumes before
 payment, including on checkout failure. This controls fixture timing without
@@ -164,7 +168,7 @@ funds and enough ring decoys). Results land in the `state` volume:
 /state/makers/<direction>/       provider.json, identity, custody key, store
 /state/evm/contracts.json        Anvil HTLC and fUSDC addresses, maker/user accounts
 /state/user/                     age.key, network.json, Core/LND credentials
-/state/user/swaps/<time>-<dir>/  recovery files from `devctl swap`
+/state/user/swaps/<time>-<dir>-<unique>/  recovery files from `devctl swap`
 /state/merchant/                 merchant config, keys, admin token, ledger
 /state/shop/orders.json          demo shop orders
 /state/shop/native/              stablecoin keys; per token config.json, ledger
@@ -227,6 +231,10 @@ and prints the `rill` output. Extra flags pass through, for example
 `dev/devctl swap btc-to-ln 50000 --fee-rate 5`. The exact command is printed,
 so you can rerun or vary it with `dev/devctl rill ...` or inside
 `dev/devctl shell`.
+
+Separate invocations can run simultaneously. Each has its own session and
+private recovery directory, including invocations started in the same second.
+Existing recovery directories are unchanged.
 
 ## Swapping as a user (browser)
 
