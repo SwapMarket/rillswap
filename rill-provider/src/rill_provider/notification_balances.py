@@ -1,4 +1,4 @@
-"""Read-only balance sources for operator summaries, never for swap authorization.
+"""Read-only balance sources for operator summaries and pricing, never for authorization.
 
 Construction does not read credentials or contact backends. The notifier runs
 each source in a bounded worker thread only when a summary is due.
@@ -91,7 +91,8 @@ def _lnd_read[Response: Message](
     return result
 
 
-def _channel_balances(settings: Lnd) -> str:
+def lnd_channel_balance(settings: Lnd) -> lightning_pb2.ChannelBalanceResponse:
+    """Read LND's channel totals; validate each field used with ``channel_amount_msat``."""
     response = _lnd_read(
         settings,
         "ChannelBalance",
@@ -100,22 +101,32 @@ def _channel_balances(settings: Lnd) -> str:
     )
     if response.custom_channel_data:
         raise LndProtocolError("LND custom channel balances unsupported")
-    amounts = []
-    for field in (
-        "local_balance",
-        "remote_balance",
-        "unsettled_local_balance",
-        "pending_open_local_balance",
+    return response
+
+
+def channel_amount_msat(response: lightning_pb2.ChannelBalanceResponse, field: str) -> int:
+    """Return one present, self-consistent channel total in msat."""
+    amount = getattr(response, field)
+    if not (
+        response.HasField(field)
+        and amount.msat <= MAX_SATS * 1000
+        and amount.sat == amount.msat // 1000
     ):
-        amount = getattr(response, field)
-        if not (
-            response.HasField(field)
-            and amount.msat <= MAX_SATS * 1000
-            and amount.sat == amount.msat // 1000
-        ):
-            raise LndProtocolError("LND channel balance invalid")
-        amounts.append(f"{_units(amount.msat, 3)} sat")
-    local, remote, unsettled, pending = amounts
+        raise LndProtocolError("LND channel balance invalid")
+    return int(amount.msat)
+
+
+def _channel_balances(settings: Lnd) -> str:
+    response = lnd_channel_balance(settings)
+    local, remote, unsettled, pending = (
+        f"{_units(channel_amount_msat(response, field), 3)} sat"
+        for field in (
+            "local_balance",
+            "remote_balance",
+            "unsettled_local_balance",
+            "pending_open_local_balance",
+        )
+    )
     return (
         f"local {local}, remote {remote} (peer-owned), "
         f"unsettled local {unsettled}, pending local {pending}"
@@ -136,7 +147,7 @@ def _lnd_wallet_balance(settings: Lnd) -> str:
     return f"{total:,} sat ({confirmed:,} confirmed, {pending:,} unconfirmed)"
 
 
-def _evm_balance(settings: EvmSettings, token: EvmToken | None) -> str:
+def _evm_client(settings: EvmSettings) -> EvmHtlcClient:
     client = EvmHtlcClient(
         rpc_url=settings.rpc_url,
         chain_id=settings.chain_id,
@@ -145,6 +156,20 @@ def _evm_balance(settings: EvmSettings, token: EvmToken | None) -> str:
         request_timeout_seconds=RPC_SECONDS,
     )
     client.verify_deployment()
+    return client
+
+
+def evm_token_balances(settings: EvmSettings) -> dict[str, int]:
+    """Return the signer's base-unit balance of every configured token, by contract."""
+    client = _evm_client(settings)
+    return {
+        token.token_contract: client.token_balance(token.token_contract, client.signer_address)
+        for token in settings.tokens
+    }
+
+
+def _evm_balance(settings: EvmSettings, token: EvmToken | None) -> str:
+    client = _evm_client(settings)
     if token is None:
         return f"{_units(client.native_balance(client.signer_address), 0)} wei"
     return _units(

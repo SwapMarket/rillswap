@@ -93,6 +93,24 @@ def test_configured_balance_readers_are_lazy_and_include_all_assets(
     assert balances.balance_readers(load_config(_config(tmp_path))) == {}
 
 
+def test_token_pools_are_read_once_per_token_after_verifying_the_deployment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    evm = MagicMock()
+    evm.signer_address = "0x" + "ab" * 20
+    evm.token_balance.return_value = 42
+    monkeypatch.setattr(balances, "EvmHtlcClient", MagicMock(return_value=evm))
+    monkeypatch.setattr(balances, "read_evm_signer_key", MagicMock(return_value="key"))
+    config = load_config(_config(tmp_path, evm=EVM))
+    assert config.evm is not None
+    assert balances.evm_token_balances(config.evm) == {"0x" + "2b" * 20: 42}
+    evm.token_balance.assert_called_once_with("0x" + "2b" * 20, evm.signer_address)
+    evm.verify_deployment.side_effect = EvmBackendError("wrong chain")
+    with pytest.raises(EvmBackendError):
+        balances.evm_token_balances(config.evm)
+    assert evm.token_balance.call_count == 1  # nothing read from an unverified deployment
+
+
 def _channels() -> pb.ChannelBalanceResponse:
     return pb.ChannelBalanceResponse(
         local_balance=pb.Amount(sat=1234, msat=1_234_567),

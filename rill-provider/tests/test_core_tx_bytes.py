@@ -1221,6 +1221,30 @@ def test_trusted_balance_reads_the_funding_wallet_exactly(tmp_path: Path) -> Non
             reader.trusted_balance_sat()
 
 
+def test_balance_interval_credits_untrusted_pending_only_at_its_high_end(tmp_path: Path) -> None:
+    _, _, network = _context()
+    requests: list[dict[str, Any]] = []
+    result = ['{"mine": {"trusted": 1.23456789, "untrusted_pending": 0.5}}']
+
+    def respond(payload: dict[str, Any]) -> tuple[int, bytes]:
+        return 200, f'{{"jsonrpc": "2.0", "id": {payload["id"]}, "result": {result[0]}}}'.encode()
+
+    with _server(respond, requests) as port:
+        reader = CoreTransactionReader(
+            port=port, cookie_path=_cookie(tmp_path), network=network, wallet="maker"
+        )
+        assert reader.balance_interval_sat() == (123_456_789, 173_456_789)
+        assert [request["method"] for request in requests] == ["getbalances"]  # one snapshot
+        for invalid in (
+            '{"mine": {"trusted": 1}}',
+            '{"mine": {"trusted": 1, "untrusted_pending": -1}}',
+            '{"mine": {"trusted": 1, "untrusted_pending": false}}',
+        ):
+            result[0] = invalid
+            with pytest.raises(CoreProtocolError, match="balance"):
+                reader.balance_interval_sat()
+
+
 def test_wallet_utxo_count_includes_locked_and_unconfirmed_without_double_counting(
     tmp_path: Path,
 ) -> None:

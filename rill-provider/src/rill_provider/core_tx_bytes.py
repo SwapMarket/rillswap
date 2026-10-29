@@ -91,7 +91,8 @@ CORE_RPC_METHODS = (
     "gettxspendingprevout",
     "getblock",
     "getblockheader",
-    # Caps the announced amounts by the funding wallet's balance.
+    # Caps the announced amounts by the funding wallet's balance and prices
+    # balance-aware discounts.
     "getbalances",
     # Privacy-first funding: the provider picks the inputs itself.
     "listunspent",
@@ -504,6 +505,18 @@ class CoreTransactionReader:
         Indicative only (it caps announced amounts): it includes coins locked
         for contracts being funded and authorizes nothing.
         """
+        return _balance_sat(self._mine_balances(), "trusted")
+
+    def balance_interval_sat(self) -> tuple[int, int]:
+        """Return the wallet balance as (trusted, trusted plus untrusted pending).
+
+        Indicative only (it prices balance-aware discounts) and authorizes nothing.
+        """
+        mine = self._mine_balances()
+        trusted = _balance_sat(mine, "trusted")
+        return trusted, trusted + _balance_sat(mine, "untrusted_pending")
+
+    def _mine_balances(self) -> object:
         username, password = _cookie(self._cookie_path)
         try:
             with httpx.Client(
@@ -516,17 +529,7 @@ class CoreTransactionReader:
                 result = self._rpc(client, "getbalances", [], 1)
         except httpx.HTTPError:
             raise CoreUnavailableError("Core RPC transport unavailable") from None
-        mine = result.get("mine") if isinstance(result, dict) else None
-        trusted = mine.get("trusted") if isinstance(mine, dict) else None
-        if (
-            isinstance(trusted, bool)
-            or not isinstance(trusted, (int, Decimal))
-            or not Decimal(trusted).is_finite()
-            or not 0 <= trusted <= MAX_SATS / SATS_PER_BTC
-        ):
-            raise CoreProtocolError("Core wallet balance invalid")
-        with localcontext(DecimalContext(prec=28)):
-            return int(trusted * SATS_PER_BTC)
+        return result.get("mine") if isinstance(result, dict) else None
 
     def wallet_utxo_count(self) -> int:
         """Count Core's listed wallet outputs, including locked and unconfirmed.
@@ -1871,3 +1874,17 @@ def _spending_witness(decoded: object, txid: str, vout: int) -> tuple[bytes, ...
         except ValueError:
             raise CoreProtocolError("Core reported a malformed witness") from None
     return None
+
+
+def _balance_sat(mine: object, field: str) -> int:
+    """Return one ``getbalances`` mine field in sat, refusing anything implausible."""
+    value = mine.get(field) if isinstance(mine, dict) else None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, Decimal))
+        or not Decimal(value).is_finite()
+        or not 0 <= value <= MAX_SATS / SATS_PER_BTC
+    ):
+        raise CoreProtocolError("Core wallet balance invalid")
+    with localcontext(DecimalContext(prec=28)):
+        return int(value * SATS_PER_BTC)
