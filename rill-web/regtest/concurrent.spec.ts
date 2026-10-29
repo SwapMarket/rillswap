@@ -16,7 +16,8 @@ for (const direction of ["btc-to-ln", "ln-to-btc"] as const) {
     test.skip(!composeEnabled, "Explicit disposable Compose opt-in required");
     assertDisposableStack();
     test.setTimeout(300000);
-    // Both funders still require separate sufficient confirmed witness coins.
+    // Seed independent confirmed coins here; the pipeline case below instead
+    // requires the provider to reuse its first funding transaction's change.
     const wallet = direction === "btc-to-ln" ? "user" : "maker";
     const destinations = Object.fromEntries([0, 1].map(() => [command("address", "--wallet", wallet), 0.002]));
     command("bitcoin-cli", `-rpcwallet=${wallet}`, "sendmany", "", JSON.stringify(destinations));
@@ -67,6 +68,96 @@ for (const direction of ["btc-to-ln", "ln-to-btc"] as const) {
     }).toEqual([]);
   });
 }
+
+test("one provider pipelines two swaps from one initial UTXO before either confirms", async () => {
+  test.skip(!composeEnabled, "Explicit disposable Compose opt-in required");
+  assertDisposableStack();
+  test.setTimeout(300000);
+  type Outpoint = { txid: string; vout: number };
+  type Coin = Outpoint & { address: string; confirmations: number };
+  type Result = { output: string; error?: unknown };
+  const wallet = (...args: string[]) => command("bitcoin-cli", "-rpcwallet=maker", ...args);
+  const key = (coin: Outpoint) => `${coin.txid}:${coin.vout}`;
+  const spender = (coin: Outpoint): string => JSON.parse(command("bitcoin-cli", "gettxspendingprevout", JSON.stringify([coin])))[0]?.spendingtxid ?? "";
+  const before = new Set(swaps("ln-to-btc").map((row) => row.session));
+  const paymentsBefore = new Set<string>(JSON.parse(command("lncli", "user", "listpayments", "--include_incomplete"))
+    .payments.map((payment: { payment_hash: string }) => payment.payment_hash));
+  let locked: Outpoint[] = [], pending: Promise<Result>[] = [], paused = false;
+  try {
+    paused = true; command("miner", "pause");
+    const address = command("address", "--wallet", "maker");
+    const seedTxid = wallet("sendtoaddress", address, "0.003");
+    command("mine", "1");
+    const height = Number(command("bitcoin-cli", "getblockcount"));
+    const available = JSON.parse(wallet("listunspent", "0")) as Coin[];
+    const seed = available.find((coin) => coin.txid === seedTxid && coin.address === address)!;
+    expect(seed).toBeDefined();
+    expect(seed.confirmations).toBeGreaterThanOrEqual(1);
+    // Existing operator reservations never appear in listunspent. Keep those
+    // intact and temporarily reserve only the other coins visible to this test.
+    const reserve = available.filter((coin) => key(coin) !== key(seed)).map(({ txid, vout }) => ({ txid, vout }));
+    if (reserve.length) {
+      expect(wallet("lockunspent", "false", JSON.stringify(reserve))).toBe("true");
+      locked = reserve;
+    }
+    expect((JSON.parse(wallet("listunspent", "0")) as Coin[]).map(key)).toEqual([key(seed)]);
+
+    pending = [20000, 21000].map((amount) => run("swap", "ln-to-btc", String(amount)).then(
+      (output) => ({ output }), (error: unknown) => ({ output: "", error })));
+    let pipelineError: unknown;
+    let parent = "", child = "";
+    try {
+      await expect.poll(() => swaps("ln-to-btc").filter((row) => !before.has(row.session)
+        && row.state === "FUNDING_SENT").length, { timeout: 90000 }).toBe(2);
+      await expect.poll(() => spender({ txid: seed.txid, vout: seed.vout })).toMatch(/^[0-9a-f]{64}$/);
+      parent = spender({ txid: seed.txid, vout: seed.vout });
+      const first = JSON.parse(command("bitcoin-cli", "getrawtransaction", parent, "true"));
+      expect(first.vin).toHaveLength(1);
+      expect(key(first.vin[0])).toBe(key(seed));
+      expect(first.vout).toHaveLength(2);
+      // The provider puts the contract at vout 0 and wallet change at vout 1.
+      expect(JSON.parse(wallet("getaddressinfo", first.vout[1].scriptPubKey.address)).ismine).toBe(true);
+      await expect.poll(() => spender({ txid: parent, vout: 1 })).toMatch(/^[0-9a-f]{64}$/);
+      child = spender({ txid: parent, vout: 1 });
+      const second = JSON.parse(command("bitcoin-cli", "getrawtransaction", child, "true"));
+      expect(second.vin).toHaveLength(1);
+      expect(key(second.vin[0])).toBe(`${parent}:1`);
+      expect(first.confirmations ?? 0).toBe(0);
+      expect(second.confirmations ?? 0).toBe(0);
+      expect(JSON.parse(command("bitcoin-cli", "getrawmempool"))).toEqual(expect.arrayContaining([parent, child]));
+      expect(Number(command("bitcoin-cli", "getblockcount"))).toBe(height);
+    } catch (error) { pipelineError = error; }
+    finally { command("miner", "resume"); paused = false; }
+
+    const results = await Promise.all(pending);
+    for (const result of results) if (result.error) throw result.error;
+    if (pipelineError) throw pipelineError;
+    const funding = results.map((result) => result.output.match(/\(funding ([0-9a-f]{64}), contract/)![1]!);
+    expect(funding.sort()).toEqual([parent, child].sort());
+    for (const [index, result] of results.entries()) {
+      expect(result.output).toContain(`Received ${20000 + index * 1000} sat`);
+      const claim = result.output.match(/claim ([0-9a-f]{64}) \(funding/)![1]!;
+      expect(JSON.parse(command("bitcoin-cli", "getrawtransaction", claim, "true")).confirmations).toBeGreaterThanOrEqual(1);
+    }
+    await expect.poll(() => swaps("ln-to-btc").filter((row) => !before.has(row.session))
+      .map((row) => row.state), { timeout: 60000 }).toEqual(["SETTLED", "SETTLED"]);
+    const payments = JSON.parse(command("lncli", "user", "listpayments", "--include_incomplete")).payments
+      .filter((payment: { payment_hash: string }) => !paymentsBefore.has(payment.payment_hash));
+    expect(payments).toHaveLength(2);
+    for (const payment of payments) {
+      expect(payment.status).toBe("SUCCEEDED");
+      expect(JSON.parse(command("lncli", "maker", "lookupinvoice", payment.payment_hash)).state).toBe("SETTLED");
+    }
+  } finally {
+    if (paused) command("miner", "resume");
+    await Promise.all(pending);
+    if (locked.length) {
+      const owned = new Set(locked.map(key));
+      const release = (JSON.parse(wallet("listlockunspent")) as Outpoint[]).filter((coin) => owned.has(key(coin)));
+      if (release.length) expect(wallet("lockunspent", "true", JSON.stringify(release))).toBe("true");
+    }
+  }
+});
 
 test("signed CLI funding keeps its coin reserved across a wallet restart", async () => {
   test.skip(!composeEnabled, "Explicit disposable Compose opt-in required");
