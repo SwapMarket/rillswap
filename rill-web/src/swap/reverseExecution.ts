@@ -4,6 +4,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import canonicalize from "canonicalize";
 import { Encrypter } from "age-encryption";
 import { jcs, clientAcceptanceHash } from "./hashes";
+import { checkFeeBreakdown, FEE_POLICY_FEATURE, networkFeeRequest, type FeeBreakdown } from "./feePolicy";
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { newKeyPair, type Handshake } from "./handshake";
 import { invoiceBinding } from "./bolt11";
@@ -39,6 +40,7 @@ export function minimumClaimFeeReserveSat(destinationScript: string, rateSatKvb:
 }
 const sign = (digest: Uint8Array, key: Uint8Array): string => bytesToHex(schnorr.sign(digest, key, randomBytes(32)));
 export interface ReverseExecutionConfiguration {
+  readonly feeOffer?: import("../nostrProviderAnnouncement").AnnouncementCandidate;
   readonly destinationScript: string;
   readonly tipHeight: number;
   /** Next-block fee rate (sat/kvB) from the trusted chain API; the claim reserve must pay at least this. */
@@ -59,6 +61,7 @@ export interface ReverseExecutionConfiguration {
 }
 export interface PreparedReverseExecution {
   readonly terms: LnToBtcTerms;
+  readonly feeBreakdown?: FeeBreakdown;
   readonly deadlineAt: number;
   readonly recoveryFile: Uint8Array;
   readonly record: ReverseJournalRecord;
@@ -109,6 +112,7 @@ export async function prepareReverseExecution(session: Session, handshake: Hands
       Number.isSafeInteger(config.tipHeight) && config.tipHeight > 0 && config.tipHeight < 500000000 &&
       (config.claimConfirmations === undefined || (Number.isSafeInteger(config.claimConfirmations) && config.claimConfirmations >= 0)));
     const limits = request.limits;
+    require(!init.required_features.includes(FEE_POLICY_FEATURE) || config.feeOffer?.feePolicy !== undefined);
     const minimumReserve = minimumClaimFeeReserveSat(config.destinationScript, config.claimFeeRateSatKvb, limits.minClaimFeeReserveSat);
     if (minimumReserve > limits.maxClaimFeeSat) {
       throw new SwapError(`The minimum claim fee reserve (${minimumReserve} sat, at least the next-block fee) exceeds your maximum claim fee (${limits.maxClaimFeeSat} sat)`);
@@ -117,7 +121,8 @@ export async function prepareReverseExecution(session: Session, handshake: Hands
       payment_hash: bytesToHex(sha256(preimage)), client_contract_compressed_key: contract.compressed, recovery_authorization_xonly_key: authorization.xonly,
       client_destination_script: config.destinationScript, limits: { max_success_fee_sat: limits.maxSuccessFeeSat.toString(), min_claim_fee_reserve_sat: minimumReserve.toString(),
         max_claim_fee_sat: limits.maxClaimFeeSat.toString(), min_refund_lock_height: config.tipHeight + limits.minRefundDelayBlocks,
-        max_incoming_htlc_expiry_height: config.tipHeight + limits.maxIncomingHtlcDelayBlocks }, extensions: {} });
+        max_incoming_htlc_expiry_height: config.tipHeight + limits.maxIncomingHtlcDelayBlocks },
+      extensions: networkFeeRequest(config.feeOffer ?? { outerEventId: "" }, config.claimFeeRateSatKvb) });
     const initialDeadline = seconds() + 600;
     const encrypt = (bytes: Uint8Array): Promise<Uint8Array> => encryptCanonicalRecoveryForRecipient(bytes, config.ageRecipient);
     const secrets = jcs({ format: "rillswap-reverse-secrets", network_identity: network, session_id: session.sessionId, handshake_init: init, handshake_accept: accept,
@@ -136,10 +141,13 @@ export async function prepareReverseExecution(session: Session, handshake: Hands
     const answer = await session.replyTo(envelope, "terms_offer"); current();
     const { terms, holdInvoice } = checkReverseTermsOffer(answer.payload, { request: firm, transcript, envelopeContractHash: answer.contract_hash,
       identity: request.identity, network, now: seconds(), handshakeInit: init, handshakeAccept: accept, decodeInvoice: (value) => invoiceBinding(value, name) });
+    const feeBreakdown = checkFeeBreakdown(terms);
     checkReverseClaimWindow(terms, config.tipHeight, limits.minRefundDelayBlocks);
-    const deadlineAt = Math.min(initialDeadline, terms.terms_expiry, terms.invoice_binding.expires_at);
+    const deadlineAt = Math.min(initialDeadline, terms.invoice_binding.expires_at,
+      terms.required_features.includes(FEE_POLICY_FEATURE) ? initialDeadline : terms.terms_expiry);
+    const acceptanceDeadline = Math.min(deadlineAt, terms.terms_expiry);
     let claimDepth = effectiveClaimDepth(terms.funding_confirmations, config.claimConfirmations);
-    const live = (): void => { current(); require(seconds() < deadlineAt); };
+    const live = (): void => { current(); require(seconds() < (accepted ? deadlineAt : acceptanceDeadline)); };
     const acceptance = { contract_hash: answer.contract_hash!, handshake_hash: transcript, session_id: session.sessionId,
       client_session_xonly_key: session.key, provider_session_xonly_key: session.providerKey! };
     const acceptanceSignature = sign(clientAcceptanceHash(acceptance), session.secret), createdAt = seconds();
@@ -152,7 +160,7 @@ export async function prepareReverseExecution(session: Session, handshake: Hands
       network: network as { name: NetworkName; genesis_hash: string }, assertCurrent: () => { current(); approve(); }, claimDepth });
     const freeze = (value: unknown): void => { if (value !== null && typeof value === "object") { for (const child of Object.values(value)) freeze(child); Object.freeze(value); } };
     freeze(terms);
-    return Object.freeze({ terms, deadlineAt, get claimDepth() { return claimDepth; },
+    return Object.freeze({ terms, deadlineAt, ...(feeBreakdown ? { feeBreakdown } : {}), get claimDepth() { return claimDepth; },
       lowerClaimDepth(depth: number): void {
         current(); require((record.stage === "funded" || record.stage === "claim-ready") && !exposing && Number.isSafeInteger(depth) && depth >= 0 && depth < claimDepth);
         claimDepth = depth;
@@ -171,7 +179,7 @@ export async function prepareReverseExecution(session: Session, handshake: Hands
         require(!acceptanceStarted && record.stage === "terms-ready"); live(); acknowledgeRecovery(); live(); acceptanceStarted = true;
         const acceptedEnvelope = session.envelope("terms_accept", { acceptance, client_acceptance_signature: acceptanceSignature }, { inReplyTo: answer.message_id, contract: answer.contract_hash! });
         await session.send(acceptedEnvelope, session.providerKey!, () => { live(); acknowledgeRecovery(); });
-        await session.replyTo(acceptedEnvelope, "ack"); live(); accepted = true;
+        await session.replyTo(acceptedEnvelope, "ack"); accepted = true; live();
       },
       async planPayment(payer: BrowserHoldPayer, endpoint: string, feeLimitSat: bigint, approve: () => void): Promise<BoundedHoldPlan> {
         require(accepted && !paying && record.stage === "terms-ready"); live(); approve();

@@ -85,6 +85,7 @@ from rill_cli.live_swap import (
     _scalar,
     _Session,
     discover,
+    network_fee_request,
     require_announced_depth,
 )
 from rill_cli.refund_watcher import ChainView
@@ -363,7 +364,9 @@ def _check_offer(  # noqa: PLR0913 - every binding checked explicitly
     crypto: Context,
     now: int,
 ) -> ContractTerms:
-    check_reverse_terms_offer(request, offer, handshake_hash=transcript, invoice_binding=hold)
+    check_reverse_terms_offer(
+        request, offer, handshake_hash=transcript, invoice_binding=hold, now=now
+    )
     # The validator rejects ERC20 terms before this Bitcoin-only path.
     terms = cast("ContractTerms", offer.terms.contract_terms)
     crypto.schnorr_verify(
@@ -1312,7 +1315,10 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
                     min_refund_lock_height=tip + limits.min_refund_delay_blocks,
                     max_incoming_htlc_expiry_height=tip + limits.max_incoming_htlc_delay_blocks,
                 ),
-                extensions={},
+                extensions=network_fee_request(
+                    advertisement,
+                    independent_rate_sat_kvb=max(fee.rate_sat_kvb, fee.floor_sat_kvb),
+                ),
             )
             request = session.envelope("quote_request", request_model.model_dump(mode="json"))
             await session.send(request, provider_key)
@@ -1386,6 +1392,8 @@ async def run_reverse_swap(  # noqa: PLR0912, PLR0913, PLR0915 - one ordered swa
             document = _recovery_document(**record)  # type: ignore[arg-type]
             await lifetime.worker(lambda: write_recovery(document, None))
             report("recovery file written (terms and preimage, nothing paid yet)")
+            if int(time.time()) >= terms.terms_expiry:
+                raise SwapError("quote expired before acceptance; request a fresh quote")
             accepted = session.envelope(
                 "terms_accept",
                 {

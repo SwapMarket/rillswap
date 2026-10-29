@@ -268,6 +268,8 @@ export async function mountReverseExecution(root: HTMLElement, options: ReverseE
     v.screen.append(node("h2", `Pay ${BigInt(terms.economics.hold_invoice_sat).toLocaleString()} sat`),
       node("p", `Receive at least ${BigInt(terms.economics.nominal_payout_sat).toLocaleString()} sat in Bitcoin. Your wallet's routing fee is extra.`),
       node("p", "After payment, this page checks confirmations and claims your Bitcoin automatically."));
+    const fees = e.feeBreakdown;
+    if (fees) v.screen.append(node("small", `Provider service: ${fees.service_fee_sat} sat. Provider network estimate: ${fees.network_fee_sat} sat (154 vB at ${Number(fees.feerate_sat_kvb) / 1000} sat/vB). Accept before ${new Date(terms.terms_expiry * 1000).toLocaleTimeString()}.`));
     // Before any payment: the client's own lower claim depth risks a provider double-spend.
     const warning = earlyClaimWarning(e.claimDepth, terms.funding_confirmations);
     if (warning !== null) { v.screen.append(node("p", warning, "swap-reverse-early-claim")); options.report?.(`warning: ${warning}`); }

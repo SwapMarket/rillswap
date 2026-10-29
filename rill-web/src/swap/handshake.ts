@@ -5,6 +5,7 @@ import { bytesToHex, randomBytes } from "@noble/hashes/utils.js";
 import type { AnnouncementCandidate } from "../nostrProviderAnnouncement";
 import { TRANSPORT_POW_EXTENSION } from "../transportPow";
 import { epochBoundSessionId, handshakeHash } from "./hashes";
+import { FEE_POLICY_FEATURE } from "./feePolicy";
 import type { Session } from "./session";
 import {
   checkHandshakeAccept, COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_EXTENSION, EPOCH_SESSION_FEATURE, type HandshakeInit,
@@ -40,7 +41,8 @@ export async function handshake(session: Session, provider: AnnouncementCandidat
     required_features: [
       ...(["btc-to-ln/v1", "ln-to-btc/v1"].includes(session.profile) ? [COOPERATIVE_CLAIM_FEATURE] : []),
       EPOCH_SESSION_FEATURE,
-    ],
+      ...(provider.feePolicy ? [FEE_POLICY_FEATURE] : []),
+    ].sort(),
     extensions: {
       [EPOCH_SESSION_EXTENSION]: { epoch_inbox_xonly_key: epoch },
       // RS-006: the declaration binds every message of this session to the advertised work.

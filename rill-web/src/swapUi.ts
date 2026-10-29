@@ -19,7 +19,7 @@ import { TransactionRefusedError } from "./swap/transaction";
 import { explorerTxUrl, trustedEvmAsset, validateEvmSponsor, validateMempoolApi, validateRelays, type EvmSponsorDefaults, type NetworkName } from "./swap/config";
 import { ConnectionPreferences, type ConnectionSettings, type ConnectionPreferenceState } from "./connectionPreferences";
 import { GasSponsor, newStagingSecret, stagingAddress } from "./swap/gasSponsor";
-import { readChainTip } from "./swap/chainTip";
+import { readChainTip, readNextBlockFeeRate } from "./swap/chainTip";
 import { BrowserRecoveryWallet, parseWalletBackup } from "./browserRecoveryWallet";
 import { type DirectoryEntry, DIRECTORY_PROFILES, discoverDirectory, discoverMarketplace, eligibleProviders, indicativeFee, ineligibilityReason, quoteProviders, quoteReverseProviders,
   estimateFromDirectory, providerLimits, type LocatedQuote, MAX_QUOTE_PROVIDERS, quoteErc20Providers, quoteLnErc20Providers, selectEvmAsset, unexpired } from "./swap/marketplace";
@@ -30,6 +30,8 @@ import { connectEvmWallet, mountErc20Execution, mountLnErc20Execution, parseToke
 import { EvmClaimJournal } from "./evmClaimJournal";
 import type { PreparedLnErc20Quote } from "./swap/lnErc20Swap";
 import type { PreparedReverseQuote, ReverseSwapRequest } from "./swap/reverseSwap";
+import type { FeeBreakdown } from "./swap/feePolicy";
+
 import { invoiceBinding } from "./swap/bolt11";
 import { confirmationsLabel, fundingWaitText, quoteSelectionLabel, stoppedSwapAdvice } from "./swapUiStatus";
 import { ASSETS, type AssetId, routeFor, STABLECOIN_SYMBOL } from "./swapPairs";
@@ -46,6 +48,10 @@ const NETWORKS = { mainnet, signet, testnet4, regtest } as const;
 /** How often an idle, visible page reloads the provider directory. */
 const DIRECTORY_REFRESH_MS = 5 * 60_000;
 const SOURCE_CODE_URL = "https://github.com/rillswap/rillswap";
+
+const providerFeeDetails = (fee?: FeeBreakdown): string => fee
+  ? ` Service: ${fee.service_fee_sat} sat. Network estimate: ${fee.network_fee_sat} sat (154 vB at ${Number(fee.feerate_sat_kvb) / 1000} sat/vB). Advertised outbound LN cap: ${fee.policy.max_routing_fee_ppm} ppm, inside the service fee.`
+  : "";
 
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, text = "", id?: string): HTMLElementTagNameMap[K] {
   const element = document.createElement(tag);
@@ -279,8 +285,9 @@ function mount(root: HTMLElement): void {
         const cells = [who,
           ...(stablecoin ? [node("td", [...new Set(entry.evmAssets.map((asset) => asset.token_symbol))].join(", "))] : []),
           node("td", entry.amountBands.map((band) => `${BigInt(band.minimum_sat).toLocaleString()} – ${BigInt(band.maximum_sat).toLocaleString()}`).join(", ")),
-          node("td", `${BigInt(fee.base_sat).toLocaleString()} sat + ${(fee.proportional_millionths / 10_000).toFixed(2)}%`),
-          node("td", `${indicativeFee(fee, FEE_SAMPLE).toLocaleString()} sat`),
+          node("td", `${BigInt(fee.base_sat).toLocaleString()} sat + ${(fee.proportional_millionths / 10_000).toFixed(2)}%` +
+            (entry.feePolicy ? ` + network (up to ${Number(entry.feePolicy.max_network_feerate_sat_kvb) / 1000} sat/vB), LN cap ${entry.feePolicy.max_routing_fee_ppm} ppm` : "")),
+          node("td", `${entry.feePolicy ? "up to " : ""}${indicativeFee(fee, FEE_SAMPLE, entry.feePolicy).toLocaleString()} sat`),
           node("td", entry.fundingConfirmations === null ? "unknown" : String(entry.fundingConfirmations)),
           node("td", new Date(entry.expiresAt * 1000).toLocaleString())];
         const action = node("td"); action.append(choose(entry.identity, "Choose"));
@@ -1224,9 +1231,12 @@ function mount(root: HTMLElement): void {
       try {
         if (await stopForPublishedUpdate(cancellation.signal)) return;
         const directory = await discoverMarketplace(urls, request.network, pinned || undefined, cancellation.signal, "ln-to-btc/v1");
+        if (directory.providers.some(({ announcement }) => announcement.feePolicy)) {
+          request = { ...request, networkFeeRateSatKvb: await readNextBlockFeeRate(chainApi.value.trim(), name, { signal: cancellation.signal }) };
+        }
         for (const warning of directory.warnings) report(warning);
         const mode = sortMode();
-        const eligible = eligibleProviders(directory.providers, request.payoutSat, mode);
+        const eligible = eligibleProviders(directory.providers, request.payoutSat, mode, request.networkFeeRateSatKvb);
         if (eligible.length === 0) throw new Error(ineligibilityReason(providerLimits(directory.providers), request.payoutSat));
         setStatus("Comparing provider estimates", 1);
         report(`Requesting up to ${MAX_QUOTE_PROVIDERS} eligible offers from ${eligible.length} announced providers`);
@@ -1250,14 +1260,14 @@ function mount(root: HTMLElement): void {
           review.append(node("small", "Some relays or providers did not return complete results. This is not a market-wide best-price guarantee."));
         }
         const providers = node("details"); providers.append(node("summary", "Provider details & manual selection"));
-        const chosen = node("p", `Selected provider: ${selected.prepared.quote.providerIdentity}`, "swap-reverse-selected");
+        const chosen = node("p", `Selected provider: ${selected.prepared.quote.providerIdentity}${providerFeeDetails(selected.prepared.quote.feeBreakdown)}`, "swap-reverse-selected");
         const tags = offerTags(arrivals, reverseRank);
         for (const [index, located] of arrivals.entries()) {
           const label = node("label"), option = node("input"); option.type = "radio"; option.name = "reverse-provider"; option.checked = index === 0;
           option.onchange = () => {
             selected = located;
             chosen.textContent = `Selected provider: ${located.prepared.quote.providerIdentity}. Estimated hold: ${located.prepared.quote.holdInvoiceSat} sat. ` +
-              fundingWaitText("ln-to-btc/v1", located.prepared.quote.fundingConfirmations);
+              fundingWaitText("ln-to-btc/v1", located.prepared.quote.fundingConfirmations) + providerFeeDetails(located.prepared.quote.feeBreakdown);
           };
           label.append(option, node("span", `${located.prepared.quote.holdInvoiceSat} sat · ${located.prepared.quote.providerIdentity.slice(0, 12)}…`), ...tags(located));
           providers.append(label);
@@ -1438,11 +1448,14 @@ function mount(root: HTMLElement): void {
         }
         if (cancelled) return;
         const directory = await discoverMarketplace(urls, request.network, request.identity || undefined, cancellation.signal);
+        if (directory.providers.some(({ announcement }) => announcement.feePolicy)) {
+          request = { ...request, networkFeeRateSatKvb: await readNextBlockFeeRate(api, name, { signal: cancellation.signal }) };
+        }
         if (cancelled) return;
         for (const warning of directory.warnings) report(warning);
         const binding = invoiceBinding(request.invoice, name);
         const mode = sortMode();
-        const eligible = eligibleProviders(directory.providers, BigInt(binding.amount_msat) / 1000n, mode);
+        const eligible = eligibleProviders(directory.providers, BigInt(binding.amount_msat) / 1000n, mode, request.networkFeeRateSatKvb);
         if (eligible.length === 0) throw new Error(ineligibilityReason(providerLimits(directory.providers), BigInt(binding.amount_msat) / 1000n));
         setStatus("Comparing verified provider quotes", 1);
         report(`Requesting up to ${MAX_QUOTE_PROVIDERS} eligible offers from ${eligible.length} announced providers`);
@@ -1459,7 +1472,7 @@ function mount(root: HTMLElement): void {
           priceClaim.textContent = quoteSelectionLabel(selected === arrivals[0], arrivals.length, mode);
           quoteSummary.replaceChildren(node("h2", `${quote.contractAmountSat.toLocaleString()} sat`),
             node("p", `Provider fee: ${quote.successFeeSat.toLocaleString()} sat. Your wallet's network fee is extra. ` +
-              fundingWaitText("btc-to-ln/v1", quote.fundingConfirmations)),
+              fundingWaitText("btc-to-ln/v1", quote.fundingConfirmations) + providerFeeDetails(quote.feeBreakdown)),
             node("small", `Refund after block ${quote.refundLockHeight}. Offer expires ${new Date(quote.expiresAt * 1000).toLocaleTimeString()}.`));
         };
         showQuote();

@@ -12,6 +12,7 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import { bytesToHex, randomBytes } from "@noble/hashes/utils.js";
 
 import { invoiceBinding } from "./bolt11";
+import { networkFeeRequest, checkFeeBreakdown, type FeeBreakdown } from "./feePolicy";
 import { COOPERATIVE_RESERVATION_EXTENSION, type Cosigner, settle } from "./cooperative";
 import { type AnnouncementSource, discoverProvider } from "./discovery";
 import { type AuthorizedFunding, authorizeFunding, authorizeFundingPsbt, type FundingBinding, fundingBinding } from "./funding";
@@ -63,6 +64,8 @@ export interface SwapRequest {
   readonly limits: UserLimits;
   /** A merchant checkout can expire earlier than the invoice. */
   readonly checkoutExpiresAt?: number;
+  /** Fresh independent trusted-chain rate, required for dynamic-priced offers. */
+  readonly networkFeeRateSatKvb?: number;
 }
 
 export interface FundingRequest {
@@ -141,6 +144,7 @@ export interface PreparedQuote {
   readonly expiresAt: number;
   /** Signed blocks the provider waits on the funding before paying (0: from the mempool). */
   readonly fundingConfirmations: number;
+  readonly feeBreakdown?: FeeBreakdown;
 }
 
 /** Holds one exact authenticated offer. Preparation does not accept or fund it. */
@@ -206,7 +210,7 @@ export async function prepareSwap(
         max_refund_fee_sat: limits.maxRefundFeeSat.toString(),
         max_refund_lock_height: request.tipHeight + limits.maxRefundDelayBlocks,
       },
-      extensions: {},
+      extensions: networkFeeRequest(provider, request.networkFeeRateSatKvb),
     };
     requireShape("validateFirmQuoteRequest", quote);
     const quoteEnvelope = session.envelope("quote_request", quote as unknown as Record<string, unknown>);
@@ -226,12 +230,14 @@ export async function prepareSwap(
     const offer = answer.payload as unknown as TermsOffer;
     const contractHash = offer.terms.contract_hash;
     const economics = terms.economics;
+    const feeBreakdown = provider.feePolicy ? checkFeeBreakdown(terms) : undefined;
     report(`terms: fund ${economics.contract_amount_sat} sat, refund after block ${terms.refund_lock_height}`);
 
     let state: "ready" | "executing" | "disposed" | "done" = "ready";
     const release = (): void => { session.secret.fill(0); contract.secret.fill(0); };
     return Object.freeze({
       quote: Object.freeze({
+        ...(feeBreakdown ? { feeBreakdown } : {}),
         providerIdentity: identity,
         providerSlot: provider.slot,
         contractHash,

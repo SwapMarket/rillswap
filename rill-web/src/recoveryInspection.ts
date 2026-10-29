@@ -21,6 +21,7 @@ import { validateNetwork } from "./generated/manualAdvertisementValidators.js";
 import { parseRecoveryPlaintext } from "./recoveryDocument";
 import { COOPERATIVE_RESERVATION_EXTENSION, verifyCooperativeClaimProposal } from "./swap/cooperative";
 import type { FundingBinding } from "./swap/funding";
+import { checkFeeBreakdown, FEE_POLICY_FEATURE } from "./swap/feePolicy";
 import {
   clientAcceptanceHash, contractHash, epochBoundSessionId, fundingBindingHash, handshakeAcceptHash,
   handshakeHash, handshakeInitHash, jcs, providerTermsHash, taggedHash, unsignedEnvelopeHash,
@@ -106,14 +107,15 @@ function features(list: readonly string[], supported: readonly string[]): void {
 /** Historical model/validate_against rules, intentionally NOT the live admission helper. */
 function checkHandshake(record: RecoveryRecord): void {
   const { handshake_init: init, handshake_accept: accept } = record.verification_context;
-  const supported = [COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE];
+  const supported = [COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE, FEE_POLICY_FEATURE];
   features(init.required_features, supported);
   features(accept.required_features, supported);
-  features(record.contract_terms.required_features, [COOPERATIVE_CLAIM_FEATURE]);
+  features(record.contract_terms.required_features, [COOPERATIVE_CLAIM_FEATURE, FEE_POLICY_FEATURE]);
   for (const feature of supported) {
     require(init.required_features.includes(feature) === accept.required_features.includes(feature));
   }
   require(record.contract_terms.required_features.includes(COOPERATIVE_CLAIM_FEATURE) === init.required_features.includes(COOPERATIVE_CLAIM_FEATURE));
+  require(record.contract_terms.required_features.includes(FEE_POLICY_FEATURE) === init.required_features.includes(FEE_POLICY_FEATURE));
   require(init.session_id !== init.client_challenge && init.client_session_xonly_key !== init.expected_provider_identity_xonly_key);
   require(new Set([accept.client_session_xonly_key, accept.provider_session_xonly_key, accept.provider_identity_xonly_key]).size === 3);
   require(![accept.session_id, accept.client_challenge].includes(accept.provider_challenge));
@@ -139,6 +141,7 @@ function checkHandshake(record: RecoveryRecord): void {
 }
 
 function checkTerms(terms: BtcToLnTerms | LnToBtcTerms): void {
+  checkFeeBreakdown(terms);
   // The parser already enforced the closed schema, including profile roles, networks, lists, and extensions.
   let principal: bigint;
   if (terms.profile_id === "btc-to-ln/v1") {

@@ -11,6 +11,7 @@ import {
   verifyManualProviderAdvertisement,
 } from "../src/manualProviderAdvertisement";
 import fixture from "./fixtures/manual-advertisement-regtest-v1.json";
+import { FEE_MODEL, FEE_POLICY_EXTENSION } from "../src/swap/feePolicy";
 
 // Independent test trust anchors, not taken from the advertisement being checked.
 const APPROVED_IDENTITY = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
@@ -211,5 +212,35 @@ describe("manual application-signed provider import", () => {
     expect(() => verifyManualProviderAdvertisement(
       canonical(fixture), APPROVED_IDENTITY, REGTEST_NETWORK, "btc-to-ln/v1",
     )).toThrow(ManualAdvertisementRefusedError);
+  });
+});
+
+describe("signed dynamic fee advertisements", () => {
+  const policy = {
+    model: FEE_MODEL, ...fixture.advertisement.indicative_fee_policy,
+    max_network_feerate_sat_kvb: "10000", max_routing_fee_ppm: 1000,
+  } as const;
+
+  test("retains authenticated limits and service coefficients for quote binding", () => {
+    const input = copyFixture();
+    (input.advertisement.extensions as Record<string, unknown>)[FEE_POLICY_EXTENSION] = policy;
+    input.signature = resignTestOnly(input.advertisement, APPROVED_TEST_SCALAR);
+    const candidate = importAtFixtureTime(canonical(input));
+    expect(candidate.feePolicy).toEqual(policy);
+    expect(Object.isFrozen(candidate.feePolicy)).toBe(true);
+  });
+
+  test.each([
+    null,
+    { ...policy, base_sat: "999999" },
+    { ...policy, max_routing_fee_ppm: -1 },
+    { ...policy, max_network_feerate_sat_kvb: "0" },
+    { ...policy, vbytes: 9999 },
+  ])("refuses malformed or contradictory signed policies %j", (change) => {
+    const input = copyFixture();
+    (input.advertisement.extensions as Record<string, unknown>)[FEE_POLICY_EXTENSION] = change;
+    input.signature = resignTestOnly(input.advertisement, APPROVED_TEST_SCALAR);
+    expect(() => importAtFixtureTime(canonical(input)))
+      .toThrow(ManualAdvertisementRefusedError);
   });
 });

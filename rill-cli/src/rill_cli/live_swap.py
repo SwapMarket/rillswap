@@ -51,10 +51,18 @@ from rill_core.wire.cooperative_messages import (
     check_cooperative_action_context,
 )
 from rill_core.wire.envelope_authentication import verify_static_signed_envelope
+from rill_core.wire.fee_policy import (
+    FEE_POLICY_EXTENSION,
+    BtcFeePolicy,
+    FeePolicyRequest,
+    parse_fee_policy,
+)
 from rill_core.wire.hashes import (
     COOPERATIVE_CLAIM_FEATURE,
     EPOCH_SESSION_EXTENSION,
     EPOCH_SESSION_FEATURE,
+    FEE_POLICY_FEATURE,
+    SUPPORTED_HANDSHAKE_FEATURES,
     client_acceptance_hash,
     contract_hash,
     epoch_bound_session_id,
@@ -102,6 +110,7 @@ if TYPE_CHECKING:
     from rill_core.wire.messages import ContractTerms, InvoiceBinding
     from rill_core.wire.types import NetworkIdentity
     from rill_crypto import Context
+    from rill_provider.core_tx_bytes import NextBlockFee
     from rill_provider.relay_client import RelayConnection
 
     from rill_cli.wallet_rpc import WalletFunding
@@ -111,7 +120,7 @@ type ProfileId = Literal["btc-to-ln/v1", "ln-to-btc/v1"]
 ENCRYPTION_SUITES = ("noise-xk-secp256k1-chachapoly-sha256/v1",)
 CAPABILITIES = ("core/v1", "recovery/v1")
 # Handshake features this client negotiates; cooperative claims are always requested.
-NEGOTIATED_FEATURES = frozenset({EPOCH_SESSION_FEATURE, COOPERATIVE_CLAIM_FEATURE})
+NEGOTIATED_FEATURES = SUPPORTED_HANDSHAKE_FEATURES
 NIP59_BACKDATE_SECONDS = 2 * 24 * 60 * 60
 MAX_PROVIDER_SEQUENCE_WINDOW = 16
 MAX_PROVIDER_PENDING_BYTES = 256 * 1024
@@ -135,6 +144,10 @@ class Wallet(Protocol):
 
     def new_destination_script(self) -> bytes:
         """Return a fresh refund destination scriptPubKey."""
+        ...
+
+    def next_block_fee(self) -> NextBlockFee:
+        """Return independent own-node feerate evidence for featured quotes."""
         ...
 
     def fund(self, script_pubkey: bytes, amount_sat: int, *, fee_rate_sat_vb: int) -> WalletFunding:
@@ -240,7 +253,11 @@ def verify_announcement(  # noqa: PLR0913 - explicit trust inputs
         raise SwapError("announcement does not offer this swap now")
     _transport_work(advertisement)
     announced_funding_confirmations(advertisement)
-    return dict(advertisement)
+    policy = announced_fee_policy(advertisement)
+    result = dict(advertisement)
+    if policy is not None:
+        result["_fee_offer_event_id"] = json.loads(raw)["id"]
+    return result
 
 
 def _extensions(advertisement: dict[str, Any]) -> dict[str, Any]:
@@ -252,6 +269,39 @@ def _extensions(advertisement: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(extensions, dict):
         raise SwapError("announcement extensions unsupported")
     return extensions
+
+
+def announced_fee_policy(advertisement: dict[str, Any]) -> BtcFeePolicy | None:
+    """Validate a known fee policy against the advertised service coefficients."""
+    policy = parse_fee_policy(_extensions(advertisement))
+    if policy is not None:
+        indicative = advertisement["indicative_fee_policy"]
+        if (
+            policy.base_sat != indicative["base_sat"]
+            or policy.proportional_millionths != indicative["proportional_millionths"]
+            or any(p not in {PROFILE, "ln-to-btc/v1"} for p in advertisement["profiles"])
+        ):
+            raise SwapError("announcement network fee policy contradicts its service fees")
+    return policy
+
+
+def network_fee_request(
+    advertisement: dict[str, Any], *, independent_rate_sat_kvb: int
+) -> dict[str, Any]:
+    """Bind the selected offer, allowing at most twice our own node's estimate."""
+    policy = announced_fee_policy(advertisement)
+    if policy is None:
+        return {}
+    if independent_rate_sat_kvb <= 0:
+        raise SwapError("independent network fee estimate unavailable")
+    request = FeePolicyRequest(
+        offer_event_id=advertisement["_fee_offer_event_id"],
+        policy_hash=policy.commitment(),
+        max_network_feerate_sat_kvb=str(
+            min(int(policy.max_network_feerate_sat_kvb), independent_rate_sat_kvb * 2)
+        ),
+    )
+    return {FEE_POLICY_EXTENSION: request.model_dump(mode="json")}
 
 
 def announced_funding_confirmations(advertisement: dict[str, Any]) -> int | None:
@@ -1071,7 +1121,7 @@ class _CooperativeClaimAttempt:
             expected_profile=PROFILE,
             expected_network=self.session.network,
             expected_sender_key=self.accept.provider_session_xonly_key,
-            supported_features={EPOCH_SESSION_FEATURE, COOPERATIVE_CLAIM_FEATURE},
+            supported_features=SUPPORTED_HANDSHAKE_FEATURES,
             crypto=self.session.crypto,
         )
         if (
@@ -1383,7 +1433,16 @@ async def _handshake(
         requested_capabilities=CAPABILITIES,
         # Cooperative MuSig2 claims are mandatory; a provider that does not
         # echo them fails ``validate_against`` below before any terms.
-        required_features=(COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE),
+        required_features=tuple(
+            sorted(
+                {COOPERATIVE_CLAIM_FEATURE, EPOCH_SESSION_FEATURE}
+                | (
+                    {FEE_POLICY_FEATURE}
+                    if announced_fee_policy(advertisement) is not None
+                    else set()
+                )
+            )
+        ),
         extensions=extensions,
     )
     request = session.envelope("handshake_init", init.model_dump(mode="json"), signed=False)
@@ -1427,7 +1486,7 @@ def _check_offer(  # noqa: PLR0913 - every binding checked explicitly
     crypto: Context,
     now: int,
 ) -> ContractTerms:
-    check_terms_offer(request, offer, handshake_hash=transcript, invoice_binding=invoice)
+    check_terms_offer(request, offer, handshake_hash=transcript, invoice_binding=invoice, now=now)
     # check_terms_offer rejects ERC20 terms, but its return type cannot narrow this union.
     terms = cast("ContractTerms", offer.terms.contract_terms)
     crypto.schnorr_verify(
@@ -1502,6 +1561,12 @@ async def run_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
     _, recovery_public = _scalar(crypto)  # authorization key; its secret is not needed
     tip = await asyncio.to_thread(wallet.tip_height)
     destination = await asyncio.to_thread(wallet.new_destination_script)
+    fee_extensions: dict[str, Any] = {}
+    if announced_fee_policy(advertisement) is not None:
+        fee = await asyncio.to_thread(wallet.next_block_fee)
+        fee_extensions = network_fee_request(
+            advertisement, independent_rate_sat_kvb=max(fee.rate_sat_kvb, fee.floor_sat_kvb)
+        )
     request_model = FirmQuoteRequest(
         kind="btc-to-ln",
         mode="firm",
@@ -1517,7 +1582,7 @@ async def run_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
             max_refund_fee_sat=str(limits.max_refund_fee_sat),
             max_refund_lock_height=tip + limits.max_refund_delay_blocks,
         ),
-        extensions={},
+        extensions=fee_extensions,
     )
     request = session.envelope("quote_request", request_model.model_dump(mode="json"))
     await session.send(request, provider_key)
@@ -1567,6 +1632,8 @@ async def run_swap(  # noqa: PLR0913, PLR0915 - one ordered swap story
     document = _recovery_document(**record)  # type: ignore[arg-type]
     await asyncio.to_thread(write_recovery, document, None)
     report("recovery file written (terms, no funding yet)")
+    if int(time.time()) >= terms.terms_expiry:
+        raise SwapError("quote expired before acceptance; request a fresh quote")
     accepted = session.envelope(
         "terms_accept",
         {

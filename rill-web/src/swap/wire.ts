@@ -10,6 +10,7 @@ import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 
 import * as generated from "../generated/wireValidators.js";
 import type { InvoiceBinding } from "./bolt11";
+import { checkFeeBreakdown, FEE_POLICY_FEATURE } from "./feePolicy";
 import { contractHash, handshakeInitHash, handshakeAcceptHash, handshakeHash, jcs, providerTermsHash } from "./hashes";
 
 export const EPOCH_SESSION_FEATURE = "epoch-bound-session/v1";
@@ -134,7 +135,7 @@ export function checkHandshakeAccept(payload: unknown, init: HandshakeInit, send
     throw new ProtocolError("provider selected something that was not requested");
   }
   const required = new Set([...init.required_features, ...accept.required_features]);
-  if ([...required].some((feature) => feature !== EPOCH_SESSION_FEATURE && feature !== COOPERATIVE_CLAIM_FEATURE)) {
+  if ([...required].some((feature) => ![EPOCH_SESSION_FEATURE, COOPERATIVE_CLAIM_FEATURE, FEE_POLICY_FEATURE].includes(feature))) {
     throw new ProtocolError("handshake requires an unknown feature");
   }
   // Cooperative claims exist for the Bitcoin forward profile only: the reverse profile and the
@@ -144,6 +145,13 @@ export function checkHandshakeAccept(payload: unknown, init: HandshakeInit, send
     (init.profile_id === "btc-to-ln/v1" && !cooperative) || (init.profile_id.includes("erc20") && cooperative)) {
     throw new ProtocolError("cooperative claim must be jointly negotiated");
   }
+  if (init.required_features.includes(FEE_POLICY_FEATURE) !== accept.required_features.includes(FEE_POLICY_FEATURE) ||
+    (required.has(FEE_POLICY_FEATURE) && init.profile_id.includes("erc20"))) {
+    throw new ProtocolError("fee policy must be jointly negotiated for Bitcoin");
+  }
+  if (required.has(FEE_POLICY_FEATURE) && [init.required_features, accept.required_features].some(
+    (features) => features.some((feature, i) => i > 0 && features[i - 1]! >= feature),
+  )) throw new ProtocolError("fee policy handshake features must be sorted and unique");
   // Every session is bound to one provider epoch (RS-001).
   const epoch = (init.extensions[EPOCH_SESSION_EXTENSION] as { epoch_inbox_xonly_key?: string } | undefined)
     ?.epoch_inbox_xonly_key;
@@ -179,7 +187,7 @@ export interface FirmQuoteRequest {
   readonly recovery_authorization_xonly_key: string;
   readonly client_destination_script: string;
   readonly limits: SwapLimits;
-  readonly extensions: Record<string, never>;
+  readonly extensions: Record<string, unknown>;
 }
 
 export interface BtcToLnTerms {
@@ -267,9 +275,11 @@ export function checkBtcToLnTerms(terms: BtcToLnTerms): void {
     throw new ProtocolError("outgoing HTLC exposure does not fit before refund");
   }
   // Both handshake halves already carry the feature (checkHandshakeAccept).
-  if (terms.required_features.length !== 1 || terms.required_features[0] !== COOPERATIVE_CLAIM_FEATURE) {
+  if (!terms.required_features.includes(COOPERATIVE_CLAIM_FEATURE) ||
+    terms.required_features.some((feature) => ![COOPERATIVE_CLAIM_FEATURE, FEE_POLICY_FEATURE].includes(feature))) {
     throw new ProtocolError("terms offer does not commit to cooperative claims");
   }
+  checkFeeBreakdown(terms);
 }
 
 export interface OfferContext {
@@ -287,6 +297,7 @@ export function checkTermsOffer(payload: unknown, context: OfferContext): BtcToL
   const offer = requireShape<TermsOffer>("validateTermsOffer", payload);
   const terms = offer.terms.contract_terms;
   checkBtcToLnTerms(terms);
+  checkFeeBreakdown(terms, context.request.extensions, context.now);
   const { request, invoiceBinding, identity } = context;
   const limits = request.limits;
   const economics = terms.economics;
@@ -358,7 +369,7 @@ export interface ReverseFirmQuoteRequest {
   readonly recovery_authorization_xonly_key: string;
   readonly client_destination_script: string;
   readonly limits: ReverseLimits;
-  readonly extensions: Record<string, never>;
+  readonly extensions: Record<string, unknown>;
 }
 
 export interface LnToBtcTerms extends Omit<BtcToLnTerms, "profile_id" | "claimant" | "refund_party" | "economics" | "timing_policy"> {
@@ -434,7 +445,8 @@ export function checkLnToBtcTerms(terms: LnToBtcTerms): void {
   if (terms.refund_lock_height + 1 + timing.refund_and_ln_resolution_blocks >= timing.min_incoming_htlc_expiry_height) {
     throw new ProtocolError("incoming HTLC exposure does not cover refund resolution");
   }
-  if (terms.required_features.some((feature) => feature !== COOPERATIVE_CLAIM_FEATURE)) throw new ProtocolError("reverse terms require an unsupported feature");
+  if (terms.required_features.some((feature) => ![COOPERATIVE_CLAIM_FEATURE, FEE_POLICY_FEATURE].includes(feature))) throw new ProtocolError("reverse terms require an unsupported feature");
+  checkFeeBreakdown(terms);
 }
 
 export interface ReverseOfferContext extends Omit<OfferContext, "request" | "invoiceBinding"> {
@@ -450,6 +462,7 @@ export function checkReverseTermsOffer(payload: unknown, context: ReverseOfferCo
   const offer = requireShape<ReverseTermsOffer>("validateReverseTermsOffer", payload);
   const terms = offer.terms.contract_terms;
   checkLnToBtcTerms(terms);
+  checkFeeBreakdown(terms, context.request.extensions, context.now);
   const { handshakeInit: init, handshakeAccept: accept } = context;
   if (!same(init.network_identity, context.network) || !same(accept.network_identity, context.network)) throw new ProtocolError("terms offer is not bound to this provider (reverse handshake network)");
   if (init.profile_id !== "ln-to-btc/v1" || accept.profile_id !== init.profile_id ||
@@ -457,6 +470,9 @@ export function checkReverseTermsOffer(payload: unknown, context: ReverseOfferCo
   const cooperation = init.required_features.includes(COOPERATIVE_CLAIM_FEATURE);
   if (cooperation !== accept.required_features.includes(COOPERATIVE_CLAIM_FEATURE) ||
     cooperation !== terms.required_features.includes(COOPERATIVE_CLAIM_FEATURE)) throw new ProtocolError("reverse cooperation commitment mismatch");
+  const pricing = init.required_features.includes(FEE_POLICY_FEATURE);
+  if (pricing !== accept.required_features.includes(FEE_POLICY_FEATURE) ||
+    pricing !== terms.required_features.includes(FEE_POLICY_FEATURE)) throw new ProtocolError("reverse fee policy commitment mismatch");
   let binding: InvoiceBinding;
   try {
     binding = context.decodeInvoice(offer.hold_invoice);

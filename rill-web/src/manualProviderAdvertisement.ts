@@ -6,6 +6,7 @@ import canonicalize from "canonicalize";
 
 import { validateAdvertisement, validateEvmAssetIdentity, validateNetwork } from "./generated/manualAdvertisementValidators.js";
 import type { ProfileId } from "./swapPairs";
+import { parseFeePolicy, type BtcFeePolicy } from "./swap/feePolicy";
 
 const MAX_MANUAL_ADVERTISEMENT_BYTES = 64 * 1024;
 const MAX_FUTURE_SECONDS = 300; // Local input policy, not a Nostr wire requirement.
@@ -105,6 +106,7 @@ export interface ManualProviderCandidate {
   readonly advertisementJcs: string;
   readonly amountBands: readonly Readonly<{ minimum_sat: string; maximum_sat: string }>[];
   readonly indicativeFeePolicy: Readonly<{ base_sat: string; proportional_millionths: number }>;
+  readonly feePolicy?: BtcFeePolicy;
   /** RS-010 assets served, empty for Bitcoin-only providers. */
   readonly evmAssets: readonly EvmAssetIdentity[];
   /** RS-005 announced funding depth; null when the provider did not announce one. */
@@ -162,6 +164,12 @@ export function verifyManualProviderAdvertisement(
     const networkJcs = canonicalize(independentlySelectedNetwork);
     const evmAssets = evmAssetsOf(ad.extensions);
     const fundingConfirmations = fundingConfirmationsOf(ad.extensions, ad.profiles);
+    const feePolicy = parseFeePolicy(ad.extensions);
+    if (feePolicy && (feePolicy.base_sat !== ad.indicative_fee_policy.base_sat ||
+      feePolicy.proportional_millionths !== ad.indicative_fee_policy.proportional_millionths ||
+      ad.profiles.some((profile) => !["btc-to-ln/v1", "ln-to-btc/v1"].includes(profile)))) {
+      throw new ManualAdvertisementRefusedError();
+    }
     if (networkJcs === undefined || evmAssets === null || fundingConfirmations === undefined ||
         (independentlySelectedProfile.includes("erc20") && evmAssets.length === 0) ||
         ad.provider_identity_xonly_key !== approvedIdentityXOnlyKey ||
@@ -197,6 +205,7 @@ export function verifyManualProviderAdvertisement(
     }
     return Object.freeze({
       source: "manual-app-signature-only" as const,
+      ...(feePolicy ? { feePolicy } : {}),
       identityXOnlyKey: approvedIdentityXOnlyKey,
       networkIdentityJcs: networkJcs,
       profileId: independentlySelectedProfile,

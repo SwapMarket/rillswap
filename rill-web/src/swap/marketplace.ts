@@ -156,13 +156,21 @@ export interface DirectoryEntry {
   readonly expiresAt: number;
   /** RS-005 announced funding depth; null when not announced. */
   readonly fundingConfirmations: number | null;
+  readonly feePolicy?: AnnouncementCandidate["feePolicy"];
 }
 
 export const DIRECTORY_PROFILES: readonly AnnouncementProfile[] = ["btc-to-ln/v1", "ln-to-btc/v1", "erc20-to-ln/v1", "ln-to-erc20/v1"];
 
 /** Fee a provider announces for `amount`, before any firm quote. */
-export function indicativeFee(policy: AnnouncementCandidate["indicativeFeePolicy"], amount: bigint): bigint {
-  return BigInt(policy.base_sat) + (amount * BigInt(policy.proportional_millionths) + 999_999n) / 1_000_000n;
+export function indicativeFee(policy: AnnouncementCandidate["indicativeFeePolicy"], amount: bigint,
+  networkPolicy?: AnnouncementCandidate["feePolicy"], independentRateSatKvb?: number): bigint {
+  const service = BigInt(policy.base_sat) + (amount * BigInt(policy.proportional_millionths) + 999_999n) / 1_000_000n;
+  if (!networkPolicy) return service;
+  // Without independent evidence the directory shows the advertised maximum,
+  // never a deceptively cheap service-only estimate. Firm quotes still verify.
+  const maximum = BigInt(networkPolicy.max_network_feerate_sat_kvb);
+  const rate = independentRateSatKvb === undefined ? maximum : BigInt(independentRateSatKvb);
+  return service + (154n * (rate < maximum ? rate : maximum) + 999n) / 1000n;
 }
 
 export interface Directory { readonly entries: readonly DirectoryEntry[]; readonly warnings: readonly string[] }
@@ -184,7 +192,8 @@ export function directoryFromObservations(observations: readonly RelayObservatio
         ? { ...previous, profiles: [...previous.profiles, profile], relayUrls: [...new Set([...previous.relayUrls, ...relayUrls])] }
         : { identity: announcement.identityXOnlyKey, slot: announcement.slot, profiles: [profile], amountBands: announcement.amountBands,
           indicativeFeePolicy: announcement.indicativeFeePolicy, evmAssets: announcement.evmAssets, relayUrls, expiresAt: announcement.expiresAt,
-          fundingConfirmations: announcement.fundingConfirmations });
+          fundingConfirmations: announcement.fundingConfirmations,
+          ...(announcement.feePolicy ? { feePolicy: announcement.feePolicy } : {}) });
     }
   }
   return { entries: [...entries.values()].sort((a, b) => `${a.identity}:${a.slot}`.localeCompare(`${b.identity}:${b.slot}`)), warnings: [...warnings] };
@@ -197,12 +206,13 @@ export interface LocatedQuote<P extends { dispose(): void } = PreparedSwap> {
   dispose(): void;
 }
 
-const estimatedFee = (provider: LocatedProvider, amount: bigint): bigint => indicativeFee(provider.announcement.indicativeFeePolicy, amount);
+const estimatedFee = (provider: LocatedProvider, amount: bigint, rate?: number): bigint =>
+  indicativeFee(provider.announcement.indicativeFeePolicy, amount, provider.announcement.feePolicy, rate);
 
 /** Providers serving `amount`, best first: only the first MAX_QUOTE_PROVIDERS are asked to quote. */
-export function eligibleProviders(providers: readonly LocatedProvider[], amount: bigint, mode: SortMode = "time"): readonly LocatedProvider[] {
+export function eligibleProviders(providers: readonly LocatedProvider[], amount: bigint, mode: SortMode = "time", independentRateSatKvb?: number): readonly LocatedProvider[] {
   return rank(providers.filter(({ announcement }) => withinBands(announcement.amountBands, amount)), (provider) => ({
-    depth: provider.announcement.fundingConfirmations, price: estimatedFee(provider, amount),
+    depth: provider.announcement.fundingConfirmations, price: estimatedFee(provider, amount, independentRateSatKvb),
     tie: `${provider.announcement.identityXOnlyKey}:${provider.announcement.slot}`,
   }), mode);
 }
@@ -240,7 +250,7 @@ export function estimateFromDirectory(entries: readonly DirectoryEntry[], profil
   now = Math.floor(Date.now() / 1000), mode: SortMode = "time"): DirectoryEstimate {
   const serving = unexpired(entries, now).filter((entry) => entry.profiles.includes(profile) && (!pinned || entry.identity === pinned));
   const eligible = rank(serving.filter((entry) => withinBands(entry.amountBands, amount))
-    .map((entry) => ({ identity: entry.identity, feeSat: indicativeFee(entry.indicativeFeePolicy, amount), fundingConfirmations: entry.fundingConfirmations })),
+    .map((entry) => ({ identity: entry.identity, feeSat: indicativeFee(entry.indicativeFeePolicy, amount, entry.feePolicy), fundingConfirmations: entry.fundingConfirmations })),
   (entry) => ({ depth: entry.fundingConfirmations, price: entry.feeSat, tie: entry.identity }), mode);
   if (eligible.length > 0) return eligible[0]!;
   return { reason: pinned && serving.length === 0 ? "The chosen provider does not announce this swap direction." : ineligibilityReason(serving, amount) };

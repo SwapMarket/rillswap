@@ -7,6 +7,7 @@
  */
 import { verifyNostrProviderAnnouncement } from "../nostrProviderAnnouncement";
 import { handshake } from "./handshake";
+import { checkFeeBreakdown, FEE_POLICY_FEATURE, networkFeeRequest, type FeeBreakdown } from "./feePolicy";
 import { type RelayLink, Session, SwapError } from "./session";
 import type { SwapRequest } from "./swap";
 import { MAX_SATS, ProtocolError, requireAnnouncedDepth, requireShape, reverseClaimFeeReserveCeiling, sats } from "./wire";
@@ -29,6 +30,7 @@ export interface ReverseSwapRequest {
   readonly network: SwapRequest["network"];
   readonly payoutSat: bigint;
   readonly limits: ReverseLimitsInput;
+  readonly networkFeeRateSatKvb?: number;
 }
 
 /** Indicative: authenticated as this provider's session, but committing nobody. */
@@ -44,6 +46,7 @@ export interface ReverseQuote {
   readonly refundDelayBlocks: number;
   readonly incomingHtlcExpiryDeltaBlocks: number;
   readonly expiresAt: number;
+  readonly feeBreakdown?: FeeBreakdown;
 }
 
 export interface PreparedReverseQuote {
@@ -55,6 +58,7 @@ export interface PreparedReverseQuote {
 interface ReverseQuoteOffer {
   readonly kind: "ln-to-btc";
   readonly economics: {
+    readonly kind: "ln-to-btc";
     readonly contract_amount_sat: string; readonly nominal_payout_sat: string; readonly claim_fee_reserve_sat: string;
     readonly success_fee_sat: string; readonly mining_prepayment_sat: string; readonly hold_invoice_sat: string;
   };
@@ -62,6 +66,8 @@ interface ReverseQuoteOffer {
   readonly refund_delay_blocks: number;
   readonly incoming_htlc_expiry_delta_blocks: number;
   readonly max_claim_fee_sat: string;
+  readonly max_funding_fee_sat: string;
+  readonly extensions: Record<string, unknown>;
   readonly expires_at: number;
 }
 
@@ -118,18 +124,25 @@ export async function prepareReverseQuote(
   const session = new Session(relay, network, REVERSE_PROFILE, options.replyMs ?? 15_000, clock);
   try {
     await handshake(session, provider, identity);
+    const feeRequest = networkFeeRequest(provider, request.networkFeeRateSatKvb);
     const indicative = requireShape<Record<string, unknown>>("validateReverseIndicativeQuoteRequest",
-      { kind: "ln-to-btc", mode: "indicative", nominal_payout_sat: request.payoutSat.toString(), extensions: {} });
+      { kind: "ln-to-btc", mode: "indicative", nominal_payout_sat: request.payoutSat.toString(), extensions: feeRequest });
     const envelope = session.envelope("quote_request", indicative);
     await session.send(envelope, session.providerKey!);
     const answer = await session.replyTo(envelope, "quote_offer");
     const offer = checkReverseQuoteOffer(answer.payload, request, Math.floor(clock() / 1000));
+    const feeBreakdown = checkFeeBreakdown({
+      profile_id: "ln-to-btc/v1", required_features: provider.feePolicy ? [FEE_POLICY_FEATURE] : [],
+      extensions: offer.extensions, economics: offer.economics, terms_expiry: offer.expires_at,
+      max_claim_fee_sat: offer.max_claim_fee_sat, max_funding_fee_sat: offer.max_funding_fee_sat,
+    }, feeRequest, Math.floor(clock() / 1000));
     requireAnnouncedDepth(offer.funding_confirmations, provider.fundingConfirmations);
     const economics = offer.economics;
     let used = false, disposed = false;
     let firmSession: Session | undefined;
     return Object.freeze({
       quote: Object.freeze({
+        ...(feeBreakdown ? { feeBreakdown } : {}),
         providerIdentity: identity,
         providerSlot: provider.slot,
         payoutSat: BigInt(economics.nominal_payout_sat),
@@ -151,7 +164,7 @@ export async function prepareReverseQuote(
         try {
           const agreed = await handshake(firmSession, provider, identity);
           configuration.assertCurrent(); if (disposed) throw new SwapError("Estimate discarded");
-          const execution = await prepareReverseExecution(firmSession, agreed, request, configuration, clock);
+          const execution = await prepareReverseExecution(firmSession, agreed, request, { ...configuration, feeOffer: provider }, clock);
           // Ranked and shown on the estimate's depth: the signed terms must keep it.
           if (execution.terms.funding_confirmations !== offer.funding_confirmations) {
             execution.dispose();
